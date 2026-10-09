@@ -401,9 +401,14 @@ class CoalescingGate:
             return None
         candidate_count = self._front_normal_run_length(room_gate, run_limit=self._front_run_limit(room_key, room_gate))
         candidates = list(room_gate.queue)[:candidate_count]
+        # Text-like content completes the room burst, except the thread's own root:
+        # a transcribed voice note reads as text but is the upload its caption threads under.
         if (
             not candidates
-            or pending_event_is_text(candidates[-1].pending_event)
+            or (
+                pending_event_is_text(candidates[-1].pending_event)
+                and not self._queued_event_is_thread_root_media(candidates[-1], key.thread_id)
+            )
             or not self._queued_event_allows_room_scope_batching(candidates[-1])
             or not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates)
         ):
