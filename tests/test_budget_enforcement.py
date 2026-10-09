@@ -29,6 +29,7 @@ from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import TeamMode, TeamTurnModelSelection
@@ -38,7 +39,7 @@ from tests.conftest import patch_response_runner_module, unwrap_extracted_collab
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
-from tests.test_dynamic_workflows import _fake_stream_agent, _make_context, _make_multi_agent_context
+from tests.test_dynamic_workflows import _fake_stream_agent, _make_context, _make_multi_agent_context, _workflow_spec
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -355,3 +356,44 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
 
     assert reply.status_code == 200
     monitor.response_finished.assert_called_once_with()
+
+
+def test_over_budget_caller_runs_saved_workflows_on_the_fallback(tmp_path: Path) -> None:
+    """A workflow that names the caller's priced model keeps working once the caller is over budget."""
+    context = _make_context(tmp_path)
+    _budget_context_config(context.config)
+    # The response runner hands tools the budgeted model of the reply.
+    context = replace(context, active_model_name="luna")
+    tool = DynamicWorkflowTools()
+    model = SyntheticModel(id="participant")
+
+    with (
+        tool_runtime_context(context),
+        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model) as get_model,
+        patch.object(dynamic_workflow_module, "Agent", Mock(return_value=_fake_stream_agent(content="done"))),
+    ):
+        create_payload = json.loads(tool.create_workflow(_workflow_spec()))
+        run_payload = json.loads(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert create_payload["status"] == "ok"
+    assert run_payload["status"] == "completed"
+    assert get_model.call_args.args[2] == "luna"
+
+
+def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
+    context = _make_context(tmp_path)
+    _budget_context_config(context.config)
+    context.config.models["opus"] = ModelConfig(
+        provider="anthropic",
+        id="claude-opus-5",
+        pricing=ModelPricing(input=5, output=25),
+    )
+    context = replace(context, active_model_name="luna")
+    spec = _workflow_spec()
+    spec["participants"][0]["model"] = "claude-opus-5"  # type: ignore[index]
+
+    with tool_runtime_context(context):
+        payload = json.loads(DynamicWorkflowTools().create_workflow(spec))
+
+    assert payload["status"] == "error"
+    assert "not allowed by permissions.models" in payload["message"]

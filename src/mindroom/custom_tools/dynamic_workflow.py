@@ -580,13 +580,7 @@ async def _aexecute_room_agent_participant(
         thread_id=context.resolved_thread_id,
         runtime_paths=context.runtime_paths,
     )
-    active_model_name = budget_model(
-        context.config,
-        context.runtime_paths,
-        context.budget_monitor,
-        context.requester_id,
-        runtime_model.model_name,
-    )
+    active_model_name = _budgeted_model(context, runtime_model.model_name)
     session_id = _participant_session_id(context, participant_id, run_scope=run_scope)
     participant_context = replace(
         context,
@@ -692,11 +686,8 @@ async def _aexecute_ephemeral_agent_participant(
 ) -> object:
     toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
-    model_name = budget_model(
-        context.config,
-        context.runtime_paths,
-        context.budget_monitor,
-        context.requester_id,
+    model_name = _budgeted_model(
+        context,
         _resolve_participant_model_name(
             context,
             participant.get("model"),
@@ -936,7 +927,7 @@ def _resolve_participant_model_name(
 def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dict[str, object]) -> None:
     context = replace(context, config=context.current_config, config_provider=None)
     caller_models = _caller_allowed_model_refs(context)
-    permission_models = _workflow_permission_model_refs(context, spec)
+    permission_models = _with_budget_substitutes(context, _workflow_permission_model_refs(context, spec))
     for participant in _workflow_participants(spec):
         participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
         raw_model = participant.get("model")
@@ -961,7 +952,10 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
                 "Add the model to workflow permissions before running this revision."
             )
             raise DynamicWorkflowError(msg)
-        if participant_kind != "room_agent" and model_refs.isdisjoint(caller_models):
+        # The caller's model is already the budgeted one, so compare the participant's budgeted model with it.
+        if participant_kind != "room_agent" and _model_refs(context, _budgeted_model(context, model_name)).isdisjoint(
+            caller_models,
+        ):
             requested_model = raw_model if raw_model is not None else model_name
             msg = (
                 f"Dynamic Workflow participant model '{requested_model}' is not allowed for agent '{context.agent_name}'. "
@@ -995,6 +989,26 @@ def _spec_tool_names(spec: dict[str, object]) -> list[str]:
             if isinstance(raw_tool, str) and raw_tool.strip() and raw_tool.strip() not in tool_names:
                 tool_names.append(raw_tool.strip())
     return tool_names
+
+
+def _budgeted_model(context: ToolRuntimeContext, model_name: str) -> str:
+    return budget_model(
+        context.config,
+        context.runtime_paths,
+        context.budget_monitor,
+        context.requester_id,
+        model_name,
+    )
+
+
+def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
+    """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
+    substitutes = {
+        _budgeted_model(context, model_name)
+        for model_name in context.config.models
+        if not _model_refs(context, model_name).isdisjoint(model_refs)
+    }
+    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
 
 
 def _caller_allowed_model_refs(context: ToolRuntimeContext) -> set[str]:
