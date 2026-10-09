@@ -1843,7 +1843,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; equivalent to `extra_kwargs.api_key` |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters (see [Extra Kwargs](#extra-kwargs)) |
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
-| `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](https://docs.mindroom.chat/budgets/): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price |
+| `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](https://docs.mindroom.chat/budgets/): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
@@ -5985,6 +5985,7 @@ Changes to caps, prices, and the fallback model apply without a restart.
 Spend is the cost of the user's [recorded token usage](https://docs.mindroom.chat/usage/#token-usage) since the first day of the current month in UTC, at the configured prices.
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
+Gemini thinking tokens are charged at the output price.
 Audio tokens, internal work with no requester (`system:internal`), and usage without a date or requester are not charged.
 Spend updates within about a minute of a reply finishing, so a user can go slightly over their cap before the fallback applies.
 A reply that already started finishes on its model.
