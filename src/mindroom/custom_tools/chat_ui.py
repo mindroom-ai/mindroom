@@ -49,6 +49,10 @@ _SidePanel = Literal["members", "computer"]
 
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
+_SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
+# Conversations, keyed by agent Matrix user, room, and thread (None for the room timeline), that got
+# the show_computer notice in this process, so the agent's first browser use announces it only once.
+_SHOWN_COMPUTERS: set[tuple[str, str, str | None]] = set()
 # Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
 _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
@@ -123,6 +127,10 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
         "m.new_content": replacement,
         "m.relates_to": {"rel_type": "m.replace", "event_id": canvas_event_id},
     }
+
+
+def _computer_conversation(context: ToolRuntimeContext) -> tuple[str, str, str | None]:
+    return (context.client.user_id, context.room_id, context.resolved_thread_id)
 
 
 def _canvas_title_is_valid(title: str) -> bool:
@@ -283,7 +291,7 @@ class ChatUITools(Toolkit):
     @classmethod
     async def _send_action(
         cls,
-        action: Literal["show_computer", "open_settings", "open_panel"],
+        action: Literal["open_settings", "open_panel"],
         body: str,
         **action_fields: object,
     ) -> str:
@@ -364,10 +372,14 @@ class ChatUITools(Toolkit):
         and it never opens or controls the user's own browser. Success means the
         request was sent, not that the client opened the panel.
         """
-        return await self._send_action(
-            "show_computer",
-            "Open this agent's worker computer in MindRoom Chat.",
-        )
+        validated = self._validated_context("show_computer")
+        if isinstance(validated, str):
+            return validated
+        context, requester_id = validated
+        result = await self._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
+        if json.loads(result)["status"] == "ok":
+            _SHOWN_COMPUTERS.add(_computer_conversation(context))
+        return result
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
         """Open the user's MindRoom Chat Settings dialog at one section.
@@ -842,6 +854,37 @@ class ChatUITools(Toolkit):
                 + ("; show a new canvas here instead." if update else "."),
             )
         return metadata
+
+
+async def show_computer_once() -> None:
+    """Send the show_computer notice unless this agent already showed its computer in this conversation.
+
+    Contexts where Chat UI actions are unsupported, such as teams, the router, or a missing
+    runtime context, send nothing.
+    """
+    validated = ChatUITools._validated_context("show_computer")
+    if isinstance(validated, str):
+        return
+    context, requester_id = validated
+    conversation = _computer_conversation(context)
+    if conversation in _SHOWN_COMPUTERS:
+        return
+    # Claim the conversation before awaiting the send, so concurrent first calls send one notice.
+    _SHOWN_COMPUTERS.add(conversation)
+    sent = False
+    try:
+        result = await ChatUITools._send_validated_action(
+            context,
+            requester_id,
+            "show_computer",
+            _SHOW_COMPUTER_BODY,
+            {},
+        )
+        sent = json.loads(result)["status"] == "ok"
+    finally:
+        # An undelivered notice does not count, so the next browser call tries again.
+        if not sent:
+            _SHOWN_COMPUTERS.discard(conversation)
 
 
 def _parsed_json(value: object) -> object:

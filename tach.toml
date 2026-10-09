@@ -825,6 +825,7 @@ depends_on = [
     "mindroom.claude_prompt_cache",
     "mindroom.constants",
     "mindroom.credentials",
+    "mindroom.custom_tools.computer_announcement",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.memory",
     "mindroom.entity_resolution",
@@ -2087,6 +2088,17 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.tool_system.runtime_context",
 ]
+
+[[modules]]
+path = "mindroom.custom_tools.computer_announcement"
+depends_on = [
+    "mindroom.custom_tools.chat_ui",
+    "mindroom.logging_config",
+    "mindroom.orchestration.computer_runtime",
+    "mindroom.tool_system.declarations",
+    "mindroom.worker_computer.sessions",
+]
+visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_helpers"
