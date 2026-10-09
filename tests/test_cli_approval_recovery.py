@@ -39,7 +39,7 @@ from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.config.agent import AgentConfig
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecision, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_sources import ResponseSources
@@ -57,6 +57,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tools.shell import shell_tools
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
@@ -175,17 +176,14 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
             requires_confirmation=True,
         ),
     )
-    continuation = ApprovalContinuation(
-        approval_id="approval",
+    continuation = approval_continuation(
         correlation_id=runtime.correlation_id,
         run_id="saved-run",
         session_id=runtime.session_id,
-        entity_kind="agent",
         entity_name="helper",
         room_id=runtime.room_id,
         thread_id=runtime.thread_id,
         requester_id=runtime.requester_id,
-        response_event_id="$waiting",
         sources=ResponseSources((runtime.reply_to_event_id,), (runtime.reply_to_event_id,)),
         state="claimed",
         request_body="Load sleep and answer using knowledge",
@@ -317,17 +315,13 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             requires_confirmation=True,
         ),
     )
-    continuation = ApprovalContinuation(
-        approval_id="approval",
+    continuation = approval_continuation(
         run_id="run",
         session_id="session",
-        entity_kind="agent",
         entity_name="helper",
         room_id="!room:test",
-        thread_id="$thread",
         requester_id="@alice:test",
         response_event_id="$response",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(
             ApprovalCall(
@@ -435,17 +429,13 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     )
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
     presentation.start_tool(project_cli_execution(requirement.tool_execution, parent="bash", toolkit_name="shell"))
-    continuation = ApprovalContinuation(
-        approval_id="approval",
+    continuation = approval_continuation(
         run_id="run",
         session_id="session",
-        entity_kind="agent",
         entity_name="helper",
         room_id="!room:test",
-        thread_id="$thread",
         requester_id="@alice:test",
         response_event_id="$response",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(
             ApprovalCall(
@@ -643,11 +633,10 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         await checkpoint.persist_approval("old-bash")
     session = agent.db.get_session(runtime.session_id)
     persisted = session.runs[0]
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approved",
         run_id="saved-run",
         session_id=runtime.session_id,
-        entity_kind="agent",
         entity_name="helper",
         room_id=runtime.room_id,
         thread_id=runtime.resolved_thread_id,
@@ -956,17 +945,14 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             requires_confirmation=True,
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="generated-approval",
         run_id=persisted.run_id,
         session_id=runtime.session_id,
-        entity_kind="agent",
         entity_name="helper",
         room_id=runtime.room_id,
         thread_id=runtime.thread_id,
         requester_id=runtime.requester_id,
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(ApprovalCall("remember-id", "remember", "helper", 100, toolkit_name="agent"),),
         cli_call={

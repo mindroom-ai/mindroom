@@ -65,7 +65,6 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
-from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     replace_visible_message,
@@ -109,10 +108,13 @@ from mindroom.reply_scope import (
     current_slot,
     current_span,
     initial_write,
+    interruption_note,
     pause_decision,
     pause_write,
     release_decision,
+    span_sources,
     suppress_decision,
+    terminal_source_decision,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_shutdown_diagnostics import (
@@ -1642,8 +1644,6 @@ class ResponseRunner:
                 team_member_model_names=paused.team_member_model_names,
                 team_mode=team_mode,
                 request_body=request.response_envelope.body,
-                transport_sender_id=request.response_envelope.sender_id,
-                source_kind=request.response_envelope.source_kind,
                 attachment_ids=tuple(request.attachment_ids or ()),
                 mentioned_agents=request.response_envelope.mentioned_agents,
                 hook_source=request.response_envelope.hook_source,
@@ -2285,7 +2285,7 @@ class ResponseRunner:
         return await self._approval_responses.settle_failure(
             failing,
             reason,
-            interruption="restart" if cancel_source == "sync_restart" else "interrupted",
+            interruption=interruption_note(cancel_source),
         )
 
     async def _recover_frozen_approval_final(
@@ -2351,7 +2351,6 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> ResponseRequest:
         """Rebuild the original response identity for resumed hooks and post-effects."""
-        origin = restore_legacy_approval_origin(continuation)
         envelope = MessageEnvelope(
             source_event_id=continuation.source_event_ids[0],
             target=target,
@@ -2359,7 +2358,7 @@ class ResponseRunner:
             attachment_ids=continuation.attachment_ids,
             mentioned_agents=continuation.mentioned_agents,
             agent_name=continuation.entity_name,
-            origin=origin,
+            origin=continuation.origin,
             hook_source=continuation.hook_source,
             message_received_depth=continuation.message_received_depth,
             dispatch_policy_source_kind=continuation.dispatch_policy_source_kind,
@@ -3244,7 +3243,7 @@ class ResponseRunner:
                 handle,
                 lambda reply, span: rl.dispatch_failed(
                     rl.confirm_progress(reply, confirms),
-                    span if not span.ended else None,
+                    span,
                     error_text=error_text,
                     now_ns=now_ns,
                 ),
@@ -3269,11 +3268,7 @@ class ResponseRunner:
             return request
         handle = await self.deps.replies.claim(
             delivery_id=request.response_envelope.source_event_id,
-            sources=rl.SpanSources(
-                pending=request.sources.pending_event_ids,
-                logical=request.sources.logical_source_event_ids,
-                discovery=request.sources.discovery_event_ids,
-            ),
+            sources=span_sources(request.sources),
             room_id=request.room_id,
             thread_id=request.thread_id,
             placeholder=TEAM_PLACEHOLDER if history_scope.kind == "team" else AGENT_PLACEHOLDER,
@@ -3946,7 +3941,10 @@ class ResponseRunner:
             )
             source_deleted = await self._sources_deleted(request, resolved_target)
             if handle is not None and not handle.exited:
-                await self._end_span_for_terminal_source(handle, source_deleted=source_deleted)
+                await self.deps.delivery_gateway.end_reply_span(
+                    handle,
+                    terminal_source_decision(source_deleted=source_deleted),
+                )
             elif (
                 # Before the claim, the reply an earlier attempt left ends through its records.
                 not await self.deps.delivery_gateway.settle_unclaimed_reply(
@@ -3966,18 +3964,6 @@ class ResponseRunner:
         logical = request.sources.logical_source_event_ids
         redacted = await self.deps.replies.store.redacted_event_ids(target.room_id, (driving, *logical))
         return redacted.issuperset(logical) or (driving not in logical and driving in redacted)
-
-    async def _end_span_for_terminal_source(self, handle: SpanHandle, *, source_deleted: bool) -> None:
-        """End a claimed span whose source became terminal before it ran; the rule decides a recorded Stop too."""
-        now_ns = time.time_ns()
-        await self.deps.delivery_gateway.end_reply_span(
-            handle,
-            lambda reply, span: (
-                rl.sources_deleted(reply, span, now_ns=now_ns)
-                if source_deleted
-                else rl.sources_settled_without_reply(reply, span, now_ns=now_ns)
-            ),
-        )
 
     async def _prepare_admitted_locked_turn(
         self,

@@ -46,8 +46,7 @@ class CliApprovalWaits:
     responses: ApprovalResponseCoordinator
     runtime_generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Claims a ready continuation for the waiting response, with its reply's
-    # resume in place when reply records own the reply.
+    # Claims a ready continuation for the waiting response, with its reply's resume in place.
     claim: Callable[[ApprovalContinuation], Awaitable[ApprovalContinuation | None]]
     # Records a claimed continuation's next pause while the response waits in place.
     advance: Callable[[ApprovalContinuation, PausedAttempt, MessageTarget], Awaitable[object]]

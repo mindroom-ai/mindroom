@@ -26,7 +26,7 @@ from openai import AsyncOpenAI
 
 from mindroom.approval_tools import approval_denial_context, toolkit_owners_for_agents
 from mindroom.config.main import Config
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.event_journal.approval_continuations import ApprovalDecision
 from mindroom.history.session_context import (
     close_team_runtime_state_dbs,
@@ -35,7 +35,6 @@ from mindroom.history.session_context import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.openai_models import MindRoomOpenAIResponses
-from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import (
@@ -49,7 +48,7 @@ from mindroom.teams import (
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from tests.approval_continuation_helpers import resumed_approval
+from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths, unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -97,19 +96,15 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
             ("call-three", "sleep", "beta"),
         )
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="team-approval",
         run_id="paused-team-run",
         session_id="team-session",
         entity_kind="team",
-        entity_name="general",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         requester_id=identity.requester_id,
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
         calls=calls,
-        state="ready",
         execution_identity=serialize_tool_execution_identity(identity),
         runtime_model_name="default",
         team_member_names=("alpha", "beta"),

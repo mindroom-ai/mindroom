@@ -35,7 +35,6 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import (
     AdmissionResult,
-    ApprovalContinuation,
     DeliveryStage,
     DepartureSource,
     EventClass,
@@ -67,6 +66,7 @@ from mindroom.tool_approval import (
     shutdown_approval_runtime,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_plugin,
@@ -1433,19 +1433,11 @@ class TestAgentBot(AgentBotTestBase):
                     redacts_event_id=None,
                 ),
             )
-        continuation = ApprovalContinuation(
+        continuation = approval_continuation(
             approval_id="approval-handoff",
-            run_id="run-1",
-            session_id="session-1",
-            entity_kind="agent",
             entity_name=bot.agent_name,
             room_id="!test:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            response_event_id="$waiting",
             sources=ResponseSources(("$source", "$coalesced"), ("$source", "$coalesced")),
-            calls=(),
-            state="ready",
         )
         assert await paused_for_approval(store, continuation) == continuation
         resume_started = asyncio.Event()

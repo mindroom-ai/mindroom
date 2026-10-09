@@ -79,7 +79,7 @@ from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
-from tests.approval_continuation_helpers import advance_continuation, claim_continuation
+from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
 from tests.conftest import postgres_journal_schema_url
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
@@ -6576,16 +6576,11 @@ class TestApprovalContinuations:
     @staticmethod
     def continuation(*, state: str = "ready") -> ApprovalContinuation:
         """Return one exact paused-run owner."""
-        return ApprovalContinuation(
+        return approval_continuation(
             approval_id="approval-1",
-            run_id="run-1",
-            session_id="session-1",
-            entity_kind="agent",
             entity_name="agent",
             room_id=ROOM,
-            thread_id="$thread",
             requester_id=ALICE,
-            response_event_id="$waiting",
             sources=ResponseSources(("$source-1", "$source-2"), ("$source-1", "$source-2")),
             calls=(
                 ApprovalCall(
@@ -6601,29 +6596,6 @@ class TestApprovalContinuations:
             request_body="run it",
             state=state,
         )
-
-    async def test_missing_saved_continuation_count_defaults_to_zero(self, alice: PrincipalStore) -> None:
-        """Existing approval snapshots remain readable without a saved budget."""
-        await self.admit_sources(alice)
-        await paused_for_approval(alice, self.continuation())
-
-        def remove_count(transaction: Transaction) -> None:
-            row = transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            )
-            assert row is not None
-            context = json.loads(str(row["context_json"]))
-            context.pop("continuation_count")
-            transaction.execute(
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(context), "approval-1"),
-            )
-
-        await alice._backend.write(remove_count)
-        loaded = await alice.approval_continuation("approval-1")
-        assert loaded is not None
-        assert loaded.continuation_count == 0
 
     @staticmethod
     async def admit_sources(store: PrincipalStore) -> None:

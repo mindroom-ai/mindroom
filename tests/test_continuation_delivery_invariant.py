@@ -138,7 +138,7 @@ class _WatchedOutbox:
         reply_id: str,
         *,
         before_sequence: int | None = None,
-    ) -> tuple[tuple[str, DeliveryStage, int], ...]:
+    ) -> tuple[tuple[str, DeliveryStage], ...]:
         """Return a reply's rows whose Matrix outcome is unknown, in write order."""
         return await self.inner.unresolved_reply_rows(reply_id, before_sequence=before_sequence)
 

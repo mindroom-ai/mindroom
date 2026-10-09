@@ -38,7 +38,6 @@ from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
-from mindroom.event_journal import ApprovalContinuation
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
@@ -46,7 +45,6 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
-from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
     PausedAnswer,
     PausedAttempt,
@@ -61,6 +59,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import shell_tools
 from tests.access_schema_support import with_responder_access
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths
 from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
@@ -584,18 +583,15 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         )
         for tool in paused.tools:
             presentation.start_tool(project_cli_execution(tool, parent="bash-parent", toolkit_name="file"))
-        continuation = ApprovalContinuation(
-            approval_id="approval",
+        continuation = approval_continuation(
             continuation_count=2,
             run_id="run",
             session_id="session",
-            entity_kind="agent",
             entity_name="helper",
             room_id=runtime.room_id,
             thread_id=runtime.thread_id,
             requester_id=runtime.requester_id,
             response_event_id="$response",
-            sources=ResponseSources(("$source",), ("$source",)),
             state="claimed",
             calls=calls,
             cli_call=paused.cli_call,

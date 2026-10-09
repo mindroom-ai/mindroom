@@ -162,9 +162,13 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
-from tests.approval_continuation_helpers import claim_continuation, freeze_resume_final, resumed_approval
+from tests.approval_continuation_helpers import (
+    approval_continuation,
+    claim_continuation,
+    freeze_resume_final,
+    resumed_approval,
+)
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     make_matrix_client_mock,
@@ -1561,19 +1565,8 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-failing-final",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -1631,19 +1624,8 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-stale-claim",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     owned = await claim_continuation(
@@ -1689,19 +1671,8 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-retry-cards",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(store, continuation.approval_id, runtime_generation="previous-runtime")
@@ -1745,19 +1716,8 @@ async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-restart-cancelled",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -1854,19 +1814,8 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     runner = unwrap_extracted_collaborator(runner_bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-interrupted",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     # An approved run's paused reply; this instance resumes it and stops while resuming it.
     assert await paused_for_approval(store, continuation, text="committed partial") is not None
@@ -1987,18 +1936,8 @@ async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: 
     """A crash between a resume's failure and its fence leaves nothing for a replay to continue: the approval fails."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     await _admit_approval_source(runner.deps.approval_store)
-    claimed = ApprovalContinuation(
+    claimed = approval_continuation(
         approval_id="approval-resume-failed",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
         state="claimed",
         claim_span_id="span-resume",
     )
@@ -2369,19 +2308,8 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=f"approval-recovery-error-{cancelled}",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) is not None
     await bot._reply_runtime.start()
@@ -2644,16 +2572,11 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-replay",
         run_id="run-paused",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
         room_id=request.room_id,
         thread_id=request.thread_id,
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -2698,19 +2621,11 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread", reply_to_event_id="$follow-up")
     await _admit_approval_source(runner.deps.approval_store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-resume",
         run_id="run-paused",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
     await bot._reply_runtime.start()
@@ -2788,19 +2703,11 @@ async def test_ready_approval_replay_rechecks_current_authorization(
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-revoked",
         run_id="run-paused",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
         room_id=request.room_id,
         thread_id=request.thread_id,
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
     if revoked_layer in {"room", "pending"}:
@@ -2878,19 +2785,12 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-team-member-revoked",
         run_id="run-paused",
-        session_id="session-1",
         entity_kind="team",
-        entity_name="general",
         room_id=request.room_id,
         thread_id=request.thread_id,
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
         team_member_names=("general", "worker"),
         team_mode="coordinate",
     )
@@ -2937,17 +2837,11 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-incomplete-failure",
         run_id="run-paused",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
         room_id=request.room_id,
         thread_id=request.thread_id,
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -2957,7 +2851,6 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
                 decision=ApprovalDecision.APPROVED,
             ),
         ),
-        state="ready",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
     await bot._reply_runtime.start()
@@ -3149,16 +3042,9 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-real-agent",
         run_id=paused.run_id,
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         calls=(
             ApprovalCall(
                 tool_call_id=tool_call_id,
@@ -3170,7 +3056,6 @@ async def test_agent_continuation_executes_real_agno_confirmation(
             ),
         ),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
     runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
@@ -3346,19 +3231,11 @@ async def test_agent_continuation_runs_only_approved_calls(
             tool.answered = True
             tool.user_input_schema = [UserInputField(name="args", field_type=list, value=attacker_args["args"])]
     agent.db.upsert_run(paused, session_id="session-1")
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-rewritten",
         run_id=paused.run_id,
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         calls=plan.calls,
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
     runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
@@ -3444,19 +3321,9 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
     storage.upsert_session(AgentSession(session_id="session-1", agent_id="general", user_id="@user:localhost"))
     storage.upsert_run(run=persisted, session_id="session-1", user_id="@user:localhost")
     storage.close()
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-invalid-agent",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
     decisions = dict.fromkeys(decision_call_ids, True)
@@ -3510,19 +3377,9 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-hook-error",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
 
@@ -3584,19 +3441,9 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
 
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-live-config",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
     identity = ToolExecutionIdentity(
@@ -3719,17 +3566,9 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
             },
         )
 
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-mixed",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
         response_event_id="$thinking",
-        sources=ResponseSources(("$source",), ("$source",)),
         calls=plan.calls,
         state="waiting",
     )
@@ -3781,17 +3620,9 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
             toolkit_owners={("general", "dangerous_one"): "test_toolkit", ("general", "dangerous_two"): "test_toolkit"},
         )
 
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-gated",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
         response_event_id="$thinking",
-        sources=ResponseSources(("$source",), ("$source",)),
         calls=plan.calls,
         state="waiting",
     )
@@ -4329,18 +4160,11 @@ async def test_completed_approval_continuation_delivers_canonical_ordered_body_u
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     target = _target(thread_id="$thread")
     request = _plain_request(target, source_event_id="$source")
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-visible-tools",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
-        requester_id="@user:localhost",
         response_event_id="$thinking",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
         state="claimed",
     )
     trace = [
@@ -4400,19 +4224,9 @@ async def _resumed_streamable_approval(
         event_id=f"$sent-{next(sent)}",
         room_id="!room:localhost",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-streamed",
-        run_id="run-1",
-        session_id="session-1",
         entity_kind=entity_kind,
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
         show_tool_calls=True,
         runtime_model_name="default",
         team_member_names=("general",) if entity_kind == "team" else (),
@@ -4702,20 +4516,9 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-chain",
-        run_id="run-1",
         runtime_model_name="default",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) is not None
     committed_trace = (
@@ -4824,19 +4627,8 @@ async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_p
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-chain-invalid",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     current = await claim_continuation(
@@ -5005,16 +4797,8 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-final-acked",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -5025,8 +4809,6 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
             ),
         ),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -5074,20 +4856,9 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-final-semantic",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -5143,19 +4914,9 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-failure-final",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
         state="failing",
         failure_reason="Tool approval continuation failed safely.",
     )
@@ -5190,20 +4951,9 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-oversized-final",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -5257,20 +5007,9 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-final-cancelled-return",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) is not None
 
@@ -5314,20 +5053,9 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     store = runner.deps.approval_store
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-final-late-cancel",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) is not None
     await bot._reply_runtime.start()
@@ -5368,16 +5096,8 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-final-unacknowledged",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -5388,8 +5108,6 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
             ),
         ),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
-        state="ready",
     )
     assert await paused_for_approval(store, continuation) == continuation
     claimed = await claim_continuation(
@@ -5430,19 +5148,9 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
 async def test_continuation_rejects_missing_persisted_execution_identity(tmp_path: Path) -> None:
     """Malformed durable identity must fail explicitly even when Python assertions are disabled."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-missing-identity",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
 
@@ -5475,19 +5183,12 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         resolved_thread_id=target.resolved_thread_id,
         session_id="session-1",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-team-model-resume",
         run_id="run-paused",
-        session_id="session-1",
         entity_kind="team",
-        entity_name="general",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
         execution_identity={},
         runtime_model_name="large",
         team_member_names=("general",),
@@ -5533,19 +5234,8 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
         dispatch_policy_source_kind="plugin",
         message_received_depth=3,
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-hook-context",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
         request_body=original_envelope.body,
         origin=original_envelope.origin,
         mentioned_agents=original_envelope.mentioned_agents,
@@ -5574,60 +5264,6 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
     assert restored.response_envelope.message_received_depth == 3
 
 
-@pytest.mark.parametrize(
-    ("transport_sender_id", "expected_sender_kind", "expected_intent", "expected_trust"),
-    [
-        ("@user:localhost", SenderKind.USER, TurnIntent.USER_MESSAGE, TurnTrust.EXTERNAL),
-        (
-            "@router:localhost",
-            SenderKind.MANAGED_ENTITY,
-            TurnIntent.ROUTER_HANDOFF,
-            TurnTrust.TRUSTED_INTERNAL,
-        ),
-    ],
-)
-def test_sparse_approval_continuation_restores_origin(
-    tmp_path: Path,
-    transport_sender_id: str,
-    expected_sender_kind: SenderKind,
-    expected_intent: TurnIntent,
-    expected_trust: TurnTrust,
-) -> None:
-    """Sparse continuation context retains human and router-relay attribution."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = ApprovalContinuation(
-        approval_id="approval-sparse-origin",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
-        request_body="resume me",
-        transport_sender_id=transport_sender_id,
-        source_kind="message",
-        origin=None,
-    )
-
-    restored = runner._approval_response_request(
-        continuation,
-        target=_target(thread_id="$thread", reply_to_event_id="$source"),
-    )
-    origin = restored.response_envelope.origin
-
-    assert origin.transport_sender_id == transport_sender_id
-    assert origin.requester_id == "@user:localhost"
-    assert origin.sender_kind == expected_sender_kind
-    assert origin.intent == expected_intent
-    assert origin.source_kind == "message"
-    assert origin.trust == expected_trust
-
-
 @pytest.mark.asyncio
 async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_path: Path) -> None:
     """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
@@ -5643,17 +5279,8 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-correlation",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -5664,7 +5291,6 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
                 human_approval_required=True,
             ),
         ),
-        state="ready",
         execution_identity={},
         correlation_id="correlation-original",
     )
@@ -8673,18 +8299,15 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="cli-wait",
         run_id="run",
         session_id=target.session_id,
-        entity_kind="agent",
-        entity_name="general",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         requester_id=request.user_id,
         response_event_id="$response",
         sources=request.sources,
-        calls=(),
         state="claimed" if cancel_source == "rival" else "waiting",
         runtime_generation="other-process" if cancel_source == "rival" else None,
         cli_call={"kind": "agent_cli"},
@@ -9094,19 +8717,14 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
     target = _target(thread_id="$thread")
     request = _plain_request(target, source_event_id="$source")
     identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="recovery-chain",
         run_id="saved-run",
         session_id=target.session_id,
-        entity_kind="agent",
-        entity_name="general",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         requester_id=request.user_id,
-        response_event_id="$waiting",
         sources=request.sources,
-        calls=(),
-        state="ready",
         execution_identity=serialize_tool_execution_identity(identity),
         cli_call={"kind": "agent_cli"},
         show_tool_calls=False,
@@ -9287,20 +8905,11 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     runner.deps.runtime.config.agents["general"].mid_turn = MidTurnConfig.model_validate(
         {"judgment": {"provider": "typesafe"}},
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-context",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
         thread_id="$root",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        calls=(),
         execution_identity={},
         sources=ResponseSources(("$resume",), ("$resume",)),
-        state="ready",
     )
     target = _target(thread_id="$root", reply_to_event_id="$resume")
     original = runner._approval_response_request(continuation, target=target)
@@ -9614,18 +9223,11 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(tm
         resolved_thread_id="$prompt",
         session_id="session-1",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-1",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
         thread_id="$prompt",
-        requester_id="@user:localhost",
         response_event_id="$response",
         sources=ResponseSources(("$prompt",), ("$prompt",)),
-        calls=(),
         state="running",
         execution_identity=serialize_tool_execution_identity(identity),
     )

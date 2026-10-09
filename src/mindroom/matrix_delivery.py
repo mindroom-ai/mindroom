@@ -291,7 +291,7 @@ class MatrixDeliveryWorker:
         Called with the reply's sending lock held. A row that still cannot be
         sent stops the walk, because a later row must never overtake it.
         """
-        for delivery_id, stage, _sequence in await self.store.unresolved_reply_rows(
+        for delivery_id, stage in await self.store.unresolved_reply_rows(
             reply_id,
             before_sequence=before_sequence,
         ):
@@ -787,16 +787,13 @@ class MatrixDeliveryWorker:
         on_cancelled: Callable[[], None],
     ) -> _FlushOutcome | None:
         """Flush one unacknowledged row under its sending lock; ``None`` when an earlier reply row still blocks it."""
-        if delivery.reply_id is None:
-            async with self._delivery_lock(delivery.delivery_id):
-                return await self._flush(
-                    delivery_id=delivery.delivery_id,
-                    stage=delivery.stage,
-                    process_shutdown_requested=process_shutdown_requested,
-                    on_cancelled=on_cancelled,
-                )
-        async with self._delivery_lock(_reply_lock_key(delivery.reply_id)):
-            if not await self._flush_reply_rows(delivery.reply_id, before_sequence=delivery.reply_sequence):
+        reply_id = delivery.reply_id
+        lock_key = delivery.delivery_id if reply_id is None else _reply_lock_key(reply_id)
+        async with self._delivery_lock(lock_key):
+            if reply_id is not None and not await self._flush_reply_rows(
+                reply_id,
+                before_sequence=delivery.reply_sequence,
+            ):
                 return None
             return await self._flush(
                 delivery_id=delivery.delivery_id,

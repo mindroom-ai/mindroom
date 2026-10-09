@@ -12,7 +12,7 @@ from mindroom.approval_response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
-from mindroom.response_sources import ResponseSources
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -20,18 +20,14 @@ if TYPE_CHECKING:
 
 
 def _continuation() -> ApprovalContinuation:
-    return ApprovalContinuation(
+    return approval_continuation(
         approval_id="approval-1",
         run_id="parent-run",
         session_id="parent-session",
-        entity_kind="agent",
         entity_name="leader",
         room_id="!room:test",
-        thread_id="$thread",
         requester_id="@human:test",
         response_event_id="$response",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
         state="failing",
         failure_reason="cancelled_by_user",
     )
@@ -145,7 +141,7 @@ async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, 
     ):
         assert await coordinator.settle_failure(continuation, reason)
 
-    assert gateway.write_approval_failure_note.await_args.kwargs["reason"] == note
+    assert gateway.write_approval_failure_note.await_args.kwargs["note"] == note
 
 
 @pytest.mark.asyncio

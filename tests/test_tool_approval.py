@@ -65,6 +65,7 @@ from mindroom.tool_approval import (
     tool_may_require_approval,
 )
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.journal_membership_helpers import admit_room_membership
@@ -664,16 +665,10 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="origin-team",
         room_id=room_id,
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
@@ -1252,18 +1247,10 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
-        calls=(),
         state="claimed",
         runtime_generation="old-runtime",
     )
@@ -1355,15 +1342,9 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
         response_event_id=waiting_event_id,
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
@@ -1489,16 +1470,9 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
@@ -1601,16 +1575,9 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(

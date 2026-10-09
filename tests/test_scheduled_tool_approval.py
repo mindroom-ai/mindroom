@@ -62,6 +62,7 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import runtime_paths_for, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
@@ -204,11 +205,10 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "send it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=name,
         run_id="run-" + name,
         session_id="session-" + name,
-        entity_kind="agent",
         entity_name=_AGENT,
         room_id=_ROOM,
         thread_id=_THREAD,

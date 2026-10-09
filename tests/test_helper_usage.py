@@ -27,7 +27,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import _aexecute_participant, _arun_agent
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
 from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
@@ -38,7 +38,6 @@ from mindroom.history.session_context import (
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.memory.auto_flush import _extract_memory_summary
-from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.teams import (
     TeamMode,
@@ -54,6 +53,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from mindroom.usage_storage import quote_identifier
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.history_helpers import (
     RecordingModel,
@@ -300,17 +300,13 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
         execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
         return await execution.continue_run(
-            ApprovalContinuation(
+            approval_continuation(
                 approval_id="sample-approval",
                 run_id=paused.run_id,
                 session_id="approval-session",
-                entity_kind="agent",
-                entity_name="general",
                 room_id=context.room_id,
                 thread_id=context.thread_id,
                 requester_id=context.requester_id,
-                response_event_id="$waiting",
-                sources=ResponseSources(("$source",), ("$source",)),
                 state="claimed",
                 calls=calls,
                 request_body="Add 2 and 3",

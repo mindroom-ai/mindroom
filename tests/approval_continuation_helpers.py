@@ -1,24 +1,50 @@
-"""Drive an approval continuation's claim and advance through its reply, as an approval resume does."""
+"""Build approval continuations and drive their claim and advance through their reply, as an approval resume does."""
 
 from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal.approval_continuations import ApprovalAdvance
+from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
 from mindroom.event_journal.replies import ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from tests.conftest import unwrap_extracted_collaborator
+from mindroom.reply_scope import span_sources
+from mindroom.response_sources import ResponseSources
+from tests.conftest import message_origin, unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
-    from mindroom.event_journal.approval_continuations import ApprovalCall, ApprovalContinuation
+    from mindroom.event_journal.approval_continuations import ApprovalCall
+
+
+def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN401
+    """Return a ready continuation of one user's message in ``!room:localhost``, with ``changes`` applied.
+
+    Its origin is the requester's own message unless ``changes`` names one.
+    """
+    requester_id = changes.get("requester_id", "@user:localhost")
+    defaults: dict[str, Any] = {
+        "approval_id": "approval",
+        "run_id": "run-1",
+        "session_id": "session-1",
+        "entity_kind": "agent",
+        "entity_name": "general",
+        "room_id": "!room:localhost",
+        "thread_id": "$thread",
+        "requester_id": requester_id,
+        "origin": message_origin(sender_id=requester_id),
+        "response_event_id": "$waiting",
+        "sources": ResponseSources(("$source",), ("$source",)),
+        "calls": (),
+        "state": "ready",
+    }
+    return ApprovalContinuation(**(defaults | changes))
 
 
 async def claim_continuation(
@@ -42,11 +68,7 @@ async def claim_continuation(
         claim=rl.ClaimRequest(
             span_id=uuid4().hex,
             delivery_id=sources.pending_event_ids[0],
-            sources=rl.SpanSources(
-                pending=sources.pending_event_ids,
-                logical=sources.logical_source_event_ids,
-                discovery=sources.discovery_event_ids,
-            ),
+            sources=span_sources(sources),
             bot_generation=runtime_generation,
             now_ns=time.time_ns(),
             new_reply_id=uuid4().hex,

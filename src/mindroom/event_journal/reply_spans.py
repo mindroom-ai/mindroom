@@ -129,12 +129,12 @@ def for_reply(transaction: Transaction, principal_id: str, reply_id: str) -> tup
     return tuple(_span(transaction, principal_id, row) for row in rows)
 
 
-def reply_ids_for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> tuple[str, ...]:
-    """Return replies with a span answering any of these pending or logical sources, newest first."""
+def newest_reply_id_for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> str | None:
+    """Return the newest reply with a span answering any of these pending or logical sources."""
     if not event_ids:
-        return ()
+        return None
     placeholders = ", ".join("?" for _ in event_ids)
-    rows = transaction.fetchall(
+    row = transaction.fetchone(
         f"""
         SELECT span.reply_id AS reply_id, MAX(reply.created_at_ns) AS created_at_ns
         FROM reply_span_sources AS source
@@ -146,10 +146,11 @@ def reply_ids_for_sources(transaction: Transaction, principal_id: str, event_ids
           AND source.event_id IN ({placeholders})
         GROUP BY span.reply_id
         ORDER BY created_at_ns DESC, span.reply_id DESC
+        LIMIT 1
         """,  # noqa: S608 - placeholders only
         (principal_id, *event_ids),
     )
-    return tuple(str(row["reply_id"]) for row in rows)
+    return None if row is None else str(row["reply_id"])
 
 
 def save(transaction: Transaction, principal_id: str, span: Span) -> None:

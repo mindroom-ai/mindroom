@@ -318,6 +318,13 @@ def _clear_current(reply: Reply, span_id: str) -> Reply:
     return cleared if cleared.state is ReplyState.ACTIVE else _leaves_active(cleared, cleared.state)
 
 
+def _end_running(reply: Reply, span: Span | None, outcome: SpanOutcome, now_ns: int) -> tuple[Reply, tuple[Span, ...]]:
+    """End ``span`` with ``outcome`` and clear it as current while it still runs; otherwise change nothing."""
+    if span is None or span.ended:
+        return reply, ()
+    return _clear_current(reply, span.span_id), (_end(span, outcome, now_ns),)
+
+
 def _bump(reply: Reply, now_ns: int, **changes: object) -> Reply:
     """Apply changes that alter what a payload would contain."""
     return replace(reply, revision=reply.revision + 1, updated_at_ns=now_ns, **changes)  # type: ignore[arg-type]
@@ -888,16 +895,11 @@ def write_failed(reply: Reply, span: Span, write: WriteFacts, *, now_ns: int) ->
 def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     """A pause nobody saw cannot hold its approval: fence it like a failed handoff."""
     assert reply.approval_id is not None
-    spans: tuple[Span, ...] = ()
-    effects: list[Effect] = []
-    updated = reply
-    if not span.ended:
-        # A response-local approval wait is still waiting on this pause; its
-        # turn ends here, with the failure note as its answer. Its sources stay
-        # with the continuation, whose failure settlement settles them.
-        spans = (_end(span, SpanOutcome.FAILED, now_ns),)
-        updated = _clear_current(updated, span.span_id)
-        effects.append(CancelSpan(span.span_id))
+    # A response-local approval wait is still waiting on this pause; its
+    # turn ends here, with the failure note as its answer. Its sources stay
+    # with the continuation, whose failure settlement settles them.
+    updated, spans = _end_running(reply, span, SpanOutcome.FAILED, now_ns)
+    effects: list[Effect] = [CancelSpan(span.span_id)] if spans else []
     if reply.unapplied_stop:
         owed = OwedWrite(span.span_id, NoteKind.CANCELLED)
         updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns)
@@ -1423,11 +1425,7 @@ def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> T
     # more (an older bot instance's, or a selection not yet admitted) ends here.
     if span is not None and (kept := _kept_answer(reply, span)) is not None:
         return _restored(recorded, span, kept, now_ns, SettleSources(span.span_id))
-    spans: tuple[Span, ...] = ()
-    updated = recorded
-    if unended is not None:
-        spans = (_end(unended, SpanOutcome.CANCELLED, now_ns),)
-        updated = _clear_current(updated, unended.span_id)
+    updated, spans = _end_running(recorded, unended, SpanOutcome.CANCELLED, now_ns)
     return Transition(
         outcome=Outcome.APPLIED,
         reply=_cancelled(updated, reply.last_span_id, now_ns),
@@ -1466,13 +1464,13 @@ def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_
         return _unchanged(Outcome.DUPLICATE, reply)
     if current is not None and not current.ended and (kept := _kept_answer(reply, current)) is not None:
         return _restored(reply, current, kept, now_ns, SettleSources(current.span_id))
-    spans: tuple[Span, ...] = ()
-    updated = reply
     stopped_first = reply.unapplied_stop
-    if current is not None and not current.ended:
-        outcome = SpanOutcome.CANCELLED if stopped_first else SpanOutcome.FAILED
-        spans = (_end(current, outcome, now_ns),)
-        updated = _clear_current(updated, current.span_id)
+    updated, spans = _end_running(
+        reply,
+        current,
+        SpanOutcome.CANCELLED if stopped_first else SpanOutcome.FAILED,
+        now_ns,
+    )
     if stopped_first:
         # A Stop recorded before the failure decides what the reply shows.
         updated = _cancelled(updated, reply.last_span_id, now_ns)
@@ -1530,7 +1528,7 @@ def replay_superseded(reply: Reply, last: Span, *, durable_write_debt: bool, now
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if durable_write_debt or reply.owed_write is not None:
+    if claim_blocked(reply, durable_write_debt=durable_write_debt):
         return _unchanged(Outcome.DEFERRED, reply)
     return replay_dropped(reply, last, sources_pending=False, now_ns=now_ns)
 
@@ -1572,17 +1570,13 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
         settle = SettleSources(regeneration.span_id, answered=False)
         effects = (settle,) if regeneration is waiting else (CancelSpan(regeneration.span_id), settle)
         return _restored(reply, regeneration, kept, now_ns, *effects)
-    effects: list[Effect] = []
-    spans: tuple[Span, ...] = ()
-    updated = reply
-    if current is not None:
-        effects.append(CancelSpan(current.span_id))
-        effects.append(SettleSources(current.span_id, answered=False))
-        spans = (_end(current, SpanOutcome.CANCELLED, now_ns),)
-        updated = _clear_current(updated, current.span_id)
-    else:
-        effects.append(SettleSources(reply.last_span_id, answered=False))
-    return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=tuple(effects))
+    updated, spans = _end_running(reply, current, SpanOutcome.CANCELLED, now_ns)
+    effects: tuple[Effect, ...] = (
+        (SettleSources(reply.last_span_id, answered=False),)
+        if current is None
+        else (CancelSpan(current.span_id), SettleSources(current.span_id, answered=False))
+    )
+    return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=effects)
 
 
 def departed(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
@@ -1591,13 +1585,8 @@ def departed(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
         if not reply.redaction_pending and reply.owed_write is None:
             return _unchanged(Outcome.DUPLICATE, reply)
         return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, redaction_pending=(), owed_write=None))
-    effects: tuple[Effect, ...] = ()
-    spans: tuple[Span, ...] = ()
-    updated = reply
-    if current is not None and not current.ended:
-        effects = (CancelSpan(current.span_id),)
-        spans = (_end(current, SpanOutcome.RELEASED, now_ns),)
-        updated = _clear_current(updated, current.span_id)
+    updated, spans = _end_running(reply, current, SpanOutcome.RELEASED, now_ns)
+    effects = tuple(CancelSpan(span.span_id) for span in spans)
     updated = _bump(
         _stop_applied(updated),
         now_ns,

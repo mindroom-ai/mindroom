@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.replies import PostCommitEffect
     from mindroom.matrix_delivery import ReplyRowEnqueuer
+    from mindroom.response_sources import ResponseSources
     from mindroom.turn_record import TurnRecord
 
 
@@ -510,14 +511,9 @@ class ReplyRuntime:
         earlier writes are unresolved, which retry the sources once they resolve.
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
-        sources = continuation.sources
         claim = await self._new_request(
             delivery_id=continuation.source_event_ids[0],
-            sources=rl.SpanSources(
-                pending=sources.pending_event_ids,
-                logical=sources.logical_source_event_ids,
-                discovery=sources.discovery_event_ids,
-            ),
+            sources=span_sources(continuation.sources),
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,
             empty=empty,
@@ -546,7 +542,7 @@ class ReplyRuntime:
             await self._wait_to_claim(
                 transition.reply.reply_id,
                 continuation.room_id,
-                sources.pending_event_ids,
+                continuation.source_event_ids,
             )
             return None, None
         return claimed, _handle_for(self, transition.reply, transition.claimed, empty)
@@ -712,6 +708,15 @@ def pause_decision(
     )
 
 
+def span_sources(sources: ResponseSources) -> rl.SpanSources:
+    """Return the sources one response answers, as its span records them."""
+    return rl.SpanSources(
+        pending=sources.pending_event_ids,
+        logical=sources.logical_source_event_ids,
+        discovery=sources.discovery_event_ids,
+    )
+
+
 def release_decision(
     handle: SpanHandle,
     *,
@@ -720,6 +725,13 @@ def release_decision(
     """Return the rule that ends a span with its sources pending for a retry or replay."""
     confirms = handle.unconfirmed_progress
     return lambda reply, span: rl.release(reply, span, now_ns=time.time_ns(), outcome=outcome, confirms=confirms)
+
+
+def terminal_source_decision(*, source_deleted: bool) -> Decide:
+    """Return the rule that ends a reply whose sources a deletion or another settlement made terminal before it ran."""
+    if source_deleted:
+        return lambda reply, span: rl.sources_deleted(reply, span, now_ns=time.time_ns())
+    return lambda reply, span: rl.sources_settled_without_reply(reply, span, now_ns=time.time_ns())
 
 
 def suppress_decision(handle: SpanHandle, *, reason: Literal["suppressed", "hook_failed"] = "suppressed") -> Decide:
@@ -856,6 +868,11 @@ class _NotedEnd:
     note: Segment
 
 
+def interruption_note(cancel_source: CancelSource) -> NoteKind:
+    """Return the note a reply shows below what it showed when a restart or another cancellation cut it short."""
+    return NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED
+
+
 def interrupted_end(
     reply: rl.Reply,
     *,
@@ -877,7 +894,7 @@ def interrupted_end(
     if cancel_source is None:
         note = note_segment(NoteKind.ERROR, format_error_note(failure_reason or "interrupted"))
     else:
-        note = note_segment(NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED)
+        note = note_segment(interruption_note(cancel_source))
     if cancel_source is not None and reply.event_id is None:
         # ``None``: the span is released, so its sources retry.
         return None

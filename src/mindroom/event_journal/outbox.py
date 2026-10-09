@@ -877,7 +877,7 @@ def unresolved_reply_rows(
     reply_id: str,
     *,
     before_sequence: int | None = None,
-) -> tuple[tuple[str, DeliveryStage, int], ...]:
+) -> tuple[tuple[str, DeliveryStage], ...]:
     """Return a reply's rows whose Matrix outcome is unknown, in write order.
 
     Every durable write of one reply takes the next value of its write
@@ -887,16 +887,14 @@ def unresolved_reply_rows(
     bound = "" if before_sequence is None else " AND reply_sequence < ?"
     rows = transaction.fetchall(
         f"""
-        SELECT delivery_id, stage, reply_sequence FROM matrix_delivery_outbox
+        SELECT delivery_id, stage FROM matrix_delivery_outbox
         WHERE principal_id = ? AND reply_id = ?
           AND acknowledged_event_id IS NULL AND retired = 0 AND permanent_failure_reason IS NULL{bound}
         ORDER BY reply_sequence
         """,  # noqa: S608 - a fixed clause, not input
         (principal_id, reply_id, *(() if before_sequence is None else (before_sequence,))),
     )
-    return tuple(
-        (str(row["delivery_id"]), DeliveryStage(str(row["stage"])), int(row["reply_sequence"])) for row in rows
-    )
+    return tuple((str(row["delivery_id"]), DeliveryStage(str(row["stage"]))) for row in rows)
 
 
 def _recovery_delivery(row: Row) -> MatrixDelivery | UnreadableMatrixDelivery:

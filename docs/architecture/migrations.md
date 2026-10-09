@@ -48,7 +48,7 @@ rg -n -F 'LEGACY_COMPAT:' --glob '*.py'
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
 | [`src/mindroom/event_journal/legacy_response_attempts.py`][legacy-response-attempts] | Backend startup finds `approval_continuations` without `span_id`, before the schema statements run. | An upgrade cannot rule out a pending approval, so one schema transaction cancels every continuation: it deletes the continuation with its calls and cards and settles its sources unanswered, leaving its reply's Matrix message as it was, then drops `response_attempts`, `response_attempt_sources`, `approval_continuation_sources`, and the continuation's `entity_name` column; a second open does not repeat the upgrade. |
 | [`src/mindroom/legacy_delivery_payloads.py`][legacy-delivery] | Outbox reads or Matrix writes encounter inline FINAL results and the bounded marker. | Old inline outcomes keep rolling-writer precedence, current local results remain authoritative otherwise, and full recovery data stays off the wire. |
-| [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | Approval claim or resume encounters missing historical context or the older card ID. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
+| [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | An approval card names its call only through the older `tool_call_id` field. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
 | [`src/mindroom/matrix/legacy_sync_continuity.py`][legacy-sync] | `SyncContinuityStore` loads a valid v2 or v3 record. | The helper validates the old shape, discards its checkpoint, increments revision once, and lets the store rewrite v4 under lock. |
 | [`src/mindroom/external_triggers/legacy_replay_store.py`][legacy-replay-store] | An external trigger replay call finds the shared `external_triggers/replay.json`, including one written before thread keys existed. | The helper splits the file by replay scope and supplies an empty `threads` section; `ExternalTriggerReplayStore` validates every record before writing one current file per scope, deletes the old file under its lock, and fails closed on a malformed one. |
 | [`src/mindroom/script_runs/legacy_schema.py`][script-legacy-schema] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
@@ -89,7 +89,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J6 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] retires all pre-cutoff delivery tables, replacing the earlier unfenced-outbox guard. |
 | J7 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old approval transport and continuations rather than converting or tombstoning them. |
 | J8 | Isolated | [`legacy_delivery_payloads.py`][legacy-delivery] owns inline FINAL results, precedence, markers, and wire sanitation. |
-| J9 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] rebuilds historical optional context; [`approval_execution.py`][approval-execution] keeps current exact execution gates. |
+| J9 | Removed/superseded | A continuation's origin and the rest of its context are always the native snapshot: the [continuation upgrade][legacy-response-attempts] cancels every approval an earlier release left, so nothing rebuilds historical optional context. |
 | J10 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] owns the old card ID alias; [`approval_manager.py`][approval-manager] keeps current authentication, retries, tombstones, and fail-closed behavior. |
 | J11 | Isolated | [`matrix/legacy_sync_continuity.py`][legacy-sync] converts valid v2/v3 join fences to current v4. |
 | J12 | Removed/superseded | [The upgrade fixture][pre-journal-test] confirms old event-cache and dispatch-obligation files have no runtime reader and remain untouched. |
@@ -229,7 +229,6 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
 [ai-runtime]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/ai_runtime.py
 [api-oauth]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/oauth.py
-[approval-execution]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_execution.py
 [approval-manager]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_manager.py
 [attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/attachments.py
 [auto-flush]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/auto_flush.py

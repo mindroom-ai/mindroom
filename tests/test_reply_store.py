@@ -496,7 +496,10 @@ async def test_edit_row_waits_for_the_create_and_targets_its_event(journal_store
     assert pause.stage is rl.WriteStage.EDIT
     assert pause.delivery_id == "$source:edit:2"
     assert await principal.is_pending("$source")
-    assert [row[2] for row in await principal.unresolved_reply_rows("reply-1")] == [1, 2]
+    assert await principal.unresolved_reply_rows("reply-1") == (
+        ("$source", DeliveryStage.INITIAL),
+        ("$source:edit:2", DeliveryStage.EDIT),
+    )
     assert await principal.claim_matrix_delivery(delivery_id="$source:edit:2", stage=DeliveryStage.EDIT) is None
 
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)

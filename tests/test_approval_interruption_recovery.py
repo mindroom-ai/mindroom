@@ -10,12 +10,10 @@ import pytest_asyncio
 
 from mindroom.approval_manager import initialize_approval_store
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
-from mindroom.event_journal import ApprovalContinuation
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
-from tests.approval_continuation_helpers import resumed_approval
+from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
@@ -27,6 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.event_journal import ApprovalContinuation
     from mindroom.runtime_shutdown import RuntimeShutdownIntent
 
 
@@ -38,19 +37,8 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-recovery",
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
-        state="ready",
     )
     # An approved run's paused reply; this instance resumes it and stops while resuming it.
     assert await paused_for_approval(store, continuation, text="partial answer") is not None

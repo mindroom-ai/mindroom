@@ -58,7 +58,6 @@ def holds_source_in_room(alias: str) -> str:
     """  # noqa: S608 - a fixed alias, not input
 
 
-_FENCEABLE = ("waiting", "ready")
 # The failure reason of a resume a shutdown cut short, which the next instance
 # hands back to replay.
 INTERRUPTED_FAILURE_REASON = "Tool approval continuation was interrupted before final delivery and denied safely."
@@ -157,11 +156,8 @@ def _origin_to_dict(origin: TurnOrigin) -> dict[str, object]:
     }
 
 
-def _origin_from_dict(value: object) -> TurnOrigin | None:
+def _origin_from_dict(stored: Mapping[str, object]) -> TurnOrigin:
     """Restore one exact hook origin from the durable snapshot."""
-    if not isinstance(value, dict):
-        return None
-    stored = cast("dict[str, object]", value)
     return TurnOrigin(
         transport_sender_id=cast("str", stored["transport_sender_id"]),
         requester_id=cast("str", stored["requester_id"]),
@@ -199,8 +195,6 @@ class ApprovalContinuation:
     team_member_model_names: tuple[tuple[str, str], ...] = ()
     team_mode: str | None = None
     request_body: str = ""
-    transport_sender_id: str | None = None
-    source_kind: str = "message"
     attachment_ids: tuple[str, ...] = ()
     mentioned_agents: tuple[str, ...] = ()
     hook_source: str | None = None
@@ -208,7 +202,8 @@ class ApprovalContinuation:
     dispatch_policy_source_kind: str | None = None
     correlation_id: str | None = None
     history_scope: HistoryScope | None = None
-    origin: TurnOrigin | None = None
+    # Who sent and who requested the paused turn, restored for the resumed hooks.
+    origin: TurnOrigin = field(kw_only=True)
     memory_prompt: str | None = None
     memory_thread_history: tuple[ApprovalMemoryTurn, ...] = ()
     thread_summary_message_count_hint: int | None = None
@@ -250,8 +245,6 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "team_member_model_names": [list(item) for item in continuation.team_member_model_names],
         "team_mode": continuation.team_mode,
         "request_body": continuation.request_body,
-        "transport_sender_id": continuation.transport_sender_id,
-        "source_kind": continuation.source_kind,
         "attachment_ids": list(continuation.attachment_ids),
         "mentioned_agents": list(continuation.mentioned_agents),
         "hook_source": continuation.hook_source,
@@ -259,7 +252,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
         "correlation_id": continuation.correlation_id,
         "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
-        "origin": _origin_to_dict(continuation.origin) if continuation.origin is not None else None,
+        "origin": _origin_to_dict(continuation.origin),
         "memory_prompt": continuation.memory_prompt,
         "memory_thread_history": [
             {"sender": turn.sender, "body": turn.body} for turn in continuation.memory_thread_history
@@ -303,20 +296,6 @@ def get(
     return _from_rows(transaction, principal_id, row, call_rows)
 
 
-@dataclass(frozen=True, slots=True)
-class _PausedReply:
-    """What a continuation reads from the reply it paused."""
-
-    entity_name: str
-    room_id: str
-    thread_id: str | None
-    response_event_id: str
-    pending_event_ids: tuple[str, ...]
-    logical_source_event_ids: tuple[str, ...]
-    discovery_event_ids: tuple[str, ...]
-    show_tool_calls: bool
-
-
 def _shows_tool_calls(presentation: str) -> bool:
     """Return the tool-call visibility a reply froze when it started.
 
@@ -324,30 +303,6 @@ def _shows_tool_calls(presentation: str) -> bool:
     imports.
     """
     return json.loads(presentation)["show_tool_calls"] is True
-
-
-def _paused_reply(
-    transaction: Transaction,
-    principal_id: str,
-    row: Row,
-) -> _PausedReply:
-    """Return what a continuation reads from its paused span's reply."""
-    span_id = cast("str | None", row["span_id"])
-    span = None if span_id is None else reply_spans.load(transaction, principal_id, span_id)
-    reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
-    if span is None or reply is None or reply.event_id is None:
-        message = f"Approval continuation {row['approval_id']!r} lost the reply it paused"
-        raise ValueError(message)
-    return _PausedReply(
-        entity_name=reply.entity_name,
-        room_id=reply.room_id,
-        thread_id=reply.thread_id,
-        response_event_id=reply.event_id,
-        pending_event_ids=span.sources.pending,
-        logical_source_event_ids=span.sources.logical,
-        discovery_event_ids=span.sources.discovery,
-        show_tool_calls=_shows_tool_calls(reply.presentation),
-    )
 
 
 def _from_rows(
@@ -362,15 +317,16 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
-    identity = _paused_reply(transaction, principal_id, row)
+    # The paused span and its reply own the run's room, thread, event, entity, sources, and visibility.
+    span_id = cast("str | None", row["span_id"])
+    span = None if span_id is None else reply_spans.load(transaction, principal_id, span_id)
+    reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
+    if span is None or reply is None or reply.event_id is None:
+        message = f"Approval continuation {row['approval_id']!r} lost the reply it paused"
+        raise ValueError(message)
     claim_span_id = cast("str | None", row["claim_span_id"])
     claimed = row["state"] == "ready" and claim_span_id is not None
     claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
-    sources = ResponseSources(
-        identity.pending_event_ids,
-        identity.logical_source_event_ids,
-        identity.discovery_event_ids,
-    )
     calls = tuple(
         ApprovalCall(
             tool_call_id=str(call["tool_call_id"]),
@@ -388,54 +344,50 @@ def _from_rows(
         for call in call_rows
     )
     return ApprovalContinuation(
-        cli_call=cast("dict[str, object] | None", stored.get("cli_call")),
+        cli_call=cast("dict[str, object] | None", stored["cli_call"]),
         approval_id=str(row["approval_id"]),
         run_id=cast("str", stored["run_id"]),
-        continuation_count=int(stored.get("continuation_count", 0)),
+        continuation_count=int(stored["continuation_count"]),
         session_id=cast("str", stored["session_id"]),
         entity_kind=cast("Literal['agent', 'team']", stored["entity_kind"]),
-        entity_name=identity.entity_name,
-        room_id=identity.room_id,
-        thread_id=identity.thread_id,
+        entity_name=reply.entity_name,
+        room_id=reply.room_id,
+        thread_id=reply.thread_id,
         requester_id=cast("str", stored["requester_id"]),
-        response_event_id=identity.response_event_id,
-        sources=sources,
+        response_event_id=reply.event_id,
+        sources=ResponseSources(span.sources.pending, span.sources.logical, span.sources.discovery),
         calls=calls,
         state="claimed" if claimed else cast("ApprovalContinuationState", row["state"]),
         delegation_storage_bindings=cast(
             "dict[str, dict[str, object]]",
-            stored.get("delegation_storage_bindings", {}),
+            stored["delegation_storage_bindings"],
         ),
-        show_tool_calls=identity.show_tool_calls,
-        execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
-        runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
-        team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
+        show_tool_calls=_shows_tool_calls(reply.presentation),
+        execution_identity=cast("dict[str, object]", stored["execution_identity"]),
+        runtime_model_name=cast("str | None", stored["runtime_model_name"]),
+        team_member_names=tuple(cast("list[str]", stored["team_member_names"])),
         team_member_model_names=tuple(
-            (str(item[0]), str(item[1]))
-            for item in cast("list[list[str]]", stored.get("team_member_model_names", []))
-            if len(item) == 2
+            (str(item[0]), str(item[1])) for item in cast("list[list[str]]", stored["team_member_model_names"])
         ),
-        team_mode=cast("str | None", stored.get("team_mode")),
-        request_body=cast("str", stored.get("request_body", "")),
-        transport_sender_id=cast("str | None", stored.get("transport_sender_id")),
-        source_kind=cast("str", stored.get("source_kind", "message")),
-        attachment_ids=tuple(cast("list[str]", stored.get("attachment_ids", []))),
-        mentioned_agents=tuple(cast("list[str]", stored.get("mentioned_agents", []))),
-        hook_source=cast("str | None", stored.get("hook_source")),
-        message_received_depth=int(stored.get("message_received_depth", 0)),
-        dispatch_policy_source_kind=cast("str | None", stored.get("dispatch_policy_source_kind")),
-        correlation_id=cast("str | None", stored.get("correlation_id")),
-        history_scope=HistoryScope.from_metadata(stored.get("history_scope")),
-        origin=_origin_from_dict(stored.get("origin")),
-        memory_prompt=cast("str | None", stored.get("memory_prompt")),
+        team_mode=cast("str | None", stored["team_mode"]),
+        request_body=cast("str", stored["request_body"]),
+        attachment_ids=tuple(cast("list[str]", stored["attachment_ids"])),
+        mentioned_agents=tuple(cast("list[str]", stored["mentioned_agents"])),
+        hook_source=cast("str | None", stored["hook_source"]),
+        message_received_depth=int(stored["message_received_depth"]),
+        dispatch_policy_source_kind=cast("str | None", stored["dispatch_policy_source_kind"]),
+        correlation_id=cast("str | None", stored["correlation_id"]),
+        history_scope=HistoryScope.from_metadata(stored["history_scope"]),
+        origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
+        memory_prompt=cast("str | None", stored["memory_prompt"]),
         memory_thread_history=tuple(
             ApprovalMemoryTurn(
                 sender=cast("str", turn["sender"]),
                 body=cast("str", turn["body"]),
             )
-            for turn in cast("list[dict[str, object]]", stored.get("memory_thread_history", []))
+            for turn in cast("list[dict[str, object]]", stored["memory_thread_history"])
         ),
-        thread_summary_message_count_hint=cast("int | None", stored.get("thread_summary_message_count_hint")),
+        thread_summary_message_count_hint=cast("int | None", stored["thread_summary_message_count_hint"]),
         runtime_generation=(
             (None if claim_span is None else claim_span.bot_generation)
             if claimed
@@ -494,8 +446,6 @@ def create(
     transaction as that pause.
     """
     assert continuation.span_id is not None, "every continuation pauses a reply span"
-    if not continuation.source_event_ids:
-        return None
     span = reply_spans.load(transaction, principal_id, continuation.span_id)
     assert span is not None
     assert span.sources.pending == continuation.source_event_ids, "a continuation holds its paused span's sources"
@@ -507,14 +457,6 @@ def create(
         room_id=continuation.room_id,
     )
     if membership_epoch is None:
-        return None
-    initial = outbox.load(
-        transaction,
-        principal_id,
-        delivery_id=continuation.source_event_ids[0],
-        stage=DeliveryStage.INITIAL,
-    )
-    if initial is not None and initial.retired:
         return None
     for event_id in continuation.source_event_ids:
         row = transaction.fetchone(
@@ -819,16 +761,14 @@ def fence(
     current = get(transaction, principal_id, approval_id=approval_id)
     if current is None or _answer_frozen(transaction, principal_id, current):
         return None
-    states = _FENCEABLE
-    placeholders = ", ".join("?" for _ in states)
     updated = transaction.fetchone(
-        f"""
+        """
         UPDATE approval_continuations
         SET state = 'failing', failure_reason = ?
-        WHERE principal_id = ? AND approval_id = ? AND state IN ({placeholders})
+        WHERE principal_id = ? AND approval_id = ? AND state IN ('waiting', 'ready')
         RETURNING approval_id
-        """,  # noqa: S608 - fixed placeholders
-        (reason, principal_id, approval_id, *states),
+        """,
+        (reason, principal_id, approval_id),
     )
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 

@@ -13,9 +13,9 @@ from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent, replies
 from mindroom.event_journal.replies import ReplyRowRequest
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, Segment, encode_presentation
-from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
+from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write, span_sources
 from mindroom.response_sources import ResponseSources
-from tests.approval_continuation_helpers import claim_continuation
+from tests.approval_continuation_helpers import approval_continuation, claim_continuation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -223,19 +223,15 @@ async def final_in_resume_span(
     assert request.existing_event_id is not None
     paused = await paused_for_approval(
         principal,
-        ApprovalContinuation(
+        approval_continuation(
             approval_id=f"approval-{source}",
             run_id="run",
             session_id="session",
-            entity_kind="agent",
             entity_name="agent",
             room_id=request.target.room_id,
             thread_id=request.target.resolved_thread_id,
-            requester_id="@user:localhost",
             response_event_id=request.existing_event_id,
             sources=ResponseSources((source,), request.identity.sources.logical_source_event_ids or (source,)),
-            calls=(),
-            state="ready",
         ),
     )
     assert paused is not None
@@ -289,11 +285,7 @@ async def reply_shown_for_approval(principal: PrincipalStore, continuation: Appr
         rl.ClaimRequest(
             span_id=uuid4().hex,
             delivery_id=sources.pending_event_ids[0],
-            sources=rl.SpanSources(
-                pending=sources.pending_event_ids,
-                logical=sources.logical_source_event_ids,
-                discovery=sources.discovery_event_ids,
-            ),
+            sources=span_sources(sources),
             bot_generation=generation,
             now_ns=time.time_ns(),
             new_reply_id=uuid4().hex,

@@ -836,7 +836,7 @@ class PrincipalStore:
         reply_id: str,
         *,
         before_sequence: int | None = None,
-    ) -> tuple[tuple[str, DeliveryStage, int], ...]:
+    ) -> tuple[tuple[str, DeliveryStage], ...]:
         """Return a reply's rows whose Matrix outcome is unknown, in write order."""
         return await self._backend.read(
             lambda transaction: outbox.unresolved_reply_rows(
@@ -1665,25 +1665,20 @@ class PrincipalStore:
 
         Returns the work its commit left for afterwards, or ``None`` when the run may not be released.
         """
-
-        def release(transaction: Transaction) -> tuple[PostCommitEffect, ...] | None:
-            continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
-            if continuation is not None:
-                replies.lock_paused_reply(transaction, self._principal_id, continuation)
-            released = approval_continuations.may_release(
+        return await self._backend.write(
+            lambda transaction: _end_approval(
                 transaction,
                 self._principal_id,
-                approval_id=approval_id,
-                expected_generation=expected_generation,
-            )
-            if released is None:
-                return None
-            # The reply applies the release while the run still holds it; the run goes after.
-            applied = replies.approval_released(transaction, self._principal_id, released)
-            approval_continuations.delete(transaction, self._principal_id, approval_id=approval_id)
-            return () if applied is None else applied.post_commit
-
-        return await self._backend.write(release)
+                approval_id,
+                may_end=lambda: approval_continuations.may_release(
+                    transaction,
+                    self._principal_id,
+                    approval_id=approval_id,
+                    expected_generation=expected_generation,
+                ),
+                end=lambda released: replies.approval_released(transaction, self._principal_id, released),
+            ),
+        )
 
     async def finish_approval_continuation(self, approval_id: str) -> tuple[PostCommitEffect, ...] | None:
         """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply.
@@ -1691,7 +1686,22 @@ class PrincipalStore:
         Returns the work its commit left for afterwards, or ``None`` when the run is not ready to finish.
         """
         return await self._backend.write(
-            lambda transaction: _finish_approval_continuation(transaction, self._principal_id, approval_id),
+            lambda transaction: _end_approval(
+                transaction,
+                self._principal_id,
+                approval_id,
+                may_end=lambda: approval_continuations.may_finish(
+                    transaction,
+                    self._principal_id,
+                    approval_id=approval_id,
+                ),
+                end=lambda finishing: replies.approval_finished(
+                    transaction,
+                    self._principal_id,
+                    finishing,
+                    owner_available=True,
+                ),
+            ),
         )
 
     async def enqueue_unavailable_approval_notice(
@@ -1721,26 +1731,28 @@ class PrincipalStore:
         notice_principal_id: str,
     ) -> bool:
         """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused."""
-
-        def discard(transaction: Transaction) -> bool:
-            continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
-            if continuation is not None:
-                replies.lock_paused_reply(transaction, self._principal_id, continuation)
-            discarded = approval_continuations.may_discard_unavailable(
+        # The owner that could settle the reply is gone; the notice is what the room sees.
+        # No live ledger of that owner learns it; its next start loads it.
+        ended = await self._backend.write(
+            lambda transaction: _end_approval(
                 transaction,
                 self._principal_id,
-                approval_id=approval_id,
-                notice_principal_id=notice_principal_id,
-            )
-            if discarded is None:
-                return False
-            # The owner that could settle the reply is gone; the notice is what the room sees.
-            # No live ledger of that owner learns it; its next start loads it.
-            _settled_approval(transaction, self._principal_id, discarded, owner_available=False)
-            approval_continuations.delete(transaction, self._principal_id, approval_id=approval_id)
-            return True
-
-        return await self._backend.write(discard)
+                approval_id,
+                may_end=lambda: approval_continuations.may_discard_unavailable(
+                    transaction,
+                    self._principal_id,
+                    approval_id=approval_id,
+                    notice_principal_id=notice_principal_id,
+                ),
+                end=lambda discarded: replies.approval_finished(
+                    transaction,
+                    self._principal_id,
+                    discarded,
+                    owner_available=False,
+                ),
+            ),
+        )
+        return ended is not None
 
     @property
     def principal_id(self) -> str:
@@ -1924,38 +1936,29 @@ def _claim_approval_resume(
     return approval_continuations.get(transaction, principal_id, approval_id=approval_id), applied
 
 
-def _finish_approval_continuation(
+def _end_approval(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
+    *,
+    may_end: Callable[[], ApprovalContinuation | None],
+    end: Callable[[ApprovalContinuation], AppliedTransition | None],
 ) -> tuple[PostCommitEffect, ...] | None:
-    """Finish a continuation, settle its turn, and apply the outcome to the reply it paused, in one transaction."""
+    """End one continuation that may end, applying the end to the reply it paused, in one transaction.
+
+    ``None`` means the continuation may not end now. The reply is locked before
+    the continuation, and it applies the end while the run still holds it; the
+    run goes after.
+    """
     continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if continuation is not None:
         replies.lock_paused_reply(transaction, principal_id, continuation)
-    finishing = approval_continuations.may_finish(transaction, principal_id, approval_id=approval_id)
-    if finishing is None:
+    ending = may_end()
+    if ending is None:
         return None
-    # The reply learns the finish while the run still holds it; the run goes after.
-    post_commit = _settled_approval(transaction, principal_id, finishing, owner_available=True)
+    applied = end(ending)
     approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
-    return post_commit
-
-
-def _settled_approval(
-    transaction: Transaction,
-    principal_id: str,
-    continuation: ApprovalContinuation,
-    *,
-    owner_available: bool,
-) -> tuple[PostCommitEffect, ...]:
-    """Apply a finished continuation to the reply it paused, whose rule settles the sources the pause held."""
-    return replies.approval_finished(
-        transaction,
-        principal_id,
-        continuation,
-        owner_available=owner_available,
-    ).post_commit
+    return () if applied is None else applied.post_commit
 
 
 class _ReplyRowRefusedError(Exception):

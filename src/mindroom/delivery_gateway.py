@@ -115,6 +115,7 @@ from mindroom.reply_scope import (
     release_decision,
     resumed_note_write,
     suppress_decision,
+    terminal_source_decision,
     terminal_write,
 )
 from mindroom.requester_identity import is_access_checked_requester_id
@@ -223,7 +224,6 @@ def _refused_reply_outcome(
 
 
 # What a failed approval's note says.
-type _ApprovalFailureNote = Literal["cancelled", "error", "interrupted", "restart"]
 
 
 def _reply_body(
@@ -1452,15 +1452,10 @@ class DeliveryGateway:
             # A terminal reply keeps its answer; a span an older instance left
             # current is ended when this instance starts.
             return True
-        now_ns = time.time_ns()
         applied = await self.deps.outbox.replies.decide(
             reply_id=reply.reply_id,
             span_id=reply.last_span_id,
-            decide=lambda current, span: (
-                rl.sources_deleted(current, span, now_ns=now_ns)
-                if source_deleted
-                else rl.sources_settled_without_reply(current, span, now_ns=now_ns)
-            ),
+            decide=terminal_source_decision(source_deleted=source_deleted),
         )
         await self._run_reply_effects(applied.post_commit)
         await self.settle_reply_debt(reply.reply_id)
@@ -1501,22 +1496,16 @@ class DeliveryGateway:
         event_id: str,
         *,
         approval_id: str,
-        reason: _ApprovalFailureNote,
+        note: NoteKind,
         text: str,
         target: MessageTarget,
     ) -> bool:
-        """Show a failed approval's note on the reply it paused.
+        """Show a failed approval's note on the reply it paused; ``text`` is an error note's.
 
         A Stop or failure note replaces the reply's body; an interruption note
         goes below what the reply showed. Returns whether the note was
         delivered; the continuation's finish then ends the reply.
         """
-        note = {
-            "cancelled": note_segment(NoteKind.CANCELLED),
-            "error": note_segment(NoteKind.ERROR, text),
-            "interrupted": note_segment(NoteKind.INTERRUPTED),
-            "restart": note_segment(NoteKind.RESTART),
-        }[reason]
         while True:
             reply = await self.deps.outbox.replies.for_event(event_id)
             assert reply is not None, "a continuation's paused reply exists while the continuation does"
@@ -1535,14 +1524,16 @@ class DeliveryGateway:
                         stage=DeliveryStage.FINAL,
                     )
                 return final is not None and (final.acknowledged_event_id is not None or final.permanently_failed)
-            if reply.unapplied_stop:
-                # A Stop recorded meanwhile decides the note, as the finish decides the state.
-                reason, note = "cancelled", note_segment(NoteKind.CANCELLED)
+            # A Stop recorded meanwhile decides the note, as the finish decides the state.
+            shown_note = NoteKind.CANCELLED if reply.unapplied_stop else note
             shown_before = _shown_before(reply, None)
-            if reason in {"cancelled", "error"}:
+            if shown_note in {NoteKind.CANCELLED, NoteKind.ERROR}:
                 shown_before = replace(shown_before, segments=())
-            shown = with_trailing_note(shown_before, note)
-            state = ReplyState.CANCELLED if reason == "cancelled" else ReplyState.FAILED
+            shown = with_trailing_note(
+                shown_before,
+                note_segment(shown_note, text if shown_note is NoteKind.ERROR else None),
+            )
+            state = ReplyState.CANCELLED if shown_note is NoteKind.CANCELLED else ReplyState.FAILED
             write = approval_note_write(
                 reply,
                 span,
@@ -1591,12 +1582,7 @@ class DeliveryGateway:
         applied = await self.deps.outbox.replies.decide(
             reply_id=reply.reply_id,
             span_id=reply.last_span_id,
-            decide=lambda current, span: rl.dispatch_failed(
-                current,
-                None if span.ended else span,
-                error_text=error_text,
-                now_ns=now_ns,
-            ),
+            decide=lambda current, span: rl.dispatch_failed(current, span, error_text=error_text, now_ns=now_ns),
         )
         await self._run_reply_effects(applied.post_commit)
         await self.settle_reply_debt(reply.reply_id)
@@ -1919,14 +1905,16 @@ class DeliveryGateway:
             # Recovery after a restart registers an approved run's question from its frozen answer.
             delivery_result = None if metadata is None else {"interactive": metadata.to_metadata()}
 
-        if request.existing_event_id is not None:
+        edited_event_id = request.existing_event_id
+        if edited_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
-            try:
+        try:
+            if edited_event_id is not None:
                 edited = await self.edit_text(
                     EditTextRequest(
                         target=request.target,
-                        event_id=request.existing_event_id,
+                        event_id=edited_event_id,
                         new_text=display_text,
                         tool_trace=draft.tool_trace,
                         extra_content=delivery_extra_content,
@@ -1935,51 +1923,30 @@ class DeliveryGateway:
                         reply_write=reply_write,
                     ),
                 )
-            except ReplyWriteRefusedError as refused:
-                return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
-            if edited:
-                return FinalDeliveryOutcome(
-                    terminal_status="completed",
-                    event_id=request.existing_event_id,
-                    is_visible_response=True,
-                    final_visible_body=shown_text,
-                    delivery_kind="edited",
-                    tool_trace=tuple(draft.tool_trace or ()),
-                    extra_content=delivery_extra_content,
-                    interactive_metadata=interactive_response.interactive_metadata,
+                event_id = edited_event_id if edited else None
+            else:
+                event_id = await self.send_text(
+                    SendTextRequest(
+                        target=request.target,
+                        response_text=display_text,
+                        skip_mentions=request.skip_mentions,
+                        tool_trace=draft.tool_trace,
+                        extra_content=delivery_extra_content,
+                        retry_sync_recovery=True,
+                        delivery_result=delivery_result,
+                        reply_write=reply_write,
+                    ),
                 )
-
+        except ReplyWriteRefusedError as refused:
+            return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
+        if event_id is None:
             if handle.exited:
                 return _owed_answer_outcome()
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                event_id=request.existing_event_id,
-                is_visible_response=True,
-                failure_reason="delivery_failed",
-                tool_trace=tuple(draft.tool_trace or ()),
-                extra_content=delivery_extra_content,
-            )
-        try:
-            event_id = await self.send_text(
-                SendTextRequest(
-                    target=request.target,
-                    response_text=display_text,
-                    skip_mentions=request.skip_mentions,
-                    tool_trace=draft.tool_trace,
-                    extra_content=delivery_extra_content,
-                    retry_sync_recovery=True,
-                    delivery_result=delivery_result,
-                    reply_write=reply_write,
-                ),
-            )
-        except ReplyWriteRefusedError as refused:
-            return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
-        if event_id is None and handle.exited:
-            return _owed_answer_outcome()
-        if event_id is None:
-            return FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=None,
+                # A failed edit leaves the earlier message visible.
+                event_id=edited_event_id,
+                is_visible_response=edited_event_id is not None,
                 failure_reason="delivery_failed",
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=delivery_extra_content,
@@ -1988,8 +1955,8 @@ class DeliveryGateway:
             terminal_status="completed",
             event_id=event_id,
             is_visible_response=True,
-            final_visible_body=display_text,
-            delivery_kind="sent",
+            final_visible_body=display_text if edited_event_id is None else shown_text,
+            delivery_kind="sent" if edited_event_id is None else "edited",
             tool_trace=tuple(draft.tool_trace or ()),
             extra_content=delivery_extra_content,
             interactive_metadata=interactive_response.interactive_metadata,
@@ -2278,57 +2245,34 @@ class DeliveryGateway:
             build: Callable[[], ReplyWrite],
             *,
             content: dict[str, Any],
-            display_text: str,
-            event_id: str | None,
+            new_text: str | None,
             retry_sync_recovery: bool,
         ) -> DeliveredMatrixEvent | None:
-            try:
-                return await deliver_once(
-                    build(),
-                    content=content,
-                    display_text=display_text,
-                    event_id=event_id,
-                    retry_sync_recovery=retry_sync_recovery,
-                )
-            except ReplyWriteRefusedError as refused:
-                if refused.transition.outcome is not ReplyOutcome.RECOMPUTE:
-                    return None
-                if content.get(constants.STREAM_STATUS_KEY) != constants.STREAM_STATUS_CANCELLED:
-                    # A Stop committed after this update was rendered; the
-                    # span's Stop path writes the reply from here.
-                    raise asyncio.CancelledError(USER_STOP_CANCEL_MSG) from refused
-            # This is the Stop path's own cancelled row, rendered before the
-            # handle saw the Stop's revision; the refusal refreshed the handle.
-            try:
-                return await deliver_once(
-                    build(),
-                    content=content,
-                    display_text=display_text,
-                    event_id=event_id,
-                    retry_sync_recovery=retry_sync_recovery,
-                )
-            except ReplyWriteRefusedError:
-                return None
-
-        async def deliver_once(
-            write: ReplyWrite,
-            *,
-            content: dict[str, Any],
-            display_text: str,
-            event_id: str | None,
-            retry_sync_recovery: bool,
-        ) -> DeliveredMatrixEvent | None:
-            self._ready_client()
-            outcome = await self._deliver_reply_write(
-                write,
-                target=target,
-                content=content,
-                # A create's text is its content's body; an edit names its new text.
-                new_text=None if event_id is None else display_text,
-                result=None,
-                retry_sync_recovery=retry_sync_recovery,
-            )
-            return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
+            """Deliver one stream row, rendering it again once when the Stop path's own row met its Stop."""
+            for rendered_again in (False, True):
+                self._ready_client()
+                try:
+                    outcome = await self._deliver_reply_write(
+                        build(),
+                        target=target,
+                        content=content,
+                        # A create's text is its content's body; an edit names its new text.
+                        new_text=new_text,
+                        result=None,
+                        retry_sync_recovery=retry_sync_recovery,
+                    )
+                except ReplyWriteRefusedError as refused:
+                    if rendered_again or refused.transition.outcome is not ReplyOutcome.RECOMPUTE:
+                        return None
+                    if content.get(constants.STREAM_STATUS_KEY) != constants.STREAM_STATUS_CANCELLED:
+                        # A Stop committed after this update was rendered; the
+                        # span's Stop path writes the reply from here.
+                        raise asyncio.CancelledError(USER_STOP_CANCEL_MSG) from refused
+                    # This is the Stop path's own cancelled row, rendered before the
+                    # handle saw the Stop's revision; the refusal refreshed the handle.
+                    continue
+                return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
+            return None
 
         async def initial_send(
             client: nio.AsyncClient,
@@ -2339,12 +2283,12 @@ class DeliveryGateway:
             retry_sync_recovery: bool = False,
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
-            del client, room_id
+            # A create sends its content as rendered; only an edit names its new text.
+            del client, room_id, display_text
             return await deliver(
                 lambda: initial_write(handle, shown(progress), placeholder_only=progress.placeholder_only),
                 content=content,
-                display_text=display_text,
-                event_id=None,
+                new_text=None,
                 retry_sync_recovery=retry_sync_recovery,
             )
 
@@ -2380,14 +2324,14 @@ class DeliveryGateway:
             retry_sync_recovery: bool = False,
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
-            del client, room_id
+            # A create sends its content as rendered; only an edit names its new text.
+            del client, room_id, display_text
             if answered_nothing(content, progress):
                 return None
             return await deliver(
                 lambda: terminal(content, progress),
                 content=content,
-                display_text=display_text,
-                event_id=None,
+                new_text=None,
                 retry_sync_recovery=retry_sync_recovery,
             )
 
@@ -2407,8 +2351,7 @@ class DeliveryGateway:
             return await deliver(
                 lambda: terminal(content, progress),
                 content=content,
-                display_text=display_text,
-                event_id=event_id,
+                new_text=display_text,
                 retry_sync_recovery=retry_sync_recovery,
             )
 

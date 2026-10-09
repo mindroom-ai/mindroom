@@ -473,7 +473,6 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.history.types",
     "mindroom.interactive_models",
-    "mindroom.legacy_approval_payloads",
     "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
@@ -1015,16 +1014,8 @@ visibility = [
 
 [[modules]]
 path = "mindroom.legacy_approval_payloads"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.turn_origin",
-]
-visibility = [
-    "mindroom.approval_events",
-    "mindroom.event_journal",
-    "mindroom.event_journal.approval_continuations",
-    "mindroom.response_runner",
-]
+depends_on = []
+visibility = ["mindroom.approval_events"]
 
 [[modules]]
 path = "mindroom.agno_compat_session_persistence"
@@ -2764,7 +2755,6 @@ depends_on = [
     "mindroom.history.turn_recorder",
     "mindroom.history.types",
     "mindroom.hooks",
-    "mindroom.legacy_approval_payloads",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.typing",
     "mindroom.message_target",

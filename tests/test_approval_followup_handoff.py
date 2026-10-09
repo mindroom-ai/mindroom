@@ -22,10 +22,9 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
 )
-from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from tests.approval_continuation_helpers import resumed_approval
+from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -86,18 +85,10 @@ def _pause(call_id: str) -> PausedAttempt:
 
 
 def _ready_continuation() -> ApprovalContinuation:
-    return ApprovalContinuation(
+    return approval_continuation(
         approval_id="approval-1",
         continuation_count=2,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
         response_event_id="$original-response",
-        sources=ResponseSources(("$source",), ("$source",)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -109,7 +100,6 @@ def _ready_continuation() -> ApprovalContinuation:
                 human_approval_required=False,
             ),
         ),
-        state="ready",
         show_tool_calls=False,
         execution_identity=serialize_tool_execution_identity(
             ToolExecutionIdentity(

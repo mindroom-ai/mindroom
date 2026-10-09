@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
 from mindroom.approval_failure import prepare_approval_failure
@@ -22,7 +22,7 @@ from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContin
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
-from mindroom.reply_lifecycle import SpanOutcome
+from mindroom.reply_lifecycle import NoteKind, SpanOutcome
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
@@ -444,7 +444,7 @@ class ApprovalResponseCoordinator:
         continuation: ApprovalContinuation,
         reason: str,
         *,
-        interruption: Literal["interrupted", "restart"] | None = None,
+        interruption: NoteKind | None = None,
     ) -> bool:
         """Settle cards and the failure outcome from the owning source worker.
 
@@ -476,7 +476,7 @@ class ApprovalResponseCoordinator:
         written = await self.delivery_gateway.write_approval_failure_note(
             current.response_event_id,
             approval_id=current.approval_id,
-            reason=interruption or ("cancelled" if user_stop else "error"),
+            note=interruption or (NoteKind.CANCELLED if user_stop else NoteKind.ERROR),
             text=redact_sensitive_text(reason),
             target=continuation_target(current),
         )

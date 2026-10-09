@@ -19,16 +19,16 @@ from agno.tools.function import Function
 from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage, save_runs
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.openai_models import MindRoomOpenAIResponses
-from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_team_run
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import runtime_paths_for, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _config, _noop_typing
 from tests.test_openai_native_compaction import _ANSWER, _CALL, _CHECKPOINT, _REASONING, _event, _response
@@ -56,19 +56,12 @@ async def _resume_approval(
         ),
     )
     if isinstance(actor, Agent):
-        continuation = ApprovalContinuation(
+        continuation = approval_continuation(
             approval_id="approval-native",
             run_id=run_id,
-            session_id="session-1",
-            entity_kind="agent",
             entity_name=identity.agent_name,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            response_event_id="$waiting",
             calls=calls,
             execution_identity={},
-            sources=ResponseSources(("$source",), ("$source",)),
             state="claimed",
         )
         runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

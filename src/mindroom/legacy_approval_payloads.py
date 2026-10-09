@@ -1,42 +1,11 @@
-"""Interpret approval fields that predate the current continuation payload."""
+"""Interpret approval card fields that predate the current card payload."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from mindroom.event_journal.approval_continuations import ApprovalContinuation
-
-# LEGACY_COMPAT: Sparse external approval continuation origins.
-# Legacy format: Nullable or externally sparse approval continuation origin.
-# Last legacy release: Unversioned sparse input; replacement: no distinct released native predecessor.
-# Handling: Attribute a requester-authored turn or trusted router relay from the retained sender fields.
-# Coverage: tests/test_response_runner_focused.py::test_sparse_approval_continuation_restores_origin.
-
-
-def restore_legacy_approval_origin(continuation: ApprovalContinuation) -> TurnOrigin:
-    """Rebuild the origin snapshot absent from sparse or nullable continuation input."""
-    if continuation.origin is not None:
-        return continuation.origin
-    transport_sender_id = continuation.transport_sender_id or continuation.requester_id
-    relayed = transport_sender_id != continuation.requester_id
-    return TurnOrigin(
-        transport_sender_id=transport_sender_id,
-        requester_id=continuation.requester_id,
-        sender_entity_name=ROUTER_AGENT_NAME if relayed else None,
-        requester_entity_name=None,
-        sender_kind=SenderKind.MANAGED_ENTITY if relayed else SenderKind.USER,
-        requester_kind=SenderKind.USER,
-        intent=TurnIntent.ROUTER_HANDOFF if relayed else TurnIntent.USER_MESSAGE,
-        source_kind=continuation.source_kind,
-        trust=TurnTrust.TRUSTED_INTERNAL if relayed else TurnTrust.EXTERNAL,
-    )
-
 
 # LEGACY_COMPAT: Approval cards identifying calls only through tool_call_id.
 # Legacy format: Approval cards with only the defensive tool_call_id alias usable as identity.
