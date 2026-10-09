@@ -161,7 +161,7 @@ class TurnRecordCodec:
         # LEGACY_COMPAT: Turn records carrying Stop, edit order, and correlation state.
         # Legacy format: A stored record with user_stop_receipt_order, user_stop_settled_receipt_order,
         # latest_edit_receipt_order, or correlation_id.
-        # Last legacy release: v2026.10.220; replacement: the unreleased durable reply messages own Stop and edit
+        # Last legacy release: v2026.10.222; replacement: the unreleased durable reply messages own Stop and edit
         # state in reply_messages and reply_spans.
         # Handling: The keys are ignored on read and dropped on the next write; an edit of an answer that has no
         # reply record regenerates nothing.
