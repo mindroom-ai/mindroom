@@ -109,7 +109,7 @@ def _parse_profile(name: str, content: str) -> _PersonaProfile:
         raise PersonaError(msg) from exc
     unknown = sorted(map(str, set(frontmatter) - _PROFILE_KEYS))
     if unknown:
-        msg = f"unsupported frontmatter keys: {', '.join(map(str, unknown))}"
+        msg = f"unsupported frontmatter keys: {', '.join(unknown)}"
         raise PersonaError(msg)
     description = frontmatter.get("description")
     if not isinstance(description, str) or not description.strip():
@@ -325,7 +325,7 @@ def resolve_persona_request(  # noqa: PLR0911
     model: str | None,
     minimal: bool,
     workspace_root: Path | None,
-    available_toolkits: Sequence[str],
+    available_toolkits: Callable[[], Sequence[str]],
     cap: tuple[str, ...] | None = None,
 ) -> PersonaRequest | str:
     """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid.
@@ -353,7 +353,7 @@ def resolve_persona_request(  # noqa: PLR0911
     try:
         if profile is None:
             request = PersonaRequest(
-                persona=_capped_persona(inline_persona(system_prompt, tools), available_toolkits, cap),
+                persona=_capped_persona(inline_persona(system_prompt, tools), available_toolkits(), cap),
                 model=model,
                 agent_mode=mode,
             )
@@ -364,7 +364,7 @@ def resolve_persona_request(  # noqa: PLR0911
         else:
             loaded = load_profile(workspace_root, profile)
             request = PersonaRequest(
-                persona=_capped_persona(loaded.persona, available_toolkits, cap),
+                persona=_capped_persona(loaded.persona, available_toolkits(), cap),
                 model=model or loaded.model,
                 agent_mode="minimal" if minimal else loaded.mode or "standard",
             )

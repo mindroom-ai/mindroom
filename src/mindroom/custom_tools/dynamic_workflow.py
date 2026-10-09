@@ -811,9 +811,8 @@ def _reject_unapproved_participant_tools(
     """
     for entry in entries:
         toolkit, separator, function = entry.partition(".")
-        preapproved = toolkit not in NEVER_PREAPPROVE_TOOLKITS and ("*" in allowed or toolkit in allowed)
         if not separator:
-            if not preapproved:
+            if toolkit in NEVER_PREAPPROVE_TOOLKITS or ("*" not in allowed and toolkit not in allowed):
                 msg = (
                     f"Dynamic Workflow participant tool '{entry}' is not pre-approved; add it to the "
                     "dynamic_workflow allowed_tools setting or name its auto-approved functions."

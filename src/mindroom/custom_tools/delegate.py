@@ -242,7 +242,7 @@ class DelegateTools(Toolkit):
             model=model,
             minimal=minimal,
             workspace_root=self._workspace_root,
-            available_toolkits=caller_toolkit_names(
+            available_toolkits=lambda: caller_toolkit_names(
                 self._agent_name,
                 self._live_config(),
                 delegation_depth=self._delegation_depth,

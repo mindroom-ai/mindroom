@@ -740,7 +740,7 @@ def _resolve_fresh_target(
         model=model,
         minimal=bool(minimal),
         workspace_root=workspace.root if workspace is not None else None,
-        available_toolkits=caller_toolkit_names(
+        available_toolkits=lambda: caller_toolkit_names(
             caller_identity.agent_name,
             _current_config(config),
             delegation_depth=depth,

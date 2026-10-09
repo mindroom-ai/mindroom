@@ -274,7 +274,7 @@ def test_resolve_persona_request_mode_and_model_rules(tmp_path: Path) -> None:
         "system_prompt": None,
         "tools": None,
         "workspace_root": _workspace(tmp_path),
-        "available_toolkits": ["file"],
+        "available_toolkits": lambda: ["file"],
     }
 
     fast = resolve_persona_request(profile="fast", model=None, minimal=False, **options)
@@ -511,7 +511,7 @@ def test_empty_authoring_arguments_mean_a_plain_copy(tmp_path: Path) -> None:
         model=None,
         minimal=False,
         workspace_root=_workspace(tmp_path),
-        available_toolkits=["file"],
+        available_toolkits=lambda: ["file"],
     )
     assert request == PersonaRequest(persona=None, model=None, agent_mode="standard")
 
@@ -635,7 +635,7 @@ def test_minimal_persona_with_tools_must_keep_shell(tmp_path: Path) -> None:
         "model": None,
         "minimal": True,
         "workspace_root": _workspace(tmp_path),
-        "available_toolkits": ["file", "shell"],
+        "available_toolkits": lambda: ["file", "shell"],
     }
     refused = resolve_persona_request(system_prompt="P", tools=["file"], **options)
     kept = resolve_persona_request(system_prompt="P", tools=["file", "shell"], **options)
@@ -658,3 +658,20 @@ async def test_fresh_direct_persona_checks_the_current_config(tmp_path: Path, mo
 
     assert result.startswith("Cannot delegate: unknown tool 'file'. Your tools: ")
     assert harness.model.system_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_plain_delegation_never_lists_caller_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Delegating without authoring arguments does not depend on resolving the caller's tool surface."""
+    harness = _Harness(tmp_path, monkeypatch, _config())
+
+    def unavailable(*_args: object, **_kwargs: object) -> list[str]:
+        msg = "caller tools must not be listed for a plain delegation"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.custom_tools.delegate.caller_toolkit_names", unavailable)
+    monkeypatch.setattr("mindroom.delegation.execution.caller_toolkit_names", unavailable)
+
+    result = await harness.run(harness.toolkit.run_subagent(task="Summarize.", agent_name="child"))
+
+    assert "Reply 0." in result
