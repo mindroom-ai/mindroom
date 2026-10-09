@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import httpx
+import structlog
 
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
@@ -56,6 +57,8 @@ from mindroom.workers.runtime import (
     serialized_dedicated_worker_validation_snapshot,
     serialized_kubernetes_worker_config_snapshot,
 )
+
+logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -266,7 +269,9 @@ def _read_proxy_tools(
     return {part.strip() for part in raw_value.split(",") if part.strip()}
 
 
-def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
+def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:  # noqa: C901
+    from mindroom.credential_policy import is_egress_broker_service  # noqa: PLC0415
+
     raw_policy = (
         runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["credential_policy_json"], default="") or ""
     ).strip()
@@ -287,10 +292,22 @@ def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str,
             continue
         if not isinstance(services, list):
             continue
-        cleaned_services = tuple(
-            service.strip() for service in services if isinstance(service, str) and service.strip()
-        )
-        policy[selector.strip()] = cleaned_services
+        cleaned_services = []
+        dropped_egress = []
+        for service in services:
+            if isinstance(service, str) and service.strip():
+                stripped = service.strip()
+                if is_egress_broker_service(stripped):
+                    dropped_egress.append(stripped)
+                else:
+                    cleaned_services.append(stripped)
+        if dropped_egress:
+            logger.warning(
+                "Egress broker secrets are never leased to workers; dropping from credential policy",
+                selector=selector.strip(),
+                dropped_services=dropped_egress,
+            )
+        policy[selector.strip()] = tuple(cleaned_services)
     return policy
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 
 import pytest
+import yaml
 
 from mindroom.config.egress_broker import (
     EgressAuth,
@@ -381,3 +382,20 @@ def test_invalid_service_name_rejected() -> None:
     # Spaces not allowed
     with pytest.raises(ValueError, match=r"service name.*must match"):
         EgressBrokerConfig(services={"a b": service})
+
+
+def test_host_strips_trailing_dot() -> None:
+    """Host with trailing dot (FQDN notation) should be normalized."""
+    rule = EgressRule(host="api.example.com.", auth=EgressAuth(type="bearer"))
+    assert rule.host == "api.example.com"
+
+    # Also test via YAML parsing (as the brief requested)
+    config_yaml = """
+    services:
+      test:
+        rules:
+          - host: api.github.com.
+            auth: { type: bearer }
+    """
+    config = EgressBrokerConfig(**yaml.safe_load(config_yaml))
+    assert config.services["test"].rules[0].host == "api.github.com"

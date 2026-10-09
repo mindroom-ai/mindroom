@@ -440,8 +440,14 @@ def _collect_credential_overrides(
     if not services:
         return {}
 
+    from mindroom.credential_policy import is_egress_broker_service  # noqa: PLC0415
+
     merged_overrides: dict[str, object] = {}
     for service in services:
+        # Never lease egress broker secrets into workers
+        if is_egress_broker_service(service):
+            continue
+
         credentials = load_scoped_credentials(
             service,
             credentials_manager=credentials_manager,
