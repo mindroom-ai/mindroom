@@ -474,6 +474,24 @@ async def test_later_step_fails_when_its_named_function_becomes_gated(
 
 
 @pytest.mark.asyncio
+async def test_participant_naming_a_filtered_function_fails_its_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant whose named function the caller's configuration removes fails instead of answering without it."""
+    config = _config(
+        tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, {"file": {"include_tools": ["read_file"]}}],
+    )
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "writer", "system_prompt": "Write.", "tools": ["file.save_file"]}]))
+
+    assert run["status"] == "failed", run
+    assert "'file.save_file' is not available to you" in run["error"]
+    assert workflow.model.system_prompts == []
+
+
+@pytest.mark.asyncio
 async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant turn that fails still links its step to the delegation record it wrote."""
     workflow = _Workflow(tmp_path, monkeypatch, _config(), responses=[])

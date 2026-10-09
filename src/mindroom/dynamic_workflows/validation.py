@@ -8,7 +8,7 @@ from functools import partial
 from typing import TYPE_CHECKING, TypeVar, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
 _T = TypeVar("_T")
 
@@ -538,14 +538,22 @@ def _normalized_tool_names(raw_tools: object, context: str) -> list[str]:
 def _validate_participant_tool_grants(spec: dict[str, object], participants: list[dict[str, object]]) -> None:
     """Keep participant tools inside permissions.tools when the spec narrows them that way."""
     granted = set(cast("list[str]", _permissions_mapping(spec).get("tools", [])))
+    for participant in participants:
+        require_granted_participant_tools(
+            str(participant["id"]),
+            cast("list[str]", participant.get("tools") or []),
+            granted,
+        )
+
+
+def require_granted_participant_tools(participant_id: str, tools: Iterable[str], granted: Collection[str]) -> None:
+    """Refuse a participant tool that a non-empty permissions.tools grants neither by toolkit nor exactly."""
     if not granted:
         return
-    for participant in participants:
-        for tool_name in cast("list[str]", participant.get("tools") or []):
-            if tool_name.partition(".")[0] not in granted and tool_name not in granted:
-                participant_id = participant["id"]
-                msg = f"Participant '{participant_id}' tool '{tool_name}' is not granted by permissions.tools."
-                raise DynamicWorkflowError(msg)
+    for tool_name in tools:
+        if tool_name.partition(".")[0] not in granted and tool_name not in granted:
+            msg = f"Participant '{participant_id}' tool '{tool_name}' is not granted by permissions.tools."
+            raise DynamicWorkflowError(msg)
 
 
 def _validate_permission_data(permissions: dict[str, object]) -> None:

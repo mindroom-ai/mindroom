@@ -38,7 +38,11 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, ParticipantOutput
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_workflow_spec_errors
+from mindroom.dynamic_workflows.validation import (
+    DynamicWorkflowError,
+    collect_workflow_spec_errors,
+    require_granted_participant_tools,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.response_turn import ResponsePausedForApproval
@@ -1068,14 +1072,7 @@ def _validate_workflow_policy_for_context(
             request = _participant_request(context, participant, workflow_id=workflow_id)
             participant_id = _required_participant_text(participant, "id")
             named_tools = request.persona.tools if request.persona is not None else None
-            ungranted = [
-                entry
-                for entry in named_tools or ()
-                if entry.partition(".")[0] not in granted_tools and entry not in granted_tools
-            ]
-            if granted_tools and ungranted:
-                msg = f"Participant '{participant_id}' tool '{ungranted[0]}' is not granted by permissions.tools."
-                raise DynamicWorkflowError(msg)
+            require_granted_participant_tools(participant_id, named_tools or (), granted_tools)
             if resolved is not None:
                 resolved[participant_id] = request
             model_name = cast("str", request.model)
