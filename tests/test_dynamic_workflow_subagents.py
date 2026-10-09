@@ -163,7 +163,7 @@ async def test_unapproved_gated_participant_tool_is_rejected(tmp_path: Path, mon
     )
 
     assert run["status"] == "failed"
-    assert "require approval and cannot suspend" in run["error"]
+    assert "tool 'calculator' is not pre-approved" in run["error"]
     assert workflow.model.system_prompts == []
 
 
@@ -353,11 +353,11 @@ async def test_participant_runs_the_profile_validated_at_run_start(
 
 
 @pytest.mark.asyncio
-async def test_named_toolkits_are_built_once_per_run_with_their_configured_functions(
+async def test_declared_toolkits_are_never_built_just_for_approvals(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Approval checks see a named toolkit's configured functions, built once for every step of the run."""
+    """Approvals for a declared toolkit come from its metadata, and its configured filters still apply."""
     import mindroom.custom_tools.dynamic_workflow as workflow_module  # noqa: PLC0415 - patched where it is looked up
 
     built: list[list[str]] = []
@@ -386,8 +386,47 @@ async def test_named_toolkits_are_built_once_per_run_with_their_configured_funct
     run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files.", "tools": ["file"]}], steps=2))
 
     assert run["status"] == "completed", run
-    assert built == [["file"]]
+    assert all(not names for names in built)
     assert all("read_file" in offered and "save_file" not in offered for offered in workflow.model.offered)
+
+
+@pytest.mark.asyncio
+async def test_function_entry_allowed_by_operator_rule_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant may name one function an operator auto-approves even when its toolkit is not pre-approved."""
+    config = _config(tools=["dynamic_workflow", "calculator"])
+    config = config.model_copy(
+        update={
+            "tool_approval": config.tool_approval.model_copy(
+                update={"rules": [ApprovalRuleConfig(match="add", action="auto_approve")]},
+            ),
+        },
+    )
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator.add"]}]))
+
+    assert run["status"] == "completed", run
+    assert workflow.model.offered == [["add"]]
+
+
+@pytest.mark.asyncio
+async def test_named_function_an_operator_gates_fails_loudly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant that names a function an operator rule still gates fails instead of silently losing it."""
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file"])
+    config = config.model_copy(
+        update={
+            "tool_approval": config.tool_approval.model_copy(
+                update={"rules": [ApprovalRuleConfig(match="save_file", action="require_approval")]},
+            ),
+        },
+    )
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "writer", "system_prompt": "Write.", "tools": ["file.save_file"]}]))
+
+    assert run["status"] == "failed"
+    assert "save_file require approval and cannot suspend" in run["error"]
+    assert workflow.model.system_prompts == []
 
 
 @pytest.mark.asyncio

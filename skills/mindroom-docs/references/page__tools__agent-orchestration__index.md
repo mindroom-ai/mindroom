@@ -121,6 +121,7 @@ It sees exactly the authored prompt, with no role, instructions, date, memories,
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent that has `delegate` can author further copies only within its own tools, a copy without `tools` inherits them, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
+A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools.
 
 ```python
 run_subagent(
@@ -274,7 +275,7 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Workflow participants cannot pause for human approval, so a run fails when a tool a participant names has a function that would require approval.
+Workflow participants cannot pause for human approval, so every toolkit a participant names must be pre-approved, or the run fails when that participant starts.
 Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
 Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
 
@@ -288,7 +289,8 @@ agents:
 ```
 
 Operator-authored [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first and the first match wins.
-A matching `auto_approve` rule makes a function usable even outside `allowed_tools`, and a matching `require_approval` or script rule makes it unavailable.
+A participant may name a single `toolkit.function` that a matching `auto_approve` rule allows even outside `allowed_tools`.
+A matching `require_approval` or script rule makes a function unavailable, and a participant that names such a function directly fails when it starts.
 `allowed_tools`, including `"*"`, never auto-approves `claude_agent`, `config_manager`, or `scheduler`, but an explicit operator `auto_approve` rule can.
 Functions that ask for their own confirmation stay unavailable even under an operator `auto_approve` rule.
 A function name shared by several granted toolkits is auto-approved only when every owning toolkit is eligible.

@@ -37,6 +37,7 @@ _MAX_LISTING_CHARS = 2000
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _PROFILE_KEYS = frozenset({"description", "tools", "model", "mode"})
 _MODES: tuple[AgentMode, ...] = ("standard", "minimal")
+_MINIMAL_SHELL_FUNCTIONS = ("run_shell_command", "check_shell_command", "kill_shell_command")
 _NAME_RULE = "profile names use lowercase letters, digits, '-', and '_', at most 64 characters"
 
 
@@ -339,21 +340,37 @@ def resolve_persona_request(  # noqa: PLR0911
         return "Cannot delegate: pass either profile or system_prompt and tools, not both."
     try:
         if profile is None:
-            persona = _capped_persona(inline_persona(system_prompt, tools), available_toolkits, cap)
-            return PersonaRequest(persona=persona, model=model, agent_mode=mode)
-        if not isinstance(profile, str):
+            request = PersonaRequest(
+                persona=_capped_persona(inline_persona(system_prompt, tools), available_toolkits, cap),
+                model=model,
+                agent_mode=mode,
+            )
+        elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
-        if workspace_root is None:
+        elif workspace_root is None:
             return "Cannot delegate: subagent profiles need an agent workspace."
-        loaded = load_profile(workspace_root, profile)
-        persona = _capped_persona(loaded.persona, available_toolkits, cap)
+        else:
+            loaded = load_profile(workspace_root, profile)
+            request = PersonaRequest(
+                persona=_capped_persona(loaded.persona, available_toolkits, cap),
+                model=model or loaded.model,
+                agent_mode="minimal" if minimal else loaded.mode or "standard",
+            )
+        require_minimal_shell(request.persona, request.agent_mode)
     except PersonaError as exc:
         return str(exc)
-    return PersonaRequest(
-        persona=persona,
-        model=model or loaded.model,
-        agent_mode="minimal" if minimal else loaded.mode or "standard",
-    )
+    return request
+
+
+def require_minimal_shell(persona: SubagentPersona | None, mode: AgentMode) -> None:
+    """Refuse a minimal persona whose tool list drops shell, which minimal mode runs through."""
+    tools = persona.tools if persona is not None else None
+    if mode != "minimal" or tools is None:
+        return
+    if "shell" in tools or all(f"shell.{name}" in tools for name in _MINIMAL_SHELL_FUNCTIONS):
+        return
+    msg = "Cannot delegate: a minimal subagent that lists its tools must include shell."
+    raise PersonaError(msg)
 
 
 def _capped_persona(

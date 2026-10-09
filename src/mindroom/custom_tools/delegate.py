@@ -28,6 +28,7 @@ from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.tool_system.runtime_context import (
+    get_detached_requester_context,
     get_tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import (
@@ -243,7 +244,7 @@ class DelegateTools(Toolkit):
             workspace_root=self._workspace_root,
             available_toolkits=caller_toolkit_names(
                 self._agent_name,
-                self._config,
+                self._live_config(),
                 delegation_depth=self._delegation_depth,
             ),
             cap=self._persona_tools,
@@ -257,6 +258,15 @@ class DelegateTools(Toolkit):
             minimal=request.agent_mode == "minimal",
             persona=request.persona,
         )
+
+    def _live_config(self) -> Config:
+        """Return the config authorization and execution will use, not the one this toolkit was built with."""
+        context = get_tool_runtime_context()
+        if context is not None:
+            return context.current_config
+        detached = get_detached_requester_context()
+        live = detached.config_provider() if detached is not None else None
+        return live if live is not None else self._config
 
     def _caller_identity(self) -> ToolExecutionIdentity:
         """Resolve one concrete caller identity for execution, ownership, and audit."""

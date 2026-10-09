@@ -17,7 +17,6 @@ import pytest
 import yaml
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
-from agno.tools.function import Function
 
 import mindroom.tools  # noqa: F401
 from mindroom.api.credentials_target import RequestCredentialsTarget, save_credentials_for_target
@@ -2107,50 +2106,31 @@ def test_dynamic_workflow_uses_shared_automation_approval_policy(tmp_path: Path)
     assert [(rule.match, rule.action) for rule in shared.tool_approval.rules] == [("read_url", "auto_approve")]
 
 
-def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> None:
-    """Participants must clearly reject named tools that require approval, but not unnamed functions."""
+def test_participant_tools_must_be_pre_approved_or_auto_approved(tmp_path: Path) -> None:
+    """Named toolkits need a pre-approval; a named function may instead be auto-approved by an operator rule."""
     context = _make_context(tmp_path)
-    toolkit = Toolkit(
-        name="mixed",
-        tools=[
-            Function(name="safe", entrypoint=lambda: "safe"),
-            Function(name="dangerous", entrypoint=lambda: "dangerous"),
-        ],
-    )
-    run_config = context.config.model_copy(
+    config = context.config.model_copy(
         update={
             "tool_approval": context.config.tool_approval.model_copy(
                 update={
-                    "default": "require_approval",
-                    "rules": [ApprovalRuleConfig(match="safe", action="auto_approve")],
+                    "rules": [
+                        ApprovalRuleConfig(match="safe", action="auto_approve"),
+                        ApprovalRuleConfig(match="dangerous", action="require_approval"),
+                    ],
                 },
             ),
         },
     )
+    context = replace(context, config=config)
+    reject = dynamic_workflow_module._reject_unapproved_participant_tools
 
-    functions = {"mixed": tuple(toolkit.functions)}
-    with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
-        dynamic_workflow_module._reject_nonresumable_toolkits(functions, frozenset(), ("mixed",), run_config)
-    with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
-        dynamic_workflow_module._reject_nonresumable_toolkits(functions, frozenset(), ("mixed.dangerous",), run_config)
-    dynamic_workflow_module._reject_nonresumable_toolkits(functions, frozenset(), ("mixed.safe",), run_config)
-
-
-def test_non_resumable_participant_rejects_native_confirmation(tmp_path: Path) -> None:
-    """A tool-authored Agno confirmation cannot enter an embedded participant with no resume owner."""
-    context = _make_context(tmp_path)
-    toolkit = Toolkit(
-        name="native",
-        tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
-    )
-
-    with pytest.raises(DynamicWorkflowExecutionError, match=r"native_confirmation.*cannot suspend"):
-        dynamic_workflow_module._reject_nonresumable_toolkits(
-            {"native": tuple(toolkit.functions)},
-            dynamic_workflow_module._natively_confirmed({"native": toolkit}),
-            ("native",),
-            context.config,
-        )
+    reject(context, ("mixed", "other.safe"), allowed=frozenset({"mixed"}))
+    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'mixed' is not pre-approved"):
+        reject(context, ("mixed",), allowed=frozenset())
+    with pytest.raises(DynamicWorkflowExecutionError, match="dangerous require approval and cannot suspend"):
+        reject(context, ("mixed.dangerous",), allowed=frozenset({"mixed"}))
+    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'scheduler' is not pre-approved"):
+        reject(context, ("scheduler",), allowed=frozenset({"*"}))
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -30,7 +30,7 @@ from mindroom.delegation.personas import (
     inline_persona,
     load_profile,
     missing_persona_tool,
-    persona_allows,
+    require_minimal_shell,
     validate_persona_tools,
 )
 from mindroom.delegation.sessions import SubagentSessionError
@@ -96,11 +96,11 @@ _TOOL_DESCRIPTIONS = {
         "Create a Dynamic Workflow from a declarative workflow spec. "
         f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
         "Subagent participants are authored copies of you: each sets its entire system_prompt, or a profile "
-        "saved as subagents/<name>.md in your workspace, and optionally tools from your own toolkits "
-        "(toolkit or toolkit.function), model, and mode. A participant without tools gets your tools that can "
-        "run without approval. Participants cannot pause for approval, so every tool a participant names must be "
-        "pre-approved by the dynamic_workflow allowed_tools config. room_agent participants run another agent "
-        "available in this room without tools."
+        "saved as subagents/<name>.md in your workspace, plus tools, model, and mode. A participant gets only "
+        "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs. "
+        "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
+        "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
+        "without tools."
     ),
     "validate_workflow": (
         "Validate a declarative Dynamic Workflow spec without saving it. "
@@ -508,7 +508,7 @@ def _participant_executor(
 ) -> ParticipantExecutor:
     run_scope = f"{workflow_id}:{uuid4().hex}"
     children: dict[str, DelegationChild] = {}
-    approvals: dict[str, Config] = {}
+    approvals: dict[str, dict[str, frozenset[str]]] = {}
 
     def execute(
         *,
@@ -540,7 +540,7 @@ def _aparticipant_executor(
 ) -> AsyncParticipantExecutor:
     run_scope = f"{workflow_id}:{uuid4().hex}"
     children: dict[str, DelegationChild] = {}
-    approvals: dict[str, Config] = {}
+    approvals: dict[str, dict[str, frozenset[str]]] = {}
 
     async def execute(
         *,
@@ -571,7 +571,7 @@ async def _aexecute_participant(
     run_scope: str,
     children: dict[str, DelegationChild],
     resolved: _ResolvedParticipants,
-    approvals: dict[str, Config],
+    approvals: dict[str, dict[str, frozenset[str]]],
 ) -> ParticipantOutput:
     participant_kind = str(participant.get("kind", "subagent")).strip() or "subagent"
     if participant_kind == "room_agent":
@@ -694,7 +694,7 @@ async def _aexecute_subagent_participant(
     *,
     children: dict[str, DelegationChild],
     resolved: _ResolvedParticipants,
-    approvals: dict[str, Config],
+    approvals: dict[str, dict[str, frozenset[str]]],
 ) -> ParticipantOutput:
     """Run one step as a turn of this participant's subagent, an authored copy of the caller.
 
@@ -715,8 +715,9 @@ async def _aexecute_subagent_participant(
         msg = f"Dynamic Workflow participant '{participant_id}' tool '{missing}' is no longer available to you."
         raise DynamicWorkflowExecutionError(msg)
     if participant_id not in approvals:
-        approvals[participant_id] = await _participant_approval_config(context, persona)
-    approval_config = approvals[participant_id]
+        approvals[participant_id] = await _participant_function_owners(context, persona)
+    # Rebuild the overlay from the current config each step; only the function ownership is cached.
+    approval_config = _participant_run_config(context, approvals[participant_id])
     owner = build_execution_identity_from_runtime_context(context)
     child = prepare_child_turn(
         context.agent_name,
@@ -759,33 +760,68 @@ async def _aexecute_subagent_participant(
     return ParticipantOutput(result.text, child.delegation_id)
 
 
-async def _participant_approval_config(context: ToolRuntimeContext, persona: SubagentPersona) -> Config:
-    """Pre-approve the participant's allowed functions and refuse named ones that could pause.
+async def _participant_function_owners(
+    context: ToolRuntimeContext,
+    persona: SubagentPersona,
+) -> dict[str, frozenset[str]]:
+    """Refuse tools a participant could not use without pausing, then map its functions to their toolkits.
 
-    The named toolkits are built once, off the event loop, so their configured functions decide.
+    Declared toolkits are read from their metadata; only toolkits without declared functions,
+    such as MCP servers, are built, off the event loop, to learn what they expose.
     """
+    entries = persona.tools or ()
+    allowed = _workflow_allowed_tools(context)
+    _reject_unapproved_participant_tools(context, entries, allowed=allowed)
+    names = sorted({entry.partition(".")[0] for entry in entries})
+    functions = {
+        name: metadata.function_names
+        for name in names
+        if (metadata := TOOL_METADATA.get(name)) is not None and metadata.function_names
+    }
     built = await asyncio.to_thread(
         _resolve_participant_toolkits,
         context,
-        sorted({entry.partition(".")[0] for entry in persona.tools or ()}),
+        [name for name in names if name not in functions],
     )
-    functions = {name: (*toolkit.functions, *toolkit.async_functions) for name, toolkit in built.items()}
+    functions |= {name: (*toolkit.functions, *toolkit.async_functions) for name, toolkit in built.items()}
     owners: dict[str, set[str]] = {}
     for name, function_names in functions.items():
         for function_name in function_names:
             owners.setdefault(function_name, set()).add(name)
-    approval_config = _participant_run_config(context, {name: frozenset(toolkits) for name, toolkits in owners.items()})
-    _reject_nonresumable_toolkits(functions, _natively_confirmed(built), persona.tools or (), approval_config)
-    return approval_config
+    return {function_name: frozenset(toolkits) for function_name, toolkits in owners.items()}
 
 
-def _natively_confirmed(toolkits: dict[str, Toolkit]) -> frozenset[str]:
-    return frozenset(
-        function.name
-        for toolkit in toolkits.values()
-        for function in (*toolkit.functions.values(), *toolkit.async_functions.values())
-        if function.requires_confirmation is True
-    )
+def _reject_unapproved_participant_tools(
+    context: ToolRuntimeContext,
+    entries: tuple[str, ...],
+    *,
+    allowed: frozenset[str],
+) -> None:
+    """A participant cannot pause, so every tool it names must run without approval.
+
+    A whole toolkit needs a pre-approval through ``allowed_tools``; a single function may instead be
+    auto-approved by an operator rule, and a named function an operator rule still gates fails the run.
+    """
+    for entry in entries:
+        toolkit, separator, function = entry.partition(".")
+        preapproved = toolkit not in NEVER_PREAPPROVE_TOOLKITS and ("*" in allowed or toolkit in allowed)
+        if not separator:
+            if not preapproved:
+                msg = (
+                    f"Dynamic Workflow participant tool '{entry}' is not pre-approved; add it to the "
+                    "dynamic_workflow allowed_tools setting or name its auto-approved functions."
+                )
+                raise DynamicWorkflowExecutionError(msg)
+            continue
+        overlay = build_automation_approval_config(
+            context.config,
+            function_owners={function: frozenset({toolkit})},
+            preapproved_toolkits=allowed,
+            never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+        )
+        if tool_may_require_approval(overlay, function):
+            msg = f"Dynamic Workflow participant functions {function} require approval and cannot suspend for approval."
+            raise DynamicWorkflowExecutionError(msg)
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
@@ -839,32 +875,11 @@ def _participant_request(
             raw_model, mode = participant.get("model"), cast("AgentMode", participant.get("mode") or "standard")
         persona = replace(persona, tools=persona.tools or ())
         validate_persona_tools(persona.tools, available, cap)
+        require_minimal_shell(persona, mode)
     except PersonaError as exc:
         raise DynamicWorkflowError(str(exc)) from exc
     model = _resolve_participant_model_name(context, raw_model, default_model=_caller_runtime_model_name(context))
     return PersonaRequest(persona=persona, model=model, agent_mode=mode)
-
-
-def _reject_nonresumable_toolkits(
-    functions: Mapping[str, Iterable[str]],
-    confirmed: frozenset[str],
-    entries: tuple[str, ...],
-    config: Config,
-) -> None:
-    """Reject named functions that could pause, because a participant cannot suspend for approval."""
-    unavailable = sorted(
-        {
-            function_name
-            for name, function_names in functions.items()
-            for function_name in function_names
-            if persona_allows(entries, name, function_name)
-            and (function_name in confirmed or tool_may_require_approval(config, function_name))
-        },
-    )
-    if unavailable:
-        names = ", ".join(unavailable)
-        msg = f"Dynamic Workflow participant functions {names} require approval and cannot suspend for approval."
-        raise DynamicWorkflowExecutionError(msg)
 
 
 def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[str]) -> dict[str, Toolkit]:

@@ -624,3 +624,37 @@ async def test_native_authored_child_cannot_start_an_unauthored_copy(
     tool_results = [str(message.content) for message in model.seen_messages if message.role == "tool"]
     assert any("stays within your tools" in text for text in tool_results)
     assert len(list((paths.storage_root / "subagent_sessions").glob("*.json"))) == 1
+
+
+def test_minimal_persona_with_tools_must_keep_shell(tmp_path: Path) -> None:
+    """A minimal persona that lists its tools is refused up front unless it keeps shell."""
+    options = {
+        "caller_name": "leader",
+        "agent_name": "leader",
+        "profile": None,
+        "model": None,
+        "minimal": True,
+        "workspace_root": _workspace(tmp_path),
+        "available_toolkits": ["file", "shell"],
+    }
+    refused = resolve_persona_request(system_prompt="P", tools=["file"], **options)
+    kept = resolve_persona_request(system_prompt="P", tools=["file", "shell"], **options)
+    everything = resolve_persona_request(system_prompt="P", tools=None, **options)
+
+    assert refused == "Cannot delegate: a minimal subagent that lists its tools must include shell."
+    assert isinstance(kept, PersonaRequest)
+    assert isinstance(everything, PersonaRequest)
+
+
+@pytest.mark.asyncio
+async def test_fresh_direct_persona_checks_the_current_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh authored subagent is validated against the caller's current tools, not the toolkit's build-time config."""
+    harness = _Harness(tmp_path, monkeypatch, _config())
+
+    result = await harness.run(
+        harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["file"]),
+        config=_config(tools=()),
+    )
+
+    assert result.startswith("Cannot delegate: unknown tool 'file'. Your tools: ")
+    assert harness.model.system_prompts == []
