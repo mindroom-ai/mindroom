@@ -821,6 +821,11 @@ class CodingTools(Toolkit):
         if planned_directory or (resolved not in overlay and resolved.is_dir()):
             msg = f"Failed to write file {path}: Is a directory"
             raise PatchError(msg)
+        spelled = Path(path) if Path(path).is_absolute() else self.base_dir / path
+        if any(parent in overlay and overlay[parent] is None and parent.is_symlink() for parent in spelled.parents):
+            # The path resolves through a link this patch deletes, so writing it now would land in the old target.
+            msg = f"Failed to write file {path}: a link on its path is deleted earlier in this patch"
+            raise PatchError(msg)
         for parent in resolved.parents:
             planned_file = overlay.get(parent) is not None
             if planned_file or (parent not in overlay and parent.exists() and not parent.is_dir()):

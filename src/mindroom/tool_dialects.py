@@ -25,7 +25,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from agno.models.message import Message
 
@@ -83,7 +83,7 @@ def resolve_tool_dialect(model_config: ModelConfig | None) -> ToolDialect:
     return _DIALECTS[_resolve_tool_dialect_name(model_config) if model_config is not None else "mindroom"]
 
 
-def tool_dict_name(tool: dict[str, Any]) -> str:
+def _tool_dict_name(tool: dict[str, Any]) -> str:
     """Return the name of one Agno-formatted or provider-built tool definition."""
     function = tool.get("function")
     if isinstance(function, dict):
@@ -152,7 +152,7 @@ def wire_tools(
 
     Other functions stay ``Function`` objects so the model's own tool formatting still applies to them.
     """
-    taken = {tool.name if isinstance(tool, Function) else tool_dict_name(tool) for tool in tools}
+    taken = {tool.name if isinstance(tool, Function) else _tool_dict_name(tool) for tool in tools}
     presented: list[Function | dict[str, Any]] = []
     for tool in tools:
         if not isinstance(tool, Function):
@@ -281,34 +281,61 @@ def _wire_call(dialect: ToolDialect, mapped: Mapping[str, WireFunction], call: d
 
 
 def _wire_result(message: Message, wire_function: WireFunction) -> Message:
+    """Return a tool result under the wire name, with fixed MindRoom templates reworded for the dialect."""
     render = wire_function.render_result
-    if render is None:
-        return message
-    update = {
-        field: render(value)
-        for field in ("content", "compressed_content")
-        if isinstance(value := getattr(message, field), str)
-    }
+    update: dict[str, Any] = {"tool_name": wire_function.wire_name}
+    if render is not None:
+        update.update(
+            {
+                field: render(value)
+                for field in ("content", "compressed_content")
+                if isinstance(value := getattr(message, field), str)
+            },
+        )
     if all(getattr(message, field) == value for field, value in update.items()):
         return message
     return message.model_copy(update=update)
 
 
-def wire_messages(dialect: ToolDialect, messages: list[Message], presented: Collection[str]) -> list[Message]:
-    """Return *messages* rendered for one provider request whose tools have the *presented* names.
+def _is_wire_definition(tool: dict[str, Any], wire_function: WireFunction) -> bool:
+    """Return whether *tool* is this dialect's own definition, which a same-named foreign tool is not."""
+    if tool.get("type") == "custom":
+        return tool.get("format") == wire_function.custom_format
+    function = tool.get("function")
+    parameters = function.get("parameters") if isinstance(function, dict) else None
+    properties = set(parameters.get("properties", {})) if isinstance(parameters, dict) else set()
+    return properties - {OUTPUT_PATH_ARGUMENT} == set(wire_function.parameters.get("properties", {}))
+
+
+def _presented_wire_functions(dialect: ToolDialect, tools: Sequence[dict[str, Any]]) -> dict[str, WireFunction]:
+    """Return the dialect functions this request presents in wire form, by canonical name.
+
+    A wire name that differs from the canonical one counts unless the canonical name is presented too, which
+    means a collision kept the canonical function; a same-named one counts only with the dialect's own schema.
+    """
+    by_name = {_tool_dict_name(tool): tool for tool in tools}
+    mapped: dict[str, WireFunction] = {}
+    for wire_function in dialect.functions:
+        tool = by_name.get(wire_function.wire_name)
+        if tool is None:
+            continue
+        if wire_function.wire_name == wire_function.key.function:
+            presented = _is_wire_definition(tool, wire_function)
+        else:
+            presented = wire_function.key.function not in by_name
+        if presented:
+            mapped[wire_function.key.function] = wire_function
+    return mapped
+
+
+def wire_messages(dialect: ToolDialect, messages: list[Message], tools: Sequence[dict[str, Any]]) -> list[Message]:
+    """Return *messages* rendered for one provider request that presents the formatted *tools*.
 
     Only functions the request presents in wire form render; a call recorded in the active dialect under
     the same wire name replays its exact wire form, and other calls translate by canonical name.
     Messages that change are copied, so stored history stays canonical.
     """
-    # A presented wire name stands for the dialect's function unless its canonical name is also presented,
-    # which means a collision kept the canonical function and the wire name belongs to another tool.
-    mapped = {
-        wire_function.key.function: wire_function
-        for wire_function in dialect.functions
-        if wire_function.wire_name in presented
-        and (wire_function.wire_name == wire_function.key.function or wire_function.key.function not in presented)
-    }
+    mapped = _presented_wire_functions(dialect, tools)
     rendered: list[Message] = []
     for message in messages:
         if message.role == "assistant" and message.tool_calls:

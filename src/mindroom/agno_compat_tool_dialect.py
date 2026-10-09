@@ -10,7 +10,7 @@ from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
 from mindroom.model_instance_checks import OPENAI_RESPONSES_CLASS, isinstance_of_loaded
-from mindroom.tool_dialects import canonical_tool_calls, tool_dict_name, wire_messages, wire_tools
+from mindroom.tool_dialects import canonical_tool_calls, wire_messages, wire_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
@@ -128,5 +128,4 @@ def _wire_kwargs(dialect: ToolDialect, kwargs: dict[str, object]) -> dict[str, o
     if not isinstance(messages, list):
         return kwargs
     tools = cast("list[dict[str, Any]] | None", kwargs.get("tools"))
-    presented = {tool_dict_name(tool) for tool in tools or []}
-    return {**kwargs, "messages": wire_messages(dialect, cast("list[Message]", messages), presented)}
+    return {**kwargs, "messages": wire_messages(dialect, cast("list[Message]", messages), tools or [])}

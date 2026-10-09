@@ -250,7 +250,8 @@ async def test_codex_non_stream_invocation_projects_history_once(monkeypatch: py
             content="Process 7 already exited",
         ),
     ]
-    kill_tool = {"type": "function", "function": {"name": "kill_shell_command", "parameters": {"type": "object"}}}
+    kill_wire = next(function for function in CODEX_DIALECT.functions if function.wire_name == "kill_shell_command")
+    kill_tool = {"type": "function", "function": {"name": "kill_shell_command", "parameters": kill_wire.parameters}}
     async with AsyncOpenAI(
         api_key="test",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),

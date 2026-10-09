@@ -230,7 +230,14 @@ def _assistant(*calls: dict[str, Any]) -> Message:
     return Message(role="assistant", tool_calls=list(calls))
 
 
-_PRESENTED = frozenset({"Run", "ls"})
+_PRESENTED = [
+    {"type": "function", "function": {"name": "Run", "parameters": _TOY.functions[0].parameters}},
+    {"type": "function", "function": {"name": "ls", "parameters": {"type": "object", "properties": {}}}},
+]
+
+
+def _canonical_only(name: str) -> list[dict[str, Any]]:
+    return [{"type": "function", "function": {"name": name, "parameters": {"type": "object", "properties": {}}}}]
 
 
 def test_wire_messages_same_dialect_is_verbatim_without_the_record() -> None:
@@ -266,7 +273,7 @@ def test_wire_messages_render_only_tools_presented_in_wire_form() -> None:
     call = _call("a", "run_shell_command", {"args": "x"})
     result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="ran check_shell_command")
 
-    rendered = wire_messages(_TOY, [_assistant(call), result], frozenset({"run_shell_command"}))
+    rendered = wire_messages(_TOY, [_assistant(call), result], _canonical_only("run_shell_command"))
 
     assert rendered[0].tool_calls == [call]
     assert rendered[1] is result
@@ -294,7 +301,7 @@ def test_wire_messages_does_not_mutate_inputs() -> None:
     assert MINDROOM_WIRE_KEY in message.tool_calls[0]
     assert result.content == "use check_shell_command"
     assert rendered[0] is not message
-    assert rendered[1].content == "use Poll"
+    assert (rendered[1].content, rendered[1].tool_name) == ("use Poll", "Run")
 
 
 def test_render_result_applies_only_to_mapped_tool_results() -> None:
@@ -312,7 +319,7 @@ def test_render_result_applies_only_to_mapped_tool_results() -> None:
     rendered = wire_messages(_TOY, [other, media, compressed], _PRESENTED)
 
     assert rendered[0] is other
-    assert rendered[1] is media
+    assert (rendered[1].content, rendered[1].tool_name) == ([{"type": "image"}], "Run")
     assert (rendered[2].content, rendered[2].compressed_content) == ("Poll", "Poll short")
 
 
@@ -377,7 +384,7 @@ def test_wire_record_is_ignored_when_the_tool_is_not_presented_in_wire_form() ->
     wire = {"dialect": "claude", "name": "Run", "arguments": '{"cmd": "ls", "note": 1}'}
     call = _call("a", "run_shell_command", {"args": "ls"}, **{MINDROOM_WIRE_KEY: wire})
 
-    [rendered] = wire_messages(_TOY, [_assistant(call)], frozenset({"run_shell_command"}))
+    [rendered] = wire_messages(_TOY, [_assistant(call)], _canonical_only("run_shell_command"))
 
     assert rendered.tool_calls == [_call("a", "run_shell_command", {"args": "ls"})]
 
@@ -388,7 +395,8 @@ def test_identity_named_functions_render_results_when_presented() -> None:
     dialect = ToolDialect(name="codex", functions=(same_name,))
     result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="check_shell_command")
 
-    [rendered] = wire_messages(dialect, [result], frozenset({"run_shell_command"}))
+    ours = {"type": "function", "function": {"name": "run_shell_command", "parameters": same_name.parameters}}
+    [rendered] = wire_messages(dialect, [result], [ours])
 
     assert rendered.content == "Poll"
 
@@ -409,3 +417,35 @@ def test_same_named_dialect_function_translates_its_arguments() -> None:
     assert errors == []
     assert json.loads(translated["function"]["arguments"]) == {"args": "ls"}
     assert json.loads(foreign["function"]["arguments"]) == {"cmd": "ls"}
+
+
+def test_foreign_same_named_tool_history_stays_untouched() -> None:
+    """A same-named tool from another server, presented with its own schema, keeps its recorded arguments."""
+    same_name = replace(_TOY.functions[0], wire_name="run_shell_command")
+    dialect = ToolDialect(name="codex", functions=(same_name,))
+    foreign = {
+        "type": "function",
+        "function": {
+            "name": "run_shell_command",
+            "parameters": {"type": "object", "properties": {"script": {"type": "string"}}},
+        },
+    }
+    ours = {"type": "function", "function": {"name": "run_shell_command", "parameters": same_name.parameters}}
+    call = _call("a", "run_shell_command", {"script": "x"})
+
+    [kept] = wire_messages(dialect, [_assistant(call)], [foreign])
+    [ported] = wire_messages(dialect, [_assistant(_call("b", "run_shell_command", {"args": "ls"}))], [ours])
+
+    assert kept.tool_calls == [call]
+    assert ported.tool_calls is not None
+    assert json.loads(ported.tool_calls[0]["function"]["arguments"]) == {"cmd": "ls"}
+
+
+def test_tool_results_carry_the_wire_name() -> None:
+    """Results answer the call under the name the request presents, which providers like Gemini require."""
+    result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="done")
+
+    [rendered] = wire_messages(_TOY, [result], _PRESENTED)
+
+    assert rendered.tool_name == "Run"
+    assert result.tool_name == "run_shell_command"

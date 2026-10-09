@@ -299,3 +299,19 @@ def test_moving_a_symlink_removes_the_link_and_keeps_its_target(tmp_path: Path) 
     assert (tmp_path / "b.txt").read_text() == "y\n"
     assert (tmp_path / "a.txt").read_text() == "x\n"
     assert not (tmp_path / "link.txt").is_symlink()
+
+
+def test_writing_below_a_link_deleted_earlier_is_refused(tmp_path: Path) -> None:
+    """A patch that deletes a directory link and then writes below that path changes nothing."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "config.txt").write_text("keep\n")
+    (tmp_path / "link").symlink_to("real")
+    before = _tree(tmp_path)
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Delete File: link\n*** Add File: link/config.txt\n+new\n*** End Patch",
+    )
+
+    assert result.startswith("apply_patch verification failed: ")
+    assert _tree(tmp_path) == before
+    assert (tmp_path / "link").is_symlink()
