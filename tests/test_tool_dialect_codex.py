@@ -13,7 +13,6 @@ from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_dialects.codex import CODEX_DIALECT
 from mindroom.tool_dialects.translation import canonical_tool_calls, resolve_tool_dialect, wire_tools
 from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, WireFunction
-from mindroom.tool_system.tool_access import ToolKey
 
 
 def _wire(name: str) -> WireFunction:
@@ -104,9 +103,11 @@ def test_status_renderings() -> None:
     )
     assert (
         _render("write_stdin", finished)
-        == "Wall time: 1.5 seconds\nProcess exited with code 2\nOutput:\nout\nStderr:\nboom"
+        == "Wall time: 1.5 seconds\nProcess exited with code 2\nStderr:\nboom\nOutput:\nout"
     )
-    assert _render("write_stdin", running) == "Wall time: 3 seconds\nProcess running (PID 77)\nOutput:\npartial"
+    assert _render("write_stdin", running) == (
+        "Wall time: 3 seconds\nProcess running (PID 77)\nPartial output (1 lines buffered):\npartial"
+    )
     printed = "grep hit: check_shell_command('shell:0123abcd')"
     assert _render("exec_command", printed) == printed
     status_output = _format_finished_status(return_code=0, elapsed=1.0, stderr="", output=printed)
@@ -114,6 +115,15 @@ def test_status_renderings() -> None:
         _render("write_stdin", status_output) == f"Wall time: 1 seconds\nProcess exited with code 0\nOutput:\n{printed}"
     )
     assert _render("exec_command", "[cwd: /w]\nplain output") == "[cwd: /w]\nplain output"
+
+
+def test_finished_report_keeps_stderr_that_repeats_a_label() -> None:
+    """A finished report stays verbatim, so stderr that contains an ``Output:`` line keeps its place."""
+    finished = _format_finished_status(return_code=1, elapsed=1.0, stderr="before\nOutput:\nafter", output="stdout")
+
+    assert _render("write_stdin", finished) == (
+        "Wall time: 1 seconds\nProcess exited with code 1\nStderr:\nbefore\nOutput:\nafter\nOutput:\nstdout"
+    )
 
 
 @pytest.mark.parametrize(
@@ -131,24 +141,41 @@ def test_round_trip_for_every_function(wire_name: str, canonical: dict[str, obje
     assert wire.to_canonical(wire.to_wire(canonical)) == canonical
 
 
+def _names(dialect_tools: list[Function | dict[str, object]]) -> list[str]:
+    return sorted(
+        tool.name if isinstance(tool, Function) else str(tool.get("name") or tool["function"]["name"])
+        for tool in dialect_tools
+    )
+
+
 def test_edit_and_write_hidden_apply_patch_shown() -> None:
-    """Codex models edit with apply_patch; Claude and other models never see it."""
+    """Codex models edit with apply_patch; Claude and other models edit with edit_file and write_file."""
     coding = [_function(name, "coding") for name in ("edit_file", "write_file", "apply_patch", "read_file")]
 
-    def names(dialect_tools: list[Function | dict[str, object]]) -> list[str]:
-        return sorted(
-            tool.name if isinstance(tool, Function) else str(tool.get("name") or tool["function"]["name"])
-            for tool in dialect_tools
-        )
-
-    assert names(wire_tools(CODEX_DIALECT, coding, custom_tools=False)) == ["apply_patch", "read_file"]
-    assert names(wire_tools(CLAUDE_DIALECT, coding, custom_tools=False)) == ["Edit", "Read", "Write"]
-    assert names(wire_tools(resolve_tool_dialect(None), coding, custom_tools=False)) == [
+    assert _names(wire_tools(CODEX_DIALECT, coding, custom_tools=False)) == ["apply_patch", "read_file"]
+    assert _names(wire_tools(CLAUDE_DIALECT, coding, custom_tools=False)) == ["Edit", "Read", "Write"]
+    assert _names(wire_tools(resolve_tool_dialect(None), coding, custom_tools=False)) == [
         "edit_file",
         "read_file",
         "write_file",
     ]
-    assert ToolKey("coding", "apply_patch") in CLAUDE_DIALECT.hidden
+
+
+def test_file_edits_stay_when_filters_removed_their_replacement() -> None:
+    """A dialect hides a file-edit function only beside its replacement, so a filtered toolkit can still edit."""
+    edit_and_write = [_function(name, "coding") for name in ("edit_file", "write_file", "read_file")]
+    patch_only = [_function(name, "coding") for name in ("apply_patch", "read_file")]
+
+    assert _names(wire_tools(CODEX_DIALECT, edit_and_write, custom_tools=False)) == [
+        "edit_file",
+        "read_file",
+        "write_file",
+    ]
+    assert _names(wire_tools(CLAUDE_DIALECT, patch_only, custom_tools=False)) == ["Read", "apply_patch"]
+    assert _names(wire_tools(resolve_tool_dialect(None), patch_only, custom_tools=False)) == [
+        "apply_patch",
+        "read_file",
+    ]
 
 
 def test_apply_patch_custom_format_only_with_custom_tools() -> None:
@@ -179,7 +206,8 @@ def test_kill_shell_command_takes_the_session_id() -> None:
 
     assert kill.to_canonical({"session_id": 0x0123ABCD}) == {"handle": "shell:0123abcd", "force": False}
     assert kill.to_canonical({"session_id": 1, "force": True}) == {"handle": "shell:00000001", "force": True}
-    assert kill.to_wire({"handle": "shell:0123abcd", "force": False}) == {"session_id": 0x0123ABCD, "force": False}
+    assert kill.to_wire({"handle": "shell:0123abcd", "force": False}) == {"session_id": 0x0123ABCD}
+    assert kill.to_wire({"handle": "shell:0123abcd", "force": True}) == {"session_id": 0x0123ABCD, "force": True}
     assert _render(
         "kill_shell_command",
         "Terminated process 77 (SIGTERM sent). Use check_shell_command('shell:0123abcd') to confirm exit.",
@@ -224,11 +252,12 @@ def test_stale_kill_names_the_session_id() -> None:
     )
 
 
-def test_default_waits_need_no_wire_record() -> None:
-    """Calls that leave Codex's default yields unset translate losslessly, so history stores them once."""
+def test_default_arguments_need_no_wire_record() -> None:
+    """Calls that leave Codex's defaults unset translate losslessly, so history stores them once."""
     functions = {
         "run_shell_command": _function("run_shell_command", "shell"),
         "check_shell_command": _function("check_shell_command", "shell"),
+        "kill_shell_command": _function("kill_shell_command", "shell"),
     }
     calls = [
         {
@@ -241,9 +270,14 @@ def test_default_waits_need_no_wire_record() -> None:
             "type": "function",
             "function": {"name": "write_stdin", "arguments": json.dumps({"session_id": 1})},
         },
+        {
+            "id": "c",
+            "type": "function",
+            "function": {"name": "kill_shell_command", "arguments": json.dumps({"session_id": 1})},
+        },
     ]
 
     translated, errors = canonical_tool_calls(CODEX_DIALECT, calls, functions)
 
     assert errors == []
-    assert [MINDROOM_WIRE_KEY in call for call in translated] == [False, False]
+    assert [MINDROOM_WIRE_KEY in call for call in translated] == [False, False, False]

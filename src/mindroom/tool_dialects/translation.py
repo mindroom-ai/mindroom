@@ -21,6 +21,8 @@ from mindroom.model_loading import canonical_provider
 from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_dialects.codex import CODEX_DIALECT
 from mindroom.tool_dialects.types import (
+    APPLY_PATCH,
+    FILE_EDITS,
     MINDROOM_WIRE_KEY,
     DialectArgumentError,
     DialectName,
@@ -29,7 +31,6 @@ from mindroom.tool_dialects.types import (
     without_wire_record,
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
-from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from agno.models.message import Message
 
     from mindroom.config.models import ModelConfig
+    from mindroom.tool_system.tool_access import ToolKey
 
 logger = get_logger(__name__)
 
@@ -47,7 +49,7 @@ _OPENAI_MODEL_PROVIDERS = frozenset({"openai", "azure"})
 _OPENAI_MODEL_ID = re.compile(r"gpt-|o\d|codex")
 
 # apply_patch exists for Codex models; every other dialect edits with edit_file and write_file.
-_MINDROOM_DIALECT = ToolDialect(name="mindroom", hidden=frozenset({ToolKey("coding", "apply_patch")}))
+_MINDROOM_DIALECT = ToolDialect(name="mindroom", replaced={APPLY_PATCH: FILE_EDITS})
 _DIALECTS: dict[DialectName, ToolDialect] = {
     "mindroom": _MINDROOM_DIALECT,
     "claude": CLAUDE_DIALECT,
@@ -144,9 +146,14 @@ def _wire_tool_dict(function: Function, wire_function: WireFunction, *, custom_t
     return {"type": "function", "function": definition}
 
 
-def presents(dialect: ToolDialect, function: Function) -> bool:
-    """Return whether *dialect* shows *function* to the model at all."""
-    return not any(_is_canonical(function, key) for key in dialect.hidden)
+def presents(dialect: ToolDialect, function: Function, tools: Sequence[Function | dict[str, Any]]) -> bool:
+    """Return whether *dialect* shows *function* among *tools*: not beside a function that replaces it."""
+    replacements = next((keys for key, keys in dialect.replaced.items() if _is_canonical(function, key)), ())
+    return not any(
+        isinstance(tool, Function) and _is_canonical(tool, replacement)
+        for tool in tools
+        for replacement in replacements
+    )
 
 
 def wire_tools(
@@ -165,7 +172,7 @@ def wire_tools(
         if not isinstance(tool, Function):
             presented.append(tool)
             continue
-        if not presents(dialect, tool):
+        if not presents(dialect, tool, tools):
             continue
         wire_function = _wire_function_for(dialect, tool)
         if wire_function is not None and wire_function.wire_name != tool.name and wire_function.wire_name in taken:

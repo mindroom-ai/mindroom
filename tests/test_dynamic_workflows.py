@@ -36,6 +36,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -2474,6 +2475,33 @@ def test_ephemeral_participant_runs_within_the_default_tool_call_budget(tmp_path
     assert run_payload["status"] == "completed"
     assert agent_mock.call_args.kwargs["tool_call_limit"] == 12
     install_cap.assert_called_once_with(model, entity_name="dynamic_workflow_writer")
+
+
+def test_participant_model_presents_tools_in_its_dialect(tmp_path: Path) -> None:
+    """A participant on a Claude model sees the Claude Code tool names, like a configured agent on that model."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"])},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    tool = DynamicWorkflowTools()
+    model = FakeModel(id="participant-model", provider="fake")
+
+    with (
+        tool_runtime_context(context),
+        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model),
+        patch.object(dynamic_workflow_module, "Agent", Mock(return_value=_fake_stream_agent(content="done"))),
+        patch.object(dynamic_workflow_module, "install_tool_dialect") as install_dialect,
+    ):
+        _tool_payload(tool.create_workflow(_workflow_spec()))
+        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert run_payload["status"] == "completed"
+    install_dialect.assert_called_once_with(model, CLAUDE_DIALECT)
 
 
 def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:

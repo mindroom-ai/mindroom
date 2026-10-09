@@ -591,7 +591,7 @@ async def build_call_tools(
             logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
             continue
         # Realtime voice models see MindRoom's own tool names, so they get the default dialect's tool set.
-        if not presents(resolve_tool_dialect(None), tool):
+        if not presents(resolve_tool_dialect(None), tool, effective_tools):
             continue
         visible_functions.append(tool)
         tools.append(

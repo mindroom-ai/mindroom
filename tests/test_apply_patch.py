@@ -145,14 +145,73 @@ def test_failure_writes_nothing(tmp_path: Path) -> None:
     assert _tree(tmp_path) == {"a.txt": b"one\n"}
 
 
-def test_later_hunks_see_earlier_hunks(tmp_path: Path) -> None:
-    """Hunks apply in order, so an update can follow an add of the same file."""
+@pytest.mark.parametrize(
+    "hunks",
+    [
+        "*** Add File: a.txt\n+one\n*** Update File: a.txt\n@@\n-one\n+two\n",
+        "*** Update File: a.txt\n@@\n-a\n+b\n*** Update File: a.txt\n@@\n-b\n+c\n",
+        "*** Delete File: current.txt\n*** Add File: current.txt\n+new\n",
+        "*** Add File: new/item.txt\n+x\n*** Delete File: new/item.txt\n*** Add File: new\n+y\n",
+        "*** Delete File: link\n*** Update File: sub/../link/config.txt\n@@\n-keep\n+changed\n",
+        "*** Update File: a.txt\n*** Move to: moved.txt\n@@\n-a\n+b\n*** Add File: moved.txt\n+x\n",
+    ],
+    ids=[
+        "add-then-update",
+        "update-twice",
+        "replace-link",
+        "child-then-file",
+        "dotdot-through-deleted-link",
+        "move-target",
+    ],
+)
+def test_hunks_touching_one_path_are_refused(tmp_path: Path, hunks: str) -> None:
+    """Every hunk applies to the files as they were before the patch, so two hunks may not touch one path."""
+    (tmp_path / "a.txt").write_text("a\n")
+    (tmp_path / "original.txt").write_text("keep\n")
+    (tmp_path / "current.txt").symlink_to("original.txt")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "config.txt").write_text("keep\n")
+    (tmp_path / "link").symlink_to("real")
+    before = _tree(tmp_path)
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(f"*** Begin Patch\n{hunks}*** End Patch")
+
+    assert result.startswith("apply_patch verification failed: invalid patch: ")
+    assert "touch the same file or directory" in result
+    assert _tree(tmp_path) == before
+    assert (tmp_path / "current.txt").is_symlink()
+    assert (tmp_path / "link").is_symlink()
+
+
+def test_deleting_a_link_and_updating_its_target_both_apply(tmp_path: Path) -> None:
+    """A patch may remove a link and change the file it pointed to, since the two hunks touch different paths."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "config.txt").write_text("keep\n")
+    (tmp_path / "current").symlink_to("real")
+
     result = CodingTools(base_dir=str(tmp_path)).apply_patch(
-        "*** Begin Patch\n*** Add File: a.txt\n+one\n*** Update File: a.txt\n@@\n-one\n+two\n*** End Patch",
+        "*** Begin Patch\n*** Delete File: current\n*** Update File: real/config.txt\n@@\n-keep\n+changed\n"
+        "*** End Patch",
     )
 
-    assert result.startswith("Success.")
-    assert (tmp_path / "a.txt").read_text() == "two\n"
+    assert result == "Success. Updated the following files:\nM real/config.txt\nD current"
+    assert not (tmp_path / "current").is_symlink()
+    assert (tmp_path / "real" / "config.txt").read_text() == "changed\n"
+
+
+def test_moving_a_link_onto_its_target_removes_the_link(tmp_path: Path) -> None:
+    """Moving a link onto the file it points to writes that file and removes the link, like any move."""
+    (tmp_path / "real.txt").write_text("x\n")
+    (tmp_path / "link.txt").symlink_to("real.txt")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Update File: link.txt\n*** Move to: real.txt\n@@\n-x\n+y\n*** End Patch",
+    )
+
+    assert result == "Success. Updated the following files:\nM real.txt"
+    assert (tmp_path / "real.txt").read_text() == "y\n"
+    assert not (tmp_path / "link.txt").is_symlink()
 
 
 def test_path_outside_workspace_rejected(tmp_path: Path) -> None:
@@ -269,21 +328,6 @@ def test_delete_through_symlink_removes_the_link(tmp_path: Path) -> None:
     assert result == "Success. Updated the following files:\nD current.log"
     assert not (tmp_path / "current.log").is_symlink()
     assert (tmp_path / "logs" / "real.log").read_text() == "keep\n"
-
-
-def test_replacing_a_symlink_keeps_its_old_target(tmp_path: Path) -> None:
-    """Deleting a link and adding a file at its path writes a new file there, not through the old link."""
-    (tmp_path / "original.txt").write_text("keep\n")
-    (tmp_path / "current.txt").symlink_to("original.txt")
-
-    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
-        "*** Begin Patch\n*** Delete File: current.txt\n*** Add File: current.txt\n+new\n*** End Patch",
-    )
-
-    assert result.startswith("Success.")
-    assert not (tmp_path / "current.txt").is_symlink()
-    assert (tmp_path / "current.txt").read_text() == "new\n"
-    assert (tmp_path / "original.txt").read_text() == "keep\n"
 
 
 def test_moving_a_symlink_removes_the_link_and_keeps_its_target(tmp_path: Path) -> None:

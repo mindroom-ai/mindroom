@@ -6,7 +6,6 @@ import re
 
 INT_FIELD = r"-?\d+"
 FLOAT_FIELD = r"-?\d+(?:\.\d+)?"
-TEXT_FIELD = r"[\s\S]*"
 
 
 def template_pattern(template: str, **fields: str) -> re.Pattern[str]:

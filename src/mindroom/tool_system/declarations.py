@@ -183,6 +183,8 @@ class ToolMetadata:
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
+    # Functions that exclude_tools also removes when it removes the key, such as another way to edit files.
+    implied_exclusions: dict[str, tuple[str, ...]] | None = None
     # SDK functions that accept, but never use, an injected Agent or Team.
     worker_inert_agent_functions: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()

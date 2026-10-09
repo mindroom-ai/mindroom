@@ -295,7 +295,7 @@ def test_background_handle_message_round_trips() -> None:
 
 
 def test_parse_check_status_matches_both_templates() -> None:
-    """Both check_command templates parse into one status shape."""
+    """Both check_command templates parse into their status fields plus the labeled report verbatim."""
     failed = _format_finished_status(return_code=2, elapsed=1.5, stderr="boom", output="out\nmore")
     succeeded = _format_finished_status(return_code=0, elapsed=0.5, stderr="ignored", output="ok")
     running = _format_running_status(pid=77, elapsed=3.0, buffered_lines=4, partial="a\nb")
@@ -305,24 +305,21 @@ def test_parse_check_status_matches_both_templates() -> None:
         exit_code=2,
         elapsed=1.5,
         pid=None,
-        stderr="boom",
-        output="out\nmore",
+        report="Stderr:\nboom\nOutput:\nout\nmore",
     )
     assert parse_check_status(succeeded) == _CheckStatus(
         running=False,
         exit_code=0,
         elapsed=0.5,
         pid=None,
-        stderr=None,
-        output="ok",
+        report="Output:\nok",
     )
     assert parse_check_status(running) == _CheckStatus(
         running=True,
         exit_code=None,
         elapsed=3.0,
         pid=77,
-        stderr=None,
-        output="a\nb",
+        report="Partial output (4 lines buffered):\na\nb",
     )
 
 

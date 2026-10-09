@@ -262,4 +262,4 @@ async def test_codex_non_stream_invocation_projects_history_once(monkeypatch: py
         await model.ainvoke(messages=messages, assistant_message=Message(role="assistant"), tools=[kill_tool])
 
     [call] = [item for item in requests[0]["input"] if item.get("type") == "function_call"]
-    assert json.loads(call["arguments"]) == {"session_id": 0x0123ABCD, "force": False}
+    assert json.loads(call["arguments"]) == {"session_id": 0x0123ABCD}

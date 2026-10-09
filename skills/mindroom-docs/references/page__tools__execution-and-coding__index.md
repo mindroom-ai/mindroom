@@ -75,6 +75,7 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 Claude and OpenAI models see `shell` and `coding` under the names and arguments of the coding agents they were trained in, chosen by the model's [`tool_dialect`](https://docs.mindroom.chat/configuration/models/#tool-dialect).
 Claude models see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
 OpenAI GPT and Codex models see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
+When tool filters leave `apply_patch` out of `coding`, these models see `edit_file` and `write_file` instead.
 Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees.
 
 ## [`file`]
@@ -227,6 +228,7 @@ pip_install_package("rich")
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`, or pass `replace_all=True` to replace every match.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 `apply_patch()` checks every file a patch touches before writing any of them, so a patch that does not apply changes nothing.
+Excluding `edit_file` or `write_file` with `exclude_tools` also excludes `apply_patch()`, so a `coding` toolkit without them cannot change files.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()`, `edit_file()`, and `apply_patch()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
 

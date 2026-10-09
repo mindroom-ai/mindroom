@@ -24,6 +24,7 @@ from mindroom.tool_system.tool_access import ToolKey
 
 _RUN = ToolKey("shell", "run_shell_command")
 _EDIT = ToolKey("coding", "edit_file")
+_PATCH = ToolKey("coding", "apply_patch")
 
 
 def _run_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -46,7 +47,7 @@ _TOY = ToolDialect(
             render_result=lambda text: text.replace("check_shell_command", "Poll"),
         ),
     ),
-    hidden=frozenset({_EDIT}),
+    replaced={_EDIT: (_PATCH,)},
 )
 
 
@@ -114,13 +115,18 @@ def test_explicit_tool_dialect_overrides_auto(setting: str) -> None:
 
 
 def test_wire_tools_renames_and_hides() -> None:
-    """Mapped functions become wire definitions, hidden ones vanish, and others stay Functions."""
+    """Mapped functions become wire definitions, replaced ones vanish beside their replacement, others stay."""
     ls = _function("ls", "coding")
-    tools = [_function("run_shell_command", "shell"), _function("edit_file", "coding"), ls]
+    tools = [
+        _function("run_shell_command", "shell"),
+        _function("edit_file", "coding"),
+        ls,
+        _function("apply_patch", "coding"),
+    ]
 
     presented = wire_tools(_TOY, tools, custom_tools=False)
 
-    assert _names(presented) == ["Run", "ls"]
+    assert _names(presented) == ["Run", "ls", "apply_patch"]
     run = presented[0]
     assert isinstance(run, dict)
     assert run["function"]["description"] == "Run a command."

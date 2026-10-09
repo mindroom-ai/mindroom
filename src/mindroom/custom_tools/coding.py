@@ -15,6 +15,7 @@ from __future__ import annotations
 import bisect
 import difflib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -760,38 +761,64 @@ class CodingTools(Toolkit):
         return "\n".join(["Success. Updated the following files:", *summary])
 
     def _plan_patch(self, hunks: list[PatchHunk]) -> tuple[list[tuple[Path, bytes | None]], list[str]]:
-        """Return the ordered writes (None deletes) and summary lines for *hunks*, checking every hunk first."""
-        overlay: dict[Path, str | None] = {}
+        """Return the ordered writes (None deletes) and summary lines for *hunks*, checking every hunk first.
+
+        Like Codex's verification, every hunk applies to the files as they were before the patch, so
+        hunks must touch separate paths and the order of the writes cannot change the result.
+        """
+        claimed: list[tuple[str, Path]] = []
         writes: list[tuple[Path, bytes | None]] = []
         added: list[str] = []
         modified: list[str] = []
         deleted: list[str] = []
         for hunk in hunks:
-            resolved = self._patch_link(hunk.path, overlay, deleting=isinstance(hunk, DeleteFile))
             if isinstance(hunk, AddFile):
-                self._check_patch_target(resolved, hunk.path, overlay)
-                overlay[resolved] = hunk.contents
-                writes.append((resolved, hunk.contents.encode("utf-8")))
+                target = self._patch_path(hunk.path)
+                self._claim_patch_paths(claimed, hunk.path, [target])
+                self._check_patch_target(target, hunk.path)
+                writes.append((target, hunk.contents.encode("utf-8")))
                 added.append(f"A {hunk.path}")
             elif isinstance(hunk, DeleteFile):
-                self._check_patch_source(resolved, hunk.path, overlay, action="delete")
-                overlay[resolved] = None
-                writes.append((resolved, None))
+                entry = self._patch_entry(hunk.path)
+                self._claim_patch_paths(claimed, hunk.path, [entry])
+                self._check_patch_source(entry, hunk.path, action="delete")
+                writes.append((entry, None))
                 deleted.append(f"D {hunk.path}")
             else:
-                original = self._patch_source(resolved, hunk.path, overlay, action="update")
-                new_contents = updated_contents(original, hunk.path, hunk.chunks)
-                target = resolved if hunk.move_to is None else self._patch_link(hunk.move_to, overlay, deleting=False)
-                self._check_patch_target(target, hunk.move_to or hunk.path, overlay)
-                overlay[target] = new_contents
+                source = self._patch_path(hunk.path)
+                target = source if hunk.move_to is None else self._patch_path(hunk.move_to)
+                # A moved link goes away itself, like a deleted one, and its target stays.
+                entry = self._patch_entry(hunk.path) if hunk.move_to is not None else source
+                self._claim_patch_paths(claimed, hunk.path, [source, entry, target], hunk.move_to)
+                new_contents = updated_contents(self._patch_source(source, hunk.path), hunk.path, hunk.chunks)
+                self._check_patch_target(target, hunk.move_to or hunk.path)
                 writes.append((target, new_contents.encode("utf-8")))
-                if target != resolved:
-                    # A moved link goes away itself, like a deleted one, and its target stays.
-                    source = self._patch_link(hunk.path, overlay, deleting=True)
-                    overlay[source] = None
-                    writes.append((source, None))
+                if entry != target:
+                    writes.append((entry, None))
                 modified.append(f"M {hunk.move_to or hunk.path}")
         return writes, [*added, *modified, *deleted]
+
+    def _claim_patch_paths(
+        self,
+        claimed: list[tuple[str, Path]],
+        path: str,
+        resolved: list[Path],
+        *spelled: str | None,
+    ) -> None:
+        """Refuse a hunk touching a path an earlier hunk touches, as spelled or as resolved, then record its paths."""
+        paths = [*resolved, *(self._spelled_patch_path(name) for name in (path, *spelled) if name is not None)]
+        for earlier, other in claimed:
+            if any(other == own or other in own.parents or own in other.parents for own in paths):
+                msg = (
+                    f"invalid patch: the hunks for {earlier} and {path} touch the same file or directory; "
+                    "put all changes to a file in one hunk, or send separate patches"
+                )
+                raise PatchError(msg)
+        claimed.extend((path, own) for own in paths)
+
+    def _spelled_patch_path(self, path: str) -> Path:
+        """Return *path* as written, made absolute with ``..`` folded, so aliases of one spelling compare equal."""
+        return Path(os.path.normpath(Path(path) if Path(path).is_absolute() else self.base_dir / path))
 
     def _patch_path(self, path: str) -> Path:
         try:
@@ -802,59 +829,37 @@ class CodingTools(Toolkit):
             raise PatchError(blocked_git_metadata_message("applying patch", path))
         return resolved
 
-    def _patch_link(self, path: str, overlay: dict[Path, str | None], *, deleting: bool) -> Path:
-        """Return the path a hunk touches: a link itself when deleting it or after this patch deleted it.
-
-        Like Codex, a delete removes the link, not its target, so a later hunk writes a new file in its place.
-        Every hunk path resolves here, so none reaches through a link an earlier hunk deletes.
-        """
-        spelled = Path(path) if Path(path).is_absolute() else self.base_dir / path
-        if any(parent in overlay and overlay[parent] is None and parent.is_symlink() for parent in spelled.parents):
-            # The path resolves through a link this patch deletes, so it would reach the link's old target.
-            msg = f"Failed to resolve {path}: a link on its path is deleted earlier in this patch"
-            raise PatchError(msg)
-        parent = self._patch_path(str(Path(path).parent))
-        link = parent / Path(path).name
-        if link.is_symlink() and not is_git_metadata_path(link) and (deleting or link in overlay):
+    def _patch_entry(self, path: str) -> Path:
+        """Return the entry a delete or move removes: a link itself, not its target, as in Codex."""
+        link = self._patch_path(str(Path(path).parent)) / Path(path).name
+        if link.is_symlink() and not is_git_metadata_path(link):
             return link
         return self._patch_path(path)
 
-    def _check_patch_target(self, resolved: Path, path: str, overlay: dict[Path, str | None]) -> None:
-        """Refuse a write that must fail, onto a directory or below a file, as earlier hunks leave the tree."""
-        planned_directory = any(
-            resolved in planned.parents for planned, contents in overlay.items() if contents is not None
-        )
-        if planned_directory or (resolved not in overlay and resolved.is_dir()):
+    def _check_patch_target(self, resolved: Path, path: str) -> None:
+        """Refuse a write that must fail, onto a directory or below a file."""
+        if resolved.is_dir():
             msg = f"Failed to write file {path}: Is a directory"
             raise PatchError(msg)
         for parent in resolved.parents:
-            planned_file = overlay.get(parent) is not None
-            if planned_file or (parent not in overlay and parent.exists() and not parent.is_dir()):
+            if parent.exists() and not parent.is_dir():
                 msg = f"Failed to write file {path}: {format_path_for_output(parent, self.base_dir)} is a file"
                 raise PatchError(msg)
 
-    def _check_patch_source(self, resolved: Path, path: str, overlay: dict[Path, str | None], *, action: str) -> None:
-        """Refuse a hunk whose file does not exist as earlier hunks of the same patch left it."""
-        if resolved in overlay:
-            if overlay[resolved] is None:
-                msg = f"Failed to read file to {action} {path}: No such file or directory"
-                raise PatchError(msg)
-            return
+    def _check_patch_source(self, resolved: Path, path: str, *, action: str) -> None:
+        """Refuse a hunk whose file does not exist."""
         if not resolved.is_file() and not (action == "delete" and resolved.is_symlink()):
             reason = "Is a directory" if resolved.is_dir() else "No such file or directory"
             msg = f"Failed to read file to {action} {path}: {reason}"
             raise PatchError(msg)
 
-    def _patch_source(self, resolved: Path, path: str, overlay: dict[Path, str | None], *, action: str) -> str:
-        """Return the current text of a file a hunk changes, as earlier hunks of the same patch left it."""
-        self._check_patch_source(resolved, path, overlay, action=action)
-        contents = overlay.get(resolved)
-        if contents is not None:
-            return contents
+    def _patch_source(self, resolved: Path, path: str) -> str:
+        """Return the current text of a file an update changes."""
+        self._check_patch_source(resolved, path, action="update")
         try:
             return read_resolved_file(self.base_dir, resolved).decode("utf-8")
         except (OSError, ValueError) as e:
-            msg = f"Failed to read file to {action} {path}: {e}"
+            msg = f"Failed to read file to update {path}: {e}"
             raise PatchError(msg) from e
 
     def grep(

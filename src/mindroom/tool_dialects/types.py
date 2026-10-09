@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import math
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from mindroom.tool_system.tool_access import ToolKey
 
-    from mindroom.tool_system.tool_access import ToolKey
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 type DialectName = Literal["mindroom", "claude", "codex"]
+
+APPLY_PATCH = ToolKey("coding", "apply_patch")
+FILE_EDITS = (ToolKey("coding", "edit_file"), ToolKey("coding", "write_file"))
 
 # Tool-call dict key recording the exact wire form of a lossy translated call: dialect, name, arguments.
 MINDROOM_WIRE_KEY = "mindroom_wire"
@@ -53,7 +56,8 @@ class ToolDialect:
 
     name: DialectName
     functions: tuple[WireFunction, ...] = ()
-    hidden: frozenset[ToolKey] = frozenset()
+    replaced: Mapping[ToolKey, tuple[ToolKey, ...]] = field(default_factory=dict)
+    """Canonical functions the dialect hides when the request also has a function that replaces them."""
 
 
 _KIND_NAMES: dict[type, str] = {str: "a string", bool: "a boolean", int: "an integer", float: "a number"}

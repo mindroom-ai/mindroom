@@ -1,7 +1,7 @@
 """Codex CLI's tool names and argument shapes for MindRoom's canonical shell and coding functions.
 
 Names, argument names, and argument types follow Codex's exec_command, write_stdin, and apply_patch
-tools; edit_file and write_file are hidden because Codex models edit with apply_patch.
+tools; edit_file and write_file are hidden beside apply_patch because Codex models edit with it.
 The apply_patch grammar is copied from, and its description adapted from, OpenAI Codex,
 https://github.com/openai/codex at commit 7f2f4fd46e0f50798fd8d3436a8e14a5386d253b
 (``codex-rs/core/assets/tools/apply_patch.lark``, ``codex-rs/core/src/tools/handlers/apply_patch_spec.rs``),
@@ -21,6 +21,8 @@ from mindroom.shell_execution import (
     parse_unknown_handle_error,
 )
 from mindroom.tool_dialects.types import (
+    APPLY_PATCH,
+    FILE_EDITS,
     DialectArgumentError,
     ToolDialect,
     WireFunction,
@@ -93,8 +95,7 @@ def _render_poll(text: str) -> str:
     if status is None:
         return text
     state = f"Process running (PID {status.pid})" if status.running else f"Process exited with code {status.exit_code}"
-    stderr = f"\nStderr:\n{status.stderr}" if status.stderr else ""
-    return f"Wall time: {status.elapsed:g} seconds\n{state}\nOutput:\n{status.output}{stderr}"
+    return f"Wall time: {status.elapsed:g} seconds\n{state}\n{status.report}"
 
 
 def _render_unknown_handle(text: str) -> str | None:
@@ -210,7 +211,7 @@ _WRITE_STDIN = WireFunction(
     render_result=_render_poll,
 )
 _APPLY_PATCH = WireFunction(
-    key=ToolKey("coding", "apply_patch"),
+    key=APPLY_PATCH,
     wire_name="apply_patch",
     description=(
         "Use the `apply_patch` tool to edit files. The patch is a file-oriented diff:\n\n"
@@ -250,9 +251,10 @@ _KILL_SHELL_COMMAND = WireFunction(
         "handle": _handle(wire_argument(arguments, "kill_shell_command", "session_id", kind=int)),
         "force": bool(wire_argument(arguments, "kill_shell_command", "force", kind=bool, required=False)),
     },
+    # Omitting the default force keeps a call that left it unset lossless, so history stores it once.
     to_wire=lambda canonical: {
         "session_id": _session_id(str(canonical.get("handle", ""))),
-        "force": bool(canonical.get("force")),
+        **({"force": True} if canonical.get("force") else {}),
     },
     render_result=_render_kill,
 )
@@ -260,5 +262,5 @@ _KILL_SHELL_COMMAND = WireFunction(
 CODEX_DIALECT = ToolDialect(
     name="codex",
     functions=(_EXEC_COMMAND, _WRITE_STDIN, _KILL_SHELL_COMMAND, _APPLY_PATCH),
-    hidden=frozenset({ToolKey("coding", "edit_file"), ToolKey("coding", "write_file")}),
+    replaced=dict.fromkeys(FILE_EDITS, (APPLY_PATCH,)),
 )

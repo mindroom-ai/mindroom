@@ -25,7 +25,7 @@ from mindroom.shell_output_capture import (
     ShellOutputDestination,
     format_shell_completion,
 )
-from mindroom.text_templates import FLOAT_FIELD, INT_FIELD, TEXT_FIELD, template_pattern
+from mindroom.text_templates import FLOAT_FIELD, INT_FIELD, template_pattern
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
@@ -64,23 +64,20 @@ _KILL = template_pattern(
 _FINISHED_HEADER_TEMPLATE = "Status: FINISHED (exit code {code}, ran for {elapsed}s)\n"
 _FINISHED_WITH_STDERR_TEMPLATE = _FINISHED_HEADER_TEMPLATE + "Stderr:\n{stderr}\nOutput:\n{output}"
 _FINISHED_TEMPLATE = _FINISHED_HEADER_TEMPLATE + "Output:\n{output}"
-_RUNNING_TEMPLATE = (
-    "Status: RUNNING (PID {pid}, elapsed {elapsed}s)\nPartial output ({buffered} lines buffered):\n{output}"
-)
-_FINISHED_WITH_STDERR = template_pattern(
-    _FINISHED_WITH_STDERR_TEMPLATE,
+_RUNNING_HEADER_TEMPLATE = "Status: RUNNING (PID {pid}, elapsed {elapsed}s)\n"
+_RUNNING_TEMPLATE = _RUNNING_HEADER_TEMPLATE + "Partial output ({buffered} lines buffered):\n{output}"
+# Program output can repeat a section label, so parsers read the status line and keep the report verbatim.
+_FINISHED = template_pattern(
+    _FINISHED_HEADER_TEMPLATE + "{report}",
     code=INT_FIELD,
     elapsed=FLOAT_FIELD,
-    stderr=r"[\s\S]*?",
-    output=TEXT_FIELD,
+    report=r"(?:Stderr|Output):\n[\s\S]*",
 )
-_FINISHED = template_pattern(_FINISHED_TEMPLATE, code=INT_FIELD, elapsed=FLOAT_FIELD, output=TEXT_FIELD)
 _RUNNING = template_pattern(
-    _RUNNING_TEMPLATE,
+    _RUNNING_HEADER_TEMPLATE + "{report}",
     pid=INT_FIELD,
     elapsed=FLOAT_FIELD,
-    buffered=INT_FIELD,
-    output=TEXT_FIELD,
+    report=r"Partial output \(\d+ lines buffered\):\n[\s\S]*",
 )
 _UNKNOWN_HANDLE_TEMPLATE = "Error: Unknown handle '{handle}'"
 _UNKNOWN_HANDLE = template_pattern(_UNKNOWN_HANDLE_TEMPLATE, handle=_HANDLE_FIELD)
@@ -103,8 +100,8 @@ class _CheckStatus:
     exit_code: int | None
     elapsed: float
     pid: int | None
-    stderr: str | None
-    output: str
+    report: str
+    """The labeled output sections after the status line, verbatim."""
 
 
 def _format_background_handle_message(timeout: float, pid: int, handle: str) -> str:
@@ -545,21 +542,17 @@ def parse_check_status(text: str) -> _CheckStatus | None:
             exit_code=None,
             elapsed=float(match["elapsed"]),
             pid=int(match["pid"]),
-            stderr=None,
-            output=match["output"],
+            report=match["report"],
         )
-    match = _FINISHED_WITH_STDERR.fullmatch(text) or _FINISHED.fullmatch(text)
-    if match is None:
-        return None
-    groups = match.groupdict()
-    return _CheckStatus(
-        running=False,
-        exit_code=int(groups["code"]),
-        elapsed=float(groups["elapsed"]),
-        pid=None,
-        stderr=groups.get("stderr"),
-        output=groups["output"],
-    )
+    if (match := _FINISHED.fullmatch(text)) is not None:
+        return _CheckStatus(
+            running=False,
+            exit_code=int(match["code"]),
+            elapsed=float(match["elapsed"]),
+            pid=None,
+            report=match["report"],
+        )
+    return None
 
 
 def parse_kill_message(text: str) -> tuple[str, int, str, str] | None:

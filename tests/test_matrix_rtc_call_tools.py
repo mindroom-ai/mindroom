@@ -2085,14 +2085,14 @@ async def test_build_call_tools_hides_apply_patch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Voice models see MindRoom's own file tools, so the Codex-only apply_patch stays hidden."""
+    """Voice models see MindRoom's own file tools, so apply_patch stays hidden beside edit_file."""
     patch = _function(lambda input: input, name="apply_patch")  # noqa: A006
     patch.owning_toolkit = "coding"
-    read = _function(lambda path: path, name="read_file")
-    read.owning_toolkit = "coding"
+    edit = _function(lambda path: path, name="edit_file")
+    edit.owning_toolkit = "coding"
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        lambda *_args, **_kwargs: FakeAgnoAgent([patch, read]),
+        lambda *_args, **_kwargs: FakeAgnoAgent([patch, edit]),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools._wrap_agno_function",
@@ -2119,4 +2119,4 @@ async def test_build_call_tools_hides_apply_patch(
         authorize_operation=_authorized_call_operation,
     )
 
-    assert tooling.tools == ("read_file",)
+    assert tooling.tools == ("edit_file",)
