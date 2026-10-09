@@ -34,7 +34,7 @@ from mindroom.legacy_delivery_payloads import decode_delivery_result
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership_state import claim_membership_epoch
-from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, UnreadableMatrixDelivery
+from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, ReplyRowFacts, UnreadableMatrixDelivery
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
@@ -144,7 +144,7 @@ def enqueue(
     reply_id: str | None = None,
     span_id: str | None = None,
     reply_sequence: int | None = None,
-    reply_row: Mapping[str, object] | None = None,
+    reply_row: ReplyRowFacts | None = None,
 ) -> str | None:
     """Record delivery intent without changing its durable membership owner."""
     if permanent_failure_reason is not None and not permanent_failure_reason:
@@ -227,7 +227,7 @@ def enqueue(
             reply_id,
             span_id,
             reply_sequence,
-            None if reply_row is None else json.dumps(dict(reply_row), sort_keys=True, separators=(",", ":")),
+            None if reply_row is None else _reply_row_json(reply_row),
         ),
     )
     return transaction_id
@@ -867,7 +867,23 @@ def _delivery(row: Row) -> MatrixDelivery:
         reply_id=row["reply_id"],
         span_id=row["span_id"],
         reply_sequence=None if row["reply_sequence"] is None else int(row["reply_sequence"]),
-        reply_row=None if row["reply_row_json"] is None else json.loads(str(row["reply_row_json"])),
+        reply_row=None if row["reply_row_json"] is None else _reply_row(str(row["reply_row_json"])),
+    )
+
+
+def _reply_row_json(facts: ReplyRowFacts) -> str:
+    stored: dict[str, object] = {"placeholder_only": facts.placeholder_only}
+    if facts.new_text is not None:
+        stored["new_text"] = facts.new_text
+    return json.dumps(stored, sort_keys=True, separators=(",", ":"))
+
+
+def _reply_row(stored: str) -> ReplyRowFacts:
+    data = json.loads(stored)
+    new_text = data.get("new_text")
+    return ReplyRowFacts(
+        placeholder_only=data.get("placeholder_only") is True,
+        new_text=new_text if isinstance(new_text, str) else None,
     )
 
 

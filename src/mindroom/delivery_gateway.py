@@ -33,10 +33,11 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.replies import (
+    AppliedTransition,
+    PreparedReplyRow,
     ReplyRowEnqueue,
     ReplyRowRequest,
     edit_delivery_id,
-    row_new_text,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
@@ -81,7 +82,6 @@ from mindroom.matrix_delivery import (
     DeliveryStage,
     MatrixDeliveryWorker,
     PermanentDeliveryError,
-    PreparedReplyRow,
     RecoveryOutcome,
     ReplyRowDelivery,
     ReplyRowEnqueuer,
@@ -113,7 +113,6 @@ from mindroom.reply_scope import (
     interrupted_end,
     owed_note_write,
     release_decision,
-    resumed_note_write,
     suppress_decision,
     terminal_source_decision,
     terminal_write,
@@ -221,9 +220,6 @@ def _refused_reply_outcome(
         tool_trace=tuple(tool_trace or ()),
         extra_content=extra_content,
     )
-
-
-# What a failed approval's note says.
 
 
 def _reply_body(
@@ -340,7 +336,7 @@ def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
     payload = dict(claimed.payload)
     if claimed.reply_id is None or claimed.edits_event_id is None or "m.new_content" in payload:
         return payload
-    new_text = row_new_text(claimed)
+    new_text = None if claimed.reply_row is None else claimed.reply_row.new_text
     envelope = build_edit_event_content(
         event_id=claimed.edits_event_id,
         new_content=payload,
@@ -1209,7 +1205,7 @@ class DeliveryGateway:
         async def send(claimed: MatrixDelivery) -> str:
             nonlocal requested
             delivered = await self._send_claimed(claimed, retry_sync_recovery=retry_sync_recovery)
-            if claimed.delivery_id == predicted.get("delivery_id") and claimed.stage.value == write.stage.value:
+            if claimed.delivery_id == predicted.get("delivery_id") and claimed.stage == write.stage:
                 requested = delivered
             return delivered.event_id
 
@@ -1217,7 +1213,7 @@ class DeliveryGateway:
             reply = await self.deps.outbox.replies.load(write.reply_id)
             assert reply is not None or write.create is not None, "a reply exists while its rows are written"
             event_id = None if reply is None else reply.event_id
-            stage = DeliveryStage(write.stage.value)
+            stage = write.stage
             delivery_id = write.span.delivery_id
             if stage is DeliveryStage.EDIT:
                 assert reply is not None
@@ -1270,13 +1266,13 @@ class DeliveryGateway:
                     reply_id=write.reply_id,
                     span_id=write.span.span_id,
                     decide=write.decide,
+                    room_id=target.room_id,
+                    thread_id=target.resolved_thread_id,
                     placeholder_only=write.placeholder_only,
                     create=write.create,
                     stage=write.stage,
                     author_generation=None if write.handle is None else write.handle.runtime.generation,
                 ),
-                room_id=target.room_id,
-                thread_id=target.resolved_thread_id,
                 prepare=prepare,
                 enqueue=write.enqueue,
                 on_enqueued=enqueued,
@@ -1304,6 +1300,12 @@ class DeliveryGateway:
         """Run the work a committed reply transition left for after its commit."""
         if effects and self.deps.reply_effects is not None:
             await self.deps.reply_effects(effects)
+
+    async def _after_reply_commit(self, applied: AppliedTransition) -> None:
+        """Run what a committed reply transition left for after its commit, then deliver what its reply owes."""
+        await self._run_reply_effects(applied.post_commit)
+        if applied.transition.reply is not None:
+            await self.settle_reply_debt(applied.transition.reply.reply_id)
 
     @staticmethod
     def _live_span() -> SpanHandle | None:
@@ -1359,12 +1361,9 @@ class DeliveryGateway:
                 # A Stop committed before this span ended; its note is the cancellation.
                 state, note = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)
             shown = _with_note(_shown_before(reply, handle), note)
-            if state is ReplyState.ACTIVE:
-                write = resumed_note_write(handle, shown)
-                rendered = render(shown, state=ReplyState.FAILED.value)
-            else:
-                write = terminal_write(handle, shown, state=state)
-                rendered = render(shown, state=state.value)
+            write = terminal_write(handle, shown, state=state)
+            # A resumed reply's note keeps its sources pending, yet shows as a failure.
+            rendered = render(shown, state=ReplyState.FAILED if state is ReplyState.ACTIVE else state)
             try:
                 delivered = await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
             except ReplyWriteRefusedError as refused:
@@ -1397,16 +1396,41 @@ class DeliveryGateway:
 
         Raises ``ReplyWriteRefusedError`` when the reply's rule refuses the row.
         """
-        extra_content: dict[str, Any] = {constants.STREAM_STATUS_KEY: rendered.stream_status}
-        tool_trace = list(rendered.tool_trace) or None
+        return await self._send_reply_write(
+            write,
+            target,
+            text=rendered.body,
+            tool_trace=list(rendered.tool_trace) or None,
+            extra_content={constants.STREAM_STATUS_KEY: rendered.stream_status},
+            event_id=event_id,
+        )
+
+    async def _send_reply_write(
+        self,
+        write: ReplyWrite,
+        target: MessageTarget,
+        *,
+        text: str,
+        tool_trace: list[ToolTraceEntry] | None,
+        extra_content: dict[str, Any],
+        event_id: str | None,
+        skip_mentions: bool = False,
+        delivery_result: dict[str, object] | None = None,
+    ) -> str | None:
+        """Send one reply row as an edit of ``event_id``, or as the reply's create; return the event it shows on.
+
+        Raises ``ReplyWriteRefusedError`` when the reply's rule refuses the row.
+        """
         if event_id is None:
             return await self.send_text(
                 SendTextRequest(
                     target=target,
-                    response_text=rendered.body,
+                    response_text=text,
+                    skip_mentions=skip_mentions,
                     tool_trace=tool_trace,
                     extra_content=extra_content,
                     retry_sync_recovery=True,
+                    delivery_result=delivery_result,
                     reply_write=write,
                 ),
             )
@@ -1414,10 +1438,11 @@ class DeliveryGateway:
             EditTextRequest(
                 target=target,
                 event_id=event_id,
-                new_text=rendered.body,
+                new_text=text,
                 tool_trace=tool_trace,
                 extra_content=extra_content,
                 retry_sync_recovery=True,
+                delivery_result=delivery_result,
                 reply_write=write,
             ),
         )
@@ -1435,9 +1460,7 @@ class DeliveryGateway:
             return None
         if applied.transition.outcome is ReplyOutcome.DEFERRED:
             return False
-        await self._run_reply_effects(applied.post_commit)
-        if applied.transition.reply is not None:
-            await self.settle_reply_debt(applied.transition.reply.reply_id)
+        await self._after_reply_commit(applied)
         return True
 
     async def settle_unclaimed_reply(self, source_event_ids: tuple[str, ...], *, source_deleted: bool) -> bool:
@@ -1457,8 +1480,7 @@ class DeliveryGateway:
             span_id=reply.last_span_id,
             decide=terminal_source_decision(source_deleted=source_deleted),
         )
-        await self._run_reply_effects(applied.post_commit)
-        await self.settle_reply_debt(reply.reply_id)
+        await self._after_reply_commit(applied)
         return True
 
     async def pause_shown_reply(
@@ -1471,15 +1493,15 @@ class DeliveryGateway:
     ) -> bool:
         """Pause a reply whose create already showed the pause, with the continuation; return whether it paused."""
         enqueued = await enqueue(
-            request=ReplyRowRequest(
+            ReplyRowRequest(
                 reply_id=handle.reply_id,
                 span_id=handle.span_id,
                 decide=decide,
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
                 author_generation=handle.runtime.generation,
             ),
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            payload={},
+            PreparedReplyRow(payload={}),
         )
         if enqueued is None:
             return False
@@ -1541,7 +1563,7 @@ class DeliveryGateway:
                 approval_id=approval_id,
                 state=state,
             )
-            rendered = render(shown, state=state.value)
+            rendered = render(shown, state=state)
             try:
                 return (
                     await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
@@ -1584,8 +1606,7 @@ class DeliveryGateway:
             span_id=reply.last_span_id,
             decide=lambda current, span: rl.dispatch_failed(current, span, error_text=error_text, now_ns=now_ns),
         )
-        await self._run_reply_effects(applied.post_commit)
-        await self.settle_reply_debt(reply.reply_id)
+        await self._after_reply_commit(applied)
         return True
 
     async def add_reply_stop_button(self, handle: SpanHandle, event_id: str) -> None:
@@ -1625,10 +1646,7 @@ class DeliveryGateway:
         )
         if isinstance(recorded, bool):
             return recorded
-        await self._run_reply_effects(recorded.post_commit)
-        reply = recorded.transition.reply
-        if reply is not None:
-            await self.settle_reply_debt(reply.reply_id)
+        await self._after_reply_commit(recorded)
         return True
 
     async def accepts_reply_stop(self, event_id: str, room_id: str) -> bool:
@@ -1671,7 +1689,7 @@ class DeliveryGateway:
             shown = _with_note(_shown_before(reply, None), note_segment(owed.note, owed.text))
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
-            rendered = render(shown, state=reply.state.value)
+            rendered = render(shown, state=reply.state)
             target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
             try:
                 await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
@@ -1681,21 +1699,22 @@ class DeliveryGateway:
                     continue
                 return
             current = await self.deps.outbox.replies.load(reply_id)
-            if current is not None and current.owed_write == owed and await self._owed_row_refused(span, current):
+            # A note the outbox refuses because the room's membership ended is never sent; one that stays owed
+            # for another reason, such as a payload that could not be prepared yet, the next recovery pass retries.
+            if (
+                current is not None
+                and current.owed_write == owed
+                and not await self.deps.outbox.turn_membership_is_current(
+                    turn_id=span.delivery_id,
+                    room_id=current.room_id,
+                )
+            ):
                 self.deps.logger.warning("reply_owed_write_refused", reply_id=reply_id, note=owed.note)
                 await self.deps.outbox.replies.update(
                     reply_id,
                     lambda latest, owed=owed: rl.owed_write_refused(latest, owed, now_ns=time.time_ns()),
                 )
             return
-
-    async def _owed_row_refused(self, span: rl.Span, reply: rl.Reply) -> bool:
-        """Return whether the outbox refuses any row of the span because its room's membership ended.
-
-        A note that stays owed for another reason, such as a payload that could
-        not be prepared yet, is retried by the next recovery pass.
-        """
-        return not await self.deps.outbox.turn_membership_is_current(turn_id=span.delivery_id, room_id=reply.room_id)
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -1910,33 +1929,16 @@ class DeliveryGateway:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
         try:
-            if edited_event_id is not None:
-                edited = await self.edit_text(
-                    EditTextRequest(
-                        target=request.target,
-                        event_id=edited_event_id,
-                        new_text=display_text,
-                        tool_trace=draft.tool_trace,
-                        extra_content=delivery_extra_content,
-                        retry_sync_recovery=True,
-                        delivery_result=delivery_result,
-                        reply_write=reply_write,
-                    ),
-                )
-                event_id = edited_event_id if edited else None
-            else:
-                event_id = await self.send_text(
-                    SendTextRequest(
-                        target=request.target,
-                        response_text=display_text,
-                        skip_mentions=request.skip_mentions,
-                        tool_trace=draft.tool_trace,
-                        extra_content=delivery_extra_content,
-                        retry_sync_recovery=True,
-                        delivery_result=delivery_result,
-                        reply_write=reply_write,
-                    ),
-                )
+            event_id = await self._send_reply_write(
+                reply_write,
+                request.target,
+                text=display_text,
+                tool_trace=draft.tool_trace,
+                extra_content=delivery_extra_content,
+                event_id=edited_event_id,
+                skip_mentions=request.skip_mentions,
+                delivery_result=delivery_result,
+            )
         except ReplyWriteRefusedError as refused:
             return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
         if event_id is None:

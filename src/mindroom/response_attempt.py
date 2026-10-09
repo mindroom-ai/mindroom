@@ -22,10 +22,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.config.main import Config
     from mindroom.message_target import MessageTarget
-
-type _MatrixEventId = str
 
 _FORWARDED_CANCEL_WAIT_SECONDS = 10.0
 
@@ -37,7 +34,6 @@ class ResponseAttemptDeps:
     client: nio.AsyncClient
     logger: structlog.stdlib.BoundLogger
     show_stop_button: Callable[[], bool]
-    config: Config
 
 
 @dataclass(frozen=True)
@@ -157,7 +153,7 @@ class ResponseAttemptRunner:
                 error=str(error),
             )
 
-    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
+    async def run(self, request: ResponseAttemptRequest) -> None:
         """Run one response coroutine as its reply span's attempt."""
         with bound_log_context(**request.target.log_context):
             message_id = request.existing_event_id
@@ -197,8 +193,6 @@ class ResponseAttemptRunner:
                 # running after its span ends, where a Stop no longer reaches it.
                 await self._forward_cancel_to_attempt_task(task, asyncio.CancelledError())
                 raise
-
-            return message_id
 
     async def _add_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> None:
         """Show the Stop button on the reply's event when wanted; the reply records it and redacts it."""

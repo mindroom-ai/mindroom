@@ -36,7 +36,7 @@ Every fact about an AI reply has one owner and one writer; other stores hold onl
 
 A reply (`reply_messages`) is one visible message in one room, with its event id once Matrix created it.
 Its state is `active`, `paused` (waiting for an approval decision), or terminal: `completed`, `cancelled`, `failed`, or `gone` (removed from the room, or never shown).
-It holds the canonical presentation, the possibly-shown presentation of its latest write with that write's sequence, the confirmed sequence Matrix acknowledged, a frozen display when a final transform reshaped the answer, the Stop it recorded and whether it was applied, the Stop button's event id, redactions it still owes, and a note it owes but has not enqueued.
+It holds the canonical presentation, the possibly-shown presentation of its latest write with that write's sequence (a final transform's reshaped display, when one reshaped the answer), the confirmed sequence Matrix acknowledged, the Stop it recorded and whether it was applied, the Stop button's event id, redactions it still owes, and a note it owes but has not enqueued.
 The approval that holds it is read with it from the continuations and never written to it.
 
 A span (`reply_spans`, `reply_span_sources`) is one execution that writes a reply: `turn`, `replay`, `regeneration`, or `approval_resume`.

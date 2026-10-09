@@ -236,7 +236,6 @@ if TYPE_CHECKING:
 
     from .response_admission import ResponseAdmissionGate
 
-type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
@@ -1767,20 +1766,16 @@ class ResponseRunner:
         assert reply is not None
         assert reply.event_id is not None, "a resumed reply shows its paused event"
         try:
-            shown = await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=reply.event_id,
-                    new_text=visible_text,
-                    extra_content={STREAM_STATUS_KEY: stream_status},
-                    tool_trace=list(tool_trace) or None,
-                    reply_write=pause_write(
-                        handle,
-                        _paused_presentation(handle, paused, waiting_text=waiting_text),
-                        in_place=in_place,
-                        enqueue=partial(self.deps.approval_store.pause_for_approval, advance),
-                    ),
-                ),
+            shown = await self._edit_pause_row(
+                handle,
+                advance,
+                target=target,
+                event_id=reply.event_id,
+                shown=_paused_presentation(handle, paused, waiting_text=waiting_text),
+                in_place=in_place,
+                text=visible_text,
+                stream_status=stream_status,
+                tool_trace=tool_trace,
             )
         except ReplyWriteRefusedError:
             # A Stop committed while the pause was prepared; neither was written.
@@ -1865,18 +1860,47 @@ class ResponseRunner:
         permanent refusal fails the approval. A rule that refuses the pause (a
         Stop committed while it was prepared) raises ``ReplyWriteRefusedError``.
         """
-        enqueue = partial(self.deps.approval_store.pause_for_approval, continuation)
         if stage is None:
             return await self.deps.delivery_gateway.pause_shown_reply(
                 handle,
                 pause_decision(handle, shown, in_place=in_place, stage=None),
-                enqueue=enqueue,
+                enqueue=partial(self.deps.approval_store.pause_for_approval, continuation),
                 target=target,
             )
-        shown_now = await self.deps.delivery_gateway.edit_text(
+        shown_now = await self._edit_pause_row(
+            handle,
+            continuation,
+            target=target,
+            event_id=continuation.response_event_id,
+            shown=shown,
+            in_place=in_place,
+            text=text,
+            stream_status=stream_status,
+            tool_trace=tool_trace,
+        )
+        return shown_now or await self.deps.approval_store.approval_continuation(continuation.approval_id) is not None
+
+    async def _edit_pause_row(
+        self,
+        handle: SpanHandle,
+        hold: ApprovalContinuation | ApprovalAdvance,
+        *,
+        target: MessageTarget,
+        event_id: str,
+        shown: Presentation,
+        in_place: bool,
+        text: str,
+        stream_status: str,
+        tool_trace: tuple[ToolTraceEntry, ...],
+    ) -> bool:
+        """Edit the paused reply with its pause row, recorded with the continuation ``hold`` creates or advances.
+
+        A rule that refuses the pause (a Stop committed while it was prepared) raises ``ReplyWriteRefusedError``.
+        """
+        return await self.deps.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
-                event_id=continuation.response_event_id,
+                event_id=event_id,
                 new_text=text,
                 extra_content={STREAM_STATUS_KEY: stream_status},
                 tool_trace=list(tool_trace) or None,
@@ -1884,11 +1908,10 @@ class ResponseRunner:
                     handle,
                     shown,
                     in_place=in_place,
-                    enqueue=enqueue,
+                    enqueue=partial(self.deps.approval_store.pause_for_approval, hold),
                 ),
             ),
         )
-        return shown_now or await self.deps.approval_store.approval_continuation(continuation.approval_id) is not None
 
     @asynccontextmanager
     async def _cli_approval_scope(
@@ -2204,7 +2227,7 @@ class ResponseRunner:
             msg = "Approval final delivery has no reply records"
             raise RuntimeError(msg)
         # What the FINAL showed: the final transform's display when it reshaped the answer.
-        body, _trace = render_body(decode_presentation(reply.frozen_display or reply.presentation))
+        body, _trace = render_body(decode_presentation(reply.possibly_shown or reply.presentation))
         return FinalDeliveryOutcome(
             # A frozen FINAL may be the failure or cancellation its span ended with.
             terminal_status=_terminal_status_of_span(span),
@@ -3016,10 +3039,9 @@ class ResponseRunner:
         try:
             resolved_target = request.response_envelope.target
             early_placeholder = _EarlyPlaceholderState()
-            async with self.deps.replies.span_scope() as span_slot:
+            async with self.deps.replies.span_scope():
                 return await self._run_locked_response_in_span(
                     request,
-                    span_slot=span_slot,
                     resolved_target=resolved_target,
                     early_placeholder=early_placeholder,
                     locked_operation=locked_operation,
@@ -3035,7 +3057,6 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        span_slot: SpanSlot,
         resolved_target: MessageTarget,
         early_placeholder: _EarlyPlaceholderState,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
@@ -3051,10 +3072,9 @@ class ResponseRunner:
                 locked_operation=locked_operation,
                 signal_queued_message=signal_queued_message,
                 acknowledge_deferred=acknowledge_deferred,
-                span_slot=span_slot,
             )
         except BaseException as error:
-            handle = span_slot.handle
+            handle = current_span()
             # The locked operation ends its span before the lock is released;
             # this covers what raises outside it.
             await self._exit_unended_span(handle, error, target=resolved_target)
@@ -3062,7 +3082,7 @@ class ResponseRunner:
                 # The span's exit ended the reply with this error, which its records now own.
                 raise PostLockRequestPreparationError(reply_owned=True) from error.__cause__ or error
             raise
-        handle = span_slot.handle
+        handle = current_span()
         if handle is not None and not handle.exited:
             # Every exit path is meant to end its span; one that did not is a bug,
             # and releasing keeps the reply's sources for a retry.
@@ -3079,7 +3099,6 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
         signal_queued_message: bool,
         acknowledge_deferred: Callable[[str, str], Awaitable[None]],
-        span_slot: SpanSlot,
     ) -> str | None:
         """Run one response under its conversation lock, mapping early failures to their outcomes."""
         try:
@@ -3096,14 +3115,13 @@ class ResponseRunner:
                 locked_operation=lambda target: self._run_locked_ending_span(
                     request,
                     target=target,
-                    span_slot=span_slot,
                     early_placeholder=early_placeholder,
                     locked_operation=locked_operation,
                 ),
                 signal_queued_message=signal_queued_message and not _is_silent_schedule_response(request),
             )
         except Exception as error:
-            mapped = _post_lock_error(error, early_placeholder, reply_owned=span_slot.handle is not None)
+            mapped = _post_lock_error(error, early_placeholder, reply_owned=current_span() is not None)
             if mapped is error:
                 raise
             raise mapped from mapped.__cause__
@@ -3113,7 +3131,6 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         target: MessageTarget,
-        span_slot: SpanSlot,
         early_placeholder: _EarlyPlaceholderState,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
@@ -3129,7 +3146,7 @@ class ResponseRunner:
                 locked_operation=locked_operation,
             )
         except BaseException as error:
-            handle = span_slot.handle
+            handle = current_span()
             mapped = (
                 _post_lock_error(error, early_placeholder, reply_owned=handle is not None)
                 if isinstance(error, Exception)
@@ -4646,6 +4663,17 @@ class ResponseRunner:
                 response_event_id=_reply_event_id(),
             )
 
+        async def persist_interrupted_team_turn() -> None:
+            await self._persist_interrupted_recorder_off_loop(
+                recorder=team_turn_recorder,
+                session_scope=session_scope,
+                session_id=session_id,
+                execution_identity=tool_dispatch.execution_identity,
+                run_id=response_run_id,
+                is_team=True,
+                response_event_id=_reply_event_id(),
+            )
+
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
             session_type=session_type,
@@ -4740,15 +4768,7 @@ class ResponseRunner:
                     except asyncio.CancelledError:
                         if current_task_is_process_shutdown():
                             raise
-                        await self._persist_interrupted_recorder_off_loop(
-                            recorder=team_turn_recorder,
-                            session_scope=session_scope,
-                            session_id=session_id,
-                            execution_identity=tool_dispatch.execution_identity,
-                            run_id=response_run_id,
-                            is_team=True,
-                            response_event_id=_reply_event_id(),
-                        )
+                        await persist_interrupted_team_turn()
                         raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
@@ -4815,15 +4835,7 @@ class ResponseRunner:
                             except asyncio.CancelledError:
                                 if current_task_is_process_shutdown():
                                     raise
-                                await self._persist_interrupted_recorder_off_loop(
-                                    recorder=team_turn_recorder,
-                                    session_scope=session_scope,
-                                    session_id=session_id,
-                                    execution_identity=tool_dispatch.execution_identity,
-                                    run_id=response_run_id,
-                                    is_team=True,
-                                    response_event_id=_reply_event_id(),
-                                )
+                                await persist_interrupted_team_turn()
                                 raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
@@ -4862,15 +4874,7 @@ class ResponseRunner:
                 except asyncio.CancelledError:
                     if current_task_is_process_shutdown():
                         raise
-                    await self._persist_interrupted_recorder_off_loop(
-                        recorder=team_turn_recorder,
-                        session_scope=session_scope,
-                        session_id=session_id,
-                        execution_identity=tool_dispatch.execution_identity,
-                        run_id=response_run_id,
-                        is_team=True,
-                        response_event_id=_reply_event_id(),
-                    )
+                    await persist_interrupted_team_turn()
                     raise
                 self._note_final_delivery_timing(request, delivery)
 
@@ -4894,15 +4898,7 @@ class ResponseRunner:
                 tool_trace=error.tool_trace,
                 resumed=_resumed_reply(),
             ):
-                await self._persist_interrupted_recorder_off_loop(
-                    recorder=team_turn_recorder,
-                    session_scope=session_scope,
-                    session_id=session_id,
-                    execution_identity=tool_dispatch.execution_identity,
-                    run_id=response_run_id,
-                    is_team=True,
-                    response_event_id=_reply_event_id(),
-                )
+                await persist_interrupted_team_turn()
             return await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=delivery_target,
@@ -4980,14 +4976,13 @@ class ResponseRunner:
         run_id: str | None = None,
         on_cancelled: Callable[[str], None] | None = None,
         show_stop_button: bool = True,
-    ) -> _MatrixEventId | None:
+    ) -> None:
         """Run one response-generation attempt with cancellation support."""
-        return await ResponseAttemptRunner(
+        await ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=self._client(),
                 logger=self.deps.logger,
                 show_stop_button=lambda: show_stop_button and self.deps.runtime.config.defaults.show_stop_button,
-                config=self.deps.runtime.config,
             ),
         ).run(
             ResponseAttemptRequest(

@@ -9,6 +9,7 @@ from tests.conftest import unwrap_extracted_collaborator
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.event_journal import MatrixDeliveryView, PrincipalStore
+    from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
 
 
 class _DirectResponseOutbox:
@@ -21,17 +22,16 @@ class _DirectResponseOutbox:
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         return getattr(self.inner, name)
 
-    async def _admit_sources(self, kwargs: dict[str, Any]) -> None:
-        request = kwargs.get("request")
-        span = None if request is None else await self.principal.replies.span(request.span_id)
+    async def _admit_sources(self, request: "ReplyRowRequest") -> None:
+        span = await self.principal.replies.span(request.span_id)
         if span is not None:
             for event_id in span.sources.pending:
                 if await self.principal.load_event(event_id) is None:
                     await self.principal.admit(
                         InboundEvent(
                             event_id=event_id,
-                            room_id=kwargs["room_id"],
-                            thread_id=kwargs["thread_id"],
+                            room_id=request.room_id,
+                            thread_id=request.thread_id,
                             kind=EventKind.MESSAGE,
                             event_class=EventClass.ACTIONABLE,
                             sender="@user:localhost",
@@ -40,9 +40,13 @@ class _DirectResponseOutbox:
                         ),
                     )
 
-    async def enqueue_reply_row(self, **kwargs: Any) -> Any:  # noqa: ANN401
-        await self._admit_sources(kwargs)
-        return await self.inner.enqueue_reply_row(**kwargs)
+    async def enqueue_reply_row(
+        self,
+        request: "ReplyRowRequest",
+        prepared: "PreparedReplyRow",
+    ) -> "ReplyRowEnqueue | None":
+        await self._admit_sources(request)
+        return await self.inner.enqueue_reply_row(request, prepared)
 
 
 def install_direct_response_admission(bot: "AgentBot | TeamBot") -> None:

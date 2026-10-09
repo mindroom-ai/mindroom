@@ -18,7 +18,7 @@ from mindroom.approval_manager import initialize_approval_store
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
-from mindroom.event_journal.replies import ReplyRowRequest
+from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
@@ -156,7 +156,7 @@ class _ApprovalCase:
         assert resume is not None
         # The resume's answer ends its span, as a resumed run's FINAL does.
         await self.principal.enqueue_reply_row(
-            request=ReplyRowRequest(
+            ReplyRowRequest(
                 reply_id=resume.reply_id,
                 span_id=resume.span_id,
                 decide=lambda reply, span: rl.finish(
@@ -169,10 +169,10 @@ class _ApprovalCase:
                     ),
                     now_ns=time.time_ns(),
                 ),
+                room_id=self.room.room_id,
+                thread_id=None,
             ),
-            room_id=self.room.room_id,
-            thread_id=None,
-            payload={"body": "Edited answer", "formatted_body": "Edited answer"},
+            PreparedReplyRow(payload={"body": "Edited answer", "formatted_body": "Edited answer"}),
         )
         assert await self.principal.claim_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL) is not None
         return claimed

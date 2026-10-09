@@ -456,7 +456,6 @@ _TABLES = (
         current_span_id TEXT,
         last_span_id TEXT NOT NULL,
         presentation_json TEXT NOT NULL,
-        frozen_display_json TEXT,
         -- What the latest write, durable or direct, may have shown, and its
         -- place in the reply's write sequence. Matrix acknowledged it when
         -- confirmed_seq has reached possibly_shown_seq.
@@ -499,7 +498,6 @@ _TABLES = (
             'completed', 'paused', 'cancelled', 'failed',
             'suppressed', 'restored', 'released', 'superseded', 'lost')),
         claimed_at_ns BIGINT NOT NULL,
-        ended_at_ns BIGINT,
         PRIMARY KEY (principal_id, span_id)
     )
     """,
@@ -554,8 +552,7 @@ _TABLES = (
         -- The bot instance that owns this principal's replies now. Spans of
         -- any other generation can no longer write.
         principal_id TEXT NOT NULL PRIMARY KEY,
-        generation TEXT NOT NULL,
-        started_at_ns BIGINT NOT NULL
+        generation TEXT NOT NULL
     )
     """,
     """

@@ -88,7 +88,7 @@ def _span_after(transition: rl.Transition, span_id: str) -> Span:
 
 
 def _ended(reply: Reply, span: Span, outcome: SpanOutcome) -> tuple[Reply, Span]:
-    ended = replace(span, outcome=outcome, ended_at_ns=NOW)
+    ended = replace(span, outcome=outcome)
     return replace(reply, current_span_id=None), ended
 
 
@@ -324,7 +324,7 @@ def test_interactive_span_is_adopted_or_replayed_when_lost() -> None:
     assert adopted.reply is not None
     assert adopted.reply.current_span_id == "ack-span"
 
-    lost = replace(ack, outcome=SpanOutcome.LOST, ended_at_ns=NOW)
+    lost = replace(ack, outcome=SpanOutcome.LOST)
     replayed = rl.claim(
         _request("span-2", interactive_span_id="ack-span"),
         _context(created.reply, lost, interactive_span=lost),
@@ -1886,8 +1886,8 @@ def test_an_approval_settles_its_turn_unanswered_when_nothing_answers_it() -> No
 def test_span_outcome_is_written_once() -> None:
     """Ending a span twice keeps its first outcome."""
     _reply, span = _turn()
-    ended = replace(span, outcome=SpanOutcome.COMPLETED, ended_at_ns=NOW)
-    assert rl._end(ended, SpanOutcome.FAILED, NOW + 1) == ended
+    ended = replace(span, outcome=SpanOutcome.COMPLETED)
+    assert rl._end(ended, SpanOutcome.FAILED) == ended
 
 
 # --- regressions from review ----------------------------------------------
@@ -1948,17 +1948,16 @@ def test_regeneration_replaces_a_frozen_display() -> None:
     """A regenerated answer is shown, not the old post-hook display; the rollback keeps the old one."""
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
-    reply = replace(reply, state=ReplyState.COMPLETED, frozen_display="old frozen")
+    reply = replace(reply, state=ReplyState.COMPLETED, possibly_shown="old frozen", possibly_shown_seq=1)
     regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
     assert regen.reply is not None
     assert regen.claimed is not None
-    assert regen.reply.frozen_display is None
     assert regen.claimed.rollback is not None
-    assert regen.claimed.rollback.frozen_display == "old frozen"
+    assert regen.claimed.rollback.possibly_shown == "old frozen"
     final = rl.finish(regen.reply, regen.claimed, _write(regen.reply, ReplyState.COMPLETED, "new"), now_ns=NOW)
     assert final.reply is not None
-    assert final.reply.frozen_display is None
     assert final.reply.presentation == "new"
+    assert final.reply.possibly_shown == "new"
 
 
 @pytest.mark.parametrize("stage", [WriteStage.EDIT, WriteStage.INITIAL])

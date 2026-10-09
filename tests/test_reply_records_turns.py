@@ -13,9 +13,11 @@ import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom import reply_scope
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
+from mindroom.event_journal.replies import ReplyStore
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -856,9 +858,8 @@ async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
     assert render_body(decode_presentation(reply.presentation))[0] == "Hello"
-    assert reply.frozen_display is not None
-    assert render_body(decode_presentation(reply.frozen_display))[0] == "HELLO!"
-    assert reply.possibly_shown == reply.frozen_display
+    assert reply.possibly_shown is not None
+    assert render_body(decode_presentation(reply.possibly_shown))[0] == "HELLO!"
     assert _sent_bodies(bot)[-1] == "HELLO!"
 
 
@@ -1317,15 +1318,12 @@ async def test_a_tool_result_stands_when_recording_its_finish_fails(
     bot = await _streaming_bot(tmp_path)
     bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="general")
     runtime = bot._reply_runtime
-    record_tool_call = runtime.record_tool_call
 
-    async def failing_finish(*, span_id: str, call_id: str, entry: ToolTraceEntry, now_ns: int) -> None:
-        if entry.type == "tool_call_completed":
-            msg = "journal unavailable"
-            raise RuntimeError(msg)
-        await record_tool_call(span_id=span_id, call_id=call_id, entry=entry, now_ns=now_ns)
+    async def failing_finish(*_args: object, **_kwargs: object) -> None:
+        msg = "journal unavailable"
+        raise RuntimeError(msg)
 
-    monkeypatch.setattr(runtime, "record_tool_call", failing_finish)
+    monkeypatch.setattr(ReplyStore, "record_tool_call", failing_finish)
     results: list[object] = []
 
     async def answer(*_args: object, **_kwargs: object) -> str:
@@ -1346,10 +1344,12 @@ async def test_a_replay_is_told_which_tool_calls_its_stopped_attempt_made_though
     """Hidden or unstreamed tool calls still reach the replayed turn, so it does not repeat a finished one."""
     restarted, response = await _restarted_after_partial(tmp_path, None)
     stopped = await _reply(restarted)
-    await restarted._reply_runtime.record_tool_call(
+    await restarted._reply_runtime.store.replies.record_tool_call(
         span_id=stopped.last_span_id,
         call_id="call-1",
-        entry=ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+        entry_json=reply_scope._entry_json(
+            ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+        ),
         now_ns=1,
     )
     prompts: list[str] = []

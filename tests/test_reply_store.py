@@ -22,7 +22,7 @@ from mindroom.event_journal import (
     reply_spans,
     turn_records,
 )
-from mindroom.event_journal.replies import AppliedTransition, Decide, ReplyRowRequest
+from mindroom.event_journal.replies import AppliedTransition, Decide, PreparedReplyRow, ReplyRowRequest
 from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
     ClaimContext,
@@ -40,7 +40,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import paused_for_approval
+from tests.reply_span_helpers import paused_for_approval, reply_shown_for_approval
 from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
@@ -98,7 +98,6 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
     reply = replace(
         transition.reply,
         event_id="$reply",
-        frozen_display='{"frozen":true}',
         possibly_shown='{"shown":true}',
         possibly_shown_seq=4,
         confirmed_seq=3,
@@ -127,12 +126,12 @@ async def test_span_outcome_is_write_once_and_rollback_round_trips(journal_store
     transition = _first_claim()
     await _apply(journal_store, transition)
     assert transition.claimed is not None
-    rollback = Rollback(presentation="old", frozen_display=None, state=ReplyState.COMPLETED)
+    rollback = Rollback(presentation="old", state=ReplyState.COMPLETED)
     regen = replace(transition.claimed, span_id="span-2", kind=SpanKind.REGENERATION, rollback=rollback)
     await journal_store.backend.write(lambda tx: reply_spans.save(tx, PRINCIPAL, regen))
     assert await principal.replies.span("span-2") == regen
 
-    ended = replace(transition.claimed, outcome=SpanOutcome.COMPLETED, ended_at_ns=20)
+    ended = replace(transition.claimed, outcome=SpanOutcome.COMPLETED)
     await journal_store.backend.write(lambda tx: reply_spans.save(tx, PRINCIPAL, ended))
     await journal_store.backend.write(lambda tx: reply_spans.save(tx, PRINCIPAL, ended))
     assert await principal.replies.span("span-1") == ended
@@ -217,8 +216,8 @@ async def test_generation_is_replaced_by_each_bot_instance(journal_store: EventJ
     """Each bot instance becomes the owner of its principal's replies."""
     replies = journal_store.principal(PRINCIPAL).replies
     assert await replies.active_generation() is None
-    await replies.write_generation("gen-1", now_ns=1)
-    await replies.write_generation("gen-2", now_ns=2)
+    await replies.write_generation("gen-1")
+    await replies.write_generation("gen-2")
     assert await replies.active_generation() == "gen-2"
     assert await journal_store.principal("agent@bob").replies.active_generation() is None
 
@@ -378,7 +377,7 @@ async def test_post_commit_effects_are_returned(journal_store: EventJournalStore
 
 async def _claimed(principal: PrincipalStore) -> tuple[rl.Reply, rl.Span]:
     await admit(principal, "$source")
-    await principal.replies.write_generation("gen-1", now_ns=1)
+    await principal.replies.write_generation("gen-1")
     claim = (await principal.replies.claim(_request())).transition
     assert claim.reply is not None
     assert claim.claimed is not None
@@ -403,10 +402,14 @@ async def test_terminal_row_settles_sources_and_its_ack_binds_the_reply(journal_
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert enqueued is not None
     assert enqueued.delivery_id == "$source"
@@ -440,10 +443,14 @@ async def test_a_stop_committed_after_rendering_writes_nothing(journal_store: Ev
     reply, span = await _claimed(principal)
     await _apply(journal_store, rl.stop(reply, span, rl.StopFacts(4, span_live=True), now_ns=40))
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish(revision=0)),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(revision=0),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert enqueued is not None
     assert enqueued.transition.outcome is rl.Outcome.RECOMPUTE
@@ -457,7 +464,7 @@ async def test_edit_row_waits_for_the_create_and_targets_its_event(journal_store
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     initial = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=span.span_id,
             decide=lambda reply, span: rl.enqueue_initial(
@@ -468,16 +475,16 @@ async def test_edit_row_waits_for_the_create_and_targets_its_event(journal_store
                 prepared_revision=reply.revision,
                 now_ns=60,
             ),
+            room_id=ROOM,
+            thread_id=None,
             placeholder_only=True,
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "Thinking..."},
+        PreparedReplyRow(payload={"body": "Thinking..."}),
     )
     assert initial is not None
     assert initial.stage is rl.WriteStage.INITIAL
     pause = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=span.span_id,
             decide=lambda reply, span: rl.fail(
@@ -487,10 +494,10 @@ async def test_edit_row_waits_for_the_create_and_targets_its_event(journal_store
                 phase="pre_delivery",
                 now_ns=70,
             ),
+            room_id=ROOM,
+            thread_id=None,
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "note"},
+        PreparedReplyRow(payload={"body": "note"}),
     )
     assert pause is not None
     assert pause.stage is rl.WriteStage.EDIT
@@ -525,7 +532,7 @@ async def test_a_terminal_row_waiting_for_the_create_takes_its_target_from_the_r
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=span.span_id,
             decide=lambda reply, span: rl.enqueue_initial(
@@ -536,18 +543,22 @@ async def test_a_terminal_row_waiting_for_the_create_takes_its_target_from_the_r
                 prepared_revision=reply.revision,
                 now_ns=60,
             ),
+            room_id=ROOM,
+            thread_id=None,
             placeholder_only=True,
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "Thinking..."},
+        PreparedReplyRow(payload={"body": "Thinking..."}),
     )
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
     await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     await principal.acknowledge_matrix_delivery(
         delivery_id="$source",
@@ -570,10 +581,14 @@ async def test_permanent_failure_of_a_terminal_row_applies_its_rule(journal_stor
     reply, span = await _claimed(principal)
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, event_id="$reply")))
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert enqueued is not None
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
@@ -602,10 +617,14 @@ async def test_the_note_of_a_refused_only_create_is_sent_as_the_replys_message(
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert enqueued is not None
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
@@ -620,7 +639,7 @@ async def test_the_note_of_a_refused_only_create_is_sent_as_the_replys_message(
     assert failed.owed_write is not None
 
     note = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id="reply-1",
             span_id=failed.owed_write.span_id,
             decide=lambda current, owner: rl.flush_owed_write(
@@ -631,10 +650,10 @@ async def test_the_note_of_a_refused_only_create_is_sent_as_the_replys_message(
                 span_has_final=True,
                 now_ns=60,
             ),
+            room_id=ROOM,
+            thread_id=None,
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "note"},
+        PreparedReplyRow(payload={"body": "note"}),
     )
     assert note is not None
     assert note.stage is rl.WriteStage.EDIT
@@ -685,20 +704,21 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
     )
-    await runtime.record_tool_call(
+    await principal.replies.record_tool_call(
         span_id=first.span_id,
         call_id="call-1",
-        entry=ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+        entry_json=reply_scope._entry_json(
+            ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+        ),
         now_ns=20,
     )
-    lost = replace(first, outcome=SpanOutcome.LOST, ended_at_ns=30)
+    lost = replace(first, outcome=SpanOutcome.LOST)
     superseded = replace(
         first,
         span_id="span-2",
         kind=SpanKind.REPLAY,
         claimed_at_ns=40,
         outcome=SpanOutcome.SUPERSEDED,
-        ended_at_ns=50,
     )
     current = replace(first, span_id="span-3", kind=SpanKind.REPLAY, claimed_at_ns=60)
     await _apply(
@@ -725,10 +745,14 @@ async def test_a_departure_ends_the_rooms_replies_and_refuses_their_rows(journal
     assert released is not None
     assert released.outcome is SpanOutcome.RELEASED
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     # The released span's write is stale, so no row is recorded.
     assert enqueued is not None
@@ -756,7 +780,7 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
             record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
         ),
     )
-    await principal.replies.write_generation("gen-1", now_ns=1)
+    await principal.replies.write_generation("gen-1")
     request = replace(
         _request(source="$first"),
         sources=SpanSources(pending=("$first", "$second"), logical=("$first", "$second")),
@@ -794,10 +818,14 @@ async def _answered_and_regenerating(principal: PrincipalStore) -> rl.Span:
     """Answer ``$source``, then claim an edit's regeneration of it that has written nothing yet."""
     reply, span = await _claimed(principal)
     await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     await principal.acknowledge_matrix_delivery(
@@ -822,10 +850,14 @@ async def test_a_regeneration_keeps_the_membership_its_edit_was_admitted_in(jour
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     await principal.acknowledge_matrix_delivery(
@@ -862,7 +894,7 @@ async def test_deleting_the_source_of_a_regeneration_a_restart_left_keeps_the_an
     await _answered_and_regenerating(principal)
     answered = await principal.replies.load("reply-1")
     assert answered is not None
-    await principal.replies.write_generation("gen-2", now_ns=60)
+    await principal.replies.write_generation("gen-2")
     assert len(await principal.replies.owner_lost("gen-2", now_ns=70)) == 1
 
     await _delete(principal, "$source")
@@ -996,7 +1028,7 @@ async def test_progress_waits_for_the_replys_earlier_durable_writes(journal_stor
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=span.span_id,
             decide=lambda reply, span: rl.enqueue_initial(
@@ -1007,11 +1039,11 @@ async def test_progress_waits_for_the_replys_earlier_durable_writes(journal_stor
                 prepared_revision=reply.revision,
                 now_ns=60,
             ),
+            room_id=ROOM,
+            thread_id=None,
             placeholder_only=True,
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "Thinking..."},
+        PreparedReplyRow(payload={"body": "Thinking..."}),
     )
     assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
 
@@ -1035,17 +1067,21 @@ async def test_a_retired_instance_neither_claims_nor_writes(journal_store: Event
     """After another instance takes the replies over, the old one's claims and running spans change nothing."""
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
-    await principal.replies.write_generation("gen-2", now_ns=70)
+    await principal.replies.write_generation("gen-2")
 
     await admit(principal, "$other")
     refused = await principal.replies.claim(_request("span-old", reply_id="reply-old", source="$other"))
     assert refused.transition.outcome is rl.Outcome.STALE
     assert await principal.replies.load("reply-old") is None
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(reply_id=reply.reply_id, span_id=span.span_id, decide=_finish()),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        ReplyRowRequest(
+            reply_id=reply.reply_id,
+            span_id=span.span_id,
+            decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
+        ),
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert enqueued is not None
     assert enqueued.applied.transition.outcome is rl.Outcome.STALE
@@ -1073,7 +1109,7 @@ async def test_a_retired_instance_resume_writes_nothing_while_the_owner_may_end_
     """A retired instance's own approval resume is refused; the owner's recovery still ends the resume it left."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
-    await principal.replies.write_generation("gen-1", now_ns=1)
+    await principal.replies.write_generation("gen-1")
     claim = _first_claim()
     assert claim.reply is not None
     assert claim.claimed is not None
@@ -1082,7 +1118,7 @@ async def test_a_retired_instance_resume_writes_nothing_while_the_owner_may_end_
     reply = await principal.replies.load(claim.reply.reply_id)
     assert reply is not None
     assert reply.current_span_id == resume.span_id
-    await principal.replies.write_generation("gen-2", now_ns=70)
+    await principal.replies.write_generation("gen-2")
 
     progress = await principal.replies.write_ahead(
         reply_id=reply.reply_id,
@@ -1094,15 +1130,15 @@ async def test_a_retired_instance_resume_writes_nothing_while_the_owner_may_end_
     )
     assert progress.transition.outcome is rl.Outcome.STALE
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=resume.span_id,
             decide=_finish(),
+            room_id=ROOM,
+            thread_id=None,
             author_generation="gen-1",
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "answer"},
+        PreparedReplyRow(payload={"body": "answer"}),
     )
     assert enqueued is not None
     assert enqueued.applied.transition.outcome is rl.Outcome.STALE
@@ -1164,6 +1200,61 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
     assert ended.state is ReplyState.FAILED
     assert ended.approval_id is None
     assert not await alice.is_pending("$source-1")
+
+
+async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journal_store: EventJournalStore) -> None:
+    """The resume opens no span, the approval stays ready, and its sources retry once the row resolves."""
+    alice = journal_store.principal("agent@alice")
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    continuation = journal_tests.TestApprovalContinuations.continuation(state="ready")
+    span = await reply_shown_for_approval(alice, continuation)
+    assert span is not None
+    paused = await alice.pause_for_approval(
+        continuation,
+        ReplyRowRequest(
+            reply_id=span.reply_id,
+            span_id=span.span_id,
+            decide=lambda reply, held: rl.pause(
+                reply,
+                held,
+                rl.PauseWrite(shown=reply.presentation, prepared_revision=reply.revision, stage=rl.WriteStage.EDIT),
+                in_place=False,
+                now_ns=40,
+            ),
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+        ),
+        PreparedReplyRow(payload=text("Waiting for approval")),
+    )
+    assert paused is not None
+    assert paused.delivery_id is not None
+    retried: list[tuple[str, tuple[str, ...]]] = []
+    runtime = reply_scope.ReplyRuntime(
+        store=alice,
+        entity_name="agent",
+        generation="gen-2",
+        retry_sources=lambda room_id, sources: retried.append((room_id, sources)),
+        complete_turn=AsyncMock(),
+    )
+    await runtime.take_ownership()
+    stored = await alice.approval_continuation("approval-1")
+    assert stored is not None
+
+    assert await runtime.claim_approval_resume(stored, placeholder="Thinking...") == (None, None)
+    waiting = await alice.approval_continuation("approval-1")
+    assert waiting is not None
+    assert waiting.state == "ready"
+    assert retried == []
+
+    assert await alice.claim_matrix_delivery(delivery_id=paused.delivery_id, stage=DeliveryStage.EDIT)
+    await alice.acknowledge_matrix_delivery(
+        delivery_id=paused.delivery_id,
+        stage=DeliveryStage.EDIT,
+        event_id="$paused",
+        delivered_projections=(),
+    )
+    runtime.claim_may_proceed(span.reply_id)
+    assert retried == [(continuation.room_id, continuation.source_event_ids)]
 
 
 async def test_a_reply_is_held_by_the_continuation_that_names_its_span(journal_store: EventJournalStore) -> None:
@@ -1233,7 +1324,7 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
     """A waiter a newer instance took over neither claims the approval nor resumes the reply; the owner's waiter does."""
     alice = journal_store.principal("agent@alice")
     await journal_tests.TestApprovalContinuations.admit_sources(alice)
-    await alice.replies.write_generation("gen-1", now_ns=1)
+    await alice.replies.write_generation("gen-1")
     continuation = journal_tests.TestApprovalContinuations.continuation(state="ready")
     claim = rl.claim(
         replace(
@@ -1267,7 +1358,7 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
     # The waiter pauses its reply in place: its span keeps running while the approval is decided.
     enqueued = await alice.pause_for_approval(
         continuation,
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=shown.reply_id,
             span_id=waiting.span_id,
             decide=lambda reply, span: rl.pause(
@@ -1277,17 +1368,17 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
                 in_place=True,
                 now_ns=60,
             ),
+            room_id=ROOM,
+            thread_id="$thread",
         ),
-        room_id=ROOM,
-        thread_id="$thread",
-        payload={},
+        PreparedReplyRow(payload={}),
     )
     assert enqueued is not None
     paused = await alice.replies.load(shown.reply_id)
     assert paused is not None
     assert paused.state is ReplyState.PAUSED
     if taken_over:
-        await alice.replies.write_generation("gen-2", now_ns=70)
+        await alice.replies.write_generation("gen-2")
 
     claimed, applied = await alice.claim_approval_in_place(
         "approval-1",
@@ -1350,7 +1441,7 @@ async def _stop_waiting_for_the_create(journal_store: EventJournalStore, stop_ro
         record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending_turn)),
     )
     await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=span.span_id,
             decide=lambda reply, span: rl.enqueue_initial(
@@ -1361,11 +1452,11 @@ async def _stop_waiting_for_the_create(journal_store: EventJournalStore, stop_ro
                 prepared_revision=reply.revision,
                 now_ns=60,
             ),
+            room_id=ROOM,
+            thread_id=None,
             placeholder_only=True,
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "Thinking..."},
+        PreparedReplyRow(payload={"body": "Thinking..."}),
     )
     await journal_store.backend.write(
         lambda tx: reply_messages.record_pending_stop(
@@ -1456,7 +1547,7 @@ async def test_a_pending_stop_no_create_binds_is_forgotten(journal_store: EventJ
 async def test_pending_stop_ends_a_span_an_older_instance_ran(journal_store: EventJournalStore) -> None:
     """A create acknowledged after a restart ends its span with the Stop: no task here would see a cancel."""
     principal = await _stop_waiting_for_the_create(journal_store)
-    await principal.replies.write_generation("gen-2", now_ns=70)
+    await principal.replies.write_generation("gen-2")
     effects = await _acknowledge_the_create(principal)
     assert not any(isinstance(effect, rl.CancelSpan) for effect in effects)
     stored = await principal.replies.load("reply-1")
@@ -1484,7 +1575,7 @@ async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue
             record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
         ),
     )
-    await principal.replies.write_generation("gen-2", now_ns=70)
+    await principal.replies.write_generation("gen-2")
     assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
     waiting = await principal.replies.load("reply-1")
     assert waiting is not None
@@ -1507,7 +1598,7 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
     await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=span.span_id,
             decide=lambda reply, span: rl.enqueue_initial(
@@ -1518,14 +1609,14 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
                 prepared_revision=reply.revision,
                 now_ns=60,
             ),
+            room_id=ROOM,
+            thread_id=None,
             placeholder_only=True,
         ),
-        room_id=ROOM,
-        thread_id=None,
-        payload={"body": "Thinking..."},
+        PreparedReplyRow(payload={"body": "Thinking..."}),
     )
     # A restart lost the span; its source waits for the replay.
-    await principal.replies.write_generation("gen-2", now_ns=70)
+    await principal.replies.write_generation("gen-2")
     assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
 
     kept = await principal.replies.supersede_replay(("$source",), now_ns=90)

@@ -11,11 +11,11 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent, replies
-from mindroom.event_journal.replies import ReplyRowRequest
+from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, Segment, encode_presentation
-from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write, span_sources
+from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
 from mindroom.response_sources import ResponseSources
-from tests.approval_continuation_helpers import approval_continuation, claim_continuation
+from tests.approval_continuation_helpers import approval_continuation, claim_continuation, continuation_claim
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -68,7 +68,7 @@ async def seed_finished_reply(
         empty_presentation=encode_presentation(Presentation()),
     )
     reply = rl._new_reply(request, state=rl.ReplyState.COMPLETED, event_id=event_id)
-    span = rl._end(rl._new_span(request, reply, rl.SpanKind.TURN), rl.SpanOutcome.COMPLETED, now_ns)
+    span = rl._end(rl._new_span(request, reply, rl.SpanKind.TURN), rl.SpanOutcome.COMPLETED)
     transition = rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply, spans=(span,))
     await principal._backend.write(lambda transaction: replies.apply(transaction, principal._principal_id, transition))
     return reply
@@ -140,16 +140,16 @@ async def reply_span(
         if placeholder_event_id is not None:
             write = initial_write(handle, Presentation(placeholder=placeholder), placeholder_only=True)
             enqueued = await principal.enqueue_reply_row(
-                request=ReplyRowRequest(
+                ReplyRowRequest(
                     reply_id=handle.reply_id,
                     span_id=handle.span_id,
                     decide=write.decide,
+                    room_id=room_id,
+                    thread_id=thread_id,
                     placeholder_only=True,
                     stage=rl.WriteStage.INITIAL,
                 ),
-                room_id=room_id,
-                thread_id=thread_id,
-                payload={"msgtype": "m.text", "body": placeholder},
+                PreparedReplyRow(payload={"msgtype": "m.text", "body": placeholder}),
             )
             assert enqueued is not None
             handle.note(enqueued.applied)
@@ -279,22 +279,9 @@ async def reply_shown_for_approval(principal: PrincipalStore, continuation: Appr
     generation = await replies.active_generation()
     if generation is None:
         generation = "gen-test"
-        await replies.write_generation(generation, now_ns=time.time_ns())
-    sources = continuation.sources
+        await replies.write_generation(generation)
     claimed = await replies.claim(
-        rl.ClaimRequest(
-            span_id=uuid4().hex,
-            delivery_id=sources.pending_event_ids[0],
-            sources=span_sources(sources),
-            bot_generation=generation,
-            now_ns=time.time_ns(),
-            new_reply_id=uuid4().hex,
-            entity_name=continuation.entity_name,
-            room_id=continuation.room_id,
-            thread_id=continuation.thread_id,
-            membership_epoch=await principal.membership_epoch(continuation.room_id),
-            empty_presentation=encode_presentation(Presentation(show_tool_calls=continuation.show_tool_calls)),
-        ),
+        await continuation_claim(principal, continuation, generation=generation),
         existing_event_id=continuation.response_event_id,
     )
     span = claimed.transition.claimed
@@ -304,7 +291,7 @@ async def reply_shown_for_approval(principal: PrincipalStore, continuation: Appr
     assert reply is not None
     if reply.event_id is None:
         created = await principal.enqueue_reply_row(
-            request=ReplyRowRequest(
+            ReplyRowRequest(
                 reply_id=span.reply_id,
                 span_id=span.span_id,
                 decide=lambda reply, created: rl.enqueue_initial(
@@ -315,12 +302,12 @@ async def reply_shown_for_approval(principal: PrincipalStore, continuation: Appr
                     prepared_revision=reply.revision,
                     now_ns=time.time_ns(),
                 ),
+                room_id=continuation.room_id,
+                thread_id=continuation.thread_id,
                 placeholder_only=True,
                 stage=rl.WriteStage.INITIAL,
             ),
-            room_id=continuation.room_id,
-            thread_id=continuation.thread_id,
-            payload={"msgtype": "m.text", "body": AGENT_PLACEHOLDER},
+            PreparedReplyRow(payload={"msgtype": "m.text", "body": AGENT_PLACEHOLDER}),
         )
         if created is None or created.delivery_id is None:
             return None
@@ -352,7 +339,7 @@ async def pause_shown_reply(
     stage = rl.WriteStage.EDIT if text else None
     enqueued = await principal.pause_for_approval(
         continuation,
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=span.reply_id,
             span_id=span.span_id,
             decide=lambda reply, held: rl.pause(
@@ -366,10 +353,10 @@ async def pause_shown_reply(
                 in_place=False,
                 now_ns=time.time_ns(),
             ),
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
         ),
-        room_id=continuation.room_id,
-        thread_id=continuation.thread_id,
-        payload={"msgtype": "m.text", "body": text} if text else {},
+        PreparedReplyRow(payload={"msgtype": "m.text", "body": text} if text else {}),
     )
     if enqueued is None or not enqueued.transition.applied:
         return None

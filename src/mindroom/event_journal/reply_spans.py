@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 _SPAN_COLUMNS = """
     span_id, reply_id, kind, delivery_id, approval_id, bot_generation,
-    base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns
+    base_sequence, rollback_json, outcome, claimed_at_ns
 """
 _ROLES = ("pending", "logical", "discovery")
 
@@ -23,7 +23,6 @@ def _rollback_json(rollback: Rollback | None) -> str | None:
     return json.dumps(
         {
             "presentation": rollback.presentation,
-            "frozen_display": rollback.frozen_display,
             "state": rollback.state.value,
             "possibly_shown": rollback.possibly_shown,
             "possibly_shown_seq": rollback.possibly_shown_seq,
@@ -42,13 +41,11 @@ def _rollback(stored: str | None) -> Rollback | None:
         raise TypeError(msg)
     data = cast("dict[str, object]", raw)
     presentation = data["presentation"]
-    frozen_display = data.get("frozen_display")
     if not isinstance(presentation, str) or not isinstance(data["state"], str):
         msg = "Stored rollback snapshot is malformed"
         raise TypeError(msg)
     return Rollback(
         presentation=presentation,
-        frozen_display=frozen_display if isinstance(frozen_display, str) else None,
         state=ReplyState(data["state"]),
         possibly_shown=shown if isinstance((shown := data.get("possibly_shown")), str) else None,
         possibly_shown_seq=shown_seq if isinstance((shown_seq := data.get("possibly_shown_seq")), int) else None,
@@ -75,7 +72,6 @@ def _sources(transaction: Transaction, principal_id: str, span_id: str) -> SpanS
 
 
 def _span(transaction: Transaction, principal_id: str, row: Row) -> Span:
-    ended_at_ns = row["ended_at_ns"]
     outcome = row["outcome"]
     return Span(
         span_id=str(row["span_id"]),
@@ -89,7 +85,6 @@ def _span(transaction: Transaction, principal_id: str, row: Row) -> Span:
         approval_id=cast("str | None", row["approval_id"]),
         rollback=_rollback(cast("str | None", row["rollback_json"])),
         outcome=None if outcome is None else SpanOutcome(str(outcome)),
-        ended_at_ns=None if ended_at_ns is None else int(ended_at_ns),
     )
 
 
@@ -169,8 +164,8 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
             """
             INSERT INTO reply_spans (
                 principal_id, span_id, reply_id, kind, delivery_id, approval_id,
-                bot_generation, base_sequence, rollback_json, outcome, claimed_at_ns, ended_at_ns
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                bot_generation, base_sequence, rollback_json, outcome, claimed_at_ns
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 principal_id,
@@ -184,7 +179,6 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
                 _rollback_json(span.rollback),
                 None if span.outcome is None else span.outcome.value,
                 span.claimed_at_ns,
-                span.ended_at_ns,
             ),
         )
         roles = (
@@ -211,10 +205,10 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
         return
     transaction.execute(
         """
-        UPDATE reply_spans SET outcome = ?, ended_at_ns = ?
+        UPDATE reply_spans SET outcome = ?
         WHERE principal_id = ? AND span_id = ? AND outcome IS NULL
         """,
-        (span.outcome.value, span.ended_at_ns, principal_id, span.span_id),
+        (span.outcome.value, principal_id, span.span_id),
     )
 
 

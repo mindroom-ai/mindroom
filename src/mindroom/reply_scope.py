@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -49,7 +49,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from mindroom.cancellation import CancelSource
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
@@ -210,10 +210,10 @@ class _SpanToolCalls:
             result = f"{type(result).__name__}: {result}"
         _, entry = format_tool_combined(tool_name, dict(args), result)
         try:
-            await self.runtime.record_tool_call(
+            await self.runtime.store.replies.record_tool_call(
                 span_id=handle.span_id,
                 call_id=call_id,
-                entry=entry,
+                entry_json=_entry_json(entry),
                 now_ns=self.runtime.clock(),
             )
         except Exception:
@@ -274,15 +274,6 @@ class ReplyRuntime:
         for effect in effects:
             if isinstance(effect, rl.CancelSpan):
                 self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
-
-    async def record_tool_call(self, *, span_id: str, call_id: str, entry: ToolTraceEntry, now_ns: int) -> None:
-        """Record what a started tool call returned."""
-        await self.store.replies.record_tool_call(
-            span_id=span_id,
-            call_id=call_id,
-            entry_json=_entry_json(entry),
-            now_ns=now_ns,
-        )
 
     async def _span_tool_calls(self, span_ids: tuple[str, ...]) -> tuple[ToolTraceEntry, ...]:
         """Return the tool calls these spans recorded, in the order they started."""
@@ -385,7 +376,7 @@ class ReplyRuntime:
 
     async def take_ownership(self) -> None:
         """Make this bot instance the owner of its principal's replies, before it writes any of them."""
-        await self.store.replies.write_generation(self.generation, now_ns=self.clock())
+        await self.store.replies.write_generation(self.generation)
 
     async def start(self) -> None:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
@@ -437,20 +428,36 @@ class ReplyRuntime:
             driving_edit_id=driving_edit_id,
             interactive_span_id=interactive_span_id,
         )
-        # A Stop can reach the span as soon as its claim commits, before its task registers. The claim may
-        # continue the span a selection's acknowledgement created instead of opening its own.
+        # The claim may continue the span a selection's acknowledgement created instead of opening its own.
         candidates = (request.span_id,) if interactive_span_id is None else (request.span_id, interactive_span_id)
-        for span_id in candidates:
-            self.spans.expect(span_id)
-        try:
+        with self._expecting(candidates):
             applied = await self.committed(
                 await self.store.replies.claim(request, existing_event_id=existing_event_id),
             )
+        return await self._opened(applied.transition, candidates, room_id=room_id, pending=sources.pending, empty=empty)
+
+    @contextmanager
+    def _expecting(self, span_ids: tuple[str, ...]) -> Iterator[None]:
+        """Expect these spans while their claim commits; a Stop can reach a span before its task registers."""
+        for span_id in span_ids:
+            self.spans.expect(span_id)
+        try:
+            yield
         except BaseException:
-            for span_id in candidates:
+            for span_id in span_ids:
                 self.spans.forget(span_id)
             raise
-        transition = applied.transition
+
+    async def _opened(
+        self,
+        transition: rl.Transition,
+        candidates: tuple[str, ...],
+        *,
+        room_id: str,
+        pending: tuple[str, ...],
+        empty: Presentation,
+    ) -> SpanHandle | ClaimRefused:
+        """Return the span a committed claim opened, or say why it opened none, forgetting the spans it did not take."""
         claimed_span_id = None if transition.claimed is None else transition.claimed.span_id
         for span_id in candidates:
             if span_id != claimed_span_id:
@@ -458,17 +465,13 @@ class ReplyRuntime:
         if transition.outcome is rl.Outcome.STALE:
             return ClaimRefused.RETIRED
         if transition.outcome is rl.Outcome.DUPLICATE or transition.unmodeled is not None:
-            # An unmodeled claim already ended the reply and settled its sources.
+            # An unmodeled claim already ended the reply and settled its sources, or failed the approval that holds them.
             return ClaimRefused.NOTHING_TO_RUN
         if transition.claimed is None or transition.reply is None:
             # Earlier writes of this reply are unresolved; their resolution
             # wakes these sources instead of waiting under the conversation lock.
             assert transition.reply is not None, "only a reply with earlier writes defers a claim"
-            await self._wait_to_claim(
-                transition.reply.reply_id,
-                room_id,
-                sources.pending,
-            )
+            await self._wait_to_claim(transition.reply.reply_id, room_id, pending)
             return ClaimRefused.DEFERRED
         return _handle_for(self, transition.reply, transition.claimed, empty)
 
@@ -518,34 +521,26 @@ class ReplyRuntime:
             thread_id=continuation.thread_id,
             empty=empty,
         )
-        # A Stop can reach the resume span as soon as its claim commits, before its task registers.
-        self.spans.expect(claim.span_id)
-        try:
-            claimed, applied = await self.store.claim_approval_resume(
-                continuation.approval_id,
-                claim=claim,
-            )
-            if applied is None:
-                self.spans.forget(claim.span_id)
-                return None, None
-            transition = (await self.committed(applied)).transition
-        except BaseException:
+        with self._expecting((claim.span_id,)):
+            claimed, applied = await self.store.claim_approval_resume(continuation.approval_id, claim=claim)
+            if applied is not None:
+                applied = await self.committed(applied)
+        if applied is None:
             self.spans.forget(claim.span_id)
-            raise
-        if claimed is None or transition.claimed is None or transition.reply is None:
-            self.spans.forget(claim.span_id)
-            if transition.outcome is rl.Outcome.STALE or transition.unmodeled is not None:
-                # Another instance took the replies over, whose approval recovery resumes this; or the
-                # rules ended the reply and failed the approval, whose settlement ends it.
-                return None, None
-            assert transition.reply is not None, "only a reply with earlier writes defers a resume"
-            await self._wait_to_claim(
-                transition.reply.reply_id,
-                continuation.room_id,
-                continuation.source_event_ids,
-            )
             return None, None
-        return claimed, _handle_for(self, transition.reply, transition.claimed, empty)
+        # A retired claim leaves the resume to the instance that took the replies over, whose approval recovery runs
+        # it; an unmodeled one ended the reply and failed the approval, whose settlement ends it.
+        opened = await self._opened(
+            applied.transition,
+            (claim.span_id,),
+            room_id=continuation.room_id,
+            pending=continuation.source_event_ids,
+            empty=empty,
+        )
+        if isinstance(opened, ClaimRefused):
+            return None, None
+        assert claimed is not None, "a resume span claims its continuation in the same transaction"
+        return claimed, opened
 
     async def acknowledgement(
         self,
@@ -786,7 +781,11 @@ def terminal_write(
     state: rl.ReplyState,
     frozen_display: Presentation | None = None,
 ) -> ReplyWrite:
-    """Return the span's terminal row for one reply state, as finish, stopped, or a delivery failure decides it."""
+    """Return the span's terminal row for one reply state, as finish, stopped, or a delivery failure decides it.
+
+    ``ACTIVE`` is the note a resumed reply shows when its continuation failed
+    before delivering: an edit that keeps the reply's sources pending.
+    """
     write = rl.TerminalWrite(
         shown=encode_presentation(shown),
         prepared_revision=handle.reply.revision,
@@ -801,12 +800,13 @@ def terminal_write(
             return rl.finish(reply, span, write, now_ns=now_ns)
         if write.state is rl.ReplyState.CANCELLED:
             return rl.stopped(reply, span, write, now_ns=now_ns)
-        return rl.fail(reply, span, write, phase="delivery", now_ns=now_ns)
+        phase = "pre_delivery" if write.state is rl.ReplyState.ACTIVE else "delivery"
+        return rl.fail(reply, span, write, phase=phase, now_ns=now_ns)
 
     return ReplyWrite(
         span=handle.span,
         handle=handle,
-        stage=rl.WriteStage.FINAL,
+        stage=rl.WriteStage.EDIT if state is rl.ReplyState.ACTIVE else rl.WriteStage.FINAL,
         shown=shown,
         # A note is not a placeholder: a later suppression must not redact it.
         placeholder_only=render_body(shown)[0] == shown.placeholder,
@@ -899,20 +899,3 @@ def interrupted_end(
         # ``None``: the span is released, so its sources retry.
         return None
     return _NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)
-
-
-def resumed_note_write(handle: SpanHandle, shown: Presentation) -> ReplyWrite:
-    """Return the note a resumed reply shows when its continuation failed before delivering, keeping sources pending."""
-    write = rl.TerminalWrite(
-        shown=encode_presentation(shown),
-        prepared_revision=handle.reply.revision,
-        state=rl.ReplyState.ACTIVE,
-        confirms=handle.unconfirmed_progress,
-    )
-    return ReplyWrite(
-        span=handle.span,
-        handle=handle,
-        stage=rl.WriteStage.EDIT,
-        shown=shown,
-        decide=lambda reply, span: rl.fail(reply, span, write, phase="pre_delivery", now_ns=time.time_ns()),
-    )

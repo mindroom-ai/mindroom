@@ -7,6 +7,7 @@ from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
+from mindroom.reply_lifecycle import WriteStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -134,18 +135,8 @@ class DeliveryProjectionPendingError(RuntimeError):
     """An interactive source arrived before a visible delivery was projected."""
 
 
-class DeliveryStage(StrEnum):
-    """The delivery points that must survive a crash.
-
-    ``EDIT`` is a non-terminal durable write of an agent or team reply (a
-    pause, or a note that keeps the reply's sources pending). It lives on a
-    delivery id derived from the span's, so readers of a turn's ``INITIAL``
-    and ``FINAL`` keep their meaning.
-    """
-
-    INITIAL = "initial"
-    FINAL = "final"
-    EDIT = "edit"
+# The delivery points that must survive a crash: one durable write's stage, as the reply rules name it.
+DeliveryStage = WriteStage
 
 
 class DepartureSource(StrEnum):
@@ -391,6 +382,16 @@ class ConversationPage:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyRowFacts:
+    """What a reply row's acknowledgement and late edit target need, recorded beside its payload."""
+
+    # Whether the row shows only the reply's placeholder.
+    placeholder_only: bool
+    # The body an edit carries when its target was bound after the row was prepared.
+    new_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MatrixDelivery:
     """One claimed, immutable Matrix delivery."""
 
@@ -432,7 +433,7 @@ class MatrixDelivery:
     span_id: str | None = None
     reply_sequence: int | None = None
     # What the row's acknowledgement and late edit target need; never sent.
-    reply_row: Mapping[str, object] | None = None
+    reply_row: ReplyRowFacts | None = None
 
     @property
     def permanently_failed(self) -> bool:

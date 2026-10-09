@@ -455,21 +455,9 @@ class ApprovalResponseCoordinator:
             return True
         if await self.successful_final_delivery(current) is not None:
             return False
-        manager = approval_manager.get_approval_store()
-        current = await prepare_approval_failure(
-            current,
-            reason,
-            request_failure=partial(self.request_failure, current),
-            expire_cards=None if manager is None else manager.expire_continuation_cards,
-        )
+        current = await self._prepare_failure(current, reason)
         if current is None:
             return False
-        await cancel_approval_delegations(
-            current,
-            config=self.config(),
-            runtime_paths=self.runtime_paths,
-            reason=reason,
-        )
         if await self.finish_approval(current.approval_id):
             return True
         user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
@@ -485,6 +473,11 @@ class ApprovalResponseCoordinator:
 
     async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
         """End an interrupted continuation's cards and release it: its sources go back to replay unless a Stop ends the reply."""
+        current = await self._prepare_failure(continuation, reason)
+        return current is not None and await self.release_approval(current.approval_id, current.generation)
+
+    async def _prepare_failure(self, continuation: ApprovalContinuation, reason: str) -> ApprovalContinuation | None:
+        """Fence a continuation for failure, expire its cards, and cancel its delegations; ``None`` when that failed."""
         manager = approval_manager.get_approval_store()
         current = await prepare_approval_failure(
             continuation,
@@ -493,14 +486,14 @@ class ApprovalResponseCoordinator:
             expire_cards=None if manager is None else manager.expire_continuation_cards,
         )
         if current is None:
-            return False
+            return None
         await cancel_approval_delegations(
             current,
             config=self.config(),
             runtime_paths=self.runtime_paths,
             reason=reason,
         )
-        return await self.release_approval(current.approval_id, current.generation)
+        return current
 
     async def successful_final_delivery(
         self,

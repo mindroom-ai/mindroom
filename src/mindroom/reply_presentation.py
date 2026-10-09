@@ -178,21 +178,6 @@ def with_trailing_note(presentation: Presentation, note: Segment | None) -> Pres
     return replace(presentation, trailing_note=note)
 
 
-def _folded(presentation: Presentation) -> Presentation:
-    """Return the presentation as one answer segment that later spans continue below.
-
-    A frozen display and the notes inside it become plain history: a later
-    span appends after them and never rewrites them.
-    """
-    body, trace = _combined(presentation.segments, presentation.placeholder)
-    note = presentation.trailing_note
-    if note is not None and note.note is not NoteKind.APPROVAL_WAIT:
-        body = f"{body}\n\n{note.text}" if body else note.text
-    if not body and not trace:
-        return replace(presentation, segments=(), trailing_note=None)
-    return replace(presentation, segments=(Segment(kind="answer", text=body, tool_trace=trace),), trailing_note=None)
-
-
 def _shown_work(possibly_shown: Presentation) -> Segment | None:
     """Return the work a stopped reply may have shown, without its notes.
 
@@ -200,8 +185,12 @@ def _shown_work(possibly_shown: Presentation) -> Segment | None:
     reply interrupted twice before its continuation showed anything carries
     one restart note, not two. ``None`` means only a placeholder or notes.
     """
-    body, trace = _combined(_folded(possibly_shown).segments, possibly_shown.placeholder)
-    text = clean_partial_reply_text(body)
+    body, trace = _combined(possibly_shown.segments, possibly_shown.placeholder)
+    note = possibly_shown.trailing_note
+    if note is not None and note.note is not NoteKind.APPROVAL_WAIT:
+        body = f"{body}\n\n{note.text}" if body else note.text
+    body = body.rstrip()
+    text = clean_partial_reply_text("" if body == possibly_shown.placeholder else body)
     if not text and not trace:
         return None
     return Segment(kind="answer", text=text, tool_trace=trace)

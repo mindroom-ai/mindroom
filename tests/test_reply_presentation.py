@@ -15,7 +15,6 @@ from mindroom.reply_presentation import (
     NoteKind,
     Presentation,
     Segment,
-    _folded,
     after_restart,
     continued_by,
     decode_presentation,
@@ -148,14 +147,6 @@ def test_continued_by_hands_the_paused_answer_to_the_resume() -> None:
     assert resumed.trailing_note is None
     assert resumed.segments[-1].span_id == "span-2"
     assert resumed.segments[-1].text == "partial"
-
-
-def test_folded_turns_a_frozen_display_into_history() -> None:
-    """Notes inside a frozen display stay, and later spans append below them."""
-    frozen = with_trailing_note(Presentation(segments=(_answer("answer"),)), note_segment(NoteKind.CANCELLED))
-    history = _folded(frozen)
-    assert history.trailing_note is None
-    assert render_body(history)[0] == build_cancelled_response_update("answer", cancel_source="user_stop")[0]
 
 
 @pytest.mark.parametrize(

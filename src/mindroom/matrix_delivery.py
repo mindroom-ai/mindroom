@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal.models import MatrixDelivery, TerminalTurnWrite
     from mindroom.event_journal.projection import ProjectedEvent
-    from mindroom.event_journal.replies import PostCommitEffect, ReplyRowEnqueue, ReplyRowRequest
+    from mindroom.event_journal.replies import PostCommitEffect, PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
     from mindroom.event_journal.views import MatrixDeliveryView
 
 logger = get_logger(__name__)
@@ -37,7 +37,7 @@ class PermanentDeliveryError(RuntimeError):
 
 type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
 # Decides and records one reply row: the store's own enqueue, or one coupled to another durable step.
-type ReplyRowEnqueuer = Callable[..., Awaitable["ReplyRowEnqueue | None"]]
+type ReplyRowEnqueuer = Callable[["ReplyRowRequest", "PreparedReplyRow"], Awaitable["ReplyRowEnqueue | None"]]
 type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
 # Finding the Matrix event a previous attempt already produced, when the frozen
@@ -87,17 +87,6 @@ class RecoveryOutcome:
     def complete(self) -> bool:
         """Return whether nothing is left for a later pass to retry."""
         return self.failed == 0
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedReplyRow:
-    """One reply row's wire payload, prepared after the reply's earlier rows resolved."""
-
-    payload: Mapping[str, object]
-    result: Mapping[str, object] | None = None
-    permanent_failure_reason: str | None = None
-    # The body an edit carries when the reply's create binds its target only after this row is prepared.
-    new_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,8 +223,6 @@ class MatrixDeliveryWorker:
         self,
         request: ReplyRowRequest,
         *,
-        room_id: str,
-        thread_id: str | None,
         prepare: Callable[[], Awaitable[PreparedReplyRow]],
         enqueue: ReplyRowEnqueuer | None = None,
         on_enqueued: Callable[[ReplyRowEnqueue], None] | None = None,
@@ -255,16 +242,7 @@ class MatrixDeliveryWorker:
         async with self._delivery_lock(_reply_lock_key(request.reply_id)):
             prepared = await prepare()
             enqueue_row = self.store.enqueue_reply_row if enqueue is None else enqueue
-            enqueued = await enqueue_row(
-                request=request,
-                room_id=room_id,
-                thread_id=thread_id,
-                payload=prepared.payload,
-                result=prepared.result,
-                event_type=self.event_type,
-                permanent_failure_reason=prepared.permanent_failure_reason,
-                new_text=prepared.new_text,
-            )
+            enqueued = await enqueue_row(request, prepared)
             if enqueued is not None and on_enqueued is not None:
                 on_enqueued(enqueued)
             if enqueued is None or enqueued.delivery_id is None or enqueued.stage is None:
@@ -275,7 +253,7 @@ class MatrixDeliveryWorker:
                 # An earlier row cannot be sent yet; recovery sends both in order.
                 return ReplyRowDelivery(enqueue=enqueued)
             outcome = await run_coroutine_until_complete(
-                self._flush(delivery_id=enqueued.delivery_id, stage=DeliveryStage(enqueued.stage.value)),
+                self._flush(delivery_id=enqueued.delivery_id, stage=enqueued.stage),
             )
         event_id = await self._finish_flush(enqueued.delivery_id, outcome)
         return ReplyRowDelivery(enqueue=enqueued, event_id=event_id)
@@ -887,7 +865,6 @@ __all__ = [
     "DeliveryStage",
     "MatrixDeliveryWorker",
     "PermanentDeliveryError",
-    "PreparedReplyRow",
     "RecoveryOutcome",
     "ReplyRowDelivery",
     "ReplyRowEnqueuer",

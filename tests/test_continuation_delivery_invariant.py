@@ -58,7 +58,7 @@ if TYPE_CHECKING:
         ProjectedEvent,
         TerminalTurnWrite,
     )
-    from mindroom.event_journal.replies import ReplyRowEnqueue, ReplyRowRequest, ReplyStore
+    from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
@@ -106,29 +106,9 @@ class _WatchedOutbox:
         """Return the current room membership without timeline noise."""
         return await self.inner.membership_epoch(room_id)
 
-    async def enqueue_reply_row(
-        self,
-        *,
-        request: ReplyRowRequest,
-        room_id: str,
-        thread_id: str | None,
-        payload: Mapping[str, object],
-        result: Mapping[str, object] | None = None,
-        event_type: str = "m.room.message",
-        permanent_failure_reason: str | None = None,
-        new_text: str | None = None,
-    ) -> ReplyRowEnqueue | None:
+    async def enqueue_reply_row(self, request: ReplyRowRequest, prepared: PreparedReplyRow) -> ReplyRowEnqueue | None:
         """Record one reply write, noting the stage its rule chose on the timeline."""
-        enqueued = await self.inner.enqueue_reply_row(
-            request=request,
-            room_id=room_id,
-            thread_id=thread_id,
-            payload=payload,
-            result=result,
-            event_type=event_type,
-            permanent_failure_reason=permanent_failure_reason,
-            new_text=new_text,
-        )
+        enqueued = await self.inner.enqueue_reply_row(request, prepared)
         if enqueued is not None and enqueued.stage is not None:
             self.timeline.append(f"enqueue:{enqueued.stage.value}")
         return enqueued

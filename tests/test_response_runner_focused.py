@@ -183,7 +183,6 @@ from tests.history_helpers import RecordingModel
 from tests.reply_span_helpers import paused_for_approval, reply_span, response_span
 from tests.response_runner_helpers import (
     _bot,
-    _config,
     _envelope,
     _noop_typing,
     _PersistenceSeamProbe,
@@ -1176,13 +1175,12 @@ async def test_detached_inbox_response_owns_source_until_task_finishes() -> None
     retry_sources.assert_called_once_with(_target().room_id, ("$reaction",))
 
 
-def _attempt_runner(tmp_path: Path) -> ResponseAttemptRunner:
+def _attempt_runner() -> ResponseAttemptRunner:
     return ResponseAttemptRunner(
         ResponseAttemptDeps(
             client=make_matrix_client_mock(),
             logger=get_logger("tests.response_attempt"),
             show_stop_button=lambda: False,
-            config=_config(tmp_path),
         ),
     )
 
@@ -1883,7 +1881,7 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
     frozen = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert frozen is not None
     reply = MagicMock(presentation=encode_presentation(Presentation(segments=(Segment(kind="answer", text="note"),))))
-    reply.frozen_display = None
+    reply.possibly_shown = None
     with (
         patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=outcome))),
         patch.object(ReplyStore, "load", AsyncMock(return_value=reply)),
@@ -1919,7 +1917,7 @@ async def test_a_recovered_approval_answer_reports_what_its_final_showed(tmp_pat
     assert frozen is not None
     reply = MagicMock(
         presentation=encode_presentation(Presentation(segments=(Segment(kind="answer", text="raw answer"),))),
-        frozen_display=encode_presentation(Presentation(segments=(Segment(kind="answer", text="transformed"),))),
+        possibly_shown=encode_presentation(Presentation(segments=(Segment(kind="answer", text="transformed"),))),
     )
     with (
         patch.object(ReplyStore, "load", AsyncMock(return_value=reply)),
@@ -5465,15 +5463,15 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
 
 
 @pytest.mark.asyncio
-async def test_adopted_placeholder_is_passed_to_the_response_function(tmp_path: Path) -> None:
+async def test_adopted_placeholder_is_passed_to_the_response_function() -> None:
     """The event the turn already made visible is what the attempt generates against."""
-    runner = _attempt_runner(tmp_path)
+    runner = _attempt_runner()
     seen: list[str | None] = []
 
     async def respond(message_id: str | None) -> None:
         seen.append(message_id)
 
-    result = await runner.run(
+    await runner.run(
         ResponseAttemptRequest(
             target=_target(),
             response_function=respond,
@@ -5482,14 +5480,13 @@ async def test_adopted_placeholder_is_passed_to_the_response_function(tmp_path: 
         ),
     )
 
-    assert result == "$placeholder"
     assert seen == ["$placeholder"]
 
 
 @pytest.mark.asyncio
-async def test_generation_failure_reraises(tmp_path: Path) -> None:
+async def test_generation_failure_reraises() -> None:
     """Generation failures re-raise to the response lifecycle that settles the reply."""
-    runner = _attempt_runner(tmp_path)
+    runner = _attempt_runner()
 
     async def respond(_message_id: str | None) -> None:
         msg = "generation exploded"
@@ -5507,10 +5504,10 @@ async def test_generation_failure_reraises(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_approval_suspension_is_not_logged_as_generation_failure(tmp_path: Path) -> None:
+async def test_approval_suspension_is_not_logged_as_generation_failure() -> None:
     """A native pause is a lifecycle handoff, not an exceptional generation failure."""
     logger = MagicMock()
-    runner = ResponseAttemptRunner(replace(_attempt_runner(tmp_path).deps, logger=logger))
+    runner = ResponseAttemptRunner(replace(_attempt_runner().deps, logger=logger))
     suspension = ResponsePausedForApproval(
         PausedAttempt(
             session_id="session-1",
@@ -5543,9 +5540,9 @@ async def test_approval_suspension_is_not_logged_as_generation_failure(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_user_stop_mid_generation_cancels_the_span_task(tmp_path: Path) -> None:
+async def test_user_stop_mid_generation_cancels_the_span_task() -> None:
     """A Stop on the reply span mid-generation cancels the attempt, which records the outcome and keeps its event."""
-    runner = _attempt_runner(tmp_path)
+    runner = _attempt_runner()
     spans = SpanRegistry()
     spans.expect("span-1")
     started = asyncio.Event()
@@ -5574,8 +5571,8 @@ async def test_user_stop_mid_generation_cancels_the_span_task(tmp_path: Path) ->
     await asyncio.wait_for(started.wait(), timeout=2)
 
     assert spans.cancel("span-1", cancel_source="user_stop") is True
-    # The attempt survives the cancellation and still reports its visible event id.
-    assert await asyncio.wait_for(run_task, timeout=2) == "$placeholder"
+    # The attempt survives the cancellation and finishes.
+    await asyncio.wait_for(run_task, timeout=2)
 
     [attempt_task] = attempt_tasks
     assert attempt_task is not None

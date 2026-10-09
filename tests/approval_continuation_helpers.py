@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
-from mindroom.event_journal.replies import ReplyRowRequest
+from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_scope import span_sources
 from mindroom.response_sources import ResponseSources
@@ -47,6 +47,28 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
     return ApprovalContinuation(**(defaults | changes))
 
 
+async def continuation_claim(
+    principal: PrincipalStore,
+    continuation: ApprovalContinuation,
+    *,
+    generation: str,
+) -> rl.ClaimRequest:
+    """Return the claim of a span for a continuation's sources and reply, as the bot instance ``generation`` makes it."""
+    return rl.ClaimRequest(
+        span_id=uuid4().hex,
+        delivery_id=continuation.source_event_ids[0],
+        sources=span_sources(continuation.sources),
+        bot_generation=generation,
+        now_ns=time.time_ns(),
+        new_reply_id=uuid4().hex,
+        entity_name=continuation.entity_name,
+        room_id=continuation.room_id,
+        thread_id=continuation.thread_id,
+        membership_epoch=await principal.membership_epoch(continuation.room_id),
+        empty_presentation=encode_presentation(Presentation(show_tool_calls=continuation.show_tool_calls)),
+    )
+
+
 async def claim_continuation(
     principal: PrincipalStore,
     approval_id: str,
@@ -61,26 +83,13 @@ async def claim_continuation(
     if continuation is None:
         return None
     owner = await principal.replies.active_generation()
-    await principal.replies.write_generation(runtime_generation, now_ns=time.time_ns())
-    sources = continuation.sources
+    await principal.replies.write_generation(runtime_generation)
     claimed, _applied = await principal.claim_approval_resume(
         approval_id,
-        claim=rl.ClaimRequest(
-            span_id=uuid4().hex,
-            delivery_id=sources.pending_event_ids[0],
-            sources=span_sources(sources),
-            bot_generation=runtime_generation,
-            now_ns=time.time_ns(),
-            new_reply_id=uuid4().hex,
-            entity_name=continuation.entity_name,
-            room_id=continuation.room_id,
-            thread_id=continuation.thread_id,
-            membership_epoch=await principal.membership_epoch(continuation.room_id),
-            empty_presentation=encode_presentation(Presentation(show_tool_calls=continuation.show_tool_calls)),
-        ),
+        claim=await continuation_claim(principal, continuation, generation=runtime_generation),
     )
     if owner is not None:
-        await principal.replies.write_generation(owner, now_ns=time.time_ns())
+        await principal.replies.write_generation(owner)
     return claimed
 
 
@@ -134,7 +143,7 @@ async def advance_continuation(
             cli_call=cli_call,
             continuation_count=continuation_count,
         ),
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=reply.reply_id,
             span_id=reply.current_span_id,
             decide=lambda reply, held: rl.pause(
@@ -144,10 +153,10 @@ async def advance_continuation(
                 in_place=False,
                 now_ns=time.time_ns(),
             ),
+            room_id=current.room_id,
+            thread_id=current.thread_id,
         ),
-        room_id=current.room_id,
-        thread_id=current.thread_id,
-        payload={},
+        PreparedReplyRow(payload={}),
     )
     if enqueued is None or not enqueued.transition.applied:
         return None
@@ -173,15 +182,17 @@ async def freeze_resume_final(
         return rl.finish(reply, current, write, now_ns=time.time_ns())
 
     enqueued = await principal.enqueue_reply_row(
-        request=ReplyRowRequest(
+        ReplyRowRequest(
             reply_id=span.reply_id,
             span_id=span.span_id,
             decide=decide,
+            room_id=claimed.room_id,
+            thread_id=claimed.thread_id,
             stage=rl.WriteStage.FINAL,
         ),
-        room_id=claimed.room_id,
-        thread_id=claimed.thread_id,
-        payload=payload,
-        result=result,
+        PreparedReplyRow(
+            payload=payload,
+            result=result,
+        ),
     )
     assert enqueued is not None

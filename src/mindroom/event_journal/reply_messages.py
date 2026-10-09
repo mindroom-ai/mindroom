@@ -40,7 +40,7 @@ _HELD_BY = """(
 _REPLY_COLUMNS = f"""
     reply_id, entity_name, room_id, thread_id, membership_epoch,
     event_id, state, current_span_id, last_span_id, presentation_json,
-    frozen_display_json, possibly_shown_json, possibly_shown_seq, confirmed_seq, revision,
+    possibly_shown_json, possibly_shown_seq, confirmed_seq, revision,
     placeholder_only, stop_receipt_order, stop_applied_receipt_order, stop_button_event_id,
     redaction_pending_json, owed_write_json, reply_sequence, {_HELD_BY} AS approval_id, created_at_ns, updated_at_ns
 """
@@ -106,7 +106,6 @@ def _reply(row: Row) -> Reply:
         updated_at_ns=int(row["updated_at_ns"]),
         event_id=cast("str | None", row["event_id"]),
         current_span_id=cast("str | None", row["current_span_id"]),
-        frozen_display=cast("str | None", row["frozen_display_json"]),
         possibly_shown=cast("str | None", row["possibly_shown_json"]),
         possibly_shown_seq=_optional_int(row["possibly_shown_seq"]),
         confirmed_seq=_optional_int(row["confirmed_seq"]),
@@ -389,11 +388,11 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
         """
         INSERT INTO reply_messages (
             principal_id, reply_id, entity_name, room_id, thread_id, membership_epoch, event_id, state,
-            current_span_id, last_span_id, presentation_json, frozen_display_json, possibly_shown_json,
+            current_span_id, last_span_id, presentation_json, possibly_shown_json,
             possibly_shown_seq, confirmed_seq, revision, placeholder_only, stop_receipt_order,
             stop_applied_receipt_order, stop_button_event_id, redaction_pending_json,
             owed_write_json, reply_sequence, created_at_ns, updated_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
             membership_epoch = excluded.membership_epoch,
             event_id = excluded.event_id,
@@ -401,7 +400,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             current_span_id = excluded.current_span_id,
             last_span_id = excluded.last_span_id,
             presentation_json = excluded.presentation_json,
-            frozen_display_json = excluded.frozen_display_json,
             possibly_shown_json = excluded.possibly_shown_json,
             possibly_shown_seq = excluded.possibly_shown_seq,
             confirmed_seq = excluded.confirmed_seq,
@@ -427,7 +425,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             reply.current_span_id,
             reply.last_span_id,
             reply.presentation,
-            reply.frozen_display,
             reply.possibly_shown,
             reply.possibly_shown_seq,
             reply.confirmed_seq,
@@ -530,16 +527,15 @@ def take_pending_stop(transaction: Transaction, principal_id: str, event_id: str
     return None if row is None else int(row["receipt_order"])
 
 
-def write_generation(transaction: Transaction, principal_id: str, *, generation: str, now_ns: int) -> None:
+def write_generation(transaction: Transaction, principal_id: str, *, generation: str) -> None:
     """Make one bot instance the owner of this principal's replies."""
     transaction.execute(
         """
-        INSERT INTO reply_principal_generations (principal_id, generation, started_at_ns)
-        VALUES (?, ?, ?)
-        ON CONFLICT (principal_id) DO UPDATE SET
-            generation = excluded.generation, started_at_ns = excluded.started_at_ns
+        INSERT INTO reply_principal_generations (principal_id, generation)
+        VALUES (?, ?)
+        ON CONFLICT (principal_id) DO UPDATE SET generation = excluded.generation
         """,
-        (principal_id, generation, now_ns),
+        (principal_id, generation),
     )
 
 

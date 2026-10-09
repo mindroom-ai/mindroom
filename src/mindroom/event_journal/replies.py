@@ -32,7 +32,7 @@ from .projection import is_tombstoned
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.turn_record import TurnRecord
 
@@ -551,6 +551,17 @@ class ReplyCreation:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedReplyRow:
+    """One reply row's wire payload, prepared after the reply's earlier rows resolved."""
+
+    payload: Mapping[str, object]
+    result: Mapping[str, object] | None = None
+    permanent_failure_reason: str | None = None
+    # The body an edit carries when the reply's create binds its target only after this row is prepared.
+    new_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ReplyRowRequest:
     """A durable write of a reply, decided by a lifecycle rule inside its enqueue transaction.
 
@@ -560,6 +571,9 @@ class ReplyRowRequest:
     reply_id: str
     span_id: str
     decide: Decide | None
+    # Where the row is sent: the reply's room and the thread it answers in.
+    room_id: str
+    thread_id: str | None
     # Whether the row shows only the reply's placeholder.
     placeholder_only: bool = False
     create: ReplyCreation | None = None
@@ -594,25 +608,6 @@ class ReplyRowEnqueue:
         return self.applied.transition
 
 
-def _row_placeholder_only(delivery: MatrixDelivery) -> bool:
-    """Return whether one reply row shows only the reply's placeholder."""
-    return (delivery.reply_row or {}).get("placeholder_only") is True
-
-
-def row_new_text(delivery: MatrixDelivery) -> str | None:
-    """Return the fallback body a reply row's edit carries when its target was bound after it was prepared."""
-    new_text = (delivery.reply_row or {}).get("new_text")
-    return new_text if isinstance(new_text, str) else None
-
-
-def row_facts(*, placeholder_only: bool, new_text: str | None) -> dict[str, object]:
-    """Return what a reply row's acknowledgement and late edit target need."""
-    facts: dict[str, object] = {"placeholder_only": placeholder_only}
-    if new_text is not None:
-        facts["new_text"] = new_text
-    return facts
-
-
 def has_unresolved_rows(transaction: Transaction, principal_id: str, reply_id: str) -> bool:
     """Return whether any durable write of the reply has an unknown Matrix outcome."""
     return bool(outbox.unresolved_reply_rows(transaction, principal_id, reply_id))
@@ -622,10 +617,10 @@ def _write_facts(delivery: MatrixDelivery) -> rl.WriteFacts:
     assert delivery.span_id is not None
     assert delivery.reply_sequence is not None
     return rl.WriteFacts(
-        stage=rl.WriteStage(delivery.stage.value),
+        stage=delivery.stage,
         sequence=delivery.reply_sequence,
         creates_event=delivery.edits_event_id is None,
-        placeholder_only=_row_placeholder_only(delivery),
+        placeholder_only=delivery.reply_row is not None and delivery.reply_row.placeholder_only,
     )
 
 
@@ -777,15 +772,10 @@ class ReplyStore:
             lambda transaction: reply_spans.tool_calls(transaction, self._principal_id, span_ids),
         )
 
-    async def write_generation(self, generation: str, *, now_ns: int) -> None:
+    async def write_generation(self, generation: str) -> None:
         """Make one bot instance the owner of this principal's replies."""
         await self._backend.write(
-            lambda transaction: reply_messages.write_generation(
-                transaction,
-                self._principal_id,
-                generation=generation,
-                now_ns=now_ns,
-            ),
+            lambda transaction: reply_messages.write_generation(transaction, self._principal_id, generation=generation),
         )
 
     async def active_generation(self) -> str | None:

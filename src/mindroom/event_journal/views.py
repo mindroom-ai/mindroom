@@ -56,7 +56,7 @@ if TYPE_CHECKING:
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
-    from .replies import ReplyRowEnqueue, ReplyRowRequest, ReplyStore
+    from .replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from .scheduled_approvals import (
         ScheduledApprovalArmState,
         ScheduledCall,
@@ -426,18 +426,7 @@ class MatrixDeliveryView(Protocol):
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         ...
 
-    async def enqueue_reply_row(
-        self,
-        *,
-        request: ReplyRowRequest,
-        room_id: str,
-        thread_id: str | None,
-        payload: Mapping[str, object],
-        result: Mapping[str, object] | None = None,
-        event_type: str = "m.room.message",
-        permanent_failure_reason: str | None = None,
-        new_text: str | None = None,
-    ) -> ReplyRowEnqueue | None:
+    async def enqueue_reply_row(self, request: ReplyRowRequest, prepared: PreparedReplyRow) -> ReplyRowEnqueue | None:
         """Decide and record one durable write of an agent or team reply, or refuse both."""
         ...
 

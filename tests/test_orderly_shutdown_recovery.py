@@ -94,7 +94,6 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
             client=harness.regenerator.deps.runtime.client,
             logger=MagicMock(),
             show_stop_button=lambda: False,
-            config=harness.config,
         ),
     )
 
@@ -437,7 +436,6 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
             client=bot.client,
             logger=MagicMock(),
             show_stop_button=lambda: False,
-            config=bot.config,
         ),
     )
 

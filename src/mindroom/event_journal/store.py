@@ -62,6 +62,7 @@ from .models import (
     IngestionConsumer,
     IngestionConsumerBindingError,
     PermanentDeliveryFailure,
+    ReplyRowFacts,
     ResponseRecoveryState,
 )
 from .projection import (
@@ -74,6 +75,7 @@ from .projection import (
 from .replies import (
     AppliedTransition,
     PostCommitEffect,
+    PreparedReplyRow,
     ReplyRowEnqueue,
     ReplyRowRequest,
     ReplyStore,
@@ -796,18 +798,7 @@ class PrincipalStore:
             ),
         )
 
-    async def enqueue_reply_row(
-        self,
-        *,
-        request: ReplyRowRequest,
-        room_id: str,
-        thread_id: str | None,
-        payload: Mapping[str, object],
-        result: Mapping[str, object] | None = None,
-        event_type: str = "m.room.message",
-        permanent_failure_reason: str | None = None,
-        new_text: str | None = None,
-    ) -> ReplyRowEnqueue | None:
+    async def enqueue_reply_row(self, request: ReplyRowRequest, prepared: PreparedReplyRow) -> ReplyRowEnqueue | None:
         """Decide and record one durable write of an agent or team reply.
 
         ``None`` means the outbox refused the row (the membership that owns
@@ -815,18 +806,7 @@ class PrincipalStore:
         """
         try:
             return await self._backend.write(
-                lambda transaction: _enqueue_reply_row(
-                    transaction,
-                    self._principal_id,
-                    request=request,
-                    event_type=event_type,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    payload=payload,
-                    result=result,
-                    permanent_failure_reason=permanent_failure_reason,
-                    new_text=new_text,
-                ),
+                lambda transaction: _enqueue_reply_row(transaction, self._principal_id, request, prepared),
             )
         except _ReplyRowRefusedError:
             return None
@@ -1489,15 +1469,8 @@ class PrincipalStore:
     async def pause_for_approval(
         self,
         hold: ApprovalContinuation | ApprovalAdvance,
-        *,
         request: ReplyRowRequest,
-        room_id: str,
-        thread_id: str | None,
-        payload: Mapping[str, object],
-        result: Mapping[str, object] | None = None,
-        event_type: str = "m.room.message",
-        permanent_failure_reason: str | None = None,
-        new_text: str | None = None,
+        prepared: PreparedReplyRow,
     ) -> ReplyRowEnqueue | None:
         """Create or advance a paused run's owner and pause its reply with the pause row, in one transaction.
 
@@ -1507,19 +1480,7 @@ class PrincipalStore:
         """
         try:
             return await self._backend.write(
-                lambda transaction: _pause_for_approval(
-                    transaction,
-                    self._principal_id,
-                    hold,
-                    request=request,
-                    event_type=event_type,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    payload=payload,
-                    result=result,
-                    permanent_failure_reason=permanent_failure_reason,
-                    new_text=new_text,
-                ),
+                lambda transaction: _pause_for_approval(transaction, self._principal_id, hold, request, prepared),
             )
         except _ReplyRowRefusedError:
             return None
@@ -1818,7 +1779,7 @@ def _enqueue_matrix_delivery(
     reply_id: str | None = None,
     span_id: str | None = None,
     reply_sequence: int | None = None,
-    reply_row: Mapping[str, object] | None = None,
+    reply_row: ReplyRowFacts | None = None,
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
@@ -1985,15 +1946,8 @@ def _pause_for_approval(
     transaction: Transaction,
     principal_id: str,
     hold: ApprovalContinuation | ApprovalAdvance,
-    *,
     request: ReplyRowRequest,
-    event_type: str,
-    room_id: str,
-    thread_id: str | None,
-    payload: Mapping[str, object],
-    result: Mapping[str, object] | None,
-    permanent_failure_reason: str | None,
-    new_text: str | None,
+    prepared: PreparedReplyRow,
 ) -> ReplyRowEnqueue:
     """Create or advance the continuation, then pause its reply, so neither exists without the other."""
     held = (
@@ -2003,18 +1957,7 @@ def _pause_for_approval(
     )
     if held is None:
         raise _ReplyRowRefusedError
-    enqueued = _enqueue_reply_row(
-        transaction,
-        principal_id,
-        request=request,
-        event_type=event_type,
-        room_id=room_id,
-        thread_id=thread_id,
-        payload=payload,
-        result=result,
-        permanent_failure_reason=permanent_failure_reason,
-        new_text=new_text,
-    )
+    enqueued = _enqueue_reply_row(transaction, principal_id, request, prepared)
     if not enqueued.transition.applied:
         raise _PauseRefusedError(enqueued)
     return enqueued
@@ -2065,18 +2008,15 @@ def _decide_reply_row(
     return reply, span, transition
 
 
+# Every reply row is a room message.
+_REPLY_ROW_EVENT_TYPE = "m.room.message"
+
+
 def _enqueue_reply_row(
     transaction: Transaction,
     principal_id: str,
-    *,
     request: ReplyRowRequest,
-    event_type: str,
-    room_id: str,
-    thread_id: str | None,
-    payload: Mapping[str, object],
-    result: Mapping[str, object] | None,
-    permanent_failure_reason: str | None,
-    new_text: str | None = None,
+    prepared: PreparedReplyRow,
 ) -> ReplyRowEnqueue:
     """Decide one reply write with its lifecycle rule and record the row it chose, in one transaction.
 
@@ -2095,7 +2035,7 @@ def _enqueue_reply_row(
             settled_event_ids=replies.settled_event_ids(transaction, principal_id, transition),
         )
     row = transition.row
-    stage = DeliveryStage(row.stage.value)
+    stage = row.stage
     edits_event_id = None if stage is DeliveryStage.INITIAL else reply.event_id
     # A row waits for the reply's event only while an earlier row may still create it. With none left, as when
     # Matrix refused the only create for good, the row creates the event itself.
@@ -2108,7 +2048,7 @@ def _enqueue_reply_row(
         "reply_id": reply.reply_id,
         "span_id": span.span_id,
         "reply_sequence": row.sequence,
-        "reply_row": replies.row_facts(placeholder_only=request.placeholder_only, new_text=new_text),
+        "reply_row": ReplyRowFacts(placeholder_only=request.placeholder_only, new_text=prepared.new_text),
     }
     if stage is DeliveryStage.EDIT:
         delivery_id = replies.edit_delivery_id(span.delivery_id, row.sequence)
@@ -2124,15 +2064,15 @@ def _enqueue_reply_row(
             principal_id,
             delivery_id=delivery_id,
             stage=stage,
-            event_type=event_type,
+            event_type=_REPLY_ROW_EVENT_TYPE,
             room_id=reply.room_id,
             membership_epoch=reply.membership_epoch,
-            thread_id=thread_id,
-            payload=payload,
-            result=result,
+            thread_id=request.thread_id,
+            payload=prepared.payload,
+            result=prepared.result,
             edits_event_id=edits_event_id,
             edit_target_pending=edit_target_pending,
-            permanent_failure_reason=permanent_failure_reason,
+            permanent_failure_reason=prepared.permanent_failure_reason,
             **row_fields,
         )
     else:
@@ -2142,21 +2082,21 @@ def _enqueue_reply_row(
             principal_id,
             delivery_id=delivery_id,
             stage=stage,
-            event_type=event_type,
-            room_id=room_id,
-            thread_id=thread_id,
-            payload=payload,
-            result=result,
+            event_type=_REPLY_ROW_EVENT_TYPE,
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            payload=prepared.payload,
+            result=prepared.result,
             edits_event_id=edits_event_id,
             settle_source_event_ids=(),
-            permanent_failure_reason=permanent_failure_reason,
+            permanent_failure_reason=prepared.permanent_failure_reason,
             edit_target_pending=edit_target_pending,
             **row_fields,
         )
     if transaction_id is None:
         raise _ReplyRowRefusedError
     applied = replies.apply(transaction, principal_id, transition)
-    if permanent_failure_reason is not None:
+    if prepared.permanent_failure_reason is not None:
         # A payload refused before any send fails its row now, as a refusal from Matrix would.
         refused = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=stage)
         assert refused is not None
@@ -2190,7 +2130,7 @@ def _span_row(
     """
     if stage not in {rl.WriteStage.INITIAL, rl.WriteStage.FINAL}:
         return None
-    stored = outbox.load(transaction, principal_id, delivery_id=span.delivery_id, stage=DeliveryStage(stage.value))
+    stored = outbox.load(transaction, principal_id, delivery_id=span.delivery_id, stage=stage)
     if stored is None or stored.reply_id != reply.reply_id:
         return None
     if stage is rl.WriteStage.FINAL and stored.span_id != span.span_id:

@@ -15,7 +15,6 @@ from mindroom.cancellation import (
     current_task_is_process_shutdown,
     request_task_cancel,
 )
-from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 
@@ -41,7 +40,6 @@ def _runner(*, show_stop_button: bool = False) -> tuple[ResponseAttemptRunner, _
                 client=MagicMock(user_id="@mindroom_agent:localhost"),
                 logger=MagicMock(),
                 show_stop_button=lambda: show_stop_button,
-                config=Config(),
             ),
         ),
         _Span(),
@@ -65,7 +63,7 @@ async def test_response_attempt_tracks_the_adopted_placeholder_as_the_visible_ta
         seen_message_ids.append(message_id)
         attempt_tasks.append(asyncio.current_task())
 
-    message_id = await runner.run(
+    await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
@@ -74,7 +72,6 @@ async def test_response_attempt_tracks_the_adopted_placeholder_as_the_visible_ta
         ),
     )
 
-    assert message_id == "$thinking"
     assert seen_message_ids == ["$thinking"]
     assert span.registered == attempt_tasks
     assert span.stop_buttons == []
@@ -92,7 +89,7 @@ async def test_response_attempt_without_visible_message_registers_its_task_witho
         seen_message_ids.append(message_id)
         attempt_tasks.append(asyncio.current_task())
 
-    message_id = await runner.run(
+    await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
@@ -100,7 +97,6 @@ async def test_response_attempt_without_visible_message_registers_its_task_witho
         ),
     )
 
-    assert message_id is None
     assert seen_message_ids == [None]
     assert span.registered == attempt_tasks
     assert span.stop_buttons == []
@@ -119,7 +115,7 @@ async def test_response_attempt_adds_the_reply_stop_button_for_online_user(
     async def response_function(_message_id: str | None) -> None:
         return None
 
-    message_id = await runner.run(
+    await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
@@ -129,7 +125,6 @@ async def test_response_attempt_adds_the_reply_stop_button_for_online_user(
         ),
     )
 
-    assert message_id == "$thinking"
     is_user_online.assert_awaited_once_with(
         runner.deps.client,
         "@user:localhost",
@@ -212,7 +207,7 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
     )
     await inner_started.wait()
     outer.cancel(msg=SYNC_RESTART_CANCEL_MSG)
-    assert await outer == "$existing"
+    await outer
 
     assert cancellation_reasons == ["sync_restart_cancelled"]
     assert inner_cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]
@@ -469,7 +464,7 @@ async def test_response_attempt_cancellation_records_reason_and_logs_provenance(
     async def response_function(_message_id: str | None) -> None:
         raise asyncio.CancelledError(*cancel_args)
 
-    message_id = await runner.run(
+    await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
@@ -479,7 +474,6 @@ async def test_response_attempt_cancellation_records_reason_and_logs_provenance(
         ),
     )
 
-    assert message_id == "$existing"
     assert cancellation_reasons == [expected_reason]
     getattr(runner.deps.logger, log_method).assert_called_once()
     log_call = getattr(runner.deps.logger, log_method).call_args
