@@ -1,44 +1,41 @@
-import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, useLocation } from "react-router-dom";
-import { useConfigStore } from "@/store/configStore";
-import { AgentList } from "@/components/AgentList/AgentList";
-import { AgentEditor } from "@/components/AgentEditor/AgentEditor";
-import { TeamList } from "@/components/TeamList/TeamList";
-import { TeamEditor } from "@/components/TeamEditor/TeamEditor";
-import { RoomList } from "@/components/RoomList/RoomList";
-import { RoomEditor } from "@/components/RoomEditor/RoomEditor";
-import { RoomAdmins } from "@/components/RoomAdmins/RoomAdmins";
-import { ModelConfig } from "@/components/ModelConfig/ModelConfig";
-import { MemoryConfig } from "@/components/MemoryConfig/MemoryConfig";
-import { Knowledge } from "@/components/Knowledge/Knowledge";
-import { VoiceConfig } from "@/components/VoiceConfig/VoiceConfig";
-import { Integrations } from "@/components/Integrations/Integrations";
-import { UnconfiguredRooms } from "@/components/UnconfiguredRooms/UnconfiguredRooms";
-import { SyncStatus } from "@/components/SyncStatus/SyncStatus";
-import { Dashboard } from "@/components/Dashboard/Dashboard";
-import { Usage } from "@/components/Usage/Usage";
-import { Skills } from "@/components/Skills/Skills";
-import { Settings } from "@/components/Settings/Settings";
-import { Schedules } from "@/components/Schedules/Schedules";
-import { Credentials } from "@/components/Credentials/Credentials";
-import { ProviderSetupBanner } from "@/components/ProviderSetup/ProviderSetup";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Toaster } from "@/components/ui/toaster";
-import { ThemeProvider } from "@/contexts/ThemeContext";
-import { ThemeToggle } from "@/components/ThemeToggle/ThemeToggle";
-import { showSaveFailureToastIfNeeded } from "@/components/shared";
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { BrowserRouter, useLocation } from 'react-router-dom';
+import { useConfigStore } from '@/store/configStore';
+import { AgentList } from '@/components/AgentList/AgentList';
+import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
+import { TeamList } from '@/components/TeamList/TeamList';
+import { TeamEditor } from '@/components/TeamEditor/TeamEditor';
+import { RoomList } from '@/components/RoomList/RoomList';
+import { RoomEditor } from '@/components/RoomEditor/RoomEditor';
+import { RoomAdmins } from '@/components/RoomAdmins/RoomAdmins';
+import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
+import { MemoryConfig } from '@/components/MemoryConfig/MemoryConfig';
+import { Knowledge } from '@/components/Knowledge/Knowledge';
+import { VoiceConfig } from '@/components/VoiceConfig/VoiceConfig';
+import { Integrations } from '@/components/Integrations/Integrations';
+import { UnconfiguredRooms } from '@/components/UnconfiguredRooms/UnconfiguredRooms';
+import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
+import { Dashboard } from '@/components/Dashboard/Dashboard';
+import { Usage } from '@/components/Usage/Usage';
+import { Budgets } from '@/components/Budgets/Budgets';
+import { Skills } from '@/components/Skills/Skills';
+import { Settings } from '@/components/Settings/Settings';
+import { Schedules } from '@/components/Schedules/Schedules';
+import { Credentials } from '@/components/Credentials/Credentials';
+import { ProviderSetupBanner } from '@/components/ProviderSetup/ProviderSetup';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
+import { Toaster } from '@/components/ui/toaster';
+import { ThemeProvider } from '@/contexts/ThemeContext';
+import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
+import { showSaveFailureToastIfNeeded } from '@/components/shared';
 import {
   getConfigValidationIssues,
   getGlobalConfigDiagnostics,
   type GlobalConfigDiagnostic,
-} from "@/lib/configValidation";
-import {
-  getNavigationValue,
-  NAV_ITEMS,
-  Navigation,
-} from "@/components/Navigation/Navigation";
+} from '@/lib/configValidation';
+import { getNavigationValue, NAV_ITEMS, Navigation } from '@/components/Navigation/Navigation';
 
 const queryClient = new QueryClient();
 
@@ -62,10 +59,7 @@ function RoutePanel({
 }
 
 function isAuthDiagnosticMessage(message: string): boolean {
-  return (
-    message.includes("Authentication required") ||
-    message.includes("Access denied")
-  );
+  return message.includes('Authentication required') || message.includes('Access denied');
 }
 
 export function shouldShowBlockingDiagnosticOverlay(
@@ -76,7 +70,7 @@ export function shouldShowBlockingDiagnosticOverlay(
   }: {
     hasLoadedConfig: boolean;
     hasRecoveryConfig: boolean;
-  },
+  }
 ): boolean {
   if (blockingDiagnostic == null) {
     return false;
@@ -110,39 +104,32 @@ function AppContent() {
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = getNavigationValue(location.pathname);
-  const currentNavItem =
-    NAV_ITEMS.find((item) => item.value === currentTab) || NAV_ITEMS[0];
+  const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
   const previousSelectedRoomIdRef = useRef(selectedRoomId);
   const validationIssues = getConfigValidationIssues(diagnostics);
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
   const blockingDiagnostic =
     globalDiagnostics.find(
-      (diagnostic) =>
-        diagnostic.blocking && isAuthDiagnosticMessage(diagnostic.message),
+      diagnostic => diagnostic.blocking && isAuthDiagnosticMessage(diagnostic.message)
     ) ??
-    globalDiagnostics.find((diagnostic) => diagnostic.blocking) ??
+    globalDiagnostics.find(diagnostic => diagnostic.blocking) ??
     null;
-  const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(
-    blockingDiagnostic,
-    {
-      hasLoadedConfig: config != null,
-      hasRecoveryConfig: recoveryConfigSource != null,
-    },
-  );
+  const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(blockingDiagnostic, {
+    hasLoadedConfig: config != null,
+    hasRecoveryConfig: recoveryConfigSource != null,
+  });
   const canRecoverInvalidConfig =
-    !isAuthDiagnosticMessage(blockingDiagnostic?.message ?? "") &&
-    recoveryConfigSource != null;
-  const recoveryConfigIsDirty =
-    recoveryConfigSource !== recoveryConfigSourceOriginal;
+    !isAuthDiagnosticMessage(blockingDiagnostic?.message ?? '') && recoveryConfigSource != null;
+  const recoveryConfigIsDirty = recoveryConfigSource !== recoveryConfigSourceOriginal;
   const visibleGlobalDiagnostics = showBlockingDiagnosticOverlay
-    ? globalDiagnostics.filter((diagnostic) => !diagnostic.blocking)
+    ? globalDiagnostics.filter(diagnostic => !diagnostic.blocking)
     : globalDiagnostics;
 
   const handleRecoverySave = async () => {
     const result = await saveRecoveryConfigSource();
     showSaveFailureToastIfNeeded(result, {
-      staleMessage: "Save was superseded by newer recovery edits.",
-      fallbackMessage: "Failed to save replacement configuration.",
+      staleMessage: 'Save was superseded by newer recovery edits.',
+      fallbackMessage: 'Failed to save replacement configuration.',
     });
   };
 
@@ -156,48 +143,41 @@ function AppContent() {
     previousSelectedRoomIdRef.current = selectedRoomId;
 
     if (
-      currentTab === "rooms" &&
+      currentTab === 'rooms' &&
       window.innerWidth < 1024 &&
       previousSelectedRoomId === null &&
       selectedRoomId !== null
     ) {
-      const workspace = document.querySelector<HTMLElement>(".rooms-workspace");
-      const roomsLayout =
-        workspace?.querySelector<HTMLElement>(".rooms-layout");
+      const workspace = document.querySelector<HTMLElement>('.rooms-workspace');
+      const roomsLayout = workspace?.querySelector<HTMLElement>('.rooms-layout');
       if (workspace && roomsLayout) {
         const workspaceTop = workspace.getBoundingClientRect().top;
         const layoutTop = roomsLayout.getBoundingClientRect().top;
-        const paddingTop = Number.parseFloat(
-          window.getComputedStyle(workspace).paddingTop,
-        );
+        const paddingTop = Number.parseFloat(window.getComputedStyle(workspace).paddingTop);
         workspace.scrollTo(
           0,
-          Math.max(
-            0,
-            workspace.scrollTop + layoutTop - workspaceTop - paddingTop,
-          ),
+          Math.max(0, workspace.scrollTop + layoutTop - workspaceTop - paddingTop)
         );
       }
     }
   }, [currentTab, selectedRoomId]);
 
   const getPlatformUrl = () => {
-    const configured = (import.meta as any).env?.VITE_PLATFORM_URL as
-      string | undefined;
+    const configured = (import.meta as any).env?.VITE_PLATFORM_URL as string | undefined;
     if (configured && configured.length > 0) return configured;
-    if (typeof window !== "undefined") {
+    if (typeof window !== 'undefined') {
       const host = window.location.host;
-      const firstDot = host.indexOf(".");
+      const firstDot = host.indexOf('.');
       const base = firstDot > 0 ? host.slice(firstDot + 1) : host; // 1.staging.mindroom.chat -> staging.mindroom.chat
       return `https://app.${base}`;
     }
-    return "https://app.mindroom.chat";
+    return 'https://app.mindroom.chat';
   };
 
   if (showBlockingDiagnosticOverlay && blockingDiagnostic) {
     const error = blockingDiagnostic.message;
     const isAuthError = isAuthDiagnosticMessage(error);
-    const isDifferentInstance = error.includes("Access denied");
+    const isDifferentInstance = error.includes('Access denied');
 
     if (!isAuthError && canRecoverInvalidConfig) {
       return (
@@ -206,12 +186,12 @@ function AppContent() {
             <div className="space-y-2">
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
                 {validationIssues.length > 0
-                  ? "Configuration Validation Failed"
-                  : "Configuration Recovery"}
+                  ? 'Configuration Validation Failed'
+                  : 'Configuration Recovery'}
               </h2>
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                The current <code>config.yaml</code> could not be loaded. Edit
-                the raw configuration below and save it as a full replacement.
+                The current <code>config.yaml</code> could not be loaded. Edit the raw configuration
+                below and save it as a full replacement.
               </p>
             </div>
 
@@ -223,11 +203,9 @@ function AppContent() {
               {validationIssues.length > 0 && (
                 <ul className="mt-3 list-disc space-y-1 pl-5">
                   {validationIssues.map((issue, index) => (
-                    <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
-                      <span className="font-medium">
-                        {issue.loc.join(" → ") || "config"}
-                      </span>
-                      {": "}
+                    <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
+                      <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
+                      {': '}
                       {issue.msg}
                     </li>
                   ))}
@@ -237,9 +215,7 @@ function AppContent() {
 
             <Textarea
               value={recoveryConfigSource}
-              onChange={(event) =>
-                updateRecoveryConfigSource(event.target.value)
-              }
+              onChange={event => updateRecoveryConfigSource(event.target.value)}
               className="min-h-[420px] font-mono text-sm"
               spellCheck={false}
               disabled={isLoading}
@@ -247,15 +223,10 @@ function AppContent() {
 
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Saving here replaces the entire <code>config.yaml</code> with
-                the edited source.
+                Saving here replaces the entire <code>config.yaml</code> with the edited source.
               </p>
               <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => void loadConfig()}
-                  disabled={isLoading}
-                >
+                <Button variant="outline" onClick={() => void loadConfig()} disabled={isLoading}>
                   Retry
                 </Button>
                 <Button
@@ -277,7 +248,7 @@ function AppContent() {
           <div className="flex items-center mb-4">
             <span className="text-3xl mr-3">🔒</span>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-              {isAuthError ? "Access Required" : "Configuration Error"}
+              {isAuthError ? 'Access Required' : 'Configuration Error'}
             </h2>
           </div>
           <p className="text-gray-600 dark:text-gray-300 mb-6">{error}</p>
@@ -286,16 +257,14 @@ function AppContent() {
             <div className="mb-6 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
               <p className="font-medium">Current configuration is invalid.</p>
               <p className="mt-1 text-destructive/80">
-                Fix the reported issues in <code>config.yaml</code> or the
-                referenced plugin manifests, then retry loading the dashboard.
+                Fix the reported issues in <code>config.yaml</code> or the referenced plugin
+                manifests, then retry loading the dashboard.
               </p>
               <ul className="mt-3 list-disc space-y-1 pl-5">
                 {validationIssues.map((issue, index) => (
-                  <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
-                    <span className="font-medium">
-                      {issue.loc.join(" → ") || "config"}
-                    </span>
-                    {": "}
+                  <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
+                    <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
+                    {': '}
                     {issue.msg}
                   </li>
                 ))}
@@ -308,8 +277,7 @@ function AppContent() {
               {isDifferentInstance ? (
                 <>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    You are logged in but do not have access to this instance.
-                    You may need to:
+                    You are logged in but do not have access to this instance. You may need to:
                   </p>
                   <ul className="text-sm text-gray-500 dark:text-gray-400 list-disc ml-5 space-y-1">
                     <li>Switch to an instance you have access to</li>
@@ -369,21 +337,13 @@ function AppContent() {
         <div className="flex min-w-0 items-center gap-2.5">
           <Navigation mode="mobile" />
           <h1 className="flex min-w-0 items-center gap-2.5">
-            <img
-              src="/logo.svg"
-              alt="MindRoom logo"
-              className="h-7 w-7 shrink-0"
-            />
-            <span className="hidden text-sm font-semibold tracking-tight sm:inline">
-              MindRoom
-            </span>
+            <img src="/logo.svg" alt="MindRoom logo" className="h-7 w-7 shrink-0" />
+            <span className="hidden text-sm font-semibold tracking-tight sm:inline">MindRoom</span>
           </h1>
           <span aria-hidden="true" className="hidden text-border sm:inline">
             /
           </span>
-          <span className="truncate text-sm text-muted-foreground">
-            {currentNavItem.label}
-          </span>
+          <span className="truncate text-sm text-muted-foreground">{currentNavItem.label}</span>
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
@@ -402,30 +362,25 @@ function AppContent() {
       <div className="relative z-10 flex min-h-0 flex-1 flex-col">
         {configUsesIncludes && (
           <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
-            This configuration is composed from multiple files via{" "}
-            <code>!include</code>. The backend rejects structured saves from the
-            dashboard editors — make changes by editing the include source files
-            directly.
+            This configuration is composed from multiple files via <code>!include</code>. The
+            backend rejects structured saves from the dashboard editors — make changes by editing
+            the include source files directly.
           </div>
         )}
 
         {configJournalPendingRestart && (
           <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
-            The saved <code>event_journal</code> names a different database from
-            the one this process has open. It is read once, when the store is
-            opened, so the change takes effect at the next restart — and
-            MindRoom refuses to start against a journal it is not bound to, so
-            run <code>mindroom journal adopt</code> first if the move is
-            deliberate.
+            The saved <code>event_journal</code> names a different database from the one this
+            process has open. It is read once, when the store is opened, so the change takes effect
+            at the next restart — and MindRoom refuses to start against a journal it is not bound
+            to, so run <code>mindroom journal adopt</code> first if the move is deliberate.
           </div>
         )}
 
         {config != null && (
           // Refetch on navigation and config commits so keys added on the
           // Models or Credentials pages clear the banner.
-          <ProviderSetupBanner
-            refreshKey={`${committedGeneration ?? "none"}:${currentTab}`}
-          />
+          <ProviderSetupBanner refreshKey={`${committedGeneration ?? 'none'}:${currentTab}`} />
         )}
 
         {visibleGlobalDiagnostics.map((diagnostic, index) => (
@@ -440,20 +395,16 @@ function AppContent() {
         {config != null && validationIssues.length > 0 && (
           <div className="border-b border-destructive/20 bg-destructive/5 px-3 py-4 text-sm text-destructive sm:px-6">
             <div className="space-y-2">
-              <p className="font-medium">
-                This draft still has configuration validation issues.
-              </p>
+              <p className="font-medium">This draft still has configuration validation issues.</p>
               <p className="text-destructive/80">
-                Resolve the reported issues in the draft below, then save to
-                replace <code>config.yaml</code>.
+                Resolve the reported issues in the draft below, then save to replace{' '}
+                <code>config.yaml</code>.
               </p>
               <ul className="list-disc space-y-1 pl-5">
                 {validationIssues.map((issue, index) => (
-                  <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
-                    <span className="font-medium">
-                      {issue.loc.join(" → ") || "config"}
-                    </span>
-                    {": "}
+                  <li key={`${issue.loc.join('.')}-${issue.msg}-${index}`}>
+                    <span className="font-medium">{issue.loc.join(' → ') || 'config'}</span>
+                    {': '}
                     {issue.msg}
                   </li>
                 ))}
@@ -471,7 +422,7 @@ function AppContent() {
           >
             <div className="relative flex h-full flex-col">
               <RoutePanel
-                active={currentTab === "dashboard"}
+                active={currentTab === 'dashboard'}
                 label="Dashboard"
                 className="min-h-0 flex-1 overflow-auto"
               >
@@ -481,7 +432,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "usage"}
+                active={currentTab === 'usage'}
                 label="Usage"
                 className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
               >
@@ -489,21 +440,29 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "agents"}
+                active={currentTab === 'budgets'}
+                label="Budgets"
+                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+              >
+                <Budgets />
+              </RoutePanel>
+
+              <RoutePanel
+                active={currentTab === 'agents'}
                 label="Agents"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                   <div
                     className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                      selectedAgentId ? "hidden lg:block" : "block"
+                      selectedAgentId ? 'hidden lg:block' : 'block'
                     }`}
                   >
                     <AgentList />
                   </div>
                   <div
                     className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                      selectedAgentId ? "block" : "hidden lg:block"
+                      selectedAgentId ? 'block' : 'hidden lg:block'
                     }`}
                   >
                     <AgentEditor />
@@ -512,21 +471,21 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "teams"}
+                active={currentTab === 'teams'}
                 label="Teams"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                   <div
                     className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                      selectedTeamId ? "hidden lg:block" : "block"
+                      selectedTeamId ? 'hidden lg:block' : 'block'
                     }`}
                   >
                     <TeamList />
                   </div>
                   <div
                     className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                      selectedTeamId ? "block" : "hidden lg:block"
+                      selectedTeamId ? 'block' : 'hidden lg:block'
                     }`}
                   >
                     <TeamEditor />
@@ -535,7 +494,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "rooms"}
+                active={currentTab === 'rooms'}
                 label="Rooms"
                 className="rooms-workspace min-h-0 flex-1 overflow-y-auto p-3 md:p-5 lg:overflow-hidden"
               >
@@ -544,22 +503,18 @@ function AppContent() {
                   <div className="rooms-layout grid grid-cols-1 gap-3 sm:gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
                     <div
                       className={`col-span-1 overflow-visible lg:col-span-4 lg:h-full lg:overflow-hidden ${
-                        selectedRoomId ? "hidden lg:block" : "block"
+                        selectedRoomId ? 'hidden lg:block' : 'block'
                       }`}
                     >
                       <RoomList />
                     </div>
                     <div
                       className={`col-span-1 overflow-visible lg:col-span-8 lg:h-full lg:overflow-hidden ${
-                        selectedRoomId ? "block" : "hidden lg:block"
+                        selectedRoomId ? 'block' : 'hidden lg:block'
                       }`}
                     >
                       <RoomEditor
-                        key={
-                          selectedRoomId === null
-                            ? "no-room"
-                            : `room:${selectedRoomId}`
-                        }
+                        key={selectedRoomId === null ? 'no-room' : `room:${selectedRoomId}`}
                       />
                     </div>
                   </div>
@@ -567,7 +522,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "schedules"}
+                active={currentTab === 'schedules'}
                 label="Schedules"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
@@ -577,7 +532,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "unconfigured-rooms"}
+                active={currentTab === 'unconfigured-rooms'}
                 label="External rooms"
                 className="min-h-0 flex-1 overflow-y-auto p-3 md:p-5"
               >
@@ -585,7 +540,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "models"}
+                active={currentTab === 'models'}
                 label="Models"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
@@ -595,7 +550,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "memory"}
+                active={currentTab === 'memory'}
                 label="Memory"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
@@ -605,7 +560,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "knowledge"}
+                active={currentTab === 'knowledge'}
                 label="Knowledge"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
@@ -615,7 +570,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "credentials"}
+                active={currentTab === 'credentials'}
                 label="Credentials"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
@@ -625,7 +580,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "voice"}
+                active={currentTab === 'voice'}
                 label="Voice"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
@@ -635,7 +590,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "integrations"}
+                active={currentTab === 'integrations'}
                 label="Tools"
                 className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
               >
@@ -645,7 +600,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "skills"}
+                active={currentTab === 'skills'}
                 label="Skills"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >
@@ -655,7 +610,7 @@ function AppContent() {
               </RoutePanel>
 
               <RoutePanel
-                active={currentTab === "settings"}
+                active={currentTab === 'settings'}
                 label="Settings"
                 className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
               >

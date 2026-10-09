@@ -33,6 +33,7 @@ const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
   // New voice keys land in Other; the Voice page renders these by hand.
   voice: ["enabled", "visible_router_echo", "stt", "intelligence"],
   calls: "*",
+  budgets: "*",
   room_defaults: ["admins"],
 };
 
