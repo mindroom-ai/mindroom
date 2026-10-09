@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from mindroom import constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.connections_sessions import ConnectionsSessionStore
 from mindroom.config.legacy_access import validate_access_migration_source
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
@@ -140,6 +141,7 @@ class _MindroomAppState:
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_runtime: ComputerRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
+    connections_sessions: ConnectionsSessionStore = field(default_factory=ConnectionsSessionStore)
     agent_cli_registry: TurnToolRegistry | None = None
     usage_export_runner: UsageExportRunner | None = None
 

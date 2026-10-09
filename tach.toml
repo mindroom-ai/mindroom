@@ -1464,6 +1464,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.api.connections_sessions",
     "mindroom.config_reload",
     "mindroom.response_activity",
     "mindroom.config.main",
@@ -1472,6 +1473,10 @@ depends_on = [
     "mindroom.event_journal_open",
     "mindroom.logging_config",
 ]
+
+[[modules]]
+path = "mindroom.api.connections_sessions"
+depends_on = []
 
 [[modules]]
 path = "mindroom.api.auth"
