@@ -4,7 +4,7 @@
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: mirror.gcr.io/library/postgres:15-alpine
     container_name: ${INSTANCE_NAME:-mindroom}-postgres
     environment:
       POSTGRES_DB: synapse
@@ -23,7 +23,7 @@ services:
       - mindroom-network
 
   redis:
-    image: redis:7-alpine
+    image: mirror.gcr.io/library/redis:7-alpine
     container_name: ${INSTANCE_NAME:-mindroom}-redis
     # deploy.py generates the password for new instances.
     # An empty one keeps authentication off for older instances whose homeserver.yaml has no Redis password.
