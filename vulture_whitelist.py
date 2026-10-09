@@ -469,3 +469,7 @@ _.validate_placeholder_env  # Pydantic field validator (src/mindroom/config/egre
 _.validate_service_names  # Pydantic field validator (src/mindroom/config/egress_broker.py)
 placeholder_env  # Pydantic field (src/mindroom/config/egress_broker.py)
 unmatched_hosts  # Pydantic field (src/mindroom/config/egress_broker.py)
+_.from_worker_target  # WorkerClaims public API (src/mindroom/egress_broker/tokens.py)
+_.to_worker_target  # WorkerClaims public API (src/mindroom/egress_broker/tokens.py)
+_.load_or_create  # TokenSigner public API (src/mindroom/egress_broker/tokens.py)
+_.mint  # TokenSigner public API (src/mindroom/egress_broker/tokens.py)
