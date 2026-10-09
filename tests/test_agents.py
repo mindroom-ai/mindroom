@@ -44,6 +44,7 @@ from mindroom.agents import (
     create_agent,
     get_agent_toolkit_names,
 )
+from mindroom.agno_compat_tool_dialect import _TOOL_DIALECT_MARKER
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -82,6 +83,7 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_dialects import resolve_tool_dialect
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -5542,3 +5544,15 @@ def test_create_agent_passes_resolved_tool_call_budget_to_agno() -> None:
         ((capped.model,), {"entity_name": "calculator"}),
         ((inheriting.model,), {"entity_name": "general"}),
     ]
+
+
+@patch("mindroom.agent_storage._ConversationSqliteDb")
+def test_create_agent_installs_tool_dialect_for_runtime_model(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """Each built agent presents its tools in the dialect of the model it runs, including a thread override."""
+    config = _test_config()
+
+    default_agent = _create_agent_for_test("shell", config)
+    override_agent = _create_agent_for_test("shell", config, active_model_name="sonnet")
+
+    assert vars(default_agent.model)[_TOOL_DIALECT_MARKER] == resolve_tool_dialect(config.models["default"]).name
+    assert vars(override_agent.model)[_TOOL_DIALECT_MARKER] == resolve_tool_dialect(config.models["sonnet"]).name

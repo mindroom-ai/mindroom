@@ -2947,6 +2947,18 @@
           "description": "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. An explicit compaction.model or compaction.fallback_model also needs its own context_window for summary generation. On vertexai_claude models it additionally enables request-time fitting that trims replayed history when a request would exceed the window",
           "title": "Context Window"
         },
+        "tool_dialect": {
+          "default": "auto",
+          "description": "Names and argument shapes of the shell and file-editing tools this model sees: claude follows Claude Code, codex follows the Codex CLI, mindroom keeps MindRoom's own; auto picks claude for Claude models and codex for OpenAI GPT and Codex models, otherwise mindroom",
+          "enum": [
+            "auto",
+            "mindroom",
+            "claude",
+            "codex"
+          ],
+          "title": "Tool Dialect",
+          "type": "string"
+        },
         "stream_idle_timeout_seconds": {
           "anyOf": [
             {

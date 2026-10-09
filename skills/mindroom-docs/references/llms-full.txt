@@ -1838,6 +1838,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; equivalent to `extra_kwargs.api_key` |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters (see [Extra Kwargs](#extra-kwargs)) |
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
+| `tool_dialect` | No | `auto` | `auto`, `mindroom`, `claude`, or `codex`; the shape of the shell and file-editing tools this model sees (see [Tool Dialect](#tool-dialect)) |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
@@ -1856,6 +1857,14 @@ A local `icon` must be a PNG, JPEG, WebP, or GIF image of at most 1 MiB inside t
 A missing, unreadable, unsupported, or out-of-directory image falls back to the client's provider icon and does not prevent startup.
 External image URLs are not fetched.
 Blank `display_name` or `icon` values count as unset.
+
+## Tool Dialect
+
+Claude and OpenAI models are trained inside their vendors' coding agents, so MindRoom shows each model the shell and file-editing tools in the shape it knows: `claude` follows Claude Code, `codex` follows the Codex CLI, and `mindroom` keeps MindRoom's own tools.
+With `auto`, models on `anthropic`, `vertexai_claude`, `bedrock_claude`, and OpenRouter `anthropic/` IDs use `claude`, GPT, o-series, and Codex models on `openai`, `azure`, `codex`, and OpenRouter `openai/` IDs use `codex`, and every other model uses `mindroom`.
+Set `tool_dialect` explicitly when the model ID does not reveal the family, such as an Azure deployment name or a Claude model behind an OpenAI-compatible endpoint.
+The dialect follows the model that answers, so switching a thread's model also switches its tools from the next reply on.
+[Execution and Coding](https://docs.mindroom.chat/tools/execution-and-coding/) lists the tool names each dialect uses.
 
 ## Configuration Examples
 

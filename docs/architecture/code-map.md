@@ -118,6 +118,9 @@ Matrix sync callback
 | `cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
 | `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
+| `tool_dialects.py` | Per-model-family tool dialects: dialect resolution, wire tool definitions, incoming-call translation, and per-request history rendering |
+| `tool_dialect_types.py` | Tool dialect and wire-function types shared by the dialect tables |
+| `agno_compat_tool_dialect.py` | Binds one tool dialect to an Agno model's tool formatting, call dispatch, and request messages |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |

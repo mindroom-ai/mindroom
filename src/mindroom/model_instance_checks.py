@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import sys
 
+OPENAI_RESPONSES_CLASS = ("agno.models.openai.responses", "OpenAIResponses")
+
 
 def isinstance_of_loaded(instance: object, *class_paths: tuple[str, str]) -> bool:
     """Return isinstance against the named classes, treating unloaded modules as no-match."""

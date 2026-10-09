@@ -16,6 +16,7 @@ from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
+from mindroom.agno_compat_tool_dialect import install_tool_dialect
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
@@ -38,6 +39,7 @@ from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_dialects import resolve_tool_dialect, wire_function_name
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -92,6 +94,7 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.tool_dialect_types import ToolDialect
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
@@ -164,11 +167,12 @@ class _AgentToolAssembly:
             dict.fromkeys(deferred.domain_name for deferred in self.deferred_toolkits if deferred.wire_function_names),
         )
 
-    @property
-    def deferred_wire_tool_names(self) -> frozenset[str]:
-        """Return deferred wire names from the final projected toolkit surface."""
+    def deferred_wire_tool_names(self, dialect: ToolDialect) -> frozenset[str]:
+        """Return deferred names as *dialect* presents them on the wire, from the final projected toolkit surface."""
         return frozenset(
-            function_name for deferred in self.deferred_toolkits for function_name in deferred.wire_function_names
+            wire_function_name(dialect, deferred.domain_name, function_name)
+            for deferred in self.deferred_toolkits
+            for function_name in deferred.wire_function_names
         )
 
 
@@ -1996,16 +2000,20 @@ def create_agent(
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
     )
     install_model_call_cap(model, entity_name=agent_name)
-    if tool_assembly.deferred_wire_tool_names:
+    tool_dialect = resolve_tool_dialect(runtime_model_config)
+    deferred_wire_tool_names = tool_assembly.deferred_wire_tool_names(tool_dialect)
+    if deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
-        install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
-        install_openai_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
+        install_claude_deferred_tool_search(model, deferred_tool_names=deferred_wire_tool_names)
+        install_openai_deferred_tool_search(model, deferred_tool_names=deferred_wire_tool_names)
+    install_tool_dialect(model, tool_dialect)
     logger.info(
         "create_agent",
         agent=agent_name,
         model_class=model.__class__.__name__,
         model_id=model.id,
-        native_deferred_tools=sorted(tool_assembly.deferred_wire_tool_names),
+        native_deferred_tools=sorted(deferred_wire_tool_names),
+        tool_dialect=tool_dialect.name,
     )
 
     workspace = agent_runtime.workspace
