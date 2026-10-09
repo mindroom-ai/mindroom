@@ -125,6 +125,39 @@ def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: P
         )
 
 
+@pytest.mark.parametrize(
+    ("tools", "missing"),
+    [(["file.read_file", "file.save_file"], r"'file\.save_file'"), (["file", "calculator"], "'calculator'")],
+)
+def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: list[str], missing: str) -> None:
+    """A named function or toolkit the caller's own function filter hides, such as during a call, stops construction."""
+    runtime = _runtime(tmp_path, tools=["file", "calculator"])
+
+    def caller_filter(function: Function) -> bool:
+        return function.name != "save_file" and function.owning_toolkit != "calculator"
+
+    with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            None,
+            persist_runtime_state=False,
+            tool_function_filter=caller_filter,
+            persona=inline_persona("P", tools),
+        )
+
+
+def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
+    """An explicit tool list loads every toolkit it names, so the deferred-tool manager is not a caller tool to name."""
+    runtime = _runtime(tmp_path, tools=[{"file": {"defer": True}}])
+
+    names = caller_toolkit_names("helper", runtime.config, delegation_depth=0)
+
+    assert "file" in names
+    assert "dynamic_tools" not in names
+
+
 def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A named toolkit that cannot be built stops construction instead of being skipped."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"])

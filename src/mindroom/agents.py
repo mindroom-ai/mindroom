@@ -1630,10 +1630,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             if persona_tools is not None:
                 # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
                 _keep_persona_functions(toolkit, tool_name, persona_tools)
-                persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
             # Function policies match on the owning toolkit, so stamp it before pruning.
             _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            if toolkit is not None and persona_tools is not None:
+                # Record what survives the caller's filters; approval capability below may still hide gated calls.
+                persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
         toolkit = apply_tool_approval_capability(
             toolkit,
             config,

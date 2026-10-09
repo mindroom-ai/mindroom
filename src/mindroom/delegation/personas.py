@@ -230,6 +230,7 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
     """Return every toolkit this agent may use, including deferred toolkits it loads on demand.
 
     Matrix room tools are listed too; a child naming one outside a Matrix room refuses to start.
+    The deferred-tool manager is not, since an explicit tool list loads every toolkit it names.
     """
     deferred = [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
     surface = visible_tool_surface(
@@ -237,7 +238,7 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
         config=config,
         loaded_tools=deferred,
         delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=True,
+        enable_dynamic_tools_manager=False,
         include_matrix_room_runtime_tools=True,
     )
     # A preset has no functions of its own; its member toolkits are listed by their own names.
