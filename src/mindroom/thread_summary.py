@@ -1144,8 +1144,18 @@ async def current_thread_summary(
     read, which always happens for threads longer than one projected page, or
     when room membership needed to authorize a human pin is still pending.
     """
-    thread_history = await _countable_thread_history(conversation_reader, room_id, thread_id)
-    if thread_history is None:
+    try:
+        thread_history = await _load_thread_history(conversation_reader, room_id, thread_id)
+    except _TruncatedThreadHistoryError:
+        return None
+    except Exception as exc:
+        # A listing reads up to 50 threads, so one warning per failed read, not a traceback.
+        logger.warning(
+            "Thread history unavailable for current summary",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
         return None
     human_sender_allowed = _human_summary_authorizer(
         client,
@@ -1171,7 +1181,7 @@ async def _countable_thread_history(
     room_id: str,
     thread_id: str,
 ) -> ThreadHistoryResult | None:
-    """Return complete thread history, or nothing when it is unavailable or a page of a longer thread.
+    """Return history an automatic pass may count, or nothing.
 
     An automatic pass moves the durable baseline on every outcome it reaches,
     so it must not run at all on a count it cannot trust. Both reasons it

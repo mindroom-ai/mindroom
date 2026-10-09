@@ -596,7 +596,7 @@ class MatrixRoomTools(Toolkit):
           This lists conversation targets; run_subagent separately lists your allowed subagents.
         - threads: List thread roots with preview, sender, timestamp, reply count, and latest activity when available.
           With include_summaries=True, each row also has summary (the current thread title, or null) and
-          summary_pinned (true when that title is pinned, so automatic summaries leave it alone); both are omitted
+          summary_pinned (true when the thread's title is pinned, so automatic summaries leave it alone); both are omitted
           when the thread's full history is unavailable. This reads every listed thread, so pass it only when needed.
           Use page_token from a previous response's next_token to paginate.
         - state: Read room state. If event_type is given, return that specific state event.
