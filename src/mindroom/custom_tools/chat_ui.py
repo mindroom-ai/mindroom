@@ -18,6 +18,7 @@ from mindroom.constants import UI_ACTION_CONTENT_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.file_access import resolve_agent_file
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
     send_message_result,
@@ -46,6 +47,8 @@ _SettingsSection = Literal[
     "about",
 ]
 _SidePanel = Literal["members", "computer"]
+
+logger = get_logger(__name__)
 
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
@@ -79,17 +82,18 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
     "open_panel": (
         "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
         "browser that browser_control drives with target='host'. The user can watch you on a real website or take "
-        "over, for example to log in. Your first browser_control call with target='host' in a conversation "
-        "already shows the user this panel; call open_panel(panel='computer') only to show it again, for example "
-        "when the user should log in or after they closed it. "
+        "over, for example to log in. Your first worker browser call in a conversation (browser_control with "
+        "target='host', or any browser_mcp function) already shows the user this panel; call "
+        "open_panel(panel='computer') only to show it again, for example when the user should log in or after "
+        "they closed it. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_computer": (
         "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
         "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
-        "example to log in. Your first browser_control call with target='host' in a conversation already shows "
-        "the user this panel; call show_computer() only to show it again, for example when the user should log in "
-        "or after they closed it."
+        "example to log in. Your first worker browser call in a conversation (browser_control with "
+        "target='host', or any browser_mcp function) already shows the user this panel; call show_computer() "
+        "only to show it again, for example when the user should log in or after they closed it."
     ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
@@ -110,8 +114,8 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
 # Lines that name another function; each is added only when every function it names is enabled.
 _SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
 _REAL_WEBSITE_HINT = (
-    "To show the user a real website, open it with browser_control, whose first call in a conversation shows the "
-    "Computer panel; a canvas cannot."
+    "To show the user a real website, open it in your worker browser, whose first call in a conversation shows "
+    "the Computer panel; a canvas cannot."
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
@@ -375,11 +379,12 @@ class ChatUITools(Toolkit):
         out watching. They can take control, for example to log in; while they have it
         your browser calls are blocked, and when they hand it back you get a message.
         Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
-        and it never opens or controls the user's own browser. Your first
-        browser_control call with target='host' in a conversation already shows the
-        user this panel; call show_computer only to show it again, for example when
-        the user should log in or after they closed it. Success means the request was
-        sent, not that the client opened the panel.
+        and it never opens or controls the user's own browser. Your first worker
+        browser call in a conversation (browser_control with target='host', or any
+        browser_mcp function) already shows the user this panel; call show_computer
+        only to show it again, for example when the user should log in or after they
+        closed it. Success means the request was sent, not that the client opened
+        the panel.
         """
         validated = self._validated_context("show_computer")
         if isinstance(validated, str):
@@ -418,9 +423,10 @@ class ChatUITools(Toolkit):
         it your browser calls are blocked, and when they hand it back you get a
         message. Opening the panel does not navigate to a URL, send a prompt to
         ChatGPT, or take control, and it never opens or controls the user's own
-        browser. Your first browser_control call with target='host' in a conversation
-        already shows the user this panel; call open_panel(panel='computer') only to
-        show it again, for example when the user should log in or after they closed it.
+        browser. Your first worker browser call in a conversation (browser_control
+        with target='host', or any browser_mcp function) already shows the user this
+        panel; call open_panel(panel='computer') only to show it again, for example
+        when the user should log in or after they closed it.
 
         panel='members' opens the Members panel, listing the people and agents in
         this room.
@@ -893,7 +899,15 @@ async def show_computer_once() -> None:
             _SHOW_COMPUTER_BODY,
             {},
         )
-        sent = json.loads(result)["status"] == "ok"
+        payload = json.loads(result)
+        sent = payload["status"] == "ok"
+        if not sent:
+            logger.warning(
+                "The worker computer notice was not delivered",
+                reason=payload.get("message"),
+                room_id=context.room_id,
+                thread_id=context.resolved_thread_id,
+            )
     finally:
         # An undelivered notice does not count, so the next browser call tries again.
         if not sent:

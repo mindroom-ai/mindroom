@@ -14,6 +14,7 @@ import nio
 import pytest
 from nio.api import RelationshipType
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
@@ -645,6 +646,35 @@ async def test_failed_announcement_is_retried(tmp_path: Path) -> None:
         await show_computer_once()
 
     assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_arguments", "undelivered", "reason"),
+    [
+        ({}, True, "Failed to send the UI action request."),
+        ({"reply_to_event_id": None}, False, "Failed to resolve Matrix thread fallback for UI action request."),
+    ],
+    ids=["delivery-failed", "thread-fallback-unresolved"],
+)
+async def test_undelivered_announcement_logs_a_warning(
+    tmp_path: Path,
+    context_arguments: dict[str, None],
+    undelivered: bool,
+    reason: str,
+) -> None:
+    """A notice that cannot be sent is logged with the reason, so the silent retries are traceable."""
+    context = _context(tmp_path, **context_arguments)
+    if undelivered:
+        context.client.room_send.return_value = object()
+
+    with tool_runtime_context(context), capture_logs() as logs:
+        await show_computer_once()
+
+    warnings = [log for log in logs if log["event"] == "The worker computer notice was not delivered"]
+    assert [(log["log_level"], log["reason"], log["room_id"], log["thread_id"]) for log in warnings] == [
+        ("warning", reason, ROOM_ID, THREAD_ID),
+    ]
 
 
 @pytest.mark.asyncio

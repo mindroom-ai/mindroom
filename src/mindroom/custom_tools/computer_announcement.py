@@ -55,11 +55,18 @@ def attach_computer_announcement(
     return toolkit
 
 
+def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:
+    # browser_control help and actions only return reference data, so they must not use up the announcement.
+    if name == "browser_control" and str(args.get("action", "")).strip().lower() in {"actions", "help"}:
+        return False
+    # Desktop browser calls stay on the primary and drive the user's own browser, not the computer.
+    return placement is None or not placement.runs_on_primary(name, args)
+
+
 def _announcement_hook(placement: SupportsPrimaryCallPlacement | None) -> Callable[..., Awaitable[object]]:
     async def announce_computer(name: str, func: Callable[..., object], args: dict[str, Any]) -> object:
         try:
-            # Desktop browser calls stay on the primary and drive the user's own browser, not the computer.
-            if placement is None or not placement.runs_on_primary(name, args):
+            if _uses_computer(name, args, placement):
                 await show_computer_once()
         except Exception:
             logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)

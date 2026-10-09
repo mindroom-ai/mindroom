@@ -10562,7 +10562,7 @@
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [],
-      "description": "Native Playwright browser tools in an isolated worker Computer",
+      "description": "Native Playwright browser tools in an isolated worker Computer. If you have chat_ui, your first call in a conversation already shows the user the Computer panel; use chat_ui.open_panel(panel='computer') only to show it again.",
       "display_name": "Browser MCP",
       "docs_url": null,
       "executes_code": false,

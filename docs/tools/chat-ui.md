@@ -52,7 +52,7 @@ A sent request returns `UI action request sent.`
 ## Show the worker browser
 
 The [`browser`](web-scraping-and-browser.md#browser) toolkit controls the agent's worker browser when routed to that worker.
-The agent's first `browser_control` call with `target="host"` in a conversation already shows the user the Computer panel.
+The agent's first worker browser call in a conversation, `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
 The agent calls `show_computer()` or `open_panel(panel="computer")` only to show the panel again, for example when the user should log in or after they closed it.
 Opening the Computer panel does not navigate or take control:
 

@@ -11,8 +11,10 @@ from agno.tools import Toolkit
 from agno.tools.function import FunctionCall
 
 import mindroom.tools  # noqa: F401
+from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import computer_announcement
@@ -22,6 +24,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.chat_ui_contract_fixture import make_chat_ui_context
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -65,6 +68,7 @@ def _agent(
                 worker_scope="user_agent",
             ),
         },
+        models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
     )
     return config, runtime_paths
 
@@ -137,7 +141,7 @@ async def test_browser_call_announces_then_runs(tmp_path: Path, announce: AsyncM
         ("desktop", {"action": "open", "target": "host"}, True),
     ],
 )
-async def test_desktop_target_does_not_announce(
+async def test_browser_call_announces_only_when_it_runs_on_the_worker(
     tmp_path: Path,
     announce: AsyncMock,
     events: list[str],
@@ -145,7 +149,7 @@ async def test_desktop_target_does_not_announce(
     arguments: dict[str, object],
     announced: bool,
 ) -> None:
-    """Calls that drive the user's desktop browser, explicitly or by default, never announce the computer."""
+    """Calls that drive the user's desktop browser, explicitly or by default, do not announce the computer."""
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
     toolkit = _attach(
         _real_browser(runtime_paths, events, default_target=default_target),
@@ -157,6 +161,25 @@ async def test_desktop_target_does_not_announce(
     assert await _call(toolkit, "browser_control", **arguments) == "browsed"
 
     assert announce.await_count == int(announced)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["help", "actions", " Help "])
+async def test_reference_actions_do_not_announce(
+    tmp_path: Path,
+    announce: AsyncMock,
+    events: list[str],
+    action: str,
+) -> None:
+    """Help and actions only return reference data, so the first real browser call still announces."""
+    config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
+    toolkit = _attach(_real_browser(runtime_paths, events, default_target="host"), "browser", config, runtime_paths)
+
+    assert await _call(toolkit, "browser_control", action=action) == "browsed"
+    announce.assert_not_awaited()
+
+    assert await _call(toolkit, "browser_control", action="open") == "browsed"
+    announce.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -274,3 +297,21 @@ async def test_announcement_hook_runs_inside_the_tool_hook_bridge(
     assert "browsing is paused" in str(result)
     announce.assert_not_awaited()
     assert events == []
+
+
+@pytest.mark.parametrize(("tools", "announces"), [(["browser", "chat_ui"], True), (["browser"], False)])
+def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
+    tmp_path: Path,
+    tools: list[str],
+    announces: bool,
+) -> None:
+    """create_agent gives a chat_ui agent's worker browser the announcement as its innermost hook, and no other agent."""
+    config, runtime_paths = _agent(tmp_path, tools)
+    config = bind_runtime_paths(config, runtime_paths)
+
+    agent = create_agent("researcher", config, runtime_paths, execution_identity=None)
+
+    browser = next(tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and tool.name == "browser")
+    hooks = browser.async_functions["browser_control"].tool_hooks or []
+    assert (hooks[-1].__name__ == "announce_computer") is announces
+    assert sum(hook.__name__ == "announce_computer" for hook in hooks) == int(announces)

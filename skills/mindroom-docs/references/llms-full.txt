@@ -7500,7 +7500,6 @@ Worker Computer gives an agent a visible, persistent Chromium browser inside its
 Use it when a user wants to see what the agent is doing in a browser, step in for logins or CAPTCHAs, or preview a web app the agent is building.
 The browser shares the worker's files with the agent's shell and file tools.
 Agents with the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit can open the panel for the user; see [Show the worker browser](https://docs.mindroom.chat/tools/chat-ui/#show-the-worker-browser) for that call.
-The first time an agent with `chat_ui` uses its worker browser in a thread, Chat shows a "View computer" notice there and opens the panel by itself under the [same conditions as other Chat UI actions](https://docs.mindroom.chat/tools/chat-ui/#what-the-user-sees).
 
 ## Requirements and opt-in
 
@@ -10840,7 +10839,7 @@ A sent request returns `UI action request sent.`
 ## Show the worker browser
 
 The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
-The agent's first `browser_control` call with `target="host"` in a conversation already shows the user the Computer panel.
+The agent's first worker browser call in a conversation, `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
 The agent calls `show_computer()` or `open_panel(panel="computer")` only to show the panel again, for example when the user should log in or after they closed it.
 Opening the Computer panel does not navigate or take control:
 
