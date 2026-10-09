@@ -33,7 +33,11 @@ if TYPE_CHECKING:
     from mindroom.worker_computer.protocol import ComputerStatus
     from mindroom.workers.models import WorkerHandle
 
-_STREAM_RECHECK_SECONDS = 25.0
+# Busy runtimes can take several seconds to finish one authorization/manager/status
+# check. Starting checks every 15 seconds and allowing each 15 seconds keeps an
+# overdue check revoking the viewer within 30 seconds of the previous check start.
+_STREAM_RECHECK_SECONDS = 15.0
+_STREAM_RECHECK_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -320,13 +324,25 @@ async def _maintain(websocket: WebSocket, session: ComputerSession, stream: asyn
     while not stream.is_set():
         started = asyncio.get_running_loop().time()
         try:
-            # A 25-second start cadence plus at most five seconds for the entire
-            # authorization/manager/status check bounds completed touches to 30s.
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(_STREAM_RECHECK_TIMEOUT_SECONDS):
                 await _checked_status(websocket, session)
         except TimeoutError:
+            logger.warning(
+                "Computer stream recheck timed out",
+                requester_id=session.target.requester_id,
+                agent_user_id=session.target.agent_user_id,
+            )
             _store(websocket.app).close(session.session_id)
             return
+        except ComputerError as error:
+            logger.info(
+                "Computer stream recheck closed the viewer",
+                requester_id=session.target.requester_id,
+                agent_user_id=session.target.agent_user_id,
+                status_code=error.status_code,
+                detail=error.detail,
+            )
+            raise
         interval = max(0, _STREAM_RECHECK_SECONDS - (asyncio.get_running_loop().time() - started))
         timeout = min(interval, max(0, session.expires_at - _store(websocket.app).clock()))
         try:
