@@ -71,7 +71,7 @@ Return each risk with evidence and a suggested test.
 ```
 
 Frontmatter accepts only `description`, which is required, and the optional `tools`, `model`, and `mode`; a missing description or any other key makes the profile invalid.
-The persona's `system_prompt` is every byte after the newline that ends the closing `---` line, and an empty body makes the profile invalid.
+The persona's `system_prompt` is the body after the closing `---` line with surrounding whitespace stripped, split by the same `parse_skill_markdown` helper workspace skills use, and an empty body makes the profile invalid.
 
 ### Discovery and limits
 
@@ -119,7 +119,7 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 - No MindRoom identity, role, instructions, date context, skills listing, knowledge description, toolkit instructions, context files, or memory text is added to the system message.
 - Tool schemas still reach the model through the provider's tool API, so the child sees every function in its tool subset with its normal description.
 - The persona's `tools` compose with the existing `tool_function_filter` through each function's owning toolkit.
-- Agno learning is off and MindRoom's automatic memory capture does not run for the child; it uses memory only through memory tools in its subset.
+- Agno learning is off and automatic memory recall is skipped, so no recalled memories enter the child's prompt; it uses memory only through memory tools in its subset, and delegated children never run automatic memory capture.
 - Session history stays on, so follow-ups see the child's earlier turns.
 - The task still arrives as the user message with the same per-turn framing delegated children receive today.
 
@@ -186,11 +186,12 @@ This removes the workflow's own agent construction, toolkit resolution, and run 
 - Participant models follow the delegate rule, any configured model alias, instead of the caller's active model only.
 - `permissions.tools` and `permissions.models` remain optional narrower caps within the spec.
 
-### Stored revision migration
+### Stored revision conversion
 
-Saved workflow revisions are rewritten once when the workflow store opens: each `ephemeral_agent` participant becomes a `subagent` participant whose `system_prompt` is rendered deterministically from its old `name`, `role`, and `instructions`, keeping `id`, `description`, `model`, and `tools`.
+Saved revisions are immutable per-file YAML documents, so the store converts legacy participants when it reads a revision instead of rewriting files: each `ephemeral_agent` participant becomes a `subagent` participant whose `system_prompt` is rendered deterministically from its old `name`, `role`, and `instructions`, keeping `id`, `description`, `model`, and `tools`.
+`update_workflow` merges its patch onto the converted spec, so every new revision is written in the current format.
 The rendered prompt differs from the prompt Agno built for the old participant, which is acceptable under the no-backward-compatibility policy.
-The migration lives in `legacy_dynamic_workflow_participants.py` beside the store, carries a `LEGACY_COMPAT` marker, and is listed in `docs/architecture/migrations.md`.
+The reader lives in `src/mindroom/dynamic_workflows/legacy_participants.py` beside the store, carries a `LEGACY_COMPAT` marker, and is listed in `docs/architecture/migrations.md`.
 A migrated revision whose tools exceed the caller's tools fails at run time with the subset error, which names the missing tools.
 
 ## Audit
@@ -213,7 +214,7 @@ The primary reads profiles only through no-follow confinement with the count and
 - `src/mindroom/delegation/state.py`, `sessions.py`, `lifecycle.py`, and `audit.py`: persona snapshot, grant-aware authorization, and record fields.
 - `src/mindroom/agents.py` and `src/mindroom/minimal_agent.py`: accept and apply a persona through the persona module.
 - `src/mindroom/custom_tools/dynamic_workflow.py`, `src/mindroom/dynamic_workflows/validation.py`, and `src/mindroom/dynamic_workflows/store.py`: new participant schema, lifecycle-based execution, and migration call.
-- `src/mindroom/dynamic_workflows/legacy_dynamic_workflow_participants.py`: the one-time stored revision migration.
+- `src/mindroom/dynamic_workflows/legacy_participants.py`: the read-time conversion of legacy participants.
 - `tach.toml`: any new dependency from `dynamic_workflows` or `custom_tools.dynamic_workflow` onto `delegation`.
 
 ## Documentation
@@ -230,7 +231,7 @@ The primary reads profiles only through no-follow confinement with the count and
 - Agent construction: the system message equals the persona prompt byte for byte, including braces; only subset functions are visible; learning is off; minimal personas present the authored prompt and the extended Bash description.
 - Delegate tool: inline and profile start, self-only enforcement, parameter conflicts, profile overrides, follow-up after a profile edit keeps the snapshot, and restart recovery keeps the persona on both delegation paths.
 - Approvals: a standard persona pauses and resumes through the existing approval tests, and a minimal persona hides gated tools.
-- Workflows: the subset error closes the tool gap, participants write delegation records, a participant reused by two steps continues one session, gated tools are rejected or hidden as specified, and the migration rewrites legacy revisions.
+- Workflows: the subset error closes the tool gap, participants write delegation records, a participant reused by two steps continues one session, gated tools are rejected or hidden as specified, and legacy revisions load, run, and update as `subagent` participants.
 - Live: run a quarantine-reader persona and a profile-based critic against at least two real providers through Matty, plus one workflow with two subagent participants.
 
 ## Non-goals
