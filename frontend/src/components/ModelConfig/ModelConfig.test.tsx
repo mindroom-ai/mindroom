@@ -1,18 +1,24 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ModelConfig } from './ModelConfig';
-import { useConfigStore } from '@/store/configStore';
-import { useConfigSchema } from '@/hooks/useConfigSchema';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ModelConfig } from "./ModelConfig";
+import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 
-vi.mock('@/store/configStore', () => ({
+vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
-vi.mock('@/hooks/useConfigSchema', () => ({
+vi.mock("@/hooks/useConfigSchema", () => ({
   useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
 }));
 
-vi.mock('@/components/ui/toaster', () => ({
+vi.mock("@/components/ui/toaster", () => ({
   toast: vi.fn(),
 }));
 
@@ -25,54 +31,54 @@ type KeyStatusResponse = {
 };
 
 function extractService(url: string): string {
-  const marker = '/api/credentials/';
+  const marker = "/api/credentials/";
   const start = url.indexOf(marker);
-  if (start === -1) return '';
+  if (start === -1) return "";
   const rest = url.slice(start + marker.length);
-  const end = rest.indexOf('/api-key');
+  const end = rest.indexOf("/api-key");
   const service = end === -1 ? rest : rest.slice(0, end);
-  const queryIndex = service.indexOf('?');
+  const queryIndex = service.indexOf("?");
   return queryIndex === -1 ? service : service.slice(0, queryIndex);
 }
 
 function selectOpenAIOption() {
   const option = screen
-    .getAllByRole('option')
-    .find(element => element.textContent?.includes('OpenAI'));
-  if (!option) throw new Error('OpenAI provider option not found');
+    .getAllByRole("option")
+    .find((element) => element.textContent?.includes("OpenAI"));
+  if (!option) throw new Error("OpenAI provider option not found");
   fireEvent.click(option);
 }
 
-describe('ModelConfig', () => {
+describe("ModelConfig", () => {
   const mockStore = {
     config: {
       models: {
-        default: { provider: 'ollama', id: 'devstral-small-2:24b' },
+        default: { provider: "ollama", id: "devstral-small-2:24b" },
         anthropic: {
-          provider: 'anthropic',
-          id: 'claude-haiku-4-5',
+          provider: "anthropic",
+          id: "claude-haiku-4-5",
           pricing: { input: 1, output: 5 },
         },
-        openrouter: { provider: 'openrouter', id: 'z-ai/glm-5.3' },
+        openrouter: { provider: "openrouter", id: "z-ai/glm-5.3" },
         openrouter_backup: {
-          provider: 'openrouter',
-          id: 'openai/gpt-5.6-terra',
+          provider: "openrouter",
+          id: "openai/gpt-5.6-terra",
         },
         openai_local: {
-          provider: 'openai',
-          id: 'gpt-5.6-terra',
-          api: 'responses',
+          provider: "openai",
+          id: "gpt-5.6-terra",
+          api: "responses",
           context_window: 16384,
-          extra_kwargs: { base_url: 'http://localhost:9292/v1' },
+          extra_kwargs: { base_url: "http://localhost:9292/v1" },
         },
       },
       agents: {},
       defaults: { markdown: true },
-      router: { model: 'default' },
+      router: { model: "default" },
     },
     updateConfigValue: vi.fn(),
     deleteModel: vi.fn(),
-    saveConfig: vi.fn().mockResolvedValue({ status: 'saved' }),
+    saveConfig: vi.fn().mockResolvedValue({ status: "saved" }),
   };
 
   let keyStatusByService: Record<string, KeyStatusResponse>;
@@ -93,18 +99,18 @@ describe('ModelConfig', () => {
     mockedUseConfigStore.mockReturnValue(mockStore);
 
     keyStatusByService = {
-      'model:openrouter_backup': {
+      "model:openrouter_backup": {
         has_key: true,
-        source: 'ui',
-        masked_key: 'sk-ob...9999',
-        api_key: 'sk-openrouter-backup-real',
+        source: "ui",
+        masked_key: "sk-ob...9999",
+        api_key: "sk-openrouter-backup-real",
       },
     };
     fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const method = init?.method || 'GET';
-      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method || "GET";
+      const url = typeof input === "string" ? input : input.toString();
 
-      if (method === 'GET' && url.includes('/api-key')) {
+      if (method === "GET" && url.includes("/api-key")) {
         const service = extractService(url);
         const payload = keyStatusByService[service] || { has_key: false };
         return {
@@ -115,218 +121,234 @@ describe('ModelConfig', () => {
 
       return {
         ok: true,
-        json: async () => ({ status: 'success' }),
+        json: async () => ({ status: "success" }),
       };
     });
 
-    Object.defineProperty(global, 'fetch', {
+    Object.defineProperty(global, "fetch", {
       value: fetchMock,
       writable: true,
       configurable: true,
     });
 
-    Object.defineProperty(globalThis, 'navigator', {
+    Object.defineProperty(globalThis, "navigator", {
       value: { clipboard: { writeText: writeTextMock } },
       writable: true,
       configurable: true,
     });
   });
 
-  it('renders configured rows', () => {
+  it("renders configured rows", () => {
     render(<ModelConfig />);
 
-    expect(screen.getByText('default')).toBeTruthy();
-    expect(screen.getByText('anthropic')).toBeTruthy();
-    expect(screen.getByText('openrouter')).toBeTruthy();
-    expect(screen.getByText('openai_local')).toBeTruthy();
+    expect(screen.getByText("default")).toBeTruthy();
+    expect(screen.getByText("anthropic")).toBeTruthy();
+    expect(screen.getByText("openrouter")).toBeTruthy();
+    expect(screen.getByText("openai_local")).toBeTruthy();
   });
 
-  it('keeps the models table horizontally scrollable', () => {
+  it("keeps the models table horizontally scrollable", () => {
     render(<ModelConfig />);
 
-    const scrollContainer = screen.getByTestId('models-table-scroll-container');
-    expect(scrollContainer).toHaveClass('overflow-x-auto');
-    expect(within(scrollContainer).getByRole('table')).toBeTruthy();
+    const scrollContainer = screen.getByTestId("models-table-scroll-container");
+    expect(scrollContainer).toHaveClass("overflow-x-auto");
+    expect(within(scrollContainer).getByRole("table")).toBeTruthy();
   });
 
-  it('shows provider keys resolved from their env-var-named service', async () => {
+  it("shows provider keys resolved from their env-var-named service", async () => {
     keyStatusByService.anthropic = {
       has_key: true,
-      credential_service: 'ANTHROPIC_API_KEY',
-      source: 'ui',
-      masked_key: 'sk-a...-key',
+      credential_service: "ANTHROPIC_API_KEY",
+      source: "ui",
+      masked_key: "sk-a...-key",
     };
     keyStatusByService.openrouter = {
       has_key: true,
-      credential_service: 'openrouter',
-      source: 'env',
-      masked_key: 'sk-o...-key',
+      credential_service: "openrouter",
+      source: "env",
+      masked_key: "sk-o...-key",
     };
 
     render(<ModelConfig />);
 
     await waitFor(() => {
-      expect(screen.getByText('Source: UI, saved as ANTHROPIC_API_KEY')).toBeTruthy();
+      expect(
+        screen.getByText("Source: UI, saved as ANTHROPIC_API_KEY"),
+      ).toBeTruthy();
     });
     expect(screen.getAllByText(/saved as/)).toHaveLength(1);
   });
 
-  it('starts inline editing when a row is clicked', () => {
+  it("starts inline editing when a row is clicked", () => {
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByText('anthropic'));
+    fireEvent.click(screen.getByText("anthropic"));
 
-    expect(screen.getByDisplayValue('anthropic')).toBeTruthy();
-    expect(screen.getByDisplayValue('claude-haiku-4-5')).toBeTruthy();
+    expect(screen.getByDisplayValue("anthropic")).toBeTruthy();
+    expect(screen.getByDisplayValue("claude-haiku-4-5")).toBeTruthy();
   });
 
-  it('saves inline name and model-id edits', async () => {
+  it("saves inline name and model-id edits", async () => {
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByText('anthropic'));
+    fireEvent.click(screen.getByText("anthropic"));
 
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
+    const row = screen.getByDisplayValue("anthropic").closest("tr");
+    if (!row) throw new Error("row not found");
 
-    fireEvent.change(within(row).getByDisplayValue('anthropic'), {
-      target: { value: 'anthropic-fast' },
+    fireEvent.change(within(row).getByDisplayValue("anthropic"), {
+      target: { value: "anthropic-fast" },
     });
-    fireEvent.change(within(row).getByDisplayValue('claude-haiku-4-5'), {
-      target: { value: 'claude-sonnet-5' },
+    fireEvent.change(within(row).getByDisplayValue("claude-haiku-4-5"), {
+      target: { value: "claude-sonnet-5" },
     });
 
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-        ['models', 'anthropic-fast'],
+        ["models", "anthropic-fast"],
         expect.objectContaining({
-          provider: 'anthropic',
-          id: 'claude-sonnet-5',
+          provider: "anthropic",
+          id: "claude-sonnet-5",
           // Budget prices are edited on the Budgets page and survive row edits.
           pricing: { input: 1, output: 5 },
-        })
+        }),
       );
-      expect(mockStore.deleteModel).toHaveBeenCalledWith('anthropic');
+      expect(mockStore.deleteModel).toHaveBeenCalledWith("anthropic");
     });
   });
 
-  it('deletes old custom credential when renaming a model', async () => {
-    keyStatusByService['model:anthropic'] = {
+  it("deletes old custom credential when renaming a model", async () => {
+    keyStatusByService["model:anthropic"] = {
       has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
+      source: "ui",
+      masked_key: "sk-an...1234",
+      api_key: "sk-anthropic-real",
     };
 
     render(<ModelConfig />);
 
     await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
     });
 
-    fireEvent.click(screen.getByText('anthropic'));
+    fireEvent.click(screen.getByText("anthropic"));
 
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
+    const row = screen.getByDisplayValue("anthropic").closest("tr");
+    if (!row) throw new Error("row not found");
 
-    fireEvent.change(within(row).getByDisplayValue('anthropic'), {
-      target: { value: 'anthropic-renamed' },
+    fireEvent.change(within(row).getByDisplayValue("anthropic"), {
+      target: { value: "anthropic-renamed" },
     });
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic-renamed/copy-from/model:anthropic',
-        { method: 'POST' }
+        "/api/credentials/model:anthropic-renamed/copy-from/model:anthropic",
+        { method: "POST" },
       );
-      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
-        method: 'DELETE',
-      });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/credentials/model:anthropic",
+        {
+          method: "DELETE",
+        },
+      );
     });
   });
 
-  it('keeps focus in model id input while typing', () => {
+  it("keeps focus in model id input while typing", () => {
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByText('anthropic'));
+    fireEvent.click(screen.getByText("anthropic"));
 
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
+    const row = screen.getByDisplayValue("anthropic").closest("tr");
+    if (!row) throw new Error("row not found");
 
-    const modelIdInput = within(row).getByDisplayValue('claude-haiku-4-5');
+    const modelIdInput = within(row).getByDisplayValue("claude-haiku-4-5");
     modelIdInput.focus();
     expect(modelIdInput).toHaveFocus();
 
     fireEvent.change(modelIdInput, {
-      target: { value: 'claude-haiku-4-5a' },
+      target: { value: "claude-haiku-4-5a" },
     });
 
-    const updatedInput = within(row).getByDisplayValue('claude-haiku-4-5a');
+    const updatedInput = within(row).getByDisplayValue("claude-haiku-4-5a");
     expect(updatedInput).toBe(modelIdInput);
     expect(updatedInput).toHaveFocus();
   });
 
-  it('shows OpenAI endpoint details and allows editing base URL', async () => {
+  it("shows OpenAI endpoint details and allows editing base URL", async () => {
     render(<ModelConfig />);
 
     expect(
       screen.getAllByText(
         (_, element) =>
-          element?.textContent?.includes('Endpoint: http://localhost:9292/v1') ?? false
-      ).length
+          element?.textContent?.includes(
+            "Endpoint: http://localhost:9292/v1",
+          ) ?? false,
+      ).length,
     ).toBeGreaterThan(0);
     expect(
       screen.getAllByText(
-        (_, element) => element?.textContent?.includes('Context window: 16,384') ?? false
-      ).length
+        (_, element) =>
+          element?.textContent?.includes("Context window: 16,384") ?? false,
+      ).length,
     ).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByText('openai_local'));
-    const row = screen.getByDisplayValue('openai_local').closest('tr');
-    if (!row) throw new Error('row not found');
+    fireEvent.click(screen.getByText("openai_local"));
+    const row = screen.getByDisplayValue("openai_local").closest("tr");
+    if (!row) throw new Error("row not found");
 
-    expect(within(row).getByDisplayValue('http://localhost:9292/v1')).toBeTruthy();
-    expect(within(row).getByDisplayValue('16384')).toBeTruthy();
+    expect(
+      within(row).getByDisplayValue("http://localhost:9292/v1"),
+    ).toBeTruthy();
+    expect(within(row).getByDisplayValue("16384")).toBeTruthy();
 
-    fireEvent.change(within(row).getByDisplayValue('http://localhost:9292/v1'), {
-      target: { value: 'http://localhost:11434/v1' },
+    fireEvent.change(
+      within(row).getByDisplayValue("http://localhost:9292/v1"),
+      {
+        target: { value: "http://localhost:11434/v1" },
+      },
+    );
+    fireEvent.change(within(row).getByDisplayValue("16384"), {
+      target: { value: "32768" },
     });
-    fireEvent.change(within(row).getByDisplayValue('16384'), {
-      target: { value: '32768' },
-    });
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-        ['models', 'openai_local'],
+        ["models", "openai_local"],
         expect.objectContaining({
-          provider: 'openai',
-          id: 'gpt-5.6-terra',
+          provider: "openai",
+          id: "gpt-5.6-terra",
           context_window: 32768,
-          api: 'responses',
-          extra_kwargs: { base_url: 'http://localhost:11434/v1' },
-        })
+          api: "responses",
+          extra_kwargs: { base_url: "http://localhost:11434/v1" },
+        }),
       );
     });
   });
 
-  it('clears OpenAI API selection when changing provider', async () => {
+  it("clears OpenAI API selection when changing provider", async () => {
     render(<ModelConfig />);
-    fireEvent.click(screen.getByText('openai_local'));
-    const row = screen.getByDisplayValue('openai_local').closest('tr');
-    if (!row) throw new Error('row not found');
+    fireEvent.click(screen.getByText("openai_local"));
+    const row = screen.getByDisplayValue("openai_local").closest("tr");
+    if (!row) throw new Error("row not found");
 
-    fireEvent.click(within(row).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name: /Anthropic/i }));
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name: /Anthropic/i }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(['models', 'openai_local'], {
-        provider: 'anthropic',
-        id: 'gpt-5.6-terra',
-        context_window: 16384,
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_local"],
+        {
+          provider: "anthropic",
+          id: "gpt-5.6-terra",
+          context_window: 16384,
+        },
+      );
     });
   });
 
@@ -341,30 +363,30 @@ describe('ModelConfig', () => {
   }
 
   function addKeyedOpenAIModel(fields: Record<string, unknown>) {
-    addModels({ keyed: { provider: 'openai', id: 'gpt-6-astra', ...fields } });
+    addModels({ keyed: { provider: "openai", id: "gpt-6-astra", ...fields } });
   }
 
   function editKeyedRow(): HTMLElement {
-    fireEvent.click(screen.getByText('keyed'));
-    const row = screen.getByDisplayValue('keyed').closest('tr');
-    if (!row) throw new Error('row not found');
+    fireEvent.click(screen.getByText("keyed"));
+    const row = screen.getByDisplayValue("keyed").closest("tr");
+    if (!row) throw new Error("row not found");
     return row;
   }
 
   function chooseProvider(row: HTMLElement, name: RegExp) {
-    fireEvent.click(within(row).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name }));
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name }));
   }
 
   async function renderWithSavedKeyedModelKey() {
-    keyStatusByService['model:keyed'] = {
+    keyStatusByService["model:keyed"] = {
       has_key: true,
-      source: 'ui',
-      masked_key: 'sk-op...1234',
+      source: "ui",
+      masked_key: "sk-op...1234",
     };
     render(<ModelConfig />);
     await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
     });
   }
 
@@ -372,482 +394,534 @@ describe('ModelConfig', () => {
     return fetchMock.mock.calls.filter(
       ([url, init]) =>
         url === `/api/credentials/${service}` &&
-        typeof init === 'object' &&
-        init?.method === 'DELETE'
+        typeof init === "object" &&
+        init?.method === "DELETE",
     );
   }
 
   it.each([
-    { api_key: 'sk-openai-config', extra_kwargs: { temperature: 0.2 } },
-    { extra_kwargs: { api_key: 'sk-openai-config', temperature: 0.2 } },
-  ])('drops config.yaml API keys when changing provider (%o)', async keyFields => {
-    addKeyedOpenAIModel(keyFields);
-    render(<ModelConfig />);
-    const row = editKeyedRow();
-    chooseProvider(row, /DeepSeek/i);
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    { api_key: "sk-openai-config", extra_kwargs: { temperature: 0.2 } },
+    { extra_kwargs: { api_key: "sk-openai-config", temperature: 0.2 } },
+  ])(
+    "drops config.yaml API keys when changing provider (%o)",
+    async (keyFields) => {
+      addKeyedOpenAIModel(keyFields);
+      render(<ModelConfig />);
+      const row = editKeyedRow();
+      chooseProvider(row, /DeepSeek/i);
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
-    await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(['models', 'keyed'], {
-        provider: 'deepseek',
-        id: 'gpt-6-astra',
-        extra_kwargs: { temperature: 0.2 },
+      await waitFor(() => {
+        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+          ["models", "keyed"],
+          {
+            provider: "deepseek",
+            id: "gpt-6-astra",
+            extra_kwargs: { temperature: 0.2 },
+          },
+        );
       });
-    });
-  });
+    },
+  );
 
-  it('clears a saved dashboard key when changing provider', async () => {
+  it("clears a saved dashboard key when changing provider", async () => {
     addKeyedOpenAIModel({});
     await renderWithSavedKeyedModelKey();
 
     const row = editKeyedRow();
     chooseProvider(row, /DeepSeek/i);
     expect(
-      within(row).getByText('Custom key will be removed on save because the provider changed.')
+      within(row).getByText(
+        "Custom key will be removed on save because the provider changed.",
+      ),
     ).toBeTruthy();
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(deleteCallsFor('model:keyed')).toHaveLength(1);
+      expect(deleteCallsFor("model:keyed")).toHaveLength(1);
     });
   });
 
   it.each([
-    { provider: /DeepSeek/i, newKey: 'paste' },
-    { provider: /DeepSeek/i, newKey: 'reuse' },
-    { provider: /Ollama/i, newKey: 'none' },
+    { provider: /DeepSeek/i, newKey: "paste" },
+    { provider: /DeepSeek/i, newKey: "reuse" },
+    { provider: /Ollama/i, newKey: "none" },
   ])(
-    'removes the old saved key once when a renamed model switches provider ($newKey)',
+    "removes the old saved key once when a renamed model switches provider ($newKey)",
     async ({ provider, newKey }) => {
       addModels({
-        keyed: { provider: 'openai', id: 'gpt-6-astra' },
-        deepseek_other: { provider: 'deepseek', id: 'deepseek-flash' },
+        keyed: { provider: "openai", id: "gpt-6-astra" },
+        deepseek_other: { provider: "deepseek", id: "deepseek-flash" },
       });
-      keyStatusByService['model:deepseek_other'] = {
+      keyStatusByService["model:deepseek_other"] = {
         has_key: true,
-        source: 'ui',
-        masked_key: 'sk-ds...0000',
+        source: "ui",
+        masked_key: "sk-ds...0000",
       };
       await renderWithSavedKeyedModelKey();
 
       const row = editKeyedRow();
-      fireEvent.change(within(row).getByDisplayValue('keyed'), {
-        target: { value: 'keyed2' },
+      fireEvent.change(within(row).getByDisplayValue("keyed"), {
+        target: { value: "keyed2" },
       });
       chooseProvider(row, provider);
-      if (newKey === 'paste') {
-        fireEvent.change(within(row).getByPlaceholderText('Paste new API key'), {
-          target: { value: 'sk-new' },
-        });
-      } else if (newKey === 'reuse') {
-        const reuseTrigger = within(row).getByText('Reuse from same provider').closest('button');
-        if (!reuseTrigger) throw new Error('reuse trigger not found');
+      if (newKey === "paste") {
+        fireEvent.change(
+          within(row).getByPlaceholderText("Paste new API key"),
+          {
+            target: { value: "sk-new" },
+          },
+        );
+      } else if (newKey === "reuse") {
+        const reuseTrigger = within(row)
+          .getByText("Reuse from same provider")
+          .closest("button");
+        if (!reuseTrigger) throw new Error("reuse trigger not found");
         fireEvent.click(reuseTrigger);
-        fireEvent.click(screen.getByRole('option', { name: /deepseek_other/i }));
+        fireEvent.click(
+          screen.getByRole("option", { name: /deepseek_other/i }),
+        );
       }
-      fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
       await waitFor(() => {
-        expect(mockStore.deleteModel).toHaveBeenCalledWith('keyed');
+        expect(mockStore.deleteModel).toHaveBeenCalledWith("keyed");
       });
-      expect(deleteCallsFor('model:keyed')).toHaveLength(1);
-    }
+      expect(deleteCallsFor("model:keyed")).toHaveLength(1);
+    },
   );
 
-  it('keeps the saved key when the provider is switched back before saving', async () => {
-    addKeyedOpenAIModel({ api_key: 'sk-openai-config' });
+  it("keeps the saved key when the provider is switched back before saving", async () => {
+    addKeyedOpenAIModel({ api_key: "sk-openai-config" });
     await renderWithSavedKeyedModelKey();
 
     const row = editKeyedRow();
     chooseProvider(row, /DeepSeek/i);
     chooseProvider(row, /OpenAI/i);
-    expect(within(row).getByText('This model keeps its saved custom key.')).toBeTruthy();
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(['models', 'keyed'], {
-        provider: 'openai',
-        id: 'gpt-6-astra',
-        api_key: 'sk-openai-config',
-      });
-    });
-    expect(deleteCallsFor('model:keyed')).toHaveLength(0);
-  });
-
-  it('shows no key status for providers that authenticate without a key', async () => {
-    addModels({
-      codex_model: { provider: 'codex', id: 'gpt-6-astra' },
-      vertex_model: { provider: 'vertexai_claude', id: 'claude-opus-5' },
-    });
-    keyStatusByService['vertexai_claude'] = { has_key: true, source: 'env' };
-    render(<ModelConfig />);
-
-    for (const modelName of ['codex_model', 'vertex_model']) {
-      const row = screen.getByText(modelName).closest('tr');
-      if (!row) throw new Error('row not found');
-      expect(within(row).getByText('N/A')).toBeTruthy();
-    }
-    fireEvent.click(screen.getByText('vertex_model'));
-    const row = screen.getByDisplayValue('vertex_model').closest('tr');
-    if (!row) throw new Error('row not found');
-    expect(within(row).getByText(/^No key needed for/)).toBeTruthy();
-    expect(within(row).queryByPlaceholderText('Paste new API key')).toBeNull();
-  });
-
-  it('labels a config.yaml key without offering to copy it', async () => {
-    addKeyedOpenAIModel({ api_key: 'sk-openai-config' });
-    keyStatusByService['openai'] = {
-      has_key: true,
-      source: 'env',
-      masked_key: 'sk-en...5678',
-    };
-    render(<ModelConfig />);
-
-    const row = screen.getByText('keyed').closest('tr');
-    const providerKeyRow = screen.getByText('openai_local').closest('tr');
-    if (!row || !providerKeyRow) throw new Error('row not found');
-    await waitFor(() => {
-      expect(within(providerKeyRow).getByText('Provider key')).toBeTruthy();
-    });
-    expect(within(row).getByText('Config key')).toBeTruthy();
-    expect(within(row).queryByText('Provider key')).toBeNull();
-    expect(within(row).queryByTitle('Copy API key')).toBeNull();
-  });
-
-  it('changes provider with inline dropdown', async () => {
-    render(<ModelConfig />);
-
-    fireEvent.click(screen.getByText('openrouter'));
-
-    const row = screen.getByDisplayValue('openrouter').closest('tr');
-    if (!row) throw new Error('row not found');
-
-    fireEvent.click(within(row).getAllByRole('combobox')[0]);
-    fireEvent.click(screen.getByRole('option', { name: /OpenAI/i }));
-
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    expect(
+      within(row).getByText("This model keeps its saved custom key."),
+    ).toBeTruthy();
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-        ['models', 'openrouter'],
-        expect.objectContaining({ provider: 'openai' })
+        ["models", "keyed"],
+        {
+          provider: "openai",
+          id: "gpt-6-astra",
+          api_key: "sk-openai-config",
+        },
+      );
+    });
+    expect(deleteCallsFor("model:keyed")).toHaveLength(0);
+  });
+
+  it("shows no key status for providers that authenticate without a key", async () => {
+    addModels({
+      codex_model: { provider: "codex", id: "gpt-6-astra" },
+      vertex_model: { provider: "vertexai_claude", id: "claude-opus-5" },
+    });
+    keyStatusByService["vertexai_claude"] = { has_key: true, source: "env" };
+    render(<ModelConfig />);
+
+    for (const modelName of ["codex_model", "vertex_model"]) {
+      const row = screen.getByText(modelName).closest("tr");
+      if (!row) throw new Error("row not found");
+      expect(within(row).getByText("N/A")).toBeTruthy();
+    }
+    fireEvent.click(screen.getByText("vertex_model"));
+    const row = screen.getByDisplayValue("vertex_model").closest("tr");
+    if (!row) throw new Error("row not found");
+    expect(within(row).getByText(/^No key needed for/)).toBeTruthy();
+    expect(within(row).queryByPlaceholderText("Paste new API key")).toBeNull();
+  });
+
+  it("labels a config.yaml key without offering to copy it", async () => {
+    addKeyedOpenAIModel({ api_key: "sk-openai-config" });
+    keyStatusByService["openai"] = {
+      has_key: true,
+      source: "env",
+      masked_key: "sk-en...5678",
+    };
+    render(<ModelConfig />);
+
+    const row = screen.getByText("keyed").closest("tr");
+    const providerKeyRow = screen.getByText("openai_local").closest("tr");
+    if (!row || !providerKeyRow) throw new Error("row not found");
+    await waitFor(() => {
+      expect(within(providerKeyRow).getByText("Provider key")).toBeTruthy();
+    });
+    expect(within(row).getByText("Config key")).toBeTruthy();
+    expect(within(row).queryByText("Provider key")).toBeNull();
+    expect(within(row).queryByTitle("Copy API key")).toBeNull();
+  });
+
+  it("changes provider with inline dropdown", async () => {
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByText("openrouter"));
+
+    const row = screen.getByDisplayValue("openrouter").closest("tr");
+    if (!row) throw new Error("row not found");
+
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name: /OpenAI/i }));
+
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openrouter"],
+        expect.objectContaining({ provider: "openai" }),
       );
     });
   });
 
-  it('shows API key source labels', async () => {
-    keyStatusByService['model:anthropic'] = {
+  it("shows API key source labels", async () => {
+    keyStatusByService["model:anthropic"] = {
       has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
+      source: "ui",
+      masked_key: "sk-an...1234",
+      api_key: "sk-anthropic-real",
     };
-    keyStatusByService['openrouter'] = {
+    keyStatusByService["openrouter"] = {
       has_key: true,
-      source: 'env',
-      masked_key: 'sk-en...5678',
-      api_key: 'sk-openrouter-env-real',
+      source: "env",
+      masked_key: "sk-en...5678",
+      api_key: "sk-openrouter-env-real",
     };
 
     render(<ModelConfig />);
 
     await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
       expect(
-        screen.getAllByText((_, element) => element?.textContent?.includes('Source: .env') ?? false)
-          .length
+        screen.getAllByText(
+          (_, element) =>
+            element?.textContent?.includes("Source: .env") ?? false,
+        ).length,
       ).toBeGreaterThan(0);
     });
   });
 
-  it('reuses key from another same-provider model', async () => {
+  it("reuses key from another same-provider model", async () => {
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByText('openrouter'));
+    fireEvent.click(screen.getByText("openrouter"));
 
-    const row = screen.getByDisplayValue('openrouter').closest('tr');
-    if (!row) throw new Error('row not found');
+    const row = screen.getByDisplayValue("openrouter").closest("tr");
+    if (!row) throw new Error("row not found");
 
     await waitFor(() => {
-      expect(within(row).getByText('Reuse from same provider')).toBeTruthy();
+      expect(within(row).getByText("Reuse from same provider")).toBeTruthy();
     });
 
-    const reuseTrigger = within(row).getByText('Reuse from same provider').closest('button');
-    if (!reuseTrigger) throw new Error('reuse trigger not found');
+    const reuseTrigger = within(row)
+      .getByText("Reuse from same provider")
+      .closest("button");
+    if (!reuseTrigger) throw new Error("reuse trigger not found");
 
     fireEvent.click(reuseTrigger);
-    fireEvent.click(screen.getByRole('option', { name: /openrouter_backup/i }));
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole("option", { name: /openrouter_backup/i }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:openrouter/copy-from/model:openrouter_backup',
-        { method: 'POST' }
+        "/api/credentials/model:openrouter/copy-from/model:openrouter_backup",
+        { method: "POST" },
       );
     });
   });
 
-  it('copies API key via copy button', async () => {
-    keyStatusByService['model:anthropic'] = {
+  it("copies API key via copy button", async () => {
+    keyStatusByService["model:anthropic"] = {
       has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
+      source: "ui",
+      masked_key: "sk-an...1234",
+      api_key: "sk-anthropic-real",
     };
 
     render(<ModelConfig />);
 
-    const row = screen.getByText('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
+    const row = screen.getByText("anthropic").closest("tr");
+    if (!row) throw new Error("row not found");
 
     await waitFor(() => {
-      expect(within(row).getByTitle('Copy API key')).toBeTruthy();
+      expect(within(row).getByTitle("Copy API key")).toBeTruthy();
     });
 
-    fireEvent.click(within(row).getByTitle('Copy API key'));
+    fireEvent.click(within(row).getByTitle("Copy API key"));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true'
+        "/api/credentials/model:anthropic/api-key?key_name=api_key&include_value=true",
       );
-      expect(writeTextMock).toHaveBeenCalledWith('sk-anthropic-real');
+      expect(writeTextMock).toHaveBeenCalledWith("sk-anthropic-real");
     });
   });
 
-  it('adds a model using the top add row', async () => {
+  it("adds a model using the top add row", async () => {
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add model/i }));
 
     expect(
       screen.getByText(
-        'No custom key provided. This model will use the provider key (for example from .env) when available.'
-      )
+        "No custom key provided. This model will use the provider key (for example from .env) when available.",
+      ),
     ).toBeTruthy();
 
-    fireEvent.change(screen.getByPlaceholderText('model name'), {
-      target: { value: 'new-model' },
+    fireEvent.change(screen.getByPlaceholderText("model name"), {
+      target: { value: "new-model" },
     });
-    fireEvent.change(screen.getByPlaceholderText('provider model id'), {
-      target: { value: 'openai/gpt-5.6-terra' },
+    fireEvent.change(screen.getByPlaceholderText("provider model id"), {
+      target: { value: "openai/gpt-5.6-terra" },
     });
-    fireEvent.change(screen.getByPlaceholderText('optional context window'), {
-      target: { value: '200000' },
+    fireEvent.change(screen.getByPlaceholderText("optional context window"), {
+      target: { value: "200000" },
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(['models', 'new-model'], {
-        provider: 'openrouter',
-        id: 'openai/gpt-5.6-terra',
-        context_window: 200000,
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "new-model"],
+        {
+          provider: "openrouter",
+          id: "openai/gpt-5.6-terra",
+          context_window: 200000,
+        },
+      );
     });
   });
 
-  it('accepts empty base URL for OpenAI and uses default endpoint', async () => {
+  it("accepts empty base URL for OpenAI and uses default endpoint", async () => {
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
-    const addRow = screen.getByPlaceholderText('model name').closest('tr');
-    if (!addRow) throw new Error('add row not found');
+    fireEvent.click(screen.getByRole("button", { name: /add model/i }));
+    const addRow = screen.getByPlaceholderText("model name").closest("tr");
+    if (!addRow) throw new Error("add row not found");
 
-    fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
+    fireEvent.click(within(addRow).getAllByRole("combobox")[0]);
     selectOpenAIOption();
 
-    fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
-      target: { value: 'openai_default' },
+    fireEvent.change(within(addRow).getByPlaceholderText("model name"), {
+      target: { value: "openai_default" },
     });
-    fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
-      target: { value: 'gpt-5.6-terra' },
+    fireEvent.change(within(addRow).getByPlaceholderText("provider model id"), {
+      target: { value: "gpt-5.6-terra" },
     });
 
-    expect(within(addRow).getByPlaceholderText('https://api.openai.com/v1')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+    expect(
+      within(addRow).getByPlaceholderText("https://api.openai.com/v1"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(['models', 'openai_default'], {
-        provider: 'openai',
-        id: 'gpt-5.6-terra',
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_default"],
+        {
+          provider: "openai",
+          id: "gpt-5.6-terra",
+        },
+      );
     });
   });
 
-  it('validates custom OpenAI base URL on add', async () => {
-    const { toast } = await import('@/components/ui/toaster');
+  it("validates custom OpenAI base URL on add", async () => {
+    const { toast } = await import("@/components/ui/toaster");
 
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
-    const addRow = screen.getByPlaceholderText('model name').closest('tr');
-    if (!addRow) throw new Error('add row not found');
+    fireEvent.click(screen.getByRole("button", { name: /add model/i }));
+    const addRow = screen.getByPlaceholderText("model name").closest("tr");
+    if (!addRow) throw new Error("add row not found");
 
-    fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
+    fireEvent.click(within(addRow).getAllByRole("combobox")[0]);
     selectOpenAIOption();
 
-    fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
-      target: { value: 'openai_compat' },
+    fireEvent.change(within(addRow).getByPlaceholderText("model name"), {
+      target: { value: "openai_compat" },
     });
-    fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
-      target: { value: 'gpt-5.6-terra' },
+    fireEvent.change(within(addRow).getByPlaceholderText("provider model id"), {
+      target: { value: "gpt-5.6-terra" },
     });
-    fireEvent.change(within(addRow).getByPlaceholderText('https://api.openai.com/v1'), {
-      target: { value: 'not-a-url' },
-    });
+    fireEvent.change(
+      within(addRow).getByPlaceholderText("https://api.openai.com/v1"),
+      {
+        target: { value: "not-a-url" },
+      },
+    );
 
-    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
       expect(toast).toHaveBeenCalledWith(
         expect.objectContaining({
-          title: 'Error',
-          description: 'Base URL must be a valid http(s) URL',
-          variant: 'destructive',
-        })
+          title: "Error",
+          description: "Base URL must be a valid http(s) URL",
+          variant: "destructive",
+        }),
       );
     });
   });
 
-  it('saves custom OpenAI base URL on add', async () => {
+  it("saves custom OpenAI base URL on add", async () => {
     render(<ModelConfig />);
 
-    fireEvent.click(screen.getByRole('button', { name: /add model/i }));
-    const addRow = screen.getByPlaceholderText('model name').closest('tr');
-    if (!addRow) throw new Error('add row not found');
+    fireEvent.click(screen.getByRole("button", { name: /add model/i }));
+    const addRow = screen.getByPlaceholderText("model name").closest("tr");
+    if (!addRow) throw new Error("add row not found");
 
-    fireEvent.click(within(addRow).getAllByRole('combobox')[0]);
+    fireEvent.click(within(addRow).getAllByRole("combobox")[0]);
     selectOpenAIOption();
 
-    fireEvent.change(within(addRow).getByPlaceholderText('model name'), {
-      target: { value: 'openai_compat' },
+    fireEvent.change(within(addRow).getByPlaceholderText("model name"), {
+      target: { value: "openai_compat" },
     });
-    fireEvent.change(within(addRow).getByPlaceholderText('provider model id'), {
-      target: { value: 'gpt-5.6-terra' },
+    fireEvent.change(within(addRow).getByPlaceholderText("provider model id"), {
+      target: { value: "gpt-5.6-terra" },
     });
-    fireEvent.change(within(addRow).getByPlaceholderText('https://api.openai.com/v1'), {
-      target: { value: 'http://localhost:9292/v1' },
-    });
+    fireEvent.change(
+      within(addRow).getByPlaceholderText("https://api.openai.com/v1"),
+      {
+        target: { value: "http://localhost:9292/v1" },
+      },
+    );
 
-    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
-      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(['models', 'openai_compat'], {
-        provider: 'openai',
-        id: 'gpt-5.6-terra',
-        extra_kwargs: { base_url: 'http://localhost:9292/v1' },
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_compat"],
+        {
+          provider: "openai",
+          id: "gpt-5.6-terra",
+          extra_kwargs: { base_url: "http://localhost:9292/v1" },
+        },
+      );
     });
   });
 
-  it('shows immediate feedback when clearing a custom key', async () => {
-    keyStatusByService['model:anthropic'] = {
+  it("shows immediate feedback when clearing a custom key", async () => {
+    keyStatusByService["model:anthropic"] = {
       has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
+      source: "ui",
+      masked_key: "sk-an...1234",
+      api_key: "sk-anthropic-real",
     };
 
     render(<ModelConfig />);
 
     await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
     });
 
-    fireEvent.click(screen.getByText('anthropic'));
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
+    fireEvent.click(screen.getByText("anthropic"));
+    const row = screen.getByDisplayValue("anthropic").closest("tr");
+    if (!row) throw new Error("row not found");
 
-    fireEvent.click(within(row).getByRole('button', { name: 'Clear custom key' }));
+    fireEvent.click(
+      within(row).getByRole("button", { name: "Clear custom key" }),
+    );
 
-    expect(within(row).getByText('Custom key will be removed on save.')).toBeTruthy();
-    expect(within(row).getByRole('button', { name: 'Undo clear key' })).toBeTruthy();
+    expect(
+      within(row).getByText("Custom key will be removed on save."),
+    ).toBeTruthy();
+    expect(
+      within(row).getByRole("button", { name: "Undo clear key" }),
+    ).toBeTruthy();
 
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith('/api/credentials/model:anthropic', {
-        method: 'DELETE',
-      });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/credentials/model:anthropic",
+        {
+          method: "DELETE",
+        },
+      );
     });
   });
 
-  it('deletes custom key only once when clearing key and renaming model', async () => {
-    keyStatusByService['model:anthropic'] = {
+  it("deletes custom key only once when clearing key and renaming model", async () => {
+    keyStatusByService["model:anthropic"] = {
       has_key: true,
-      source: 'ui',
-      masked_key: 'sk-an...1234',
-      api_key: 'sk-anthropic-real',
+      source: "ui",
+      masked_key: "sk-an...1234",
+      api_key: "sk-anthropic-real",
     };
 
     render(<ModelConfig />);
 
     await waitFor(() => {
-      expect(screen.getAllByText('Source: UI').length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Source: UI").length).toBeGreaterThan(0);
     });
 
-    fireEvent.click(screen.getByText('anthropic'));
-    const row = screen.getByDisplayValue('anthropic').closest('tr');
-    if (!row) throw new Error('row not found');
+    fireEvent.click(screen.getByText("anthropic"));
+    const row = screen.getByDisplayValue("anthropic").closest("tr");
+    if (!row) throw new Error("row not found");
 
-    fireEvent.change(within(row).getByDisplayValue('anthropic'), {
-      target: { value: 'anthropic-cleared' },
+    fireEvent.change(within(row).getByDisplayValue("anthropic"), {
+      target: { value: "anthropic-cleared" },
     });
-    fireEvent.click(within(row).getByRole('button', { name: 'Clear custom key' }));
-    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+    fireEvent.click(
+      within(row).getByRole("button", { name: "Clear custom key" }),
+    );
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       const deleteCalls = fetchMock.mock.calls.filter(
         ([url, init]) =>
-          url === '/api/credentials/model:anthropic' &&
-          typeof init === 'object' &&
-          init?.method === 'DELETE'
+          url === "/api/credentials/model:anthropic" &&
+          typeof init === "object" &&
+          init?.method === "DELETE",
       );
       expect(deleteCalls).toHaveLength(1);
       expect(fetchMock).not.toHaveBeenCalledWith(
-        '/api/credentials/model:anthropic-cleared/copy-from/model:anthropic',
-        { method: 'POST' }
+        "/api/credentials/model:anthropic-cleared/copy-from/model:anthropic",
+        { method: "POST" },
       );
     });
   });
 
-  it('deletes non-default models and keeps default protected', () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  it("deletes non-default models and keeps default protected", () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<ModelConfig />);
 
-    const nonDefaultRow = screen.getByText('openrouter').closest('tr');
-    const defaultRow = screen.getByText('default').closest('tr');
-    if (!nonDefaultRow || !defaultRow) throw new Error('rows not found');
+    const nonDefaultRow = screen.getByText("openrouter").closest("tr");
+    const defaultRow = screen.getByText("default").closest("tr");
+    if (!nonDefaultRow || !defaultRow) throw new Error("rows not found");
 
-    fireEvent.click(within(nonDefaultRow).getByTitle('Delete'));
-    expect(mockStore.deleteModel).toHaveBeenCalledWith('openrouter');
+    fireEvent.click(within(nonDefaultRow).getByTitle("Delete"));
+    expect(mockStore.deleteModel).toHaveBeenCalledWith("openrouter");
 
-    expect(within(defaultRow).queryByTitle('Delete')).toBeNull();
+    expect(within(defaultRow).queryByTitle("Delete")).toBeNull();
 
     confirmSpy.mockRestore();
   });
 
-  it('shows a toast when Save All Changes is superseded by newer draft edits', async () => {
-    mockStore.saveConfig.mockResolvedValueOnce({ status: 'stale' });
+  it("shows a toast when Save All Changes is superseded by newer draft edits", async () => {
+    mockStore.saveConfig.mockResolvedValueOnce({ status: "stale" });
     const user = userEvent.setup();
 
     render(<ModelConfig />);
 
-    await user.click(screen.getByRole('button', { name: 'Save All Changes' }));
+    await user.click(screen.getByRole("button", { name: "Save All Changes" }));
 
-    const { toast } = await import('@/components/ui/toaster');
+    const { toast } = await import("@/components/ui/toaster");
     await waitFor(() => {
       expect(mockStore.saveConfig).toHaveBeenCalledTimes(1);
       expect(toast).toHaveBeenCalledWith({
-        title: 'Save Failed',
-        description: 'Save was superseded by newer draft edits.',
-        variant: 'destructive',
+        title: "Save Failed",
+        description: "Save was superseded by newer draft edits.",
+        variant: "destructive",
       });
     });
   });
 
-  it('edits model fields the table does not render through More settings', () => {
+  it("edits model fields the table does not render through More settings", () => {
     vi.mocked(useConfigStore).mockReturnValue({
       ...mockStore,
       agents: [],
@@ -856,17 +930,17 @@ describe('ModelConfig', () => {
     } as never);
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: {
-        type: 'object',
+        type: "object",
         properties: {},
         $defs: {
           ModelConfig: {
-            type: 'object',
+            type: "object",
             properties: {
-              provider: { type: 'string' },
+              provider: { type: "string" },
               host: {
-                anyOf: [{ type: 'string' }, { type: 'null' }],
+                anyOf: [{ type: "string" }, { type: "null" }],
                 default: null,
-                description: 'Optional host URL (e.g., for Ollama)',
+                description: "Optional host URL (e.g., for Ollama)",
               },
             },
           },
@@ -877,19 +951,21 @@ describe('ModelConfig', () => {
     });
 
     render(<ModelConfig />);
-    fireEvent.click(screen.getByText('default'));
-    fireEvent.click(screen.getByRole('button', { name: /More settings for default/ }));
-    fireEvent.change(screen.getByLabelText('Host'), {
-      target: { value: 'http://ollama:11434' },
+    fireEvent.click(screen.getByText("default"));
+    fireEvent.click(
+      screen.getByRole("button", { name: /More settings for default/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Host"), {
+      target: { value: "http://ollama:11434" },
     });
 
     expect(mockStore.updateConfigValue).toHaveBeenLastCalledWith(
-      ['models', 'default', 'host'],
-      'http://ollama:11434'
+      ["models", "default", "host"],
+      "http://ollama:11434",
     );
   });
 
-  it('hides More settings fields that saving the row drops for its provider', () => {
+  it("hides More settings fields that saving the row drops for its provider", () => {
     vi.mocked(useConfigStore).mockReturnValue({
       ...mockStore,
       agents: [],
@@ -898,22 +974,22 @@ describe('ModelConfig', () => {
     } as never);
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: {
-        type: 'object',
+        type: "object",
         properties: {},
         $defs: {
           ModelConfig: {
-            type: 'object',
+            type: "object",
             properties: {
-              provider: { type: 'string' },
+              provider: { type: "string" },
               api: {
-                anyOf: [{ type: 'string' }, { type: 'null' }],
+                anyOf: [{ type: "string" }, { type: "null" }],
                 default: null,
               },
               host: {
-                anyOf: [{ type: 'string' }, { type: 'null' }],
+                anyOf: [{ type: "string" }, { type: "null" }],
                 default: null,
               },
-              extra_kwargs: { anyOf: [{ type: 'object' }, { type: 'null' }] },
+              extra_kwargs: { anyOf: [{ type: "object" }, { type: "null" }] },
             },
           },
         },
@@ -923,21 +999,21 @@ describe('ModelConfig', () => {
     });
 
     render(<ModelConfig />);
-    fireEvent.click(screen.getByText('openai_local'));
+    fireEvent.click(screen.getByText("openai_local"));
     expect(
-      screen.getByRole('button', { name: /More settings for openai_local/ })
-    ).toHaveTextContent('API, Extra kwargs');
+      screen.getByRole("button", { name: /More settings for openai_local/ }),
+    ).toHaveTextContent("API, Extra kwargs");
 
-    const row = screen.getByDisplayValue('openai_local').closest('tr');
-    if (!row) throw new Error('row not found');
-    fireEvent.click(within(row).getByRole('button', { name: 'Cancel' }));
-    fireEvent.click(screen.getByText('default'));
-    expect(screen.getByRole('button', { name: /More settings for default/ })).toHaveTextContent(
-      'Host, Extra kwargs'
-    );
+    const row = screen.getByDisplayValue("openai_local").closest("tr");
+    if (!row) throw new Error("row not found");
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByText("default"));
+    expect(
+      screen.getByRole("button", { name: /More settings for default/ }),
+    ).toHaveTextContent("Host, Extra kwargs");
   });
 
-  describe('while More settings edit the model being edited', () => {
+  describe("while More settings edit the model being edited", () => {
     const withEditedExtraKwargs = () => ({
       ...mockStore,
       config: {
@@ -947,7 +1023,7 @@ describe('ModelConfig', () => {
           openai_local: {
             ...mockStore.config.models.openai_local,
             extra_kwargs: {
-              base_url: 'http://proxy:8080/v1',
+              base_url: "http://proxy:8080/v1",
               temperature: 0.2,
             },
           },
@@ -957,31 +1033,33 @@ describe('ModelConfig', () => {
 
     it("keeps the More settings base URL when the row's Base URL is untouched", async () => {
       const { rerender } = render(<ModelConfig />);
-      fireEvent.click(screen.getByText('openai_local'));
-      vi.mocked(useConfigStore).mockReturnValue(withEditedExtraKwargs() as never);
+      fireEvent.click(screen.getByText("openai_local"));
+      vi.mocked(useConfigStore).mockReturnValue(
+        withEditedExtraKwargs() as never,
+      );
       rerender(<ModelConfig />);
 
-      const row = screen.getByDisplayValue('openai_local').closest('tr');
-      if (!row) throw new Error('row not found');
-      fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
       await waitFor(() => {
         expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
-          ['models', 'openai_local'],
+          ["models", "openai_local"],
           expect.objectContaining({
             extra_kwargs: {
-              base_url: 'http://proxy:8080/v1',
+              base_url: "http://proxy:8080/v1",
               temperature: 0.2,
             },
-          })
+          }),
         );
       });
     });
 
-    it('reverts only the More settings edits made since the last save', () => {
+    it("reverts only the More settings edits made since the last save", () => {
       const updateConfigValue = vi.fn();
       const { rerender } = render(<ModelConfig />);
-      fireEvent.click(screen.getByText('openai_local'));
+      fireEvent.click(screen.getByText("openai_local"));
       // A save committed the edited model, whatever its result status, and
       // a later edit changed it again.
       const committed = withEditedExtraKwargs().config;
@@ -992,7 +1070,7 @@ describe('ModelConfig', () => {
           openai_local: {
             ...committed.models.openai_local,
             extra_kwargs: {
-              base_url: 'http://proxy:8080/v1',
+              base_url: "http://proxy:8080/v1",
               temperature: 0.5,
             },
           },
@@ -1006,58 +1084,58 @@ describe('ModelConfig', () => {
       } as never);
       rerender(<ModelConfig />);
 
-      const row = screen.getByDisplayValue('openai_local').closest('tr');
-      if (!row) throw new Error('row not found');
-      fireEvent.click(within(row).getByRole('button', { name: 'Cancel' }));
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
       expect(updateConfigValue).toHaveBeenCalledWith(
-        ['models', 'openai_local'],
-        committed.models.openai_local
+        ["models", "openai_local"],
+        committed.models.openai_local,
       );
     });
 
     it("keeps the edited row when another row's Edit button is clicked", async () => {
       const updateConfigValue = vi.fn();
       const { rerender } = render(<ModelConfig />);
-      fireEvent.click(screen.getByText('openai_local'));
+      fireEvent.click(screen.getByText("openai_local"));
       vi.mocked(useConfigStore).mockReturnValue({
         ...withEditedExtraKwargs(),
         updateConfigValue,
       } as never);
       rerender(<ModelConfig />);
 
-      fireEvent.click(screen.getAllByTitle('Edit')[0]);
-      const { toast } = await import('@/components/ui/toaster');
+      fireEvent.click(screen.getAllByTitle("Edit")[0]);
+      const { toast } = await import("@/components/ui/toaster");
       expect(toast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'Finish current edit first' })
+        expect.objectContaining({ title: "Finish current edit first" }),
       );
 
-      const row = screen.getByDisplayValue('openai_local').closest('tr');
-      if (!row) throw new Error('row not found');
-      fireEvent.click(within(row).getByRole('button', { name: 'Cancel' }));
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
       expect(updateConfigValue).toHaveBeenCalledWith(
-        ['models', 'openai_local'],
-        mockStore.config.models.openai_local
+        ["models", "openai_local"],
+        mockStore.config.models.openai_local,
       );
     });
 
-    it('reverts More settings edits when the row edit is cancelled', () => {
+    it("reverts More settings edits when the row edit is cancelled", () => {
       const updateConfigValue = vi.fn();
       const { rerender } = render(<ModelConfig />);
-      fireEvent.click(screen.getByText('openai_local'));
+      fireEvent.click(screen.getByText("openai_local"));
       vi.mocked(useConfigStore).mockReturnValue({
         ...withEditedExtraKwargs(),
         updateConfigValue,
       } as never);
       rerender(<ModelConfig />);
 
-      const row = screen.getByDisplayValue('openai_local').closest('tr');
-      if (!row) throw new Error('row not found');
-      fireEvent.click(within(row).getByRole('button', { name: 'Cancel' }));
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
       expect(updateConfigValue).toHaveBeenCalledWith(
-        ['models', 'openai_local'],
-        mockStore.config.models.openai_local
+        ["models", "openai_local"],
+        mockStore.config.models.openai_local,
       );
     });
   });

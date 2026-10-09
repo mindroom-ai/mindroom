@@ -248,7 +248,10 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
             runtime,
             orchestrator=SimpleNamespace(
                 agent_cli_registry=TurnToolRegistry(),
-                budgets=BudgetMonitor(runtime_paths=runtime.runtime_paths, config_provider=lambda: runtime.config),
+                budgets=BudgetMonitor(
+                    runtime_paths=runtime.runtime_paths,
+                    config_provider=lambda config=runtime.config: config,
+                ),
             ),
         )
         persist_entity_accounts(runtime.config, runtime.runtime_paths)

@@ -28,7 +28,7 @@ _MIN_SCAN_INTERVAL_SECONDS = 30.0
 _TICK_SECONDS = 300.0
 
 
-def budget_limit_usd(config: Config, user_id: str, runtime_paths: RuntimePaths) -> float | None:
+def _budget_limit_usd(config: Config, user_id: str, runtime_paths: RuntimePaths) -> float | None:
     """Return the requester's monthly cap in USD, or None when budgets are off or the user is uncapped."""
     budgets = config.budgets
     if budgets is None:
@@ -61,11 +61,11 @@ def budget_model(
         return model_name
     if not is_human_requester_id(requester_id, config, runtime_paths):
         return model_name
-    limit = budget_limit_usd(config, requester_id, runtime_paths)
+    limit = _budget_limit_usd(config, requester_id, runtime_paths)
     if limit is None:
         return model_name
     canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    spend = monitor.spend_usd(canonical_requester_id) if monitor is not None else 0.0
+    spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
     if spend < limit:
         return model_name
     logger.info(
@@ -80,7 +80,7 @@ def budget_model(
 
 
 @dataclass(frozen=True, slots=True)
-class BudgetUserStatus:
+class _BudgetUserStatus:
     """One requester's month-to-date spend against their cap."""
 
     user_id: str
@@ -99,7 +99,7 @@ class BudgetUserStatus:
 
 
 @dataclass(frozen=True, slots=True)
-class BudgetStatus:
+class _BudgetStatus:
     """Budget settings and month-to-date spend for the dashboard."""
 
     enabled: bool
@@ -108,7 +108,7 @@ class BudgetStatus:
     snapshot: SpendSnapshot | None = None
     default_limit_usd: float | None = None
     fallback_model: str | None = None
-    users: tuple[BudgetUserStatus, ...] = ()
+    users: tuple[_BudgetUserStatus, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return the dashboard payload."""
@@ -171,16 +171,16 @@ class BudgetMonitor:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    def spend_usd(self, user_id: str) -> float:
+    def _spend_usd(self, user_id: str) -> float:
         """Return a canonical requester's month-to-date spend from the latest scan of this month."""
         snapshot = self._current_snapshot()
         return 0.0 if snapshot is None else snapshot.spend_usd.get(user_id, 0.0)
 
-    def status(self) -> BudgetStatus:
+    def status(self) -> _BudgetStatus:
         """Return budget settings with each spender's and configured user's month-to-date spend."""
         config = self.config_provider()
         if config is None or config.budgets is None:
-            return BudgetStatus(enabled=False)
+            return _BudgetStatus(enabled=False)
         period_start, period_end = month_bounds(self.clock())
         snapshot = self._current_snapshot()
         spend = dict(snapshot.spend_usd) if snapshot is not None else {}
@@ -189,17 +189,17 @@ class BudgetMonitor:
         }
         users = []
         for user_id in user_ids:
-            limit = budget_limit_usd(config, user_id, self.runtime_paths)
+            limit = _budget_limit_usd(config, user_id, self.runtime_paths)
             user_spend = spend.get(user_id, 0.0)
             users.append(
-                BudgetUserStatus(
+                _BudgetUserStatus(
                     user_id=user_id,
                     spend_usd=user_spend,
                     limit_usd=limit,
                     over_budget=limit is not None and user_spend >= limit,
                 ),
             )
-        return BudgetStatus(
+        return _BudgetStatus(
             enabled=True,
             period_start=period_start,
             period_end=period_end,

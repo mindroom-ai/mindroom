@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.budgets import monitor as monitor_module
-from mindroom.budgets.monitor import BudgetMonitor, BudgetUserStatus, budget_limit_usd, budget_model
-from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage
+from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model
+from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
@@ -55,7 +55,7 @@ def _snapshot(spend: Mapping[str, float], *, start: date = date(2026, 10, 1)) ->
         period_end=end,
         generated_at=OCTOBER,
         spend_usd=dict(spend),
-        unpriced_models=(UnpricedModelUsage(provider="Ollama", model="qwen3.8:27b", total_tokens=5),),
+        unpriced_models=(_UnpricedModelUsage(provider="Ollama", model="qwen3.8:27b", total_tokens=5),),
         scanned_sources=2,
         unavailable_sources=0,
     )
@@ -179,16 +179,16 @@ def test_budget_limit_resolves_aliases_and_defaults(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     config = _config(users={ALICE_BRIDGE: 100.0})
 
-    assert budget_limit_usd(config, ALICE, paths) == 100.0
-    assert budget_limit_usd(config, BOB, paths) == 10.0
-    assert budget_limit_usd(_config(monthly_limit_usd=None), BOB, paths) is None
-    assert budget_limit_usd(Config(), BOB, paths) is None
+    assert _budget_limit_usd(config, ALICE, paths) == 100.0
+    assert _budget_limit_usd(config, BOB, paths) == 10.0
+    assert _budget_limit_usd(_config(monthly_limit_usd=None), BOB, paths) is None
+    assert _budget_limit_usd(Config(), BOB, paths) is None
 
 
 def test_no_snapshot_yet_means_zero_spend(tmp_path: Path) -> None:
     monitor, _current = _monitor(tmp_path, _config())
 
-    assert monitor.spend_usd(ALICE) == 0.0
+    assert monitor._spend_usd(ALICE) == 0.0
     assert _decide(monitor, ALICE, "astra") == "astra"
 
 
@@ -201,7 +201,7 @@ def test_without_a_monitor_only_zero_caps_apply(tmp_path: Path) -> None:
 
 def test_disabled_budgets_never_consult_the_monitor(tmp_path: Path) -> None:
     class _Untouchable:
-        def spend_usd(self, _user_id: str) -> float:
+        def _spend_usd(self, _user_id: str) -> float:
             raise AssertionError
 
     config = _config().model_copy(update={"budgets": None})
@@ -230,7 +230,7 @@ async def test_previous_month_snapshot_counts_as_zero_after_rollover(
 
     clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
 
-    assert monitor.spend_usd(ALICE) == 0.0
+    assert monitor._spend_usd(ALICE) == 0.0
     assert _decide(monitor, ALICE, "astra") == "astra"
     scans.release.set()
     await monitor.stop()
@@ -263,7 +263,7 @@ async def test_scan_failure_keeps_previous_snapshot(tmp_path: Path, monkeypatch:
     await _until(lambda: scans.calls == 2)
     await _quiet()
 
-    assert monitor.spend_usd(ALICE) == 12.0
+    assert monitor._spend_usd(ALICE) == 12.0
     await monitor.stop()
 
 
@@ -289,9 +289,9 @@ async def test_status_lists_spenders_and_configured_users(tmp_path: Path, monkey
     status = monitor.status()
 
     assert status.users == (
-        BudgetUserStatus(user_id=ALICE, spend_usd=12.0, limit_usd=10.0, over_budget=True),
-        BudgetUserStatus(user_id=BOB, spend_usd=3.0, limit_usd=10.0, over_budget=False),
-        BudgetUserStatus(user_id="@carol:example.test", spend_usd=0.0, limit_usd=50.0, over_budget=False),
+        _BudgetUserStatus(user_id=ALICE, spend_usd=12.0, limit_usd=10.0, over_budget=True),
+        _BudgetUserStatus(user_id=BOB, spend_usd=3.0, limit_usd=10.0, over_budget=False),
+        _BudgetUserStatus(user_id="@carol:example.test", spend_usd=0.0, limit_usd=50.0, over_budget=False),
     )
     payload = status.to_dict()
     assert payload["enabled"] is True

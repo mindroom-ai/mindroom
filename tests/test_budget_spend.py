@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.budgets.pricing import price_table
-from mindroom.budgets.spend import UnpricedModelUsage, collect_monthly_spend, month_bounds
+from mindroom.budgets.spend import _UnpricedModelUsage, collect_monthly_spend, month_bounds
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
@@ -200,7 +200,7 @@ def test_spend_reports_unpriced_models_without_charging(tmp_path: Path, monkeypa
     snapshot = _spend(config, tmp_path)
 
     assert snapshot.spend_usd == {}
-    assert snapshot.unpriced_models == (UnpricedModelUsage(provider=ollama, model="qwen3.8:27b", total_tokens=1000),)
+    assert snapshot.unpriced_models == (_UnpricedModelUsage(provider=ollama, model="qwen3.8:27b", total_tokens=1000),)
 
 
 def test_spend_ignores_unattributed_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

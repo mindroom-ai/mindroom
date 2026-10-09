@@ -111,10 +111,10 @@ class _Spent:
     """Monitor stand-in that reports one month-to-date spend for every requester."""
 
     def __init__(self, spend_usd: float) -> None:
-        self._spend_usd = spend_usd
+        self._amount = spend_usd
 
-    def spend_usd(self, _user_id: str) -> float:
-        return self._spend_usd
+    def _spend_usd(self, _user_id: str) -> float:
+        return self._amount
 
 
 def _delegation_config() -> Config:

@@ -78,6 +78,10 @@ See [Models](https://docs.mindroom.chat/configuration/models/) for providers and
 
 See [Usage Tracking](https://docs.mindroom.chat/usage/#dashboard-usage-tab).
 
+### Budgets
+
+See [Budgets](https://docs.mindroom.chat/budgets/#dashboard-budgets-page).
+
 ### Memory
 
 Sets the global memory backend, embedder, file backend, and auto-flush settings; per-agent backend overrides are on the **Agents** tab.
