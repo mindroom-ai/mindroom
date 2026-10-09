@@ -242,6 +242,7 @@ class DelegateTools(Toolkit):
                 self._config,
                 delegation_depth=self._delegation_depth,
             ),
+            cap=context.persona_tools if (context := get_tool_runtime_context()) is not None else None,
         )
         if isinstance(request, str):
             return request

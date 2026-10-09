@@ -301,3 +301,85 @@ def test_update_of_legacy_revision_writes_current_format(tmp_path: Path) -> None
     [participant] = yaml.safe_load(revision.read_text())["participants"]
     assert participant["kind"] == "subagent"
     assert not {"name", "role", "instructions"} & set(participant)
+
+
+@pytest.mark.asyncio
+async def test_profile_tools_must_be_granted_by_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile's own tool list obeys a workflow's permissions.tools like an inline list."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    profile = workflow.workspace() / "subagents" / "adder.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("---\ndescription: Adds.\ntools: [calculator]\n---\nYou add.\n")
+
+    created = await workflow.create(_spec([{"id": "adder", "profile": "adder"}], tools=["file"]))
+
+    assert created["status"] == "error"
+    assert "tool 'calculator' is not granted by permissions.tools" in created["message"]
+
+
+@pytest.mark.asyncio
+async def test_participant_runs_the_profile_validated_at_run_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An earlier step that rewrites a later participant's profile cannot change how that participant runs."""
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file"])
+    rewritten = "---\ndescription: B.\ntools: []\nmodel: haiku\n---\nRewritten prompt.\n"
+    workflow = _Workflow(
+        tmp_path,
+        monkeypatch,
+        config,
+        responses=[
+            ModelResponse(
+                tool_calls=[_call("save_file", "save-1", contents=rewritten, file_name="subagents/second.md")],
+            ),
+            ModelResponse(content="Rewrote it."),
+            ModelResponse(content="Second answer."),
+        ],
+    )
+    profile = workflow.workspace() / "subagents" / "second.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("---\ndescription: B.\ntools: []\n---\nOriginal prompt.\n")
+    spec = _spec(
+        [{"id": "first", "system_prompt": "You edit files.", "tools": ["file"]}, {"id": "second", "profile": "second"}],
+    )
+    spec["workflow"] = [
+        {"id": "edit", "participant": "first", "prompt": "Rewrite the profile."},
+        {"id": "answer", "participant": "second", "prompt": "Answer."},
+    ]
+
+    run = await workflow.run(spec)
+
+    assert run["status"] == "completed", run
+    assert profile.read_text() == rewritten
+    assert workflow.model.system_prompts[-1] == "Original prompt."
+    assert workflow.models_loaded[-1] == "default"
+
+
+@pytest.mark.asyncio
+async def test_unbuildable_caller_toolkit_does_not_fail_participants_without_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller toolkit that cannot be built is skipped for a participant that names no tools."""
+    import mindroom.agents as agents_module  # noqa: PLC0415 - patched where both builders look it up
+
+    original = agents_module.build_agent_toolkit
+
+    def build(tool_name: str, *args: object, **kwargs: object) -> object:
+        if tool_name == "calculator":
+            msg = "No module named 'missing_extra'"
+            raise ImportError(msg)
+        return original(tool_name, *args, **kwargs)
+
+    workflow = _Workflow(
+        tmp_path,
+        monkeypatch,
+        _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file", "calculator"]),
+    )
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build)
+
+    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files."}]))
+
+    assert run["status"] == "completed", run
+    assert "read_file" in workflow.model.offered[0]

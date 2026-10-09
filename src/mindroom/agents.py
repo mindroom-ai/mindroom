@@ -20,7 +20,12 @@ from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, na
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
-from mindroom.delegation.personas import caller_toolkit_names, persona_disabled_toolkits, persona_function_filter
+from mindroom.delegation.personas import (
+    caller_toolkit_names,
+    persona_allows,
+    persona_disabled_toolkits,
+    persona_function_filter,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
@@ -1451,6 +1456,7 @@ def _persona_tool_policy(
     caller_filter = tool_function_filter
 
     def visible(function: Function) -> bool:
+        # Toolkit functions were already narrowed by concrete toolkit name in _assemble_agent_toolkits.
         return persona_filter(function) and (caller_filter is None or caller_filter(function))
 
     return visible, disabled_tool_names | unused, (*required_tool_names, *named)
@@ -1467,6 +1473,13 @@ def _apply_persona(agent: Agent, persona: SubagentPersona) -> None:
 
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
+
+
+def _keep_persona_functions(toolkit: Toolkit, tool_name: str, persona_tools: tuple[str, ...]) -> None:
+    """Drop the functions of one concrete toolkit that an authored persona does not name."""
+    for functions in (toolkit.functions, toolkit.async_functions):
+        for name in [name for name in functions if not persona_allows(persona_tools, tool_name, name)]:
+            del functions[name]
 
 
 def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
@@ -1495,6 +1508,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     eager_deferred_tools: bool,
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
+    persona_tools: tuple[str, ...] | None = None,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1602,7 +1616,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-            # Function policies such as a persona's tool subset match on the owning toolkit.
+            if persona_tools is not None:
+                # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
+                _keep_persona_functions(toolkit, tool_name, persona_tools)
+            # Function policies match on the owning toolkit, so stamp it before pruning.
             _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
         toolkit = apply_tool_approval_capability(
@@ -2008,6 +2025,7 @@ def create_agent(
         eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
+        persona_tools=persona.tools if persona is not None else None,
     )
     _hide_session_mcp_function_collisions(tool_assembly.tools, agent_name=agent_name)
     storage = _open_agent_session_storage(

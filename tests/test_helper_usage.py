@@ -500,9 +500,9 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             context,
             {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
             "Sample task.",
-            workflow_id="sample-workflow",
             run_scope="sample-workflow",
             children={},
+            resolved={},
         )
         assert result.content == "Sample output."
         loaded = (get_team_session if caller.endswith("team") else get_agent_session)(storage, context.session_id)

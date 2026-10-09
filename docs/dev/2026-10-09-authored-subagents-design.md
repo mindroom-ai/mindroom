@@ -50,6 +50,9 @@ Tool approval rules apply to the child exactly as they apply to the caller, beca
 | Workflow participant | A `subagent` participant in a Dynamic Workflow spec, inline or by `profile` | A caller with the `dynamic_workflow` tool |
 
 Authoring is self-only: `system_prompt`, `tools`, and `profile` are rejected when `agent_name` names another agent, because an authored prompt over another agent would hand the caller that agent's tools.
+An authored subagent's own tools cap the copies it authors: their tools must lie within its tools, a copy without `tools` inherits them, and it cannot start an unauthored copy of the caller with every caller tool.
+The cap comes from the running child's frozen persona, so restarts and approval resumes keep it.
+Persona entries match concrete toolkit names, so a toolkit reached through a preset or as an implied tool is selected by its own name, and preset names never count as toolkits.
 
 ## Profile files
 
@@ -86,6 +89,7 @@ A new or edited profile appears in the list on the agent's next run, and `run_su
 
 Starting a subagent from a profile freezes the resolved persona into the subagent's retained state.
 Follow-ups through `continue_subagent` keep that frozen persona even if the file later changes or is deleted, so a subagent's behavior never shifts mid-conversation.
+A follow-up fails when the caller has lost a toolkit the persona names; if an operator removes single functions, the follow-up runs with fewer functions, never more.
 Editing a profile affects only subagents started afterwards.
 
 ## Delegate tool changes
@@ -188,7 +192,9 @@ This removes the workflow's own agent construction, toolkit resolution, and run 
 - Participant tools must be a subset of the caller's tools; today they may name any registered tool the caller lacks, which this refactor closes.
 - A participant without `tools` gets every caller toolkit except the infrastructure toolkits, frozen into its persona at its first step, and functions that are not pre-approved stay hidden.
 - Participant models follow the delegate rule, any configured model alias, instead of the caller's active model only.
-- A non-empty `permissions.tools` must list every toolkit a participant names, and `permissions.models` still caps participant models.
+- A non-empty `permissions.tools` must list every toolkit a participant names, inline or in its profile, and `permissions.models` still caps participant models.
+- The run validates every participant when it starts and runs exactly those validated personas and models, so a profile edited during the run changes nothing.
+- A caller toolkit that cannot be built is skipped for a participant that names no tools, as agent construction skips it.
 
 ### Stored revision conversion
 

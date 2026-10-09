@@ -14,7 +14,7 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
 from mindroom.config.agent import AgentConfig
-from mindroom.delegation.personas import inline_persona
+from mindroom.delegation.personas import caller_toolkit_names, inline_persona
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
@@ -205,3 +205,25 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
     assert minimal.system_message.startswith("You are Helper (helper) in minimal mode.")
     [bash] = minimal.get_tools(RunOutput(run_id="run-1"), _run_context(), AgentSession(session_id="session-1"))
     assert _BASH_HINT not in bash.get_async_functions()["bash"].description
+
+
+@pytest.mark.asyncio
+async def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) -> None:
+    """A preset's member toolkit keeps its functions when a persona names it."""
+    runtime = _runtime(tmp_path, tools=["openclaw_compat"])
+    names = caller_toolkit_names("helper", runtime.config, delegation_depth=0)
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        persona=inline_persona("P", ["shell", "coding.read_file"]),
+    )
+
+    functions = await _function_names(agent)
+
+    assert "openclaw_compat" not in names
+    assert {"shell", "coding"} <= set(names)
+    assert {"run_shell_command", "read_file"} <= set(functions)
+    assert "write_file" not in functions

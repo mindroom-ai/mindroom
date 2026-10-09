@@ -425,3 +425,35 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
         system_prompt="You add numbers.",
         tools=("calculator",),
     )
+
+
+@pytest.mark.asyncio
+async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An authored subagent with delegate can author copies only within its own tools."""
+    harness = _Harness(tmp_path, monkeypatch, _config(tools=("file", "calculator")))
+    harness.model.responses = [
+        ModelResponse(tool_calls=[_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])]),
+        ModelResponse(tool_calls=[_call("run_subagent", "n2", task="Plain copy.")]),
+        ModelResponse(tool_calls=[_call("run_subagent", "n3", task="Read.", system_prompt="Q")]),
+        ModelResponse(content="Grandchild answer."),
+        ModelResponse(content="Child answer."),
+    ]
+
+    result = await harness.run(
+        harness.toolkit.run_subagent(task="Coordinate.", system_prompt="P", tools=["delegate", "file"]),
+    )
+
+    assert "Child answer." in result
+    assert harness.model.system_prompts == ["P", "P", "P", "Q", "P"]
+    records = [
+        json.loads(path.read_text())["child"]
+        for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
+    ]
+    grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
+    assert grandchild["persona"]["tools"] == ["delegate", "file"]
+    assert len(records) == 2
+    tool_results = [str(message.content) for message in harness.model.seen_messages if message.role == "tool"]
+    assert any(
+        "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
+    )
+    assert any("pass system_prompt or profile so the copy stays within your tools" in text for text in tool_results)

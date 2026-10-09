@@ -16,6 +16,7 @@ from mindroom.delegation.personas import (
     inline_persona,
     list_profiles,
     load_profile,
+    persona_allows,
     persona_disabled_toolkits,
     persona_function_filter,
     render_profile_listing,
@@ -90,9 +91,7 @@ def test_empty_tool_list_means_no_tools() -> None:
     """An explicit empty tool list keeps no tools instead of falling back to all of them."""
     persona = inline_persona("P", [])
     assert persona.tools == ()
-    function_filter = persona_function_filter(persona)
-    assert function_filter is not None
-    assert not function_filter(_function("read_file", "file"))
+    assert not persona_allows((), "file", "read_file")
     assert persona_disabled_toolkits(persona, ["file", "shell"]) == frozenset({"file", "shell"})
 
 
@@ -259,13 +258,20 @@ def test_validate_persona_tools_rejects_unknown_toolkit_and_function(entry: str)
     assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: file, gmail."
 
 
-def test_persona_function_filter_matches_owner_and_function() -> None:
-    """Whole toolkits and single functions are visible; everything else is hidden."""
-    function_filter = persona_function_filter(inline_persona("P", ["gmail.search_emails", "file"]))
+def test_persona_allows_whole_toolkits_and_single_functions() -> None:
+    """Toolkit entries keep every function of that concrete toolkit; function entries keep one."""
+    entries = ("gmail.search_emails", "file")
+    assert persona_allows(entries, "file", "read_file")
+    assert persona_allows(entries, "gmail", "search_emails")
+    assert not persona_allows(entries, "gmail", "send_email")
+    assert not persona_allows(entries, "shell", "run_shell_command")
+
+
+def test_persona_function_filter_hides_generated_functions() -> None:
+    """A persona that lists its tools never sees functions that belong to no toolkit."""
+    function_filter = persona_function_filter(inline_persona("P", ["file"]))
     assert function_filter is not None
     assert function_filter(_function("read_file", "file"))
-    assert function_filter(_function("search_emails", "gmail"))
-    assert not function_filter(_function("send_email", "gmail"))
     assert not function_filter(_function("generated", None))
     assert persona_function_filter(None) is None
     assert persona_function_filter(inline_persona("P", None)) is None
@@ -277,3 +283,14 @@ def test_persona_disabled_toolkits_skips_unnamed_toolkits() -> None:
     assert persona_disabled_toolkits(persona, ["file", "gmail", "shell"]) == frozenset({"file", "shell"})
     assert persona_disabled_toolkits(inline_persona("P", None), ["file"]) == frozenset()
     assert persona_disabled_toolkits(None, ["file"]) == frozenset()
+
+
+def test_list_profiles_marks_non_string_keys_invalid(tmp_path: Path) -> None:
+    """A frontmatter key YAML reads as a number or boolean makes that profile invalid, not the listing crash."""
+    _profile_file(tmp_path, "odd.md", "---\ndescription: D\n1: x\nrole: y\n---\nBody\n")
+    _profile_file(tmp_path, "critic.md", _CRITIC)
+
+    entries = list_profiles(tmp_path)
+
+    assert [entry.name for entry in entries] == ["critic", "odd"]
+    assert isinstance(entries[1], _InvalidPersonaProfile)

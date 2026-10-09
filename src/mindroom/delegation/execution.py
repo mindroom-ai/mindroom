@@ -229,6 +229,7 @@ async def _execute_child(
         agent_name=child.child_agent_name,
         active_model_name=child.model_name,
         target=replace(context.target, session_id=child.session_id),
+        persona_tools=child.persona.tools if child.persona is not None else None,
     )
     if fresh:
         return await _start_child_envelope(
@@ -735,6 +736,7 @@ def _resolve_fresh_target(
         minimal=bool(minimal),
         workspace_root=workspace.root if workspace is not None else None,
         available_toolkits=caller_toolkit_names(caller_identity.agent_name, config, delegation_depth=depth),
+        cap=context.persona_tools if (context := get_tool_runtime_context()) is not None else None,
     )
     if isinstance(request, str):
         return request

@@ -1436,6 +1436,7 @@ async def run_delegated_child_response(
             agent_name=child.child_agent_name,
             active_model_name=child.model_name,
             target=replace(context.target, session_id=child.session_id),
+            persona_tools=child.persona.tools if child.persona is not None else None,
         )
         if context is not None
         else None

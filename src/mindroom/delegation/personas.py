@@ -8,7 +8,7 @@ than the caller can.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.delegation.state import SubagentPersona
@@ -105,7 +105,7 @@ def _parse_profile(name: str, content: str) -> _PersonaProfile:
     except SkillMarkdownError as exc:
         msg = "it must start with a YAML mapping between --- lines"
         raise PersonaError(msg) from exc
-    unknown = sorted(set(frontmatter) - _PROFILE_KEYS)
+    unknown = sorted(map(str, set(frontmatter) - _PROFILE_KEYS))
     if unknown:
         msg = f"unsupported frontmatter keys: {', '.join(map(str, unknown))}"
         raise PersonaError(msg)
@@ -234,11 +234,26 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
         delegation_depth=delegation_depth,
         enable_dynamic_tools_manager=True,
     )
-    return [entry.name for entry in surface.runtime_tool_configs]
+    # A preset has no functions of its own; its member toolkits are listed by their own names.
+    return [entry.name for entry in surface.runtime_tool_configs if not config.is_tool_preset(entry.name)]
 
 
-def missing_persona_tool(tools: tuple[str, ...] | None, available_toolkits: Sequence[str]) -> str | None:
-    """Return the first entry naming neither a caller toolkit nor a known function of one."""
+def persona_allows(entries: tuple[str, ...], toolkit: str, function: str) -> bool:
+    """Return whether persona entries keep one function of one concrete toolkit."""
+    return toolkit in entries or f"{toolkit}.{function}" in entries
+
+
+def _within_cap(entry: str, cap: tuple[str, ...] | None) -> bool:
+    toolkit, separator, function = entry.partition(".")
+    return cap is None or toolkit in cap or (bool(separator) and persona_allows(cap, toolkit, function))
+
+
+def missing_persona_tool(
+    tools: tuple[str, ...] | None,
+    available_toolkits: Sequence[str],
+    cap: tuple[str, ...] | None = None,
+) -> str | None:
+    """Return the first entry naming neither a caller toolkit nor a known function of one, or outside ``cap``."""
     available = set(available_toolkits)
     for entry in tools or ():
         toolkit, separator, function = entry.partition(".")
@@ -250,16 +265,21 @@ def missing_persona_tool(tools: tuple[str, ...] | None, available_toolkits: Sequ
                 and (metadata is None or not metadata.function_names or function in metadata.function_names)
             )
         )
-        if not known:
+        if not known or not _within_cap(entry, cap):
             return entry
     return None
 
 
-def validate_persona_tools(tools: tuple[str, ...] | None, available_toolkits: Sequence[str]) -> None:
-    """Require every entry to name one of the caller's toolkits, or a known function of one."""
-    entry = missing_persona_tool(tools, available_toolkits)
+def validate_persona_tools(
+    tools: tuple[str, ...] | None,
+    available_toolkits: Sequence[str],
+    cap: tuple[str, ...] | None = None,
+) -> None:
+    """Require every entry to name one of the caller's toolkits, or a known function of one, within ``cap``."""
+    entry = missing_persona_tool(tools, available_toolkits, cap)
     if entry is not None:
-        msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(sorted(set(available_toolkits)))}."
+        yours = cap if cap is not None else sorted(set(available_toolkits))
+        msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours)}."
         raise PersonaError(msg)
 
 
@@ -288,10 +308,20 @@ def resolve_persona_request(  # noqa: PLR0911
     minimal: bool,
     workspace_root: Path | None,
     available_toolkits: Sequence[str],
+    cap: tuple[str, ...] | None = None,
 ) -> PersonaRequest | str:
-    """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid."""
+    """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid.
+
+    ``cap`` holds the tools of the authored subagent making this call, if any: copies it
+    authors stay within them, and it cannot start an unauthored copy with every caller tool.
+    """
     mode: AgentMode = "minimal" if minimal else "standard"
     if system_prompt is None and tools is None and profile is None:
+        if cap is not None and agent_name == caller_name:
+            return (
+                f"Cannot start a configured copy of '{agent_name}' from an authored subagent; "
+                "pass system_prompt or profile so the copy stays within your tools."
+            )
         return PersonaRequest(persona=None, model=model, agent_mode=mode)
     if agent_name != caller_name:
         return self_only_refusal(agent_name)
@@ -299,36 +329,47 @@ def resolve_persona_request(  # noqa: PLR0911
         return "Cannot delegate: pass either profile or system_prompt and tools, not both."
     try:
         if profile is None:
-            persona = inline_persona(system_prompt, tools)
-            validate_persona_tools(persona.tools, available_toolkits)
+            persona = _capped_persona(inline_persona(system_prompt, tools), available_toolkits, cap)
             return PersonaRequest(persona=persona, model=model, agent_mode=mode)
         if not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         if workspace_root is None:
             return "Cannot delegate: subagent profiles need an agent workspace."
         loaded = load_profile(workspace_root, profile)
-        validate_persona_tools(loaded.persona.tools, available_toolkits)
+        persona = _capped_persona(loaded.persona, available_toolkits, cap)
     except PersonaError as exc:
         return str(exc)
     return PersonaRequest(
-        persona=loaded.persona,
+        persona=persona,
         model=model or loaded.model,
         agent_mode="minimal" if minimal else loaded.mode or "standard",
     )
 
 
+def _capped_persona(
+    persona: SubagentPersona,
+    available_toolkits: Sequence[str],
+    cap: tuple[str, ...] | None,
+) -> SubagentPersona:
+    """Validate a persona's tools against the caller and ``cap``; a persona without tools inherits ``cap``."""
+    if persona.tools is None and cap is not None:
+        persona = replace(persona, tools=cap)
+    validate_persona_tools(persona.tools, available_toolkits, cap)
+    return persona
+
+
 def persona_function_filter(persona: SubagentPersona | None) -> Callable[[Function], bool] | None:
-    """Return a filter keeping only functions the persona names, or None when it keeps every tool."""
+    """Hide generated functions, such as skills and knowledge search, from a persona that lists its tools.
+
+    Toolkit functions are narrowed by concrete toolkit name while the agent's toolkits are built.
+    """
     if persona is None or persona.tools is None:
         return None
-    toolkits = frozenset(entry for entry in persona.tools if "." not in entry)
-    functions = frozenset(entry for entry in persona.tools if "." in entry)
+    return _has_toolkit_owner
 
-    def visible(function: Function) -> bool:
-        owner = function.owning_toolkit
-        return owner is not None and (owner in toolkits or f"{owner}.{function.name}" in functions)
 
-    return visible
+def _has_toolkit_owner(function: Function) -> bool:
+    return function.owning_toolkit is not None
 
 
 def persona_disabled_toolkits(persona: SubagentPersona | None, available_toolkits: Sequence[str]) -> frozenset[str]:
