@@ -23,6 +23,7 @@ from mindroom.constants import (
     STREAM_STATUS_INTERRUPTED,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    THREAD_SUMMARY_CONTENT_KEY,
     TOOL_TRACE_CONTENT_KEY,
     UI_ACTION_CONTENT_KEY,
     RuntimePaths,
@@ -77,9 +78,15 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "in_progress": "You (reply still streaming)",
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
-# Notices that are not turns: lifecycle notices describe the runtime, and a Chat UI request is a tool
-# call's fallback text for other clients (answers and error reports name the canvas themselves).
-_NON_TURN_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY, UI_ACTION_CONTENT_KEY)
+# Notices that are not turns: lifecycle notices describe the runtime, a Chat UI request is a tool
+# call's fallback text for other clients (answers and error reports name the canvas themselves),
+# and a thread summary is the thread's title.
+_NON_TURN_NOTICE_CONTENT_KEYS = (
+    COMPACTION_NOTICE_CONTENT_KEY,
+    SKILL_REVIEW_NOTICE_CONTENT_KEY,
+    UI_ACTION_CONTENT_KEY,
+    THREAD_SUMMARY_CONTENT_KEY,
+)
 
 
 class _PartialReplyKind(str, Enum):
