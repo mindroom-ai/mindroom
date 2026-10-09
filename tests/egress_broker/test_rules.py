@@ -236,6 +236,19 @@ def test_inject_query_preserves_other_params_encoding() -> None:
     assert new_target == b"/v1?a=hello%20world&key=secret"
 
 
+def test_inject_query_encodes_param_name() -> None:
+    """Query injection URL-encodes the param name when it contains special chars."""
+    auth = EgressAuth(type="query", name="my key")
+    headers: list[tuple[bytes, bytes]] = []
+    # Existing param name is already encoded in the URL
+    target = b"/v1?my%20key=old&a=1"
+
+    new_headers, new_target = inject_credentials(headers, target, auth, "s3cret")
+    assert new_headers == headers
+    # Param name "my key" encoded to "my%20key" in output
+    assert new_target == b"/v1?my%20key=s3cret&a=1"
+
+
 def test_inject_replaces_client_authorization() -> None:
     """Credential injection replaces any existing Authorization header."""
     auth = EgressAuth(type="bearer")

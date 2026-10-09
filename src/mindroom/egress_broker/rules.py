@@ -149,7 +149,8 @@ def _inject_query_param(target: bytes, param_name: str, template: str, secret: s
         # No existing query string, just append the new param
         value = template.replace("{secret}", secret)
         encoded_value = quote(value, safe="")
-        new_target_str = f"{path}?{param_name}={encoded_value}"
+        encoded_name = quote(param_name, safe="")
+        new_target_str = f"{path}?{encoded_name}={encoded_value}"
         return new_target_str.encode("latin-1")
 
     # Split query on "&" to preserve exact encoding of other params
@@ -177,7 +178,8 @@ def _inject_query_param(target: bytes, param_name: str, template: str, secret: s
     # Build the new param with template applied and encoded once
     value = template.replace("{secret}", secret)
     encoded_value = quote(value, safe="")
-    new_param = f"{param_name}={encoded_value}"
+    encoded_name = quote(param_name, safe="")
+    new_param = f"{encoded_name}={encoded_value}"
 
     # Insert at first occurrence position or append
     if first_index is not None:
