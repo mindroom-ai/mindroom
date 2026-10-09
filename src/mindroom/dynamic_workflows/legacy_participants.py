@@ -26,7 +26,7 @@ def upgrade_legacy_participants(spec: dict[str, object]) -> dict[str, object]:
     """Return the spec with every retired ephemeral participant read as a subagent participant."""
     # LEGACY_COMPAT: Dynamic Workflow ephemeral_agent participants.
     # Legacy format: A saved revision participant with kind ephemeral_agent and optional name, role, instructions, and tools; validation always stored an explicit kind.
-    # Last legacy release: v2026.10.220; replacement: the next release saves subagent participants with a system_prompt.
+    # Last legacy release: v2026.10.221; replacement: the next release saves subagent participants with a system_prompt.
     # Handling: The store renders name, role, and instructions into system_prompt when it reads a revision, keeps id, description, model, and tools, and reads absent tools as no tools, so saved workflows run as before and the next update writes the current format.
     # Coverage: tests/test_dynamic_workflow_subagents.py::test_legacy_revision_loads_as_subagent, tests/test_dynamic_workflow_subagents.py::test_update_of_legacy_revision_writes_current_format.
     participants = spec.get("participants")
