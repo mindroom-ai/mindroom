@@ -1698,7 +1698,7 @@ depends_on = [
     "mindroom.legacy_tool_credentials",
     "mindroom.legacy_usage_storage",
     "mindroom.api.computers",
-    "mindroom.worker_computer.auth",
+    "mindroom.matrix_openid",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
     "mindroom.api.thread_exports",
@@ -7202,13 +7202,11 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.worker_computer.auth"
+path = "mindroom.matrix_openid"
 depends_on = [
     "mindroom.bounded_bytes",
-    "mindroom.runtime_env_policy",
     "mindroom.constants",
     "mindroom.requester_identity",
-    "mindroom.worker_computer.sessions",
 ]
 
 [[modules]]
@@ -7224,7 +7222,7 @@ path = "mindroom.api.computers"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.worker_computer.auth",
+    "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend",

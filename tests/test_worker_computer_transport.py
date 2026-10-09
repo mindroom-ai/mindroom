@@ -7,7 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.worker_computer.auth import MatrixOpenIDToken, verify_openid
+from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
 from mindroom.worker_computer.client import computer_request
 from mindroom.worker_computer.sessions import ComputerError
 from mindroom.workers.models import WorkerHandle
@@ -40,10 +40,10 @@ async def test_openid_response_size_boundary(tmp_path: Path, size: int) -> None:
             expires_in=30,
         )
         if size == 16384:
-            assert await verify_openid(token, paths) == "@alice:example.org"
+            assert await verify_matrix_openid(token, paths) == "@alice:example.org"
         else:
-            with pytest.raises(ComputerError, match=r"^Invalid Matrix OpenID response\.$") as error:
-                await verify_openid(token, paths)
+            with pytest.raises(MatrixOpenIDError, match=r"^Invalid Matrix OpenID response\.$") as error:
+                await verify_matrix_openid(token, paths)
             assert error.value.status_code == 401
 
 

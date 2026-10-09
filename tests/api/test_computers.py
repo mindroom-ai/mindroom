@@ -27,8 +27,9 @@ from mindroom.api import main as api_main
 from mindroom.api.computers import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.matrix_openid import allowed_client_origins
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
-from mindroom.worker_computer.auth import computer_origins
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.worker_computer.protocol import BrowserSession, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
@@ -460,7 +461,7 @@ def test_prebound_computer_authorizer_survives_initial_api_config_load(
         0,
         config,
     )
-    monkeypatch.setattr(computers, "verify_openid", AsyncMock(return_value="@alice:example.org"))
+    monkeypatch.setattr(computers, "verify_matrix_openid", AsyncMock(return_value="@alice:example.org"))
     with TestClient(app) as client:
         loaded = config_lifecycle.require_api_state(app).snapshot.runtime_config
         assert loaded is not None
@@ -620,7 +621,7 @@ def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> No
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
     )
-    assert computer_origins(paths) == ()
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == ()
 
 
 @pytest.mark.parametrize(
@@ -640,7 +641,7 @@ def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, 
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
     )
-    assert computer_origins(paths) == (origin,)
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == (origin,)
 
 
 def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
@@ -651,9 +652,9 @@ def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(origins)},
     )
-    assert computer_origins(paths) == tuple(origins)
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == tuple(origins)
     invalid = replace(paths, process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([*origins, "null"])})
-    assert computer_origins(invalid) == ()
+    assert allowed_client_origins(invalid, COMPUTER_ALLOWED_ORIGINS_ENV) == ()
 
 
 @pytest.mark.parametrize("allowed", [False, True])
