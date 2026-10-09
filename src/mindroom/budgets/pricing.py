@@ -20,6 +20,8 @@ logger = get_logger(__name__)
 
 # These providers report cache reads and writes beside input_tokens; the others count cache reads inside it.
 _CACHE_EXCLUDED_PROVIDERS = frozenset({"anthropic", "bedrock_claude", "vertexai_claude"})
+# Gemini reports thinking tokens beside output_tokens and bills them as output; the others count them inside it.
+_REASONING_EXCLUDED_PROVIDERS = frozenset({"google", "gemini"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,7 @@ class PricedModel:
 
     pricing: ModelPricing
     input_includes_cache: bool
+    output_includes_reasoning: bool = True
 
 
 def cost_usd(totals: TokenTotals, priced: PricedModel) -> float:
@@ -36,11 +39,14 @@ def cost_usd(totals: TokenTotals, priced: PricedModel) -> float:
     uncached_input = totals.input_tokens
     if priced.input_includes_cache:
         uncached_input = max(0, uncached_input - totals.cache_read_tokens - totals.cache_write_tokens)
+    output = (
+        totals.output_tokens if priced.output_includes_reasoning else totals.output_tokens + totals.reasoning_tokens
+    )
     return (
         uncached_input * pricing.input
         + totals.cache_read_tokens * pricing.cache_read_price
         + totals.cache_write_tokens * pricing.cache_write_price
-        + totals.output_tokens * pricing.output
+        + output * pricing.output
     ) / 1_000_000
 
 
@@ -62,9 +68,11 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[st
             logger.warning("budget_pricing_model_unavailable", model=model_name, error=str(error))
             continue
         key = (model.get_provider(), model.id)
+        provider = canonical_provider(model_config.provider)
         priced = PricedModel(
             pricing=model_config.pricing,
-            input_includes_cache=canonical_provider(model_config.provider) not in _CACHE_EXCLUDED_PROVIDERS,
+            input_includes_cache=provider not in _CACHE_EXCLUDED_PROVIDERS,
+            output_includes_reasoning=provider not in _REASONING_EXCLUDED_PROVIDERS,
         )
         existing = table.get(key)
         if existing is not None and existing.pricing != priced.pricing:
