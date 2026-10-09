@@ -473,3 +473,7 @@ _.from_worker_target  # WorkerClaims public API (src/mindroom/egress_broker/toke
 _.to_worker_target  # WorkerClaims public API (src/mindroom/egress_broker/tokens.py)
 _.load_or_create  # TokenSigner public API (src/mindroom/egress_broker/tokens.py)
 _.mint  # TokenSigner public API (src/mindroom/egress_broker/tokens.py)
+_.cert_pem  # BrokerCA public API (src/mindroom/egress_broker/ca.py)
+_.fingerprint  # BrokerCA public API (src/mindroom/egress_broker/ca.py)
+_.server_context  # BrokerCA public API (src/mindroom/egress_broker/ca.py)
+materialize_ca_bundle  # BrokerCA public API (src/mindroom/egress_broker/ca.py)
