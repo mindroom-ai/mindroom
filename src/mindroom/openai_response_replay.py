@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.agno_compat_openai_custom_tools import CUSTOM_TOOL_CALL
 from mindroom.agno_compat_openai_responses_items import RESPONSE_OUTPUT_KEY, TOOL_SEARCH_ITEMS_KEY
 from mindroom.legacy_openai_tool_replay import repair_legacy_responses_span
 from mindroom.native_compaction import checkpoint_items
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.models.message import Message
+
+_CALL_ITEM_TYPES = frozenset({"function_call", CUSTOM_TOOL_CALL})
 
 
 def formatted_input_with_provider_items(
@@ -94,15 +97,15 @@ def _canonical_response_output(message: Message, formatted_span: list[Any]) -> l
     calls = {
         item.get("call_id"): item
         for item in formatted_span
-        if isinstance(item, dict) and item.get("type") == "function_call"
+        if isinstance(item, dict) and item.get("type") in _CALL_ITEM_TYPES
     }
-    captured_call_ids = {item.get("call_id") for item in items if item.get("type") == "function_call"}
+    captured_call_ids = {item.get("call_id") for item in items if item.get("type") in _CALL_ITEM_TYPES}
     if not calls.keys() <= captured_call_ids:
         return None
     return [
-        calls[item.get("call_id")] if item.get("type") == "function_call" else item
+        calls[item.get("call_id")] if item.get("type") in _CALL_ITEM_TYPES else item
         for item in items
-        if item.get("type") != "function_call" or item.get("call_id") in calls
+        if item.get("type") not in _CALL_ITEM_TYPES or item.get("call_id") in calls
     ]
 
 
@@ -116,7 +119,7 @@ def _anchor_index(formatted_input: list[Any], start: int, message: Message) -> i
             item = formatted_input[index]
             if (
                 isinstance(item, dict)
-                and item.get("type") == "function_call"
+                and item.get("type") in _CALL_ITEM_TYPES
                 and (item.get("id") in anchor_ids or item.get("call_id") in anchor_ids)
             ):
                 return index

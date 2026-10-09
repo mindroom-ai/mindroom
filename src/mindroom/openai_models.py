@@ -19,6 +19,7 @@ from agno.utils.media import get_image_type
 from agno.utils.tokens import _parse_image_dimensions_from_bytes
 
 from mindroom.agno_compat_openai_chat import OpenAIChatProviderCompat as AgnoOpenAIChatProviderCompat
+from mindroom.agno_compat_openai_custom_tools import replay_custom_tool_items, tool_calls_with_custom
 from mindroom.agno_compat_openai_responses import OpenAIResponsesProviderCompat
 from mindroom.agno_compat_openai_responses_items import record_response_output, record_tool_search_items
 from mindroom.history.message_content import image_content_for_token_estimation
@@ -445,7 +446,10 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
         replay_model = copy(self) if explicit_replay else self
         if explicit_replay:
             replay_model.store = False
-        formatted_input = OpenAIResponses._format_messages(replay_model, messages, compress_tool_results, tools=tools)
+        formatted_input = replay_custom_tool_items(
+            OpenAIResponses._format_messages(replay_model, messages, compress_tool_results, tools=tools),
+            messages,
+        )
         if replay_model.store is not False:
             # Match Agno's continuation boundary before locating assistant spans.
             for index in range(len(messages) - 1, -1, -1):
@@ -469,6 +473,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
     def _parse_provider_response(self, response: Response, **kwargs: object) -> ModelResponse:
         """Capture completed provider output and response storage provenance."""
         model_response = super()._parse_provider_response(response, **kwargs)
+        model_response.tool_calls = tool_calls_with_custom(model_response.tool_calls, response.output)
         model_response.provider_data = {
             **(model_response.provider_data or {}),
             "mindroom_response_stored": self.store is not False,
