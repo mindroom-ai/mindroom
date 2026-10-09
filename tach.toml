@@ -8132,6 +8132,8 @@ depends_on = [
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
     "mindroom.tool_call_budget",
+    "mindroom.tool_dialects.agno_compat_model",
+    "mindroom.tool_dialects.translation",
 ]
 visibility = ["mindroom.skill_learning.runner"]
 

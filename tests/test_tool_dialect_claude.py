@@ -121,6 +121,16 @@ def test_argv_history_renders_as_command_string() -> None:
     assert _wire("Bash").to_wire({"args": ["echo", "a b"]}) == {"command": "echo 'a b'"}
 
 
+@pytest.mark.parametrize(
+    ("args", "command"),
+    [(["echo hello && ls"], "echo hello && ls"), ('["git", "commit", "-m", "a b"]', "git commit -m 'a b'")],
+    ids=["one-item-command-line", "json-argv-string"],
+)
+def test_history_args_render_as_the_command_that_ran(args: object, command: str) -> None:
+    """A one-item list runs as a command line and a JSON argv string as argv, so each renders as what ran."""
+    assert _wire("Bash").to_wire({"args": args}) == {"command": command}
+
+
 def test_history_argv_with_non_strings_still_renders() -> None:
     """A recorded call whose argv holds non-strings, which the shell tool rejected, still renders as a command."""
     assert _wire("Bash").to_wire({"args": ["head", "-n", 5, "f"]}) == {"command": "head -n 5 f"}

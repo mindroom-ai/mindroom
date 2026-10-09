@@ -82,7 +82,8 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
-from mindroom.tool_dialects.agno_compat_model import _TOOL_DIALECT_MARKER
+from mindroom.tool_dialects.agno_compat_model import installed_tool_dialect
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_dialects.translation import resolve_tool_dialect
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
@@ -5554,6 +5555,6 @@ def test_create_agent_installs_tool_dialect_for_runtime_model(mock_storage: Magi
     default_agent = _create_agent_for_test("shell", config)
     override_agent = _create_agent_for_test("shell", config, active_model_name="sonnet")
 
-    assert vars(default_agent.model)[_TOOL_DIALECT_MARKER] == resolve_tool_dialect(config.models["default"]).name
-    assert vars(override_agent.model)[_TOOL_DIALECT_MARKER] == resolve_tool_dialect(config.models["sonnet"]).name
-    assert vars(override_agent.model)[_TOOL_DIALECT_MARKER] == "claude"
+    assert installed_tool_dialect(default_agent.model) == resolve_tool_dialect(config.models["default"])
+    assert installed_tool_dialect(override_agent.model) == resolve_tool_dialect(config.models["sonnet"])
+    assert installed_tool_dialect(override_agent.model) == CLAUDE_DIALECT

@@ -214,7 +214,7 @@ def test_canonical_tool_calls_leave_existing_and_foreign_names() -> None:
 
 
 def test_untranslatable_call_returns_tool_call_error() -> None:
-    """Arguments the dialect cannot translate become a tool error for that exact call only."""
+    """Arguments the dialect cannot translate become a tool error for that exact call, which keeps what was sent."""
     functions = {"run_shell_command": _function("run_shell_command", "shell")}
     calls = [
         _call("bad", "Run", {"command": "ls"}),
@@ -223,8 +223,11 @@ def test_untranslatable_call_returns_tool_call_error() -> None:
 
     translated, errors = canonical_tool_calls(_TOY, calls, functions)
 
-    assert translated == calls
-    assert [(error.call is calls[index], error.name) for index, error in enumerate(errors)] == [
+    assert translated == [
+        call | {MINDROOM_WIRE_KEY: {"dialect": "claude", "name": "Run", "arguments": call["function"]["arguments"]}}
+        for call in calls
+    ]
+    assert [(error.call is translated[index], error.name) for index, error in enumerate(errors)] == [
         (True, "Run"),
         (True, "Run"),
     ]
@@ -295,6 +298,17 @@ def test_wire_messages_render_only_tools_presented_in_wire_form() -> None:
 
     assert rendered[0].tool_calls == [call]
     assert rendered[1] is result
+
+
+def test_foreign_tool_with_a_wire_name_gets_no_translated_history() -> None:
+    """A foreign tool that only shares a wire name does not see canonical calls rendered as its own."""
+    call = _call("a", "run_shell_command", {"args": "ls"})
+    schema = {"type": "object", "properties": {"host": {"type": "string"}, "command": {"type": "string"}}}
+    foreign = [{"type": "function", "function": {"name": "Run", "parameters": schema}}]
+
+    [rendered] = wire_messages(_TOY, [_assistant(call)], foreign)
+
+    assert rendered.tool_calls == [call]
 
 
 def test_wire_messages_leaves_unmapped_calls() -> None:

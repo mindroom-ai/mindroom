@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import shlex
 from dataclasses import dataclass, field
@@ -99,8 +100,18 @@ def milliseconds_to_seconds(milliseconds: float, tool: str, name: str) -> int:
 
 
 def shell_command_text(args: object) -> str:
-    """Return canonical shell ``args`` as one command line; recorded history may hold any JSON value there."""
+    """Return canonical shell ``args`` as the command line that ran; recorded history may hold any JSON value there.
+
+    Like the shell tool, a JSON argv string runs as argv and a one-item list runs as a command line.
+    """
+    if isinstance(args, str) and args.lstrip().startswith("["):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return args
     if isinstance(args, list):
+        if len(args) == 1 and isinstance(args[0], str):
+            return args[0]
         return " ".join(shlex.quote(str(arg)) for arg in args)
     return str(args or "")
 

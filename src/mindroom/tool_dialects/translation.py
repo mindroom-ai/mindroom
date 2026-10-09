@@ -221,10 +221,11 @@ def _translate_call(
             msg = f"{name} arguments must be a JSON object"
             raise DialectArgumentError(msg)  # noqa: TRY301
         canonical_arguments = _with_output_path(arguments, wire_function.to_canonical(arguments))
-    except json.JSONDecodeError as exc:
-        return _ToolCallError(call=call, name=name, message=f"Error: Invalid JSON arguments for {name}: {exc}")
-    except DialectArgumentError as exc:
-        return _ToolCallError(call=call, name=name, message=f"Error: {exc}")
+    except (json.JSONDecodeError, DialectArgumentError) as exc:
+        # A same-named function's call keeps a canonical name, so only the record replays it as the model sent it.
+        recorded = {**call, MINDROOM_WIRE_KEY: {"dialect": dialect.name, "name": name, "arguments": raw_arguments}}
+        reason = f"Invalid JSON arguments for {name}: {exc}" if isinstance(exc, json.JSONDecodeError) else str(exc)
+        return _ToolCallError(call=recorded, name=name, message=f"Error: {reason}")
     translated = {
         **call,
         "function": {
@@ -248,7 +249,7 @@ def canonical_tool_calls(
 
     A call naming a function that exists keeps its name, so a wire name demoted by a collision still
     reaches the colliding function.
-    Untranslatable calls stay in the returned list unchanged so history keeps every call.
+    Untranslatable calls stay in the returned list, with their wire record, so history keeps every call.
     """
     by_wire_name = {wire_function.wire_name: wire_function for wire_function in dialect.functions}
     translated: list[dict[str, Any]] = []
@@ -266,7 +267,7 @@ def canonical_tool_calls(
         result = _translate_call(dialect, call, wire_function)
         if isinstance(result, _ToolCallError):
             errors.append(result)
-            translated.append(call)
+            translated.append(result.call)
         else:
             translated.append(result)
     return translated, errors
@@ -324,20 +325,16 @@ def _is_wire_definition(tool: dict[str, Any], wire_function: WireFunction) -> bo
 def _presented_wire_functions(dialect: ToolDialect, tools: Sequence[dict[str, Any]]) -> dict[str, WireFunction]:
     """Return the dialect functions this request presents in wire form, by canonical name.
 
-    A wire name that differs from the canonical one counts unless the canonical name is presented too, which
-    means a collision kept the canonical function; a same-named one counts only with the dialect's own schema.
+    A function counts only with the dialect's own schema, so a foreign tool sharing a wire name does not, and a
+    renamed one also not while its canonical name is presented, which means a collision kept the canonical one.
     """
     by_name = {_tool_dict_name(tool): tool for tool in tools}
     mapped: dict[str, WireFunction] = {}
     for wire_function in dialect.functions:
         tool = by_name.get(wire_function.wire_name)
-        if tool is None:
+        if tool is None or not _is_wire_definition(tool, wire_function):
             continue
-        if wire_function.wire_name == wire_function.key.function:
-            presented = _is_wire_definition(tool, wire_function)
-        else:
-            presented = wire_function.key.function not in by_name
-        if presented:
+        if wire_function.wire_name == wire_function.key.function or wire_function.key.function not in by_name:
             mapped[wire_function.key.function] = wire_function
     return mapped
 

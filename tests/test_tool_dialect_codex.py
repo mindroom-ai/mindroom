@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 
 import pytest
+from agno.models.message import Message
 from agno.tools.function import Function
 
 from mindroom.config.models import ModelConfig
 from mindroom.shell_execution import _format_background_handle_message, _format_finished_status, _format_running_status
 from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_dialects.codex import CODEX_DIALECT
-from mindroom.tool_dialects.translation import canonical_tool_calls, resolve_tool_dialect, wire_tools
+from mindroom.tool_dialects.translation import canonical_tool_calls, resolve_tool_dialect, wire_messages, wire_tools
 from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, WireFunction
 
 
@@ -281,3 +282,18 @@ def test_default_arguments_need_no_wire_record() -> None:
 
     assert errors == []
     assert [MINDROOM_WIRE_KEY in call for call in translated] == [False, False, False]
+
+
+def test_failed_same_named_call_replays_as_sent() -> None:
+    """A kill_shell_command call that could not translate replays with the arguments the model sent."""
+    functions = {"kill_shell_command": _function("kill_shell_command", "shell")}
+    arguments = json.dumps({"handle": "shell:0000abcd"})
+    call = {"id": "a", "type": "function", "function": {"name": "kill_shell_command", "arguments": arguments}}
+    kill = _wire("kill_shell_command")
+    presented = [{"type": "function", "function": {"name": kill.wire_name, "parameters": kill.parameters}}]
+
+    translated, errors = canonical_tool_calls(CODEX_DIALECT, [call], functions)
+    [rendered] = wire_messages(CODEX_DIALECT, [Message(role="assistant", tool_calls=translated)], presented)
+
+    assert [error.message for error in errors] == ["Error: kill_shell_command requires session_id"]
+    assert rendered.tool_calls == [call]

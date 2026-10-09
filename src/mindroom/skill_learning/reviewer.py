@@ -33,6 +33,8 @@ from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_dialects.agno_compat_model import installed_tool_dialect
+from mindroom.tool_dialects.translation import presents
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.skill_learning.capture import CapturedRequest
     from mindroom.skill_learning.tools import ReviewProgress
+    from mindroom.tool_dialects.types import ToolDialect
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -103,6 +106,7 @@ def _review_tools(
     schemas: Sequence[Function | dict[str, Any]],
     tools: SkillTools,
     format_definitions: Callable[[list[Function | dict[str, Any]]], list[dict[str, Any]]] = _canonical_definitions,
+    dialect: ToolDialect | None = None,
 ) -> tuple[list[Function | dict[str, Any]], list[str]]:
     """Keep every tool definition of the agent's request, but run only the skill tools, as the review's.
 
@@ -135,6 +139,9 @@ def _review_tools(
         verb = "runs" if len(runnable) == 1 else "run"
         return f"This tool is not available during a skill review; only {_listing(runnable)} {verb} here."
 
+    if dialect is not None:
+        # The dialect hid some functions beside their replacements; a gated replacement loses that context below.
+        schemas = [tool for tool in schemas if not isinstance(tool, Function) or presents(dialect, tool, schemas)]
     review_tools: list[Function | dict[str, Any]] = []
     for tool in schemas:
         if not isinstance(tool, Function):
@@ -191,8 +198,20 @@ def _fork(
     sent = _context_tokens(config, captured.model, captured.model_name, final.metrics) if final.metrics else 0
     if sent * _CONVERSATION_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
         return None
-    # The captured model formats plain definitions as it formatted the request, including any tool dialect.
-    review_tools, runnable = _review_tools(captured.tools, tools, captured.model._format_tools)
+    # AGNO_COMPAT: Provider tool formatting has no public entry point.
+    # Reason: Agno formats tool definitions only inside the private Model._format_tools, so the fork calls it to
+    # format gated definitions exactly as the captured request did, including any tool dialect.
+    # Upstream issue: Tracking gap; no issue or PR for a public provider tool-formatting method identified.
+    # Upstream PR: None identified.
+    # Remove when: Agno exposes a public method that formats tools as a model sends them.
+    # Coverage: tests/test_skill_learning.py::test_review_tool_copies_keep_their_dialect_presentation;
+    # tests/test_skill_learning.py::test_review_fork_hides_what_the_request_hid.
+    review_tools, runnable = _review_tools(
+        captured.tools,
+        tools,
+        captured.model._format_tools,
+        installed_tool_dialect(captured.model),
+    )
     if "skill_manage" not in runnable:
         return None
     return _ReviewRequest(

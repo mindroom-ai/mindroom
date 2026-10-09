@@ -50,7 +50,7 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
     model_dict = vars(model)
     if model_dict.get(_TOOL_DIALECT_MARKER) is not None:
         return
-    model_dict[_TOOL_DIALECT_MARKER] = dialect.name
+    model_dict[_TOOL_DIALECT_MARKER] = dialect
     # Bound methods survive Agno's model deepcopies, so each override calls its original on the copy.
     format_tools = model._format_tools.__func__
     get_function_calls_to_run = model.get_function_calls_to_run.__func__
@@ -96,6 +96,11 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
         wrap_invoke=lambda invoke: partial(_invoke_in_dialect, dialect, invoke),
         wrap_stream=lambda stream: partial(_stream_in_dialect, dialect, stream),
     )
+
+
+def installed_tool_dialect(model: Model) -> ToolDialect | None:
+    """Return the dialect bound to *model*, or None when it has none."""
+    return vars(model).get(_TOOL_DIALECT_MARKER)
 
 
 async def _invoke_in_dialect(
