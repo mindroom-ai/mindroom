@@ -75,6 +75,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     def hook_matrix_admin(self) -> HookMatrixAdmin | None: ...  # noqa: D102
 
+    def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
+        """Return the Matrix client of one running managed entity."""
+        ...
+
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102
 
     def validate_managed_entity_identities(self) -> None:

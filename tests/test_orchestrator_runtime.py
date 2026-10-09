@@ -109,6 +109,23 @@ from tests.conftest import (
 )
 
 
+def test_running_entity_client_returns_only_running_bot_clients(tmp_path: Path) -> None:
+    """Only a running bot with a live client lends that client to runtime collaborators."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    running_client = AsyncMock(spec=nio.AsyncClient)
+    orchestrator.agent_bots = {
+        "running": MagicMock(running=True, client=running_client),
+        "stopped": MagicMock(running=False, client=AsyncMock(spec=nio.AsyncClient)),
+        "clientless": MagicMock(running=True, client=None),
+    }
+
+    assert orchestrator.running_entity_client("running") is running_client
+    assert orchestrator.running_entity_client("stopped") is None
+    assert orchestrator.running_entity_client("clientless") is None
+    assert orchestrator.running_entity_client("unknown") is None
+
+
 @pytest.mark.asyncio
 async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_reconciliation(
     tmp_path: Path,
