@@ -9,6 +9,7 @@ from collections import ChainMap
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -2642,7 +2643,66 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
             return await self._finalize_streamed_response(request)
 
-    async def _finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _finalize_interrupted_stream(  # noqa: PLR0911
+        self,
+        request: FinalizeStreamedResponseRequest,
+        *,
+        streamed_event_id: str | None,
+        streamed_text: str,
+    ) -> FinalDeliveryOutcome:
+        """Report a stream a cancellation or failure ended, with the event that stays visible, if any."""
+        stream_outcome = request.stream_transport_outcome
+        cancelled = stream_outcome.terminal_status == "cancelled"
+        failure_reason = stream_outcome.failure_reason or (
+            "stream_finalize_cancelled" if cancelled else "stream_finalize_error"
+        )
+        cancel_source = cancel_source_from_failure_reason(failure_reason) if cancelled else None
+        outcome = partial(
+            FinalDeliveryOutcome,
+            terminal_status=stream_outcome.terminal_status,
+            cancel_source=cancel_source,
+            failure_reason=failure_reason,
+            tool_trace=tuple(request.tool_trace or ()),
+            extra_content=request.extra_content,
+        )
+        if (
+            request.initial_delivery_kind == "edited"
+            and stream_outcome.visible_body_state == "none"
+            and not request.existing_event_is_placeholder
+        ):
+            existing_visible_event_id = request.existing_event_id or streamed_event_id
+            if existing_visible_event_id is not None:
+                return outcome(event_id=existing_visible_event_id, is_visible_response=True)
+        if stream_outcome.visible_body_state == "placeholder_only":
+            if not cancelled:
+                return await self._finalize_placeholder_only_stream_error(
+                    request,
+                    stream_outcome=stream_outcome,
+                    failure_reason=failure_reason,
+                )
+            cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
+                failure_reason=failure_reason,
+                tool_trace=request.tool_trace,
+                extra_content=request.extra_content,
+            )
+            if cleanup_outcome.event_id is not None:
+                return replace(cleanup_outcome, cancel_source=cancel_source)
+            return outcome(event_id=None)
+        if stream_outcome.visible_event_id is not None:
+            return outcome(
+                event_id=stream_outcome.visible_event_id,
+                is_visible_response=True,
+                final_visible_body=streamed_text or None,
+                # Only a cancellation's committed terminal update counts as this stream's delivery.
+                delivery_kind=request.initial_delivery_kind
+                if cancelled and stream_outcome.terminal_update_committed
+                else None,
+            )
+        if request.existing_event_id is not None and not request.existing_event_is_placeholder:
+            return outcome(event_id=request.existing_event_id, is_visible_response=True)
+        return outcome(event_id=None)
+
+    async def _finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
@@ -2684,126 +2744,11 @@ class DeliveryGateway:
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
-            if stream_outcome.terminal_status == "cancelled":
-                failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
-                cancel_source = cancel_source_from_failure_reason(failure_reason)
-                if (
-                    request.initial_delivery_kind == "edited"
-                    and stream_outcome.visible_body_state == "none"
-                    and not request.existing_event_is_placeholder
-                ):
-                    existing_visible_event_id = request.existing_event_id or streamed_event_id
-                    if existing_visible_event_id is not None:
-                        return FinalDeliveryOutcome(
-                            terminal_status="cancelled",
-                            event_id=existing_visible_event_id,
-                            is_visible_response=True,
-                            cancel_source=cancel_source,
-                            failure_reason=failure_reason,
-                            tool_trace=tuple(request.tool_trace or ()),
-                            extra_content=request.extra_content,
-                        )
-                if stream_outcome.visible_body_state == "placeholder_only":
-                    cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
-                        failure_reason=failure_reason,
-                        tool_trace=request.tool_trace,
-                        extra_content=request.extra_content,
-                    )
-                    if cleanup_outcome.event_id is not None:
-                        return replace(cleanup_outcome, cancel_source=cancel_source)
-                    return FinalDeliveryOutcome(
-                        terminal_status="cancelled",
-                        event_id=None,
-                        cancel_source=cancel_source,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-
-                visible_stream_event_id = stream_outcome.visible_event_id
-                if visible_stream_event_id is not None:
-                    return FinalDeliveryOutcome(
-                        terminal_status="cancelled",
-                        event_id=visible_stream_event_id,
-                        is_visible_response=True,
-                        final_visible_body=streamed_text or None,
-                        delivery_kind=request.initial_delivery_kind
-                        if stream_outcome.terminal_update_committed
-                        else None,
-                        cancel_source=cancel_source,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-                if request.existing_event_id is not None and not request.existing_event_is_placeholder:
-                    return FinalDeliveryOutcome(
-                        terminal_status="cancelled",
-                        event_id=request.existing_event_id,
-                        is_visible_response=True,
-                        cancel_source=cancel_source,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-                return FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=None,
-                    cancel_source=cancel_source,
-                    failure_reason=failure_reason,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-
-            if stream_outcome.terminal_status == "error":
-                if (
-                    request.initial_delivery_kind == "edited"
-                    and stream_outcome.visible_body_state == "none"
-                    and not request.existing_event_is_placeholder
-                ):
-                    existing_visible_event_id = request.existing_event_id or streamed_event_id
-                    if existing_visible_event_id is not None:
-                        return FinalDeliveryOutcome(
-                            terminal_status="error",
-                            event_id=existing_visible_event_id,
-                            is_visible_response=True,
-                            failure_reason=stream_outcome.failure_reason or "stream_finalize_error",
-                            tool_trace=tuple(request.tool_trace or ()),
-                            extra_content=request.extra_content,
-                        )
-                failure_reason = stream_outcome.failure_reason or "stream_finalize_error"
-                if stream_outcome.visible_body_state == "placeholder_only":
-                    return await self._finalize_placeholder_only_stream_error(
-                        request,
-                        stream_outcome=stream_outcome,
-                        failure_reason=failure_reason,
-                    )
-
-                visible_stream_event_id = stream_outcome.visible_event_id
-                if visible_stream_event_id is not None:
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=visible_stream_event_id,
-                        is_visible_response=True,
-                        final_visible_body=streamed_text or None,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-                if request.existing_event_id is not None and not request.existing_event_is_placeholder:
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=request.existing_event_id,
-                        is_visible_response=True,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=None,
-                    failure_reason=failure_reason,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
+            if stream_outcome.terminal_status in {"cancelled", "error"}:
+                return await self._finalize_interrupted_stream(
+                    request,
+                    streamed_event_id=streamed_event_id,
+                    streamed_text=streamed_text,
                 )
 
             if stream_outcome.canonical_final_body_candidate is not None and stream_outcome.visible_body_state in {
