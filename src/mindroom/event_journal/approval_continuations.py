@@ -14,7 +14,6 @@ from mindroom.response_sources import ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import membership_state, outbox, reply_messages, reply_spans
-from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -750,7 +749,7 @@ def activate(
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
-def answer_frozen(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
+def _answer_frozen(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
     """Return whether the run's answer is a FINAL the outbox still delivers, which a failure must not replace."""
     final = outbox.load(
         transaction,
@@ -780,7 +779,7 @@ def request_failure(
     if (
         current is None
         or (current.state, current.runtime_generation) != (expected_state, expected_runtime_generation)
-        or answer_frozen(transaction, principal_id, current)
+        or _answer_frozen(transaction, principal_id, current)
     ):
         return None
     claimed = expected_state == "claimed"
@@ -818,7 +817,7 @@ def fence(
     frozen successful FINAL still wins.
     """
     current = get(transaction, principal_id, approval_id=approval_id)
-    if current is None or answer_frozen(transaction, principal_id, current):
+    if current is None or _answer_frozen(transaction, principal_id, current):
         return None
     states = _FENCEABLE
     placeholders = ", ".join("?" for _ in states)
@@ -851,9 +850,7 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
-    if delivered is None and not deleted_delivery_is_terminal(transaction, principal_id, continuation):
-        return None
-    return continuation
+    return None if delivered is None else continuation
 
 
 def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:

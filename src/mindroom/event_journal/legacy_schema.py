@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 
-from . import approval_continuations
-
 if TYPE_CHECKING:
     from .backend import Transaction
 
@@ -71,61 +69,25 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
 
 
 # LEGACY_COMPAT: Approval calls without persisted toolkit origins.
-# Legacy format: Approval calls written before per-call toolkit origin persistence.
+# Legacy format: approval_continuation_calls without a toolkit_name column, written before per-call toolkit origins.
 # Last legacy release: v2026.9.139; replacement: v2026.9.140 added per-call toolkit_name storage.
-# Handling: Fence unresumable current generations for normal failure recovery, including already-upgraded rows.
-# Preserve historical calls, existing failures, and recoverable FINAL delivery debt.
-# Coverage: tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_fences_unresumable_calls,
-# tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_compatible_work,
-# tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_frozen_final.
+# Handling: Add the nullable column. The continuation upgrade runs first in the same transaction and cancels every
+# continuation an earlier release left, so no call without a recorded origin remains to resume.
+# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_an_earlier_release_left_pending_is_cancelled.
 def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozenset[str]) -> None:
-    """Add historical origins and fence unresumable work in the schema transaction."""
+    """Add the toolkit origin column inside the schema transaction."""
     if "toolkit_name" not in columns:
         transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN toolkit_name TEXT")
-    unresumable = transaction.fetchall(
-        """
-        SELECT principal_id, approval_id FROM approval_continuations
-        WHERE state IN ('waiting', 'ready')
-          AND EXISTS (
-            SELECT 1 FROM approval_continuation_calls AS calls
-            WHERE calls.principal_id = approval_continuations.principal_id
-              AND calls.approval_id = approval_continuations.approval_id
-              AND calls.generation = approval_continuations.generation
-              AND calls.toolkit_name IS NULL
-              AND (calls.decision IS NULL OR calls.decision = 'approved')
-          )
-        """,
-    )
-    for row in unresumable:
-        principal_id = str(row["principal_id"])
-        continuation = approval_continuations.get(transaction, principal_id, approval_id=str(row["approval_id"]))
-        if continuation is None or approval_continuations.answer_frozen(transaction, principal_id, continuation):
-            continue
-        transaction.execute(
-            """
-            UPDATE approval_continuations SET state = 'failing', failure_reason = COALESCE(failure_reason, ?)
-            WHERE principal_id = ? AND approval_id = ?
-            """,
-            (
-                "This approval is from an older version of MindRoom and can no longer be used. "
-                "Please check what already completed, then send a new request for anything unfinished.",
-                principal_id,
-                continuation.approval_id,
-            ),
-        )
 
 
 # LEGACY_COMPAT: Approval calls without persisted argument digests.
-# Legacy format: approval_continuation_calls rows written before per-call argument digests, which have no
-# arguments_digest column or a NULL value there.
+# Legacy format: approval_continuation_calls without an arguments_digest column, written before per-call argument
+# digests.
 # Last legacy release: v2026.10.35; replacement: v2026.10.36 stores a SHA-256 digest of each paused call's
 # canonical arguments.
-# Handling: Add the nullable column and keep historical rows; an approved call without a digest never executes,
-# because continuation refuses calls whose persisted arguments do not match their digest and fails normally.
-# The exception is CLI recovery of a generated `agent` function, which runs the arguments saved in the journal's
-# own CLI payload, where worker code cannot write, whether or not a digest was recorded.
-# Coverage: tests/test_journal_upgrade_boundary.py::test_approval_argument_digest_upgrade_keeps_calls_unexecutable;
-# tests/test_cli_approval_recovery.py::test_generated_cli_approval_rebuilds_and_authorizes_exact_function.
+# Handling: Add the nullable column. The continuation upgrade runs first in the same transaction and cancels every
+# continuation an earlier release left, so every remaining call records its digest.
+# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_an_earlier_release_left_pending_is_cancelled.
 def upgrade_approval_argument_digests(transaction: Transaction, columns: frozenset[str]) -> None:
     """Add the argument digest column inside the schema transaction."""
     if "arguments_digest" not in columns:

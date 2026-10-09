@@ -21,7 +21,9 @@ if TYPE_CHECKING:
 # it deletes the continuation with its calls and card records, and settles its pending sources unanswered. A click on
 # one of its cards then does nothing, and its reply keeps what it showed. The upgrade then adds span_id and
 # claim_span_id and drops approval_continuation_sources, the entity_name column, and the response attempt tables.
-# Coverage: tests/test_legacy_continuation_identity.py.
+# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_an_earlier_release_left_pending_is_cancelled,
+# tests/test_legacy_continuation_identity.py::test_the_upgrade_drops_what_kept_the_identity_of_a_pending_approval,
+# tests/test_legacy_continuation_identity.py::test_the_upgrade_cancels_every_approval_in_bounded_pages.
 
 logger = get_logger(__name__)
 

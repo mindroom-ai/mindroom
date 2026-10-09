@@ -34,7 +34,7 @@ That progress closes before the approval lifecycle delivers the durable final ed
 `ResponseSources` captures immutable pending events, logical sources, and discovery aliases for one request.
 Once a reply span claims the request, the span's records own its sources and the reply's event, and an approval continuation holds the pending sources of the span whose pause created it (see [Reply messages](reply-messages.md#ownership)).
 The turn record holds an edit's text once its regeneration claims the reply, and the outbox alone owns frozen payloads, acknowledgement, and retirement.
-`response_sources.py` owns the immutable runtime values, and `event_journal/legacy_response_attempts.py` owns the one-time adoption of approval continuation identity from released stores.
+`response_sources.py` owns the immutable runtime values, and `event_journal/legacy_response_attempts.py` cancels the approvals an earlier release left pending.
 
 `EditRegenerator` owns edits of answered messages: it regenerates the reply to the latest message of a conversation while no approval holds that reply, stopping the reply first while it streams (see [Reply messages](reply-messages.md#claims)).
 It runs the regeneration on a runner-owned task and does not wait for its claim, so another reply holding the conversation never holds up the room's event lane.
@@ -340,8 +340,6 @@ Clients deduplicate those receipts by their exact approval and tool-call identit
 Acknowledged terminal receipts retire their payloads while retaining the existing grant audit and approval tombstone; unacknowledged receipt debt remains recoverable.
 Replies to duplicate receipt events are verified against the router's exact Matrix event and retained grant audit, then remembered as terminal aliases even after payload retirement.
 Approval creation and source-redaction admission serialize on the existing room-membership row, so creation cannot acquire a source that deletion already settled.
-Recovery can finish a failing approval whose INITIAL was already retired only after card expiration; `event_journal/legacy_approval_recovery.py` proves no FINAL debt and exact tombstones for its acknowledged response and every owned source inside the current owner's transaction.
-That cleanup settles journal ownership without sending replacement text or recording tool success.
 An edit loads its turn from the ledger alone; a turn the ledger forgot regenerates nothing.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
 Conversation lookups use an index derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.

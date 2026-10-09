@@ -6873,56 +6873,6 @@ class TestApprovalContinuations:
         assert (await principal.approval_continuation("approval-1") is not None) is approval_first
         assert await principal.is_pending("$source-1") is approval_first
 
-    @pytest.mark.parametrize(
-        "proof",
-        ["complete", "source_only", "partial_sources", "active_initial", "wrong_response", "owed_final", "ready"],
-    )
-    async def test_deleted_approval_failure_settles_only_proven_terminal_delivery(
-        self,
-        alice: PrincipalStore,
-        journal_store: EventJournalStore,
-        proof: str,
-    ) -> None:
-        """Recover an already-retired approval without discarding live delivery debt."""
-        await self.admit_sources(alice)
-        # The reply's create shows "$waiting" on the INITIAL row of "$source-1".
-        assert await paused_for_approval(alice, self.continuation(state="ready" if proof == "ready" else "failing"))
-        if proof == "wrong_response":
-            await journal_store.backend.write(
-                lambda tx: tx.execute(
-                    "UPDATE matrix_delivery_outbox SET acknowledged_event_id = '$different' WHERE stage = 'initial'",
-                ),
-            )
-        if proof == "owed_final":
-            await alice.enqueue_matrix_delivery(
-                delivery_id="$source-1",
-                stage=DeliveryStage.FINAL,
-                room_id=ROOM,
-                thread_id="$thread",
-                payload=text("Frozen final"),
-            )
-        if proof != "active_initial":
-            # Reproduce persisted state created before approval-aware cleanup.
-            await journal_store.backend.write(
-                lambda tx: tx.execute(
-                    "UPDATE matrix_delivery_outbox SET retired = 1 WHERE delivery_id = ? AND stage = 'initial'",
-                    ("$source-1",),
-                ),
-            )
-        deleted = ["$source-1"]
-        if proof != "partial_sources":
-            deleted.append("$source-2")
-        if proof != "source_only":
-            deleted.append("$waiting")
-        for index, event_id in enumerate(deleted):
-            await admit(alice, f"$redact-{index}", redacts=event_id, kind=EventKind.REDACTION)
-
-        finished = await alice.finish_approval_continuation("approval-1") is not None
-
-        assert finished is (proof == "complete")
-        assert await alice.is_pending("$source-1") is not finished
-        assert (await alice.approval_continuation("approval-1") is None) is finished
-
     async def test_continuation_round_trips_frozen_visibility_without_its_presentation(
         self,
         alice: PrincipalStore,

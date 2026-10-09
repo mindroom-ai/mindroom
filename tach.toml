@@ -471,7 +471,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.response_sources",
-    "mindroom.event_journal.legacy_approval_recovery",
     "mindroom.history.types",
     "mindroom.interactive_models",
     "mindroom.legacy_approval_payloads",
@@ -495,7 +494,6 @@ visibility = [
     "mindroom.delivery_gateway",
     "mindroom.dispatch_replay_guard",
     "mindroom.event_journal_open",
-    "mindroom.event_journal.legacy_approval_recovery",
     "mindroom.journal_dispatch",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
@@ -534,11 +532,6 @@ depends_on = [
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.events",
 ]
-
-[[modules]]
-path = "mindroom.event_journal.legacy_approval_recovery"
-depends_on = ["mindroom.event_journal"]
-visibility = ["mindroom.event_journal"]
 
 [[modules]]
 path = "mindroom.interactive_models"

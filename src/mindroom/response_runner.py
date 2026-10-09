@@ -2290,13 +2290,6 @@ class ResponseRunner:
             if requested is None:
                 return False
             failing = requested
-        initial = await self.deps.approval_store.load_matrix_delivery(
-            delivery_id=failing.source_event_ids[0],
-            stage=DeliveryStage.INITIAL,
-        )
-        if initial is not None and initial.retired:
-            # The legacy approval-recovery boundary proves deletion during settlement.
-            return await self._approval_responses.settle_failure(failing, reason)
         # The reply's records know what it showed; Matrix is not read back.
         return await self._approval_responses.settle_failure(
             failing,
@@ -3495,20 +3488,6 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> tuple[bool, str | None]:
         """Recover a non-ready owner, leaving ready execution to the caller."""
-        if owned.state in {"waiting", "ready"}:
-            initial = await self.deps.approval_store.load_matrix_delivery(
-                delivery_id=owned.source_event_ids[0],
-                stage=DeliveryStage.INITIAL,
-            )
-            if initial is not None and initial.retired:
-                # Fence old retired owners; legacy_approval_recovery owns the terminal proof.
-                failing = await self._approval_responses.request_failure(
-                    owned,
-                    "Tool approval response was removed. Please send a new request.",
-                )
-                if failing is None:
-                    return True, None
-                owned = failing
         if owned.state == "waiting":
             if owned.runtime_generation is not None:
                 reason = "Tool approval card publication was interrupted and denied safely."
