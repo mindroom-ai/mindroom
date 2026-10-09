@@ -27,6 +27,7 @@ from mindroom.ai import (
     _PreparedAgentRun,
 )
 from mindroom.bot import AgentBot
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -399,6 +400,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
                     schedule_refresh=lambda _base_id: None,
                     is_refreshing=lambda _base_id: False,
                 ),
+                budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
             ),
             enable_streaming=False,
         )

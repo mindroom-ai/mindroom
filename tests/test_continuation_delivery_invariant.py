@@ -33,6 +33,7 @@ from agno.run.agent import RunContentEvent, RunOutput, ToolCallCompletedEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.ai import _PreparedAgentRun
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.event_journal import DeliveryStage
 from mindroom.history.types import PreparedHistoryState
@@ -349,6 +350,7 @@ def _orchestrator_for(bot: AgentBot) -> SimpleNamespace:
         hook_matrix_admin=lambda: None,
         hook_room_state_querier=lambda: None,
         hook_room_state_putter=lambda: None,
+        budgets=BudgetMonitor(runtime_paths=bot.runtime_paths, config_provider=lambda: bot.config),
     )
 
 

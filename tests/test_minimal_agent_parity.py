@@ -37,6 +37,7 @@ from mindroom.agent_cli.protocol import (
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.agent_storage import create_session_storage
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -243,7 +244,13 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
         )
         runtime.config.agents["code"] = AgentConfig(display_name="Code", learning=False)
         with_responder_access(runtime.config, "code", users=[runtime.requester_id])
-        runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+        runtime = replace(
+            runtime,
+            orchestrator=SimpleNamespace(
+                agent_cli_registry=TurnToolRegistry(),
+                budgets=BudgetMonitor(runtime_paths=runtime.runtime_paths, config_provider=lambda: runtime.config),
+            ),
+        )
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         children = []
 
