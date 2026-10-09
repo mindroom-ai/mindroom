@@ -185,6 +185,37 @@ def test_alpn_is_http11_only(tmp_path: Path) -> None:
     assert selected_protocol == "http/1.1"
 
 
+def test_strict_tls_verification_accepts_broker_certs(tmp_path: Path) -> None:
+    """Leaf certificates pass strict X.509 verification (Python 3.13+)."""
+    ca_dir = tmp_path / "ca"
+    ca = BrokerCA.load_or_create(ca_dir, key_password=None)
+
+    # Test DNS name with strict verification
+    dns_host = "api.github.com"
+    server_ctx_dns = ca.server_context(dns_host)
+
+    client_ctx_dns = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_ctx_dns.check_hostname = False
+    client_ctx_dns.verify_mode = ssl.CERT_REQUIRED
+    # Enable strict X.509 verification (required in Python 3.13+)
+    client_ctx_dns.verify_flags = ssl.VERIFY_X509_STRICT
+    client_ctx_dns.load_verify_locations(cadata=ca.cert_pem)
+
+    _test_handshake(server_ctx_dns, client_ctx_dns, server_hostname=dns_host)
+
+    # Test IP address with strict verification
+    ip_host = "127.0.0.1"
+    server_ctx_ip = ca.server_context(ip_host)
+
+    client_ctx_ip = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_ctx_ip.check_hostname = False
+    client_ctx_ip.verify_mode = ssl.CERT_REQUIRED
+    client_ctx_ip.verify_flags = ssl.VERIFY_X509_STRICT
+    client_ctx_ip.load_verify_locations(cadata=ca.cert_pem)
+
+    _test_handshake(server_ctx_ip, client_ctx_ip, server_hostname=None)
+
+
 def test_materialize_bundle_contains_system_roots_and_broker_ca(tmp_path: Path) -> None:
     """materialize_bundle creates combined bundle with system roots and broker CA."""
     ca_dir = tmp_path / "ca"

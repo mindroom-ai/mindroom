@@ -93,25 +93,47 @@ class BrokerCA:
             cert_pem = cert_path.read_bytes()
             ca_cert = x509.load_pem_x509_certificate(cert_pem)
 
-            key_pem = key_path.read_bytes()
-            ca_key = serialization.load_pem_private_key(
-                key_pem,
-                password=key_password,
-            )
-            if not isinstance(ca_key, ec.EllipticCurvePrivateKey):
-                msg = "CA key is not an ECDSA key"
-                raise TypeError(msg)
+            # Check if CA has SubjectKeyIdentifier (required for strict TLS clients)
+            try:
+                ca_cert.extensions.get_extension_for_oid(x509.oid.ExtensionOID.SUBJECT_KEY_IDENTIFIER)
+                has_ski = True
+            except x509.ExtensionNotFound:
+                has_ski = False
 
-            return BrokerCA(
-                ca_cert=ca_cert,
-                ca_key=ca_key,
-                cert_pem=cert_pem.decode("utf-8"),
-                directory=directory,
-            )
+            # If CA lacks SKI, regenerate it (old CA created before this fix)
+            if not has_ski:
+                # Load the key and fall through to regeneration
+                key_pem = key_path.read_bytes()
+                ca_key = serialization.load_pem_private_key(
+                    key_pem,
+                    password=key_password,
+                )
+                if not isinstance(ca_key, ec.EllipticCurvePrivateKey):
+                    msg = "CA key is not an ECDSA key"
+                    raise TypeError(msg)
+                # Fall through to regenerate CA with SKI below
+            else:
+                # Load key and return existing CA
+                key_pem = key_path.read_bytes()
+                ca_key = serialization.load_pem_private_key(
+                    key_pem,
+                    password=key_password,
+                )
+                if not isinstance(ca_key, ec.EllipticCurvePrivateKey):
+                    msg = "CA key is not an ECDSA key"
+                    raise TypeError(msg)
 
-        # Generate new CA
-        ca_key = ec.generate_private_key(ec.SECP256R1())
+                return BrokerCA(
+                    ca_cert=ca_cert,
+                    ca_key=ca_key,
+                    cert_pem=cert_pem.decode("utf-8"),
+                    directory=directory,
+                )
+        else:
+            # Generate new key if files don't exist
+            ca_key = ec.generate_private_key(ec.SECP256R1())
 
+        # Generate CA certificate (new or regenerated with SKI)
         subject = issuer = x509.Name(
             [
                 x509.NameAttribute(NameOID.COMMON_NAME, "MindRoom Egress Broker CA"),
@@ -127,6 +149,10 @@ class BrokerCA:
             .serial_number(x509.random_serial_number())
             .not_valid_before(now)
             .not_valid_after(now + timedelta(days=_CA_VALIDITY_YEARS * 365))
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+                critical=False,
+            )
             .add_extension(
                 x509.BasicConstraints(ca=True, path_length=0),
                 critical=True,
@@ -235,6 +261,13 @@ class BrokerCA:
         not_before = now - timedelta(hours=1)  # 1h in the past
         not_after = now + timedelta(hours=_LEAF_VALIDITY_HOURS)
 
+        # Get CA's SubjectKeyIdentifier for AuthorityKeyIdentifier
+        ca_ski_ext = self._ca_cert.extensions.get_extension_for_oid(
+            x509.oid.ExtensionOID.SUBJECT_KEY_IDENTIFIER,
+        )
+        assert isinstance(ca_ski_ext.value, x509.SubjectKeyIdentifier)
+        ca_ski = ca_ski_ext.value
+
         leaf_cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -243,6 +276,14 @@ class BrokerCA:
             .serial_number(x509.random_serial_number())
             .not_valid_before(not_before)
             .not_valid_after(not_after)
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(self._leaf_key.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski),
+                critical=False,
+            )
             .add_extension(san, critical=False)
             .add_extension(
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
