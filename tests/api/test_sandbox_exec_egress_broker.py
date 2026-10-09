@@ -2,57 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
-import pytest
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
-
 from mindroom.api import sandbox_exec
 from mindroom.constants import resolve_runtime_paths
-from mindroom.egress_broker import env as egress_env
+from mindroom.egress_broker.env import BROKER_CA_PEM_ENV, broker_execution_env
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch
-
-
-@pytest.fixture
-def test_ca_pem() -> str:
-    """Return a valid test CA certificate in PEM format."""
-    key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test Egress Broker CA")])
-    now = datetime.now(UTC)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(hours=1))
-        .not_valid_after(now + timedelta(days=1))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=False,
-                content_commitment=False,
-                key_encipherment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=True,
-                crl_sign=True,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        )
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
-        .sign(key, hashes.SHA256())
-    )
-    return cert.public_bytes(serialization.Encoding.PEM).decode()
 
 
 def test_native_broker_env_wins_over_agent_vault(
@@ -77,7 +35,7 @@ def test_native_broker_env_wins_over_agent_vault(
     )
 
     # Compose broker execution env
-    broker_env = egress_env.broker_execution_env(
+    broker_env = broker_execution_env(
         broker_url="http://host.docker.internal:8768",
         token="mrb1.worker1token",  # noqa: S106
         ca_pem=test_ca_pem,
@@ -94,7 +52,7 @@ def test_native_broker_env_wins_over_agent_vault(
     assert "agent-vault" not in final_env["HTTPS_PROXY"]
 
     # The broker CA env var should be removed (materialized into files)
-    assert egress_env.BROKER_CA_PEM_ENV not in final_env
+    assert BROKER_CA_PEM_ENV not in final_env
 
     # SSL_CERT_FILE and friends should point to materialized bundles
     assert "SSL_CERT_FILE" in final_env
@@ -112,7 +70,7 @@ def test_broker_env_without_agent_vault_config(tmp_path: Path, test_ca_pem: str)
         process_env={},
     )
 
-    broker_env = egress_env.broker_execution_env(
+    broker_env = broker_execution_env(
         broker_url="http://broker:8768",
         token="mrb1.token",  # noqa: S106
         ca_pem=test_ca_pem,
@@ -124,5 +82,5 @@ def test_broker_env_without_agent_vault_config(tmp_path: Path, test_ca_pem: str)
 
     assert "HTTPS_PROXY" in final_env
     assert "mrb1.token" in final_env["HTTPS_PROXY"]
-    assert egress_env.BROKER_CA_PEM_ENV not in final_env
+    assert BROKER_CA_PEM_ENV not in final_env
     assert "SSL_CERT_FILE" in final_env

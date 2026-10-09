@@ -20,7 +20,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
-from mindroom.egress_broker import env as egress_env
+from mindroom.egress_broker.env import (
+    apply_runner_ca_bundle,
+)
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -181,7 +183,7 @@ def request_execution_env(
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
         # Apply broker CA bundle if present
         bundle_dir = Path(tempfile.gettempdir()) / "mindroom-egress-broker"
-        broker_active = egress_env.apply_runner_ca_bundle(env, bundle_dir)
+        broker_active = apply_runner_ca_bundle(env, bundle_dir)
         if broker_active:
             # Native broker wins; skip Agent Vault overlay
             if agent_vault_env and not _EGRESS_BROKER_OVERRIDE_LOGGED:

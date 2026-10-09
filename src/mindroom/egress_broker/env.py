@@ -7,8 +7,6 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from mindroom.egress_broker.ca import materialize_ca_bundle
-
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
@@ -20,8 +18,6 @@ __all__ = [
 ]
 
 BROKER_CA_PEM_ENV = "MINDROOM_EGRESS_BROKER_CA_PEM"
-
-_EGRESS_BROKER_OVERRIDE_LOGGED = False
 
 
 def broker_execution_env(
@@ -57,7 +53,7 @@ def broker_execution_env(
 
     # Compose base proxy env
     env = compose_worker_proxy_env(
-        {},  # placeholder process env (compose does not read it for our params)
+        {},  # broker env composed on primary; primary git config must not leak, hence empty
         proxy_url=broker_url,
         username=token,
         password="",  # empty password
@@ -125,6 +121,9 @@ def apply_runner_ca_bundle(env: dict[str, str], directory: Path) -> bool:
 
     # Create directory if missing
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    # Import lazily to keep the runner import light
+    from mindroom.egress_broker.ca import materialize_ca_bundle  # noqa: PLC0415
 
     # Materialize CA bundle
     combined, broker_only = materialize_ca_bundle(ca_pem, directory)
