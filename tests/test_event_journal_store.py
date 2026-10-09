@@ -7672,7 +7672,7 @@ class TestApprovalContinuations:
 
         assert failing is not None
         assert failing.state == "failing"
-        assert await alice.finish_approval_continuation("approval-1")
+        assert await alice.finish_approval_continuation("approval-1") is not None
         assert await alice.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
@@ -8177,7 +8177,7 @@ class TestApprovalContinuations:
 
         completed, departed = await asyncio.gather(finish, departure)
 
-        assert completed
+        assert completed is not None
         assert departed == 1
         assert await responder.approval_continuation("approval-1") is None
         assert not await responder.is_pending("$source-1")

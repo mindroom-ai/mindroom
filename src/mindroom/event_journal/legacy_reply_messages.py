@@ -10,7 +10,7 @@ reply rules no longer model.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -71,16 +71,6 @@ class LegacyPresentations:
     paused: Callable[[ApprovalContinuation, LegacyPausedAnswer, str], str]
 
 
-@dataclass(frozen=True, slots=True)
-class _Adoption:
-    """The reply records one earlier-release reply gets."""
-
-    reply: rl.Reply
-    spans: tuple[rl.Span, ...]
-    # The continuation whose pause the reply's first span is.
-    approval_id: str
-
-
 def _classified(transaction: Transaction, principal_id: str) -> bool:
     """Return whether this principal's earlier-release replies were adopted already."""
     row = transaction.fetchone(
@@ -113,10 +103,13 @@ def classify(
     if _classified(transaction, principal_id):
         return ()
     applied = [
-        _write(
+        _adopt(
             transaction,
             principal_id,
-            _paused_reply(transaction, principal_id, continuation, entity_name, presentations, now_ns),
+            continuation,
+            entity_name=entity_name,
+            presentations=presentations,
+            now_ns=now_ns,
         )
         for continuation in _newest_continuations(transaction, principal_id, entity_name)
     ]
@@ -129,20 +122,6 @@ def classify(
 
 def _new_id() -> str:
     return uuid4().hex
-
-
-def _write(transaction: Transaction, principal_id: str, adoption: _Adoption) -> AppliedTransition:
-    applied = apply(
-        transaction,
-        principal_id,
-        rl.Transition(outcome=rl.Outcome.APPLIED, reply=adoption.reply, spans=adoption.spans),
-    )
-    # The continuation names the span that paused its reply, as one paused now does.
-    transaction.execute(
-        "UPDATE approval_continuations SET span_id = ? WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL",
-        (adoption.spans[0].span_id, principal_id, adoption.approval_id),
-    )
-    return applied
 
 
 def _newest_continuations(
@@ -165,86 +144,32 @@ def _newest_continuations(
         older = newest.get(event_id)
         if older is not None:
             # The newer pause is what the reply shows.
-            _discard(transaction, principal_id, older, why="older_continuation_of_one_reply")
+            discard_continuation(
+                transaction,
+                principal_id,
+                older.approval_id,
+                older.source_event_ids,
+                why="older_continuation_of_one_reply",
+            )
         newest[event_id] = continuation
     return tuple(newest.values())
 
 
-def _discard(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation, *, why: str) -> None:
-    discard_continuation(
-        transaction,
-        principal_id,
-        continuation.approval_id,
-        continuation.source_event_ids,
-        why=why,
-    )
-
-
-def _reply(
+def _adopt(
     transaction: Transaction,
     principal_id: str,
+    continuation: ApprovalContinuation,
     *,
     entity_name: str,
-    room_id: str,
-    thread_id: str | None,
-    state: rl.ReplyState,
-    span: rl.Span,
-    presentation: str,
+    presentations: LegacyPresentations,
     now_ns: int,
-    membership_epoch: int | None = None,
-    **changes: object,
-) -> rl.Reply:
-    reply = rl.Reply(
-        reply_id=span.reply_id,
-        entity_name=entity_name,
-        room_id=room_id,
-        thread_id=thread_id,
-        membership_epoch=(
-            journal.current_membership_epoch(transaction, principal_id, room_id)
-            if membership_epoch is None
-            else membership_epoch
-        ),
-        state=state,
-        last_span_id=span.span_id,
-        presentation=presentation,
-        revision=1,
-        reply_sequence=0,
-        created_at_ns=now_ns,
-        updated_at_ns=now_ns,
-    )
-    return replace(reply, **changes)  # type: ignore[arg-type]
-
-
-def _span(
-    reply_id: str,
-    *,
-    kind: rl.SpanKind,
-    delivery_id: str,
-    sources: rl.SpanSources,
-    now_ns: int,
-    outcome: rl.SpanOutcome | None,
-    approval_id: str | None = None,
-) -> rl.Span:
-    return rl.Span(
-        span_id=_new_id(),
-        reply_id=reply_id,
-        kind=kind,
-        delivery_id=delivery_id,
-        sources=sources,
-        bot_generation=_LEGACY_GENERATION,
-        claimed_at_ns=now_ns,
-        base_sequence=0,
-        approval_id=approval_id,
-        outcome=outcome,
-        ended_at_ns=None if outcome is None else now_ns,
-    )
-
-
-def _pause_span(reply_id: str, continuation: ApprovalContinuation, outcome: rl.SpanOutcome, now_ns: int) -> rl.Span:
-    """Return the span whose pause created ``continuation``, holding its sources as one paused now does."""
+) -> AppliedTransition:
+    """Pause the reply ``continuation`` paused, which its approval runtime then resumes or settles."""
     sources = continuation.sources
-    return _span(
-        reply_id,
+    # The span whose pause created the continuation, holding its sources as one paused now does.
+    paused = rl.Span(
+        span_id=_new_id(),
+        reply_id=_new_id(),
         kind=rl.SpanKind.TURN,
         delivery_id=continuation.source_event_ids[0],
         sources=rl.SpanSources(
@@ -252,38 +177,36 @@ def _pause_span(reply_id: str, continuation: ApprovalContinuation, outcome: rl.S
             logical=sources.logical_source_event_ids,
             discovery=sources.discovery_event_ids,
         ),
-        now_ns=now_ns,
-        outcome=outcome,
+        bot_generation=_LEGACY_GENERATION,
+        claimed_at_ns=now_ns,
+        base_sequence=0,
         approval_id=continuation.approval_id,
+        outcome=rl.SpanOutcome.PAUSED,
+        ended_at_ns=now_ns,
     )
-
-
-def _paused_reply(
-    transaction: Transaction,
-    principal_id: str,
-    continuation: ApprovalContinuation,
-    entity_name: str,
-    presentations: LegacyPresentations,
-    now_ns: int,
-) -> _Adoption:
-    """A continuation pauses its reply, which its approval runtime then resumes or settles."""
-    reply_id = _new_id()
-    paused = _pause_span(reply_id, continuation, rl.SpanOutcome.PAUSED, now_ns)
-    shown = presentations.paused(
-        continuation,
-        _legacy_paused_answer(transaction, principal_id, continuation.approval_id),
-        paused.span_id,
-    )
-    reply = _reply(
-        transaction,
-        principal_id,
+    reply = rl.Reply(
+        reply_id=paused.reply_id,
         entity_name=entity_name,
         room_id=continuation.room_id,
         thread_id=continuation.thread_id,
+        membership_epoch=journal.current_membership_epoch(transaction, principal_id, continuation.room_id),
         state=rl.ReplyState.PAUSED,
-        span=paused,
-        presentation=shown,
-        now_ns=now_ns,
+        last_span_id=paused.span_id,
+        presentation=presentations.paused(
+            continuation,
+            _legacy_paused_answer(transaction, principal_id, continuation.approval_id),
+            paused.span_id,
+        ),
+        revision=1,
+        reply_sequence=0,
+        created_at_ns=now_ns,
+        updated_at_ns=now_ns,
         event_id=continuation.response_event_id,
     )
-    return _Adoption(approval_id=continuation.approval_id, reply=reply, spans=(paused,))
+    applied = apply(transaction, principal_id, rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply, spans=(paused,)))
+    # The continuation names the span that paused its reply, as one paused now does.
+    transaction.execute(
+        "UPDATE approval_continuations SET span_id = ? WHERE principal_id = ? AND approval_id = ? AND span_id IS NULL",
+        (paused.span_id, principal_id, continuation.approval_id),
+    )
+    return applied

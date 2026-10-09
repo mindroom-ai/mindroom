@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent, replies
-from mindroom.event_journal.replies import ClaimLookup, ReplyRowRequest
+from mindroom.event_journal.replies import ReplyRowRequest
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
 from mindroom.response_sources import ResponseSources
@@ -303,7 +303,7 @@ async def reply_shown_for_approval(principal: PrincipalStore, continuation: Appr
             membership_epoch=await principal.membership_epoch(continuation.room_id),
             empty_presentation=encode_presentation(Presentation(show_tool_calls=continuation.show_tool_calls)),
         ),
-        ClaimLookup(existing_event_id=continuation.response_event_id),
+        existing_event_id=continuation.response_event_id,
     )
     span = claimed.transition.claimed
     if span is None:
@@ -330,7 +330,7 @@ async def reply_shown_for_approval(principal: PrincipalStore, continuation: Appr
             thread_id=continuation.thread_id,
             payload={"msgtype": "m.text", "body": AGENT_PLACEHOLDER},
         )
-        if created is None or created.transaction_id is None:
+        if created is None or created.delivery_id is None:
             return None
         await principal.claim_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.INITIAL)
         await principal.acknowledge_matrix_delivery(

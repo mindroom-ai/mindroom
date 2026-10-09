@@ -22,7 +22,7 @@ from mindroom.event_journal import (
     reply_spans,
     turn_records,
 )
-from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyRowRequest
+from mindroom.event_journal.replies import AppliedTransition, Decide, ReplyRowRequest
 from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
     ClaimContext,
@@ -379,7 +379,7 @@ async def test_post_commit_effects_are_returned(journal_store: EventJournalStore
 async def _claimed(principal: PrincipalStore) -> tuple[rl.Reply, rl.Span]:
     await admit(principal, "$source")
     await principal.replies.write_generation("gen-1", now_ns=1)
-    claim = (await principal.replies.claim(_request(), ClaimLookup())).transition
+    claim = (await principal.replies.claim(_request())).transition
     assert claim.reply is not None
     assert claim.claimed is not None
     assert claim.reply.membership_epoch == await principal.membership_epoch(ROOM)
@@ -447,7 +447,7 @@ async def test_a_stop_committed_after_rendering_writes_nothing(journal_store: Ev
     )
     assert enqueued is not None
     assert enqueued.transition.outcome is rl.Outcome.RECOMPUTE
-    assert enqueued.transaction_id is None
+    assert enqueued.delivery_id is None
     assert await principal.is_pending("$source")
     assert await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None
 
@@ -758,7 +758,7 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
         _request(source="$first"),
         sources=SpanSources(pending=("$first", "$second"), logical=("$first", "$second")),
     )
-    span = (await principal.replies.claim(request, ClaimLookup())).transition.claimed
+    span = (await principal.replies.claim(request)).transition.claimed
     assert span is not None
 
     await _delete(principal, "$first")
@@ -809,7 +809,7 @@ async def _answered_and_regenerating(principal: PrincipalStore) -> rl.Span:
         sources=SpanSources(pending=("$edit",), logical=("$source",)),
         driving_edit_id="$edit",
     )
-    claimed = (await principal.replies.claim(regeneration, ClaimLookup(existing_event_id="$answer"))).transition
+    claimed = (await principal.replies.claim(regeneration, existing_event_id="$answer")).transition
     assert claimed.claimed is not None
     return claimed.claimed
 
@@ -843,7 +843,7 @@ async def test_a_regeneration_keeps_the_membership_its_edit_was_admitted_in(jour
         sources=SpanSources(pending=("$edit",), logical=("$source",)),
         driving_edit_id="$edit",
     )
-    claimed = (await principal.replies.claim(regeneration, ClaimLookup(existing_event_id="$answer"))).transition
+    claimed = (await principal.replies.claim(regeneration, existing_event_id="$answer")).transition
     assert claimed.claimed is not None
     assert claimed.claimed.reply_id == "reply-1"
     stored = await principal.replies.load("reply-1")
@@ -1035,7 +1035,7 @@ async def test_a_retired_instance_neither_claims_nor_writes(journal_store: Event
     await principal.replies.write_generation("gen-2", now_ns=70)
 
     await admit(principal, "$other")
-    refused = await principal.replies.claim(_request("span-old", reply_id="reply-old", source="$other"), ClaimLookup())
+    refused = await principal.replies.claim(_request("span-old", reply_id="reply-old", source="$other"))
     assert refused.transition.outcome is rl.Outcome.STALE
     assert await principal.replies.load("reply-old") is None
     enqueued = await principal.enqueue_reply_row(

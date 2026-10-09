@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.event_journal.replies import AppliedTransition, ClaimLookup, Decide, ReplyCreation, TurnCompleted
+from mindroom.event_journal.replies import AppliedTransition, Decide, ReplyCreation, TurnCompleted
 from mindroom.legacy_reply_messages import LEGACY_PRESENTATIONS
 from mindroom.logging_config import get_logger
 from mindroom.reply_presentation import (
@@ -311,18 +311,19 @@ class ReplyRuntime:
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
-        finished = await self.store.finish_approval_continuation(approval_id)
-        if finished is None:
-            return False
-        await self.run_effects(finished.post_commit)
-        return True
+        return await self._ran(await self.store.finish_approval_continuation(approval_id))
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
         """Release an interrupted run's approval as ``rl.approval_released`` decides; return whether it was released."""
-        released = await self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)
-        if released is None:
+        return await self._ran(
+            await self.store.release_approval_continuation(approval_id, expected_generation=expected_generation),
+        )
+
+    async def _ran(self, effects: tuple[PostCommitEffect, ...] | None) -> bool:
+        """Run what an ended approval's commit left, returning whether it ended."""
+        if effects is None:
             return False
-        await self.run_effects(released.post_commit)
+        await self.run_effects(effects)
         return True
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
@@ -462,13 +463,7 @@ class ReplyRuntime:
             self.spans.expect(span_id)
         try:
             applied = await self.committed(
-                await self.store.replies.claim(
-                    request,
-                    ClaimLookup(
-                        interactive_span_id=interactive_span_id,
-                        existing_event_id=existing_event_id,
-                    ),
-                ),
+                await self.store.replies.claim(request, existing_event_id=existing_event_id),
             )
         except BaseException:
             for span_id in candidates:

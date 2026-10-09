@@ -668,74 +668,9 @@ def claim(transaction: Transaction, principal_id: str, *, approval_id: str, span
     return claimed is not None
 
 
-def _advance(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    approval_id: str,
-    claimant_generation: int,
-    run_id: str,
-    session_id: str,
-    calls: tuple[ApprovalCall, ...],
-    runtime_model_name: str | None = None,
-    delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
-    cli_call: dict[str, object] | None = None,
-    continuation_count: int | None = None,
-) -> ApprovalContinuation | None:
-    """Replace one claimed generation with the next exact Agno pause."""
-    current = get(transaction, principal_id, approval_id=approval_id)
-    if current is None:
-        return None
-    next_generation = claimant_generation + 1
-    # Every chained generation stays fenced until its ordered Matrix edit and
-    # any cards are published. Even an automatically decided generation must
-    # not become executable in the persist-before-ack crash window.
-    state: ApprovalContinuationState = "waiting"
-    publication_owner = current.runtime_generation
-    advanced = replace(
-        current,
-        run_id=run_id,
-        session_id=session_id,
-        calls=calls,
-        runtime_model_name=runtime_model_name or current.runtime_model_name,
-        continuation_count=current.continuation_count if continuation_count is None else continuation_count,
-        delegation_storage_bindings=(
-            current.delegation_storage_bindings if delegation_storage_bindings is None else delegation_storage_bindings
-        ),
-        state=state,
-        runtime_generation=publication_owner,
-        failure_reason=None,
-        generation=next_generation,
-        cli_call=cli_call,
-    )
-    updated = transaction.fetchone(
-        """
-        UPDATE approval_continuations
-        SET state = ?, generation = ?, runtime_generation = ?, claim_span_id = NULL,
-            failure_reason = NULL, context_json = ?
-        WHERE principal_id = ? AND approval_id = ?
-          AND state = 'ready' AND claim_span_id IS NOT NULL AND generation = ?
-        RETURNING approval_id
-        """,
-        (
-            state,
-            next_generation,
-            publication_owner,
-            _json(_context(advanced)),
-            principal_id,
-            approval_id,
-            claimant_generation,
-        ),
-    )
-    if updated is None:
-        return None
-    _insert_calls(transaction, principal_id, approval_id, next_generation, calls)
-    return get(transaction, principal_id, approval_id=approval_id)
-
-
 @dataclass(frozen=True, slots=True)
 class ApprovalAdvance:
-    """One claimed generation's next exact Agno pause, as ``_advance`` records it."""
+    """One claimed generation's next exact Agno pause."""
 
     approval_id: str
     claimant_generation: int
@@ -748,20 +683,59 @@ class ApprovalAdvance:
     continuation_count: int | None = None
 
     def apply(self, transaction: Transaction, principal_id: str) -> ApprovalContinuation | None:
-        """Record this pause on its continuation."""
-        return _advance(
-            transaction,
-            principal_id,
-            approval_id=self.approval_id,
-            claimant_generation=self.claimant_generation,
+        """Replace the claimed generation with this next exact Agno pause."""
+        current = get(transaction, principal_id, approval_id=self.approval_id)
+        if current is None:
+            return None
+        next_generation = self.claimant_generation + 1
+        # Every chained generation stays fenced until its ordered Matrix edit and
+        # any cards are published. Even an automatically decided generation must
+        # not become executable in the persist-before-ack crash window.
+        state: ApprovalContinuationState = "waiting"
+        publication_owner = current.runtime_generation
+        advanced = replace(
+            current,
             run_id=self.run_id,
             session_id=self.session_id,
             calls=self.calls,
-            runtime_model_name=self.runtime_model_name,
-            delegation_storage_bindings=self.delegation_storage_bindings,
+            runtime_model_name=self.runtime_model_name or current.runtime_model_name,
+            continuation_count=current.continuation_count
+            if self.continuation_count is None
+            else self.continuation_count,
+            delegation_storage_bindings=(
+                current.delegation_storage_bindings
+                if self.delegation_storage_bindings is None
+                else self.delegation_storage_bindings
+            ),
+            state=state,
+            runtime_generation=publication_owner,
+            failure_reason=None,
+            generation=next_generation,
             cli_call=self.cli_call,
-            continuation_count=self.continuation_count,
         )
+        updated = transaction.fetchone(
+            """
+            UPDATE approval_continuations
+            SET state = ?, generation = ?, runtime_generation = ?, claim_span_id = NULL,
+                failure_reason = NULL, context_json = ?
+            WHERE principal_id = ? AND approval_id = ?
+              AND state = 'ready' AND claim_span_id IS NOT NULL AND generation = ?
+            RETURNING approval_id
+            """,
+            (
+                state,
+                next_generation,
+                publication_owner,
+                _json(_context(advanced)),
+                principal_id,
+                self.approval_id,
+                self.claimant_generation,
+            ),
+        )
+        if updated is None:
+            return None
+        _insert_calls(transaction, principal_id, self.approval_id, next_generation, self.calls)
+        return get(transaction, principal_id, approval_id=self.approval_id)
 
 
 def activate(

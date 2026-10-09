@@ -75,7 +75,6 @@ from .projection import (
 )
 from .replies import (
     AppliedTransition,
-    EndedApproval,
     PostCommitEffect,
     ReplyRowEnqueue,
     ReplyRowRequest,
@@ -929,7 +928,7 @@ class PrincipalStore:
                 stage=stage,
                 reason=reason,
             )
-            effects: list[replies.PostCommitEffect] = []
+            effects: list[PostCommitEffect] = []
             for failed_id, failed_stage in failed_rows:
                 delivery = outbox.load(transaction, self._principal_id, delivery_id=failed_id, stage=failed_stage)
                 applied = None if delivery is None else replies.fail_row(transaction, self._principal_id, delivery)
@@ -1663,13 +1662,13 @@ class PrincipalStore:
         approval_id: str,
         *,
         expected_generation: int,
-    ) -> EndedApproval | None:
+    ) -> tuple[PostCommitEffect, ...] | None:
         """Release an interrupted continuation, whose reply rule hands its sources back to replay or ends it stopped.
 
-        Returns ``None`` when the run may not be released.
+        Returns the work its commit left for afterwards, or ``None`` when the run may not be released.
         """
 
-        def release(transaction: Transaction) -> EndedApproval | None:
+        def release(transaction: Transaction) -> tuple[PostCommitEffect, ...] | None:
             continuation = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
             if continuation is not None:
                 replies.lock_paused_reply(transaction, self._principal_id, continuation)
@@ -1684,14 +1683,14 @@ class PrincipalStore:
             # The reply applies the release while the run still holds it; the run goes after.
             applied = replies.approval_released(transaction, self._principal_id, released)
             approval_continuations.delete(transaction, self._principal_id, approval_id=approval_id)
-            return EndedApproval(post_commit=() if applied is None else applied.post_commit)
+            return () if applied is None else applied.post_commit
 
         return await self._backend.write(release)
 
-    async def finish_approval_continuation(self, approval_id: str) -> EndedApproval | None:
+    async def finish_approval_continuation(self, approval_id: str) -> tuple[PostCommitEffect, ...] | None:
         """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply.
 
-        Returns ``None`` when the run is not ready to finish.
+        Returns the work its commit left for afterwards, or ``None`` when the run is not ready to finish.
         """
         return await self._backend.write(
             lambda transaction: _finish_approval_continuation(transaction, self._principal_id, approval_id),
@@ -1930,7 +1929,7 @@ def _claim_approval_resume(
         transaction,
         principal_id,
         replace(claim, approval_id=current.approval_id),
-        replies.ClaimLookup(existing_event_id=current.response_event_id),
+        existing_event_id=current.response_event_id,
     )
     if applied.transition.claimed is None:
         # The reply's earlier writes are unresolved; their resolution wakes the sources.
@@ -1949,7 +1948,7 @@ def _finish_approval_continuation(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
-) -> EndedApproval | None:
+) -> tuple[PostCommitEffect, ...] | None:
     """Finish a continuation, settle its turn, and apply the outcome to the reply it paused, in one transaction."""
     continuation = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
     if continuation is not None:
@@ -1960,7 +1959,7 @@ def _finish_approval_continuation(
     # The reply learns the finish while the run still holds it; the run goes after.
     post_commit = _settled_approval(transaction, principal_id, finishing, owner_available=True)
     approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
-    return EndedApproval(post_commit=post_commit)
+    return post_commit
 
 
 def _settled_approval(
@@ -2187,7 +2186,6 @@ def _enqueue_reply_row(
         applied=applied,
         delivery_id=delivery_id,
         stage=row.stage,
-        transaction_id=transaction_id,
         settled_event_ids=replies.settled_event_ids(transaction, principal_id, transition),
         sequence=row.sequence,
     )
@@ -2220,7 +2218,6 @@ def _span_row(
         ),
         delivery_id=stored.delivery_id,
         stage=stage,
-        transaction_id=stored.transaction_id,
         sequence=stored.reply_sequence,
     )
 
@@ -2301,7 +2298,7 @@ def _install_room_history_recovery_chunk(
             membership_epoch=expected_membership_epoch,
         )
         if tombstoned is not None:
-            journal.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
+            replies.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
     return True
 
 
@@ -2354,7 +2351,7 @@ def _install_hydration_chunk(
             membership_epoch=expected_membership_epoch,
         )
         if tombstoned is not None:
-            journal.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
+            replies.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
     return True
 
 

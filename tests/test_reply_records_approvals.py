@@ -616,8 +616,7 @@ async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path
         failing = await runner._approval_responses.request_failure(continuation, "Card publication failed")
         assert failing is not None
         # The Stop commits on the reply before this settlement writes its note.
-        stop = await gateway.reply_stop("$sent1", 5, room_id=_target().room_id, may_wait=False)
-        assert await gateway.finish_reply_stop(stop)
+        assert await gateway.stop_reply("$sent1", 5, room_id=_target().room_id, may_wait=False)
 
         assert await runner._approval_responses.settle_failure(failing, "Card publication failed")
 

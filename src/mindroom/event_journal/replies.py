@@ -51,13 +51,6 @@ class TurnCompleted:
 type PostCommitEffect = CancelSpan | WakeApproval | TurnCompleted
 
 
-@dataclass(frozen=True, slots=True)
-class EndedApproval:
-    """An approval continuation that finished or was released, and the work its commit left for afterwards."""
-
-    post_commit: tuple[PostCommitEffect, ...]
-
-
 type Decide = Callable[[Reply, Span], Transition]
 
 
@@ -237,8 +230,6 @@ def end_replies_of_deleted_source(
     *,
     room_id: str,
     event_id: str,
-    deleted: Callable[[str], bool],
-    now_ns: int,
 ) -> None:
     """End the replies whose current work lost every logical source to this deletion, settling their sources.
 
@@ -251,9 +242,11 @@ def end_replies_of_deleted_source(
         if reply is None or reply.terminal or reply.room_id != room_id:
             continue
         span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
-        if span is None or event_id not in span.sources.logical or not all(map(deleted, span.sources.logical)):
+        if span is None or event_id not in span.sources.logical:
             continue
-        transition = rl.sources_deleted(reply, span, now_ns=now_ns)
+        if not all(is_tombstoned(transaction, principal_id, room_id, source) for source in span.sources.logical):
+            continue
+        transition = rl.sources_deleted(reply, span, now_ns=time.time_ns())
         if transition.applied:
             # The projection cannot run post-commit effects; the bot takes the span to cancel from this record.
             applied = apply(transaction, principal_id, transition)
@@ -329,31 +322,28 @@ def approval_released(
 # Claims
 
 
-@dataclass(frozen=True, slots=True)
-class ClaimLookup:
-    """Where a claim looks for the reply it continues."""
-
-    interactive_span_id: str | None = None
-    existing_event_id: str | None = None
-
-
 def claim(
     transaction: Transaction,
     principal_id: str,
     request: rl.ClaimRequest,
-    lookup: ClaimLookup,
+    *,
+    existing_event_id: str | None = None,
 ) -> AppliedTransition:
-    """Find the reply a span continues and claim it, in one transaction."""
+    """Find the reply a span continues and claim it, in one transaction.
+
+    The reply is the one a selection's acknowledgement span belongs to, else
+    the one bound to ``existing_event_id``, else the one owning the sources.
+    """
     interactive = (
         None
-        if lookup.interactive_span_id is None
-        else reply_spans.load(transaction, principal_id, lookup.interactive_span_id)
+        if request.interactive_span_id is None
+        else reply_spans.load(transaction, principal_id, request.interactive_span_id)
     )
     reply: Reply | None = None
     if interactive is not None:
         reply = reply_messages.lock(transaction, principal_id, interactive.reply_id)
-    if reply is None and lookup.existing_event_id is not None:
-        found = reply_messages.for_event(transaction, principal_id, lookup.existing_event_id)
+    if reply is None and existing_event_id is not None:
+        found = reply_messages.for_event(transaction, principal_id, existing_event_id)
         reply = None if found is None else reply_messages.lock(transaction, principal_id, found.reply_id)
     if reply is None:
         found = reply_messages.for_sources(
@@ -395,29 +385,51 @@ def _record_stop(
     principal_id: str,
     *,
     event_id: str,
+    room_id: str,
     receipt_order: int,
-) -> AppliedTransition | None:
-    """Record a Stop on the reply bound to one event; ``None`` when no reply is bound to it."""
+    may_wait: bool,
+    now_ns: int,
+) -> AppliedTransition | bool:
+    """Record a Stop on the reply bound to one event in its room, returning what it applied.
+
+    With no reply bound to the event yet, the Stop waits for a create still
+    unresolved in its room, whose acknowledgement applies it; the result then
+    says whether it waits.
+    """
     found = reply_messages.for_event(transaction, principal_id, event_id)
     if found is None:
-        return None
+        if not may_wait or not reply_messages.has_unresolved_create(transaction, principal_id, room_id):
+            return False
+        reply_messages.record_pending_stop(
+            transaction,
+            principal_id,
+            target_event_id=event_id,
+            receipt_order=receipt_order,
+            room_id=room_id,
+            now_ns=now_ns,
+        )
+        return True
+    if found.room_id != room_id:
+        return False
     reply = reply_messages.lock(transaction, principal_id, found.reply_id)
     assert reply is not None
-    span_id = reply.current_span_id or reply.last_span_id
-    span = reply_spans.load(transaction, principal_id, span_id)
-    return apply(
-        transaction,
-        principal_id,
-        rl.stop(
-            reply,
-            span,
-            rl.StopFacts(
-                receipt_order=receipt_order,
-                span_live=_runs_here(transaction, principal_id, reply, span),
-            ),
-            now_ns=time.time_ns(),
-        ),
-    )
+    span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
+    return _apply_stop(transaction, principal_id, reply, span, receipt_order=receipt_order, now_ns=now_ns)
+
+
+def _apply_stop(
+    transaction: Transaction,
+    principal_id: str,
+    reply: Reply,
+    span: Span | None,
+    *,
+    receipt_order: int,
+    now_ns: int,
+) -> AppliedTransition:
+    """Apply a Stop to a reply, cancelling its span when this bot instance runs it."""
+    span_live = _runs_here(transaction, principal_id, reply, span)
+    facts = rl.StopFacts(receipt_order=receipt_order, span_live=span_live)
+    return apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
 
 
 def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:
@@ -529,45 +541,6 @@ def _owner_lost(
     return tuple(applied)
 
 
-@dataclass(frozen=True, slots=True)
-class StopTarget:
-    """What a Stop on one event reaches among the reply records."""
-
-    # The reply bound to the event, in the Stop's room.
-    reply: Reply | None = None
-    # No reply is bound to the event yet; the Stop waits for its create.
-    pending: bool = False
-
-
-def _stop_target(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    event_id: str,
-    room_id: str,
-    receipt_order: int,
-    may_wait: bool,
-    now_ns: int,
-) -> StopTarget:
-    """Find the reply a Stop reaches, or store the Stop for a create still unresolved in its room."""
-    found = reply_messages.for_event(transaction, principal_id, event_id)
-    if found is not None:
-        if found.room_id != room_id:
-            return StopTarget()
-        return StopTarget(reply=found)
-    if not may_wait or not reply_messages.has_unresolved_create(transaction, principal_id, room_id):
-        return StopTarget()
-    reply_messages.record_pending_stop(
-        transaction,
-        principal_id,
-        target_event_id=event_id,
-        receipt_order=receipt_order,
-        room_id=room_id,
-        now_ns=now_ns,
-    )
-    return StopTarget(pending=True)
-
-
 # ---------------------------------------------------------------------------
 # Rows
 
@@ -620,7 +593,6 @@ class ReplyRowEnqueue:
     # Set when the rule chose a row and the outbox recorded it.
     delivery_id: str | None = None
     stage: rl.WriteStage | None = None
-    transaction_id: str | None = None
     settled_event_ids: tuple[str, ...] = ()
     # The row's place in the reply's write sequence.
     sequence: int | None = None
@@ -708,19 +680,7 @@ def acknowledge_row(
     current = reply_spans.load(transaction, principal_id, bound.current_span_id or bound.last_span_id)
     if current is not None and current.ended:
         current = None
-    stopped = apply(
-        transaction,
-        principal_id,
-        rl.stop(
-            bound,
-            current,
-            rl.StopFacts(
-                receipt_order=receipt_order,
-                span_live=_runs_here(transaction, principal_id, bound, current),
-            ),
-            now_ns=now_ns,
-        ),
-    )
+    stopped = _apply_stop(transaction, principal_id, bound, current, receipt_order=receipt_order, now_ns=now_ns)
     return AppliedTransition(transition=stopped.transition, post_commit=(*applied.post_commit, *stopped.post_commit))
 
 
@@ -843,10 +803,10 @@ class ReplyStore:
             lambda transaction: reply_messages.active_generation(transaction, self._principal_id),
         )
 
-    async def claim(self, request: rl.ClaimRequest, lookup: ClaimLookup) -> AppliedTransition:
-        """Find and claim the reply one span continues."""
+    async def claim(self, request: rl.ClaimRequest, *, existing_event_id: str | None = None) -> AppliedTransition:
+        """Find and claim the reply one span continues; see ``claim``."""
         return await self._backend.write(
-            lambda transaction: claim(transaction, self._principal_id, request, lookup),
+            lambda transaction: claim(transaction, self._principal_id, request, existing_event_id=existing_event_id),
         )
 
     async def decide(
@@ -946,14 +906,25 @@ class ReplyStore:
             lambda transaction: _supersede_replay(transaction, self._principal_id, source_event_ids, now_ns=now_ns),
         )
 
-    async def record_stop(self, event_id: str, receipt_order: int) -> AppliedTransition | None:
-        """Record a Stop on the reply bound to one event; ``None`` when no reply is bound to it."""
+    async def record_stop(
+        self,
+        event_id: str,
+        *,
+        room_id: str,
+        receipt_order: int,
+        may_wait: bool,
+        now_ns: int,
+    ) -> AppliedTransition | bool:
+        """Record a Stop on the reply bound to one event in its room; see ``_record_stop``."""
         return await self._backend.write(
             lambda transaction: _record_stop(
                 transaction,
                 self._principal_id,
                 event_id=event_id,
+                room_id=room_id,
                 receipt_order=receipt_order,
+                may_wait=may_wait,
+                now_ns=now_ns,
             ),
         )
 
@@ -967,28 +938,6 @@ class ReplyStore:
             return reply_messages.has_unresolved_create(transaction, self._principal_id, room_id)
 
         return await self._backend.read(read)
-
-    async def stop_target(
-        self,
-        event_id: str,
-        *,
-        room_id: str,
-        receipt_order: int,
-        may_wait: bool,
-        now_ns: int,
-    ) -> StopTarget:
-        """Find the reply a Stop reaches, storing the Stop when the event's create is unresolved."""
-        return await self._backend.write(
-            lambda transaction: _stop_target(
-                transaction,
-                self._principal_id,
-                event_id=event_id,
-                room_id=room_id,
-                receipt_order=receipt_order,
-                may_wait=may_wait,
-                now_ns=now_ns,
-            ),
-        )
 
     async def event_ids_of_spans(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:
         """Return the events of a room's replies whose current span is one of these."""

@@ -28,31 +28,15 @@ _STOP_RECEIPT_ORDER = 7
 
 
 @dataclass
-class _NoReplyStop:
-    """A Stop no reply record owns: not pending, owned by no reply, writing nothing."""
-
-    pending: bool = False
-    owned: bool = False
-    turn_id: str | None = None
-
-    def __call__(self, _transaction: object, _record: object) -> None:
-        """Write nothing on the reply side."""
-
-
-@dataclass
 class _NoReplyGateway:
     """A gateway whose reply records own none of the events a Stop names."""
 
-    finished: int = 0
+    stops: int = 0
 
-    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> _NoReplyStop:
-        """Return a Stop step for a response no durable reply record owns."""
+    async def stop_reply(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> bool:
+        """Count a Stop that reached the reply side, which no reply took."""
         del event_id, receipt_order, room_id, may_wait
-        return _NoReplyStop()
-
-    async def finish_reply_stop(self, _stop: object) -> bool:
-        """Count a Stop that reached the reply side."""
-        self.finished += 1
+        self.stops += 1
         return False
 
 
@@ -90,4 +74,4 @@ async def test_stop_on_a_voice_echo_without_a_response_target_changes_nothing(
 
     assert finalized is False
     assert store.get_turn_record("$voice") == before
-    assert gateway.finished == 0
+    assert gateway.stops == 0

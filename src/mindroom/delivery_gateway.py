@@ -34,7 +34,6 @@ from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.replies import (
     ReplyRowEnqueue,
     ReplyRowRequest,
-    StopTarget,
     edit_delivery_id,
     row_new_text,
 )
@@ -219,26 +218,6 @@ def _refused_reply_outcome(
         tool_trace=tuple(tool_trace or ()),
         extra_content=extra_content,
     )
-
-
-@dataclass
-class _ReplyStop:
-    """What a Stop on one event reaches among the reply records, before it is recorded."""
-
-    event_id: str
-    receipt_order: int
-    # What the Stop reached: a reply, a pending create, or neither.
-    target: StopTarget
-
-    @property
-    def pending(self) -> bool:
-        """Return whether the Stop waits for its target's create, recorded already."""
-        return self.target.pending
-
-    @property
-    def owned(self) -> bool:
-        """Return whether a reply is bound to the event."""
-        return self.target.reply is not None
 
 
 # What a failed approval's note says.
@@ -1648,39 +1627,31 @@ class DeliveryGateway:
             # The reply left active while the button was sent.
             await self.settle_reply_debt(handle.reply_id)
 
-    async def reply_stop(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> _ReplyStop:
-        """Return what a Stop on one event reaches among the reply records.
+    async def stop_reply(self, event_id: str, receipt_order: int, *, room_id: str, may_wait: bool) -> bool:
+        """Record a Stop on the reply it reaches and run what it left, cancelling the span or owing the note.
 
         A Stop on an event no reply is bound to yet, while a reply create in
-        its room is unresolved, is recorded here; that create's acknowledgement
-        applies it.
+        its room is unresolved, waits for that create, whose acknowledgement
+        applies it. Returns whether a reply took the Stop or it waits for one.
         """
-        target = await self.deps.outbox.replies.stop_target(
+        recorded = await self.deps.outbox.replies.record_stop(
             event_id,
             room_id=room_id,
             receipt_order=receipt_order,
             may_wait=may_wait,
             now_ns=time.time_ns(),
         )
-        return _ReplyStop(event_id=event_id, receipt_order=receipt_order, target=target)
+        if isinstance(recorded, bool):
+            return recorded
+        await self._run_reply_effects(recorded.post_commit)
+        reply = recorded.transition.reply
+        if reply is not None:
+            await self.settle_reply_debt(reply.reply_id)
+        return True
 
     async def accepts_reply_stop(self, event_id: str, room_id: str) -> bool:
         """Return whether a Stop reaction on this event reaches a running reply or a pending create."""
         return await self.deps.outbox.replies.accepts_stop(event_id, room_id)
-
-    async def finish_reply_stop(self, stop: _ReplyStop) -> bool:
-        """Record a Stop on the reply it reaches and run what it left, cancelling the span or owing the note.
-
-        Returns whether a reply owns the event.
-        """
-        applied = await self.deps.outbox.replies.record_stop(stop.event_id, stop.receipt_order)
-        if applied is None:
-            return False
-        await self._run_reply_effects(applied.post_commit)
-        reply = applied.transition.reply
-        if reply is not None:
-            await self.settle_reply_debt(reply.reply_id)
-        return True
 
     async def settle_reply_debt(self, reply_id: str) -> None:
         """Redact what a reply owes removed and deliver the note it owes, if any."""

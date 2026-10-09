@@ -20,7 +20,7 @@ from mindroom.reply_lifecycle import (
 from . import reply_spans
 
 if TYPE_CHECKING:
-    from mindroom.reply_lifecycle import Span, Transition
+    from mindroom.reply_lifecycle import Transition
 
     from .backend import Row, Transaction
 
@@ -445,22 +445,17 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
 
 
 def persist(transaction: Transaction, principal_id: str, transition: Transition) -> None:
-    """Write the reply and spans one applied transition produced."""
-    if not transition.applied:
-        if transition.spans:
-            # A claim deferred for durable-write debt can still end a span an
-            # older bot instance left current.
-            _persist_spans(transaction, principal_id, transition.spans)
-            if transition.reply is not None:
-                _save(transaction, principal_id, transition.reply)
+    """Write the reply and spans one transition produced.
+
+    A transition that did not apply writes nothing, except a claim deferred
+    for durable-write debt, which can still end a span an older bot instance
+    left current.
+    """
+    if not transition.applied and not transition.spans:
         return
     if transition.reply is not None:
         _save(transaction, principal_id, transition.reply)
-    _persist_spans(transaction, principal_id, transition.spans)
-
-
-def _persist_spans(transaction: Transaction, principal_id: str, spans: tuple[Span, ...]) -> None:
-    for span in spans:
+    for span in transition.spans:
         reply_spans.save(transaction, principal_id, span)
 
 

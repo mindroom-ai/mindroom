@@ -48,7 +48,8 @@ class UserStopReconciler:
         owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
         if owner is not None and owner.conversation_target is None:
             return False
-        reply_stop = await self.deps.delivery_gateway.reply_stop(
+        # A reaction on someone else's message, or one whose create resolved elsewhere, reaches no reply.
+        return await self.deps.delivery_gateway.stop_reply(
             response_event_id,
             stop_receipt_order,
             room_id=room_id,
@@ -56,10 +57,3 @@ class UserStopReconciler:
             # creating its event can be the target of a Stop nothing names yet.
             may_wait=owner is None,
         )
-        if reply_stop.pending:
-            # Recorded for the event's create, whose acknowledgement applies it.
-            return True
-        if not reply_stop.owned:
-            # A reaction on someone else's message, or one whose create resolved elsewhere.
-            return False
-        return await self.deps.delivery_gateway.finish_reply_stop(reply_stop)
