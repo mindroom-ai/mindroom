@@ -13,7 +13,7 @@ Always back up configuration and persistent storage before replacing the running
 Upgrade while no agent is replying.
 Stop the previous backend once in-progress replies have finished, and decide pending tool approvals first: the upgrade cancels every approval still waiting or not yet resumed.
 A cancelled approval's card may stay visible, but clicking it does nothing, its reply keeps what it showed, and the request is not answered, so resend it if needed.
-A reply that was still streaming or being delivered when the previous backend stopped is answered again after the upgrade, sometimes in a new message, and a tool it had already run can run again, so check the room before resending that request.
+A reply that was still streaming when the previous backend stopped may be answered again after the upgrade, sometimes in a new message, and a tool it had already run can run again, so check the room before resending that request.
 
 ## Upgrading to Nio 1.0
 

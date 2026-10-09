@@ -207,9 +207,9 @@ class CliApprovalWaits:
             and (current.state != "claimed" or current.runtime_generation == self.runtime_generation)
         ):
             final = await self.responses.final_delivery(current)
-            if current.state == "failing":
-                # A Stop or failure fenced the wait: its settlement expires the cards before it ends the reply,
-                # which approval recovery does instead after a shutdown.
+            if current.state == "failing" and await self.responses.successful_final_delivery(current) is None:
+                # A Stop or failure fenced the wait before an answer: its settlement expires the cards before it
+                # ends the reply, which approval recovery does instead after a shutdown.
                 if not current_task_is_process_shutdown():
                     await self.responses.settle_failure(
                         current,

@@ -1004,10 +1004,21 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
         response.assert_not_awaited()
 
 
-@pytest.mark.parametrize("shutting_down", [False, True])
+@pytest.mark.parametrize(
+    ("answered", "shutting_down"),
+    [(False, False), (False, True), (True, False)],
+    ids=["fenced", "fenced-during-shutdown", "answered-after-fence"],
+)
 @pytest.mark.asyncio
-async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_expire(*, shutting_down: bool) -> None:
-    """The cancelled note reached the room, but only failure settlement expires the approval's pending card."""
+async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_expire(
+    *,
+    answered: bool,
+    shutting_down: bool,
+) -> None:
+    """The cancelled note reached the room, but only failure settlement expires the approval's pending card.
+
+    A run that answered after its fence finishes as an answered one does, so its after-response work runs once.
+    """
     continuation = SimpleNamespace(
         approval_id="approval-1",
         state="failing",
@@ -1017,8 +1028,10 @@ async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_exp
         room_id="!room",
         source_event_ids=("$source",),
     )
+    final = SimpleNamespace(permanently_failed=False)
     responses = SimpleNamespace(
-        final_delivery=AsyncMock(return_value=SimpleNamespace(permanently_failed=False)),
+        final_delivery=AsyncMock(return_value=final),
+        successful_final_delivery=AsyncMock(return_value=final if answered else None),
         finish_approval=AsyncMock(return_value=True),
         request_failure=AsyncMock(return_value=None),
         settle_failure=AsyncMock(return_value=True),
@@ -1036,8 +1049,12 @@ async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_exp
     with patch("mindroom.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
         await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
 
-    responses.finish_approval.assert_not_awaited()
     responses.request_failure.assert_not_awaited()
+    if answered:
+        responses.finish_approval.assert_awaited_once_with("approval-1")
+        responses.settle_failure.assert_not_awaited()
+        return
+    responses.finish_approval.assert_not_awaited()
     if shutting_down:
         # Approval recovery settles it at the next start.
         responses.settle_failure.assert_not_awaited()
