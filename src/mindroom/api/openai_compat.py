@@ -130,6 +130,7 @@ if TYPE_CHECKING:
 
     from mindroom.api.openai_request_parsing import ChatCompletionRequest
     from mindroom.api.openai_streaming_protocol import ToolStreamState
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -170,15 +171,23 @@ def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
         completion_lock.release()
 
 
+async def _finish_openai_completion(completion_lock: asyncio.Lock, budget_monitor: BudgetMonitor | None) -> None:
+    """Release the session lock and let budgets count the spend of the finished completion."""
+    _release_openai_completion_lock(completion_lock)
+    if budget_monitor is not None:
+        budget_monitor.response_finished()
+
+
 def _attach_openai_completion_lock_release(
     response: JSONResponse | StreamingResponse,
     completion_lock: asyncio.Lock,
+    budget_monitor: BudgetMonitor | None,
 ) -> JSONResponse | StreamingResponse:
     if not isinstance(response, (_OpenAIJSONResponse, _OpenAIStreamingResponse)):
         _release_openai_completion_lock(completion_lock)
         msg = f"OpenAI completion response must use a finalizer-safe response class, got {type(response).__name__}"
         raise TypeError(msg)
-    response.always_background = BackgroundTask(_release_openai_completion_lock, completion_lock)
+    response.always_background = BackgroundTask(_finish_openai_completion, completion_lock, budget_monitor)
     return response
 
 
@@ -709,13 +718,8 @@ async def _chat_completions(  # noqa: C901, PLR0912
         resolved_thread_id=None,
     )
     knowledge_refresh_scheduler = _request_knowledge_refresh_scheduler(request)
-    budget = partial(
-        budget_model,
-        config,
-        runtime_paths,
-        config_lifecycle.app_state(request.app).budget_monitor,
-        execution_identity.requester_id,
-    )
+    budget_monitor = config_lifecycle.app_state(request.app).budget_monitor
+    budget = partial(budget_model, config, runtime_paths, budget_monitor, execution_identity.requester_id)
     completion_lock = _openai_completion_lock(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
@@ -805,7 +809,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
         _release_openai_completion_lock(completion_lock)
         raise
 
-    return _attach_openai_completion_lock_release(response, completion_lock)
+    return _attach_openai_completion_lock_release(response, completion_lock, budget_monitor)
 
 
 # ---------------------------------------------------------------------------

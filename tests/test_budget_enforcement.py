@@ -17,9 +17,10 @@ from agno.team import Team as AgnoTeam
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mindroom.api import openai_compat
+from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
@@ -328,3 +329,29 @@ async def test_dynamic_workflow_ephemeral_participant_uses_fallback(tmp_path: Pa
         )
 
     assert get_model.call_args.args[2] == "luna"
+
+
+@pytest.mark.parametrize("model", ["general", "team/super_team"])
+def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: Path, model: str) -> None:
+    team = AgnoTeam(name="Super Team", id="super-team", model=SyntheticModel(id="synthetic"), members=[], tools=[])
+    team.arun = AsyncMock(return_value=TeamRunOutput(content="Team answer"))
+    monitor = MagicMock(spec=BudgetMonitor)
+    monitor._spend_usd.return_value = 0.0
+    with (
+        _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
+        patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi"),
+        patch("mindroom.api.openai_compat._build_team", return_value=([], team, TeamMode.COORDINATE)),
+        patch(
+            "mindroom.api.openai_compat._prepare_openai_team_prompt",
+            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+        ),
+    ):
+        config_lifecycle.app_state(client.app).budget_monitor = monitor
+        reply = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer alice-key"},
+            json={"model": model, "messages": [{"role": "user", "content": "Hello"}]},
+        )
+
+    assert reply.status_code == 200
+    monitor.response_finished.assert_called_once_with()

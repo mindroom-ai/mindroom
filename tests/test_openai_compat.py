@@ -2359,7 +2359,7 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         background=BackgroundTask(existing_background),
     )
 
-    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock)
+    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2463,7 +2463,7 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2510,7 +2510,7 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         await partial_sent.wait()
@@ -2547,6 +2547,7 @@ async def test_openai_json_response_skips_background_when_send_fails() -> None:
             background=BackgroundTask(background),
         ),
         completion_lock,
+        None,
     )
 
     async def receive() -> dict[str, str]:
@@ -2576,6 +2577,7 @@ async def test_openai_error_response_releases_lock_when_send_fails() -> None:
     response = openai_compat._attach_openai_completion_lock_release(
         openai_compat._error_response(500, "failed", error_type="server_error"),
         completion_lock,
+        None,
     )
 
     async def receive() -> dict[str, str]:
