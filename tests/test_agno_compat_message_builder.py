@@ -465,12 +465,18 @@ async def test_resumed_approval_run_replays_the_history_the_paused_request_saw(
     _assert_resumed_request_replays_paused_history(paused_request, resumed_request)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("entity_kind", ["agent", "team"])
 @pytest.mark.asyncio
-async def test_resumed_approval_run_filters_offloaded_history_after_reading_it_back(tmp_path: Path) -> None:
+async def test_resumed_approval_run_filters_offloaded_history_after_reading_it_back(
+    entity_kind: str,
+    stream: bool,
+    tmp_path: Path,
+) -> None:
     """Offloaded viewed images are read back before filtering, so a resumed run still replays them."""
     paused_request, resumed_request = await _paused_and_resumed_requests(
-        "agent",
-        stream=False,
+        entity_kind,
+        stream=stream,
         media_storage=LocalMediaStorage(str(tmp_path)),
     )
 
