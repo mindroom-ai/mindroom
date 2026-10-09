@@ -3,6 +3,7 @@
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.ca import BrokerCA, materialize_ca_bundle
 from mindroom.egress_broker.dial import DestinationBlockedError, DialPolicy, open_upstream
+from mindroom.egress_broker.proxy import EgressBroker, ManageUrl, SecretResolver
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
 __all__ = [
@@ -11,6 +12,9 @@ __all__ = [
     "BrokerCA",
     "DestinationBlockedError",
     "DialPolicy",
+    "EgressBroker",
+    "ManageUrl",
+    "SecretResolver",
     "TokenSigner",
     "WorkerClaims",
     "materialize_ca_bundle",
