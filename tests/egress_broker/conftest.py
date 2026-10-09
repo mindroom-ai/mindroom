@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import json
 import ssl
@@ -21,11 +22,13 @@ from cryptography.x509.oid import NameOID
 
 from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.egress_broker import AuditLog, BrokerCA, DialPolicy, TokenSigner, WorkerClaims
-from mindroom.egress_broker.proxy import EgressBroker, ManageUrl
+from mindroom.egress_broker.proxy import EgressBroker, ManageUrl, SecretResolver
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
+
+    from mindroom.egress_broker import AuditRecord
 
 DEFAULT_CLAIMS = WorkerClaims(
     worker_key="worker-alice-code",
@@ -130,13 +133,32 @@ def upstream_ca() -> UpstreamCA:
 # Fake upstream routes. Add a handler here to make it available on both `tls_upstream` and `http_upstream`.
 
 
-async def _echo(request: web.Request) -> web.Response:
+def _header_lists(request: web.Request) -> dict[str, list[str]]:
     headers: dict[str, list[str]] = {}
     for name, value in request.headers.items():
         headers.setdefault(name.lower(), []).append(value)
+    return headers
+
+
+async def _echo(request: web.Request) -> web.Response:
     return web.json_response(
-        {"method": request.method, "path": request.path, "query": dict(request.query), "headers": headers},
+        {
+            "method": request.method,
+            "path": request.path,
+            "query": dict(request.query),
+            "headers": _header_lists(request),
+        },
     )
+
+
+async def _ok(_request: web.Request) -> web.Response:
+    return web.Response(text="ok")
+
+
+async def _close(_request: web.Request) -> web.Response:
+    response = web.Response(text="closing")
+    response.force_close()
+    return response
 
 
 async def _redirect(_request: web.Request) -> web.Response:
@@ -176,24 +198,61 @@ async def _upload(request: web.Request) -> web.Response:
     return web.json_response({"length": length})
 
 
+def _pkt_line(payload: bytes) -> bytes:
+    return f"{len(payload) + 4:04x}".encode() + payload
+
+
+async def _git_info_refs(request: web.Request) -> web.Response:
+    """Serve a smart-HTTP ref advertisement only to ``Basic x-access-token:s3cret``, like GitHub."""
+    expected = "Basic " + base64.b64encode(b"x-access-token:s3cret").decode()
+    if request.headers.get("Authorization") != expected:
+        return web.Response(status=401, headers={"WWW-Authenticate": 'Basic realm="git"'})
+    sha = b"1" * 40
+    body = (
+        _pkt_line(b"# service=git-upload-pack\n")
+        + b"0000"
+        + _pkt_line(sha + b" HEAD\0agent=egress-broker-test\n")
+        + _pkt_line(sha + b" refs/heads/main\n")
+        + b"0000"
+    )
+    return web.Response(body=body, content_type="application/x-git-upload-pack-advertisement")
+
+
 UPSTREAM_ROUTES: dict[str, Callable[[web.Request], Awaitable[web.StreamResponse]]] = {
     "/echo": _echo,
+    "/ok": _ok,
+    "/close": _close,
     "/redirect": _redirect,
     "/stream": _stream,
     "/cookie": _cookie,
     "/ws": _websocket,
     "/upload": _upload,
+    "/repo.git/info/refs": _git_info_refs,
 }
+
+
+@dataclass(frozen=True)
+class SeenRequest:
+    """One request the fake upstream served: path, headers (lowercased names), and the connection's client port."""
+
+    path: str
+    headers: dict[str, list[str]]
+    peer_port: int
 
 
 @dataclass
 class Upstream:
-    """A running fake upstream; ``hits`` lists every request path it served, in order."""
+    """A running fake upstream; ``requests`` lists every request it served, in order."""
 
     scheme: str
     host: str
     port: int
-    hits: list[str]
+    requests: list[SeenRequest]
+
+    @property
+    def hits(self) -> list[str]:
+        """Return the paths of every request served, in order."""
+        return [seen.path for seen in self.requests]
 
     def url(self, path: str) -> str:
         """Return the absolute URL of `path` on this upstream."""
@@ -201,14 +260,16 @@ class Upstream:
 
 
 async def _serve_upstream(ssl_context: ssl.SSLContext | None) -> AsyncIterator[Upstream]:
-    hits: list[str] = []
+    seen: list[SeenRequest] = []
 
     @web.middleware
     async def record_hit(
         request: web.Request,
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
-        hits.append(request.path)
+        assert request.transport is not None
+        peer_port = request.transport.get_extra_info("peername")[1]
+        seen.append(SeenRequest(path=request.path, headers=_header_lists(request), peer_port=peer_port))
         return await handler(request)
 
     app = web.Application(middlewares=[record_hit])
@@ -220,7 +281,7 @@ async def _serve_upstream(ssl_context: ssl.SSLContext | None) -> AsyncIterator[U
         site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=ssl_context)
         await site.start()
         port = runner.addresses[0][1]
-        yield Upstream(scheme="https" if ssl_context else "http", host="localhost", port=port, hits=hits)
+        yield Upstream(scheme="https" if ssl_context else "http", host="localhost", port=port, requests=seen)
     finally:
         await runner.cleanup()
 
@@ -249,19 +310,24 @@ def audit(tmp_path: Path) -> Iterator[AuditLog]:
 
 @dataclass
 class BrokerFactory:
-    """Build and start brokers that share one CA, signer, and audit log; tracks them for teardown."""
+    """Build and start brokers that share one CA, signer, and audit log; tracks them for teardown.
+
+    ``resolved`` lists the service of every secret lookup any of its brokers made, in order.
+    """
 
     ca: BrokerCA
     signer: TokenSigner
     audit: AuditLog
     upstream_ssl_context: ssl.SSLContext
     brokers: list[EgressBroker] = field(default_factory=list)
+    resolved: list[str] = field(default_factory=list)
 
     async def __call__(
         self,
         config: EgressBrokerConfig | None = None,
         *,
         secrets: dict[str, str] | None = None,
+        resolve_secret: SecretResolver | None = None,
         dial_policy: DialPolicy | None = None,
         manage_url: ManageUrl | None = None,
         max_body_bytes: int = 1 << 30,
@@ -270,15 +336,22 @@ class BrokerFactory:
     ) -> EgressBroker:
         """Start a broker on an ephemeral loopback port; `secrets` maps service names to secrets.
 
-        `config_provider` replaces the fixed `config` when a test needs a provider that changes or fails.
+        `resolve_secret` replaces the `secrets` lookup, and `config_provider` replaces the fixed `config`,
+        when a test needs a callback that changes or fails.
         """
         current = config or EgressBrokerConfig()
         stored = dict(secrets or {})
+        lookup = resolve_secret or (lambda _claims, service: stored.get(service))
+
+        def recording_lookup(claims: WorkerClaims, service: str) -> str | None:
+            self.resolved.append(service)
+            return lookup(claims, service)
+
         broker = EgressBroker(
             ca=self.ca,
             signer=self.signer,
             config_provider=config_provider or (lambda: current),
-            resolve_secret=lambda _claims, service: stored.get(service),
+            resolve_secret=recording_lookup,
             audit=self.audit,
             dial_policy=dial_policy or DialPolicy(allow_loopback=True),
             upstream_ssl_context=self.upstream_ssl_context,
@@ -340,6 +413,28 @@ async def proxy_client(broker: BrokerFactory) -> AsyncIterator[Callable[..., htt
     yield make
     for client in clients:
         await client.aclose()
+
+
+def proxy_authorization(token: str) -> str:
+    """Return the ``Proxy-Authorization`` value a worker sends: Basic with the token as user name."""
+    return "Basic " + base64.b64encode(f"{token}:".encode()).decode()
+
+
+def connect_request(target: str, *, authorization: str | None = None) -> bytes:
+    """Return a raw CONNECT request head for `target`, optionally with a Proxy-Authorization value."""
+    lines = [f"CONNECT {target} HTTP/1.1", f"Host: {target}"]
+    if authorization is not None:
+        lines.append(f"Proxy-Authorization: {authorization}")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode()
+
+
+async def audit_records(audit: AuditLog, count: int) -> list[AuditRecord]:
+    """Wait for the broker to write `count` records; tunnels are audited only after they close."""
+    async with asyncio.timeout(5):
+        # The broker writes from its own thread, so the database is the only thing to watch.
+        while len(records := audit.query()) < count:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+    return records
 
 
 @dataclass(frozen=True)

@@ -5,24 +5,25 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import contextlib
-import ipaddress
-import json
-import re
-import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from http import HTTPStatus
-from typing import TYPE_CHECKING, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 import h11
 
-from mindroom.egress_broker.audit import AuditRecord
-from mindroom.egress_broker.dial import DestinationBlockedError, DialPolicy, open_upstream
-from mindroom.egress_broker.rules import host_has_rules, match_rule, strip_request_headers, strip_response_headers
-from mindroom.logging_config import get_logger
+from mindroom.egress_broker._relay import (
+    AuditEntry,
+    Peer,
+    Relay,
+    close_stream,
+    normalize_host,
+    send_json,
+    serve_peer,
+    upstream_request_headers,
+)
+from mindroom.egress_broker.dial import DialPolicy
+from mindroom.egress_broker.mitm import TlsInterceptor
+from mindroom.egress_broker.rules import host_has_rules, match_rule
 
 if TYPE_CHECKING:
     import ssl
@@ -37,161 +38,7 @@ __all__ = ["EgressBroker", "ManageUrl", "SecretResolver"]
 type SecretResolver = Callable[[WorkerClaims, str], str | None]
 type ManageUrl = Callable[[WorkerClaims], str | None]
 
-_CHUNK = 64 * 1024
-_CLOSE_TIMEOUT = 5.0
 _PROXY_AUTHENTICATE = (b"proxy-authenticate", b'Basic realm="mindroom-egress-broker"')
-_HOSTNAME = re.compile(r"[a-z0-9_][a-z0-9_.-]*")
-
-logger = get_logger(__name__)
-
-
-class _RequestFailedError(Exception):
-    """A brokered request failed with a status and error code the client should receive."""
-
-    def __init__(self, status: int, code: str) -> None:
-        super().__init__(status)
-        self.status = status
-        self.code = code
-
-
-@dataclass
-class _AuditEntry:
-    """Metadata for one audited tunnel or request; never holds header values or queries."""
-
-    claims: WorkerClaims
-    kind: Literal["request", "tunnel", "denied"]
-    method: str
-    host: str
-    path: str
-    service: str | None = None
-    status: int = 0
-    bytes_up: int = 0
-    bytes_down: int = 0
-    started: float = field(default_factory=time.monotonic)
-
-    def to_record(self) -> AuditRecord:
-        return AuditRecord(
-            at=datetime.now(UTC),
-            kind=self.kind,
-            scope=self.claims.scope_label,
-            agent_name=self.claims.agent_name,
-            requester_id=self.claims.requester_id,
-            method=self.method,
-            host=self.host,
-            path=self.path,
-            service=self.service,
-            status=self.status,
-            bytes_up=self.bytes_up,
-            bytes_down=self.bytes_down,
-            duration_ms=int((time.monotonic() - self.started) * 1000),
-        )
-
-
-class _Peer:
-    """One HTTP/1.1 side of a brokered connection, driven by an h11 state machine."""
-
-    def __init__(
-        self,
-        conn: h11.Connection,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        *,
-        idle_timeout: float,
-    ) -> None:
-        self.conn = conn
-        self.reader = reader
-        self.writer = writer
-        self.request_method = b""
-        self._idle_timeout = idle_timeout
-
-    async def next_event(self) -> h11.Event | type[h11.NEED_DATA | h11.PAUSED]:
-        """Return the next event, reading from the stream until h11 has one (never NEED_DATA)."""
-        while (event := self.conn.next_event()) is h11.NEED_DATA:
-            async with asyncio.timeout(self._idle_timeout):
-                data = await self.reader.read(_CHUNK)
-            self.conn.receive_data(data)
-        if isinstance(event, h11.Request):
-            self.request_method = event.method
-        return event
-
-    async def send(self, *events: h11.Event) -> None:
-        for event in events:
-            if data := self.conn.send(event):
-                self.writer.write(data)
-        await self.writer.drain()
-
-
-async def _send_json(
-    client: _Peer,
-    status: int,
-    body: dict[str, object],
-    *,
-    headers: tuple[tuple[bytes, bytes], ...] = (),
-) -> None:
-    """Answer the client with a JSON error and close, unless a response is already under way."""
-    if client.conn.our_state not in {h11.IDLE, h11.SEND_RESPONSE}:
-        return
-    payload = json.dumps(body).encode()
-    response = h11.Response(
-        status_code=status,
-        reason=HTTPStatus(status).phrase.encode(),
-        headers=[
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(payload)).encode()),
-            (b"connection", b"close"),
-            *headers,
-        ],
-    )
-    events: list[h11.Event] = [response]
-    if client.request_method != b"HEAD":
-        events.append(h11.Data(data=payload))
-    await client.send(*events, h11.EndOfMessage())
-
-
-async def _close_stream(writer: asyncio.StreamWriter) -> None:
-    """Close a stream after flushing what was written, aborting a peer that stops reading."""
-    writer.close()
-    try:
-        with contextlib.suppress(Exception):
-            async with asyncio.timeout(_CLOSE_TIMEOUT):
-                await writer.wait_closed()
-    finally:
-        writer.transport.abort()
-
-
-async def _from_upstream[T](operation: Awaitable[T]) -> T:
-    """Await one upstream operation, mapping its failures to the status the client receives."""
-    try:
-        return await operation
-    except TimeoutError as exc:
-        raise _RequestFailedError(504, "upstream_timeout") from exc
-    except (OSError, h11.ProtocolError) as exc:
-        raise _RequestFailedError(502, "upstream_unreachable") from exc
-
-
-async def _read_response(upstream: _Peer) -> h11.Response:
-    """Return the final response head, skipping informational responses."""
-    while True:
-        event = await upstream.next_event()
-        if isinstance(event, h11.Response):
-            return event
-        if not isinstance(event, h11.InformationalResponse):
-            msg = "Upstream closed before responding."
-            raise ConnectionError(msg)
-
-
-def _normalize_host(host: str) -> str:
-    """Return a lowercase hostname without its trailing dot or a compressed IPv6 literal, rejecting anything else."""
-    host = host.lower().removesuffix(".")
-    if ":" in host:
-        if "%" in host:
-            msg = "Zone-scoped addresses are not supported."
-            raise ValueError(msg)
-        return ipaddress.IPv6Address(host).compressed
-    if not _HOSTNAME.fullmatch(host):
-        msg = "Invalid host."
-        raise ValueError(msg)
-    return host
 
 
 def _parse_port(text: str) -> int:
@@ -214,7 +61,7 @@ def _parse_connect_target(target: bytes) -> tuple[str, int]:
         if not separator or ":" in host:
             msg = "CONNECT target needs host:port."
             raise ValueError(msg)
-    return _normalize_host(host), _parse_port(port)
+    return normalize_host(host), _parse_port(port)
 
 
 def _parse_absolute_http(target: bytes) -> tuple[str, int, bytes, bytes]:
@@ -231,44 +78,7 @@ def _parse_absolute_http(target: bytes) -> tuple[str, int, bytes, bytes]:
         msg = "Invalid port."
         raise ValueError(msg)
     authority = parts.netloc.rpartition("@")[2]
-    return _normalize_host(parts.hostname), port, authority.encode("ascii"), origin.encode("ascii")
-
-
-def _upstream_request_headers(received: list[tuple[bytes, bytes]], authority: bytes) -> list[tuple[bytes, bytes]]:
-    """Return the headers to send upstream: Host set to the routed authority, hop-by-hop removed, framing rebuilt.
-
-    The broker answers ``Expect: 100-continue`` itself. A chunked body is re-chunked, so a client
-    Content-Length beside it is dropped rather than forwarded next to the new Transfer-Encoding.
-    """
-    chunked = any(name == b"transfer-encoding" for name, _ in received)
-    dropped = {b"host", b"expect", b"content-length"} if chunked else {b"host", b"expect"}
-    headers = [(b"host", authority)]
-    headers += [
-        (name, value) for name, value in strip_request_headers(received, keep_upgrade=False) if name not in dropped
-    ]
-    if chunked:
-        headers.append((b"transfer-encoding", b"chunked"))
-    return headers
-
-
-def _downstream_response_headers(
-    received: list[tuple[bytes, bytes]],
-    *,
-    strip_cookies: bool,
-) -> list[tuple[bytes, bytes]]:
-    """Return the upstream response headers to relay: hop-by-hop removed, Set-Cookie only for hosts with rules.
-
-    A chunked upstream body is re-framed for the client, so a Content-Length beside it is dropped
-    rather than kept as the only (wrong) framing header.
-    """
-    # Hop-by-hop removal is the same in both directions; only the response variant also drops Set-Cookie.
-    strip = strip_response_headers if strip_cookies else strip_request_headers
-    chunked = any(name == b"transfer-encoding" for name, _ in received)
-    return [
-        (name, value)
-        for name, value in strip(received, keep_upgrade=False)
-        if not (chunked and name == b"content-length")
-    ]
+    return normalize_host(parts.hostname), port, authority.encode("ascii"), origin.encode("ascii")
 
 
 def _token_from(headers: list[tuple[bytes, bytes]]) -> str | None:
@@ -292,8 +102,9 @@ def _token_from(headers: list[tuple[bytes, bytes]]) -> str | None:
 class EgressBroker:
     """Forward proxy that authenticates workers and injects configured credentials.
 
-    Hosts without rules are tunnelled blind or denied by policy. Absolute-form ``http://``
-    requests are forwarded, except that a request a rule matches is refused: secrets only travel over TLS.
+    CONNECT to a host with rules is intercepted and each request inside gets the worker scope's secret.
+    Other hosts are tunnelled blind or denied by policy. Absolute-form ``http://`` requests are forwarded,
+    except that a request a rule matches is refused: secrets only travel over TLS.
     """
 
     def __init__(
@@ -311,17 +122,22 @@ class EgressBroker:
         idle_timeout: float = 1800.0,
         head_timeout: float = 30.0,
     ) -> None:
-        self._ca = ca
         self._signer = signer
-        self._config_provider = config_provider
-        self._resolve_secret = resolve_secret
-        self._audit = audit
-        self._dial_policy = dial_policy
-        self._upstream_ssl_context = upstream_ssl_context
-        self._manage_url = manage_url
-        self._max_body_bytes = max_body_bytes
-        self._idle_timeout = idle_timeout
         self._head_timeout = head_timeout
+        self._relay = Relay(
+            audit=audit,
+            config_provider=config_provider,
+            dial_policy=dial_policy,
+            max_body_bytes=max_body_bytes,
+            idle_timeout=idle_timeout,
+        )
+        self._interceptor = TlsInterceptor(
+            self._relay,
+            ca=ca,
+            upstream_ssl_context=upstream_ssl_context,
+            resolve_secret=resolve_secret,
+            manage_url=manage_url,
+        )
         self._server: asyncio.Server | None = None
         self._connections: dict[asyncio.Task[None], asyncio.StreamWriter] = {}
 
@@ -363,25 +179,13 @@ class EgressBroker:
         task.add_done_callback(self._connections.pop)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        client = _Peer(h11.Connection(h11.SERVER), reader, writer, idle_timeout=self._idle_timeout)
+        client = Peer(h11.Connection(h11.SERVER), reader, writer, idle_timeout=self._relay.idle_timeout)
         try:
-            try:
-                while await self._serve_request(client):
-                    client.conn.start_next_cycle()
-            except h11.RemoteProtocolError as exc:
-                await _send_json(client, exc.error_status_hint, {"error": "bad_request"})
-        except OSError as exc:
-            # Peers disconnect and time out (TimeoutError is an OSError); exception text can echo header bytes.
-            logger.debug("egress_broker_connection_failed", error_type=type(exc).__name__)
-        except Exception as exc:
-            # Anything else is a broker fault: it fails this connection only, never the listener.
-            logger.warning("egress_broker_connection_error", error_type=type(exc).__name__)
-            with contextlib.suppress(Exception):
-                await _send_json(client, 502, {"error": "broker_error"})
+            await serve_peer(client, self._serve_request)
         finally:
-            await _close_stream(writer)
+            await close_stream(writer)
 
-    async def _serve_request(self, client: _Peer) -> bool:
+    async def _serve_request(self, client: Peer) -> bool:
         """Serve one client request; return whether the connection stays open for another."""
         # Unauthenticated clients may not hold a connection open by trickling a request head.
         async with asyncio.timeout(self._head_timeout):
@@ -391,7 +195,7 @@ class EgressBroker:
         token = _token_from(list(request.headers))
         claims = self._signer.verify(token) if token is not None else None
         if claims is None:
-            await _send_json(
+            await send_json(
                 client,
                 407,
                 {"error": "proxy_authentication_required"},
@@ -403,116 +207,41 @@ class EgressBroker:
             return False
         return await self._forward_plain(client, request, claims)
 
-    async def _connect(self, client: _Peer, request: h11.Request, claims: WorkerClaims) -> None:
+    async def _connect(self, client: Peer, request: h11.Request, claims: WorkerClaims) -> None:
         try:
             host, port = _parse_connect_target(request.target)
         except ValueError:
-            await _send_json(client, 400, {"error": "bad_request"})
+            await send_json(client, 400, {"error": "bad_request"})
             return
         if not isinstance(await client.next_event(), h11.EndOfMessage):
-            await _send_json(client, 400, {"error": "bad_request"})
+            await send_json(client, 400, {"error": "bad_request"})
             return
-        entry = _AuditEntry(claims=claims, kind="tunnel", method="CONNECT", host=host, path="")
-        config = await self._read_config(client, entry)
+        entry = AuditEntry(claims=claims, kind="tunnel", method="CONNECT", host=host, path="")
+        config = await self._relay.read_config(client, entry)
         if config is None:
             return
         if host_has_rules(config, host, port):
-            # Hosts with rules need TLS interception, which this listener does not offer yet.
-            await _send_json(client, 501, {"error": "not_implemented"})
+            await self._interceptor.intercept(client, claims, host, port)
             return
         if config.unmatched_hosts == "deny":
-            await self._deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
+            await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
             return
         await self._tunnel(client, entry, port)
 
-    async def _read_config(self, client: _Peer, entry: _AuditEntry) -> EgressBrokerConfig | None:
-        """Return the current rules; when the provider fails, answer 502, audit, and return None."""
-        try:
-            return self._config_provider()
-        except Exception as exc:
-            logger.warning("egress_broker_config_unavailable", error_type=type(exc).__name__)
-            await self._reject(client, entry, 502, {"error": "broker_error"})
-            return None
-
-    async def _open_upstream(
-        self,
-        client: _Peer,
-        entry: _AuditEntry,
-        port: int,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-        """Dial the upstream through the guard; on failure answer the client, audit, and return None."""
-        try:
-            return await _from_upstream(open_upstream(entry.host, port, policy=self._dial_policy, ssl_context=None))
-        except DestinationBlockedError:
-            await self._deny(client, entry, {"error": "destination_blocked"})
-        except _RequestFailedError as exc:
-            await self._reject(client, entry, exc.status, {"error": exc.code})
-        return None
-
-    async def _deny(self, client: _Peer, entry: _AuditEntry, body: dict[str, object]) -> None:
-        entry.kind = "denied"
-        await self._reject(client, entry, 403, body)
-
-    async def _reject(self, client: _Peer, entry: _AuditEntry, status: int, body: dict[str, object]) -> None:
-        entry.status = status
-        await _send_json(client, status, body)
-        await self._record(entry)
-
-    async def _record(self, entry: _AuditEntry) -> None:
-        try:
-            await asyncio.to_thread(self._audit.record, entry.to_record())
-        except Exception as exc:
-            logger.warning("egress_broker_audit_write_failed", error_type=type(exc).__name__)
-
-    async def _tunnel(self, client: _Peer, entry: _AuditEntry, port: int) -> None:
+    async def _tunnel(self, client: Peer, entry: AuditEntry, port: int) -> None:
         """Relay raw bytes to an unmatched host without looking inside them."""
-        upstream = await self._open_upstream(client, entry, port)
+        upstream = await self._relay.open_upstream(client, entry, port, ssl_context=None)
         if upstream is None:
             return
-        upstream_reader, upstream_writer = upstream
         try:
             await client.send(h11.Response(status_code=200, reason=b"Connection Established", headers=[]))
             entry.status = 200
-            buffered, _ = client.conn.trailing_data
-            if buffered:
-                upstream_writer.write(buffered)
-                entry.bytes_up += len(buffered)
-            await self._splice(client, upstream_reader, upstream_writer, entry)
+            await self._relay.splice(client, upstream, entry)
         finally:
-            upstream_writer.transport.abort()
-            await self._record(entry)
+            upstream.writer.transport.abort()
+            await self._relay.record(entry)
 
-    async def _splice(
-        self,
-        client: _Peer,
-        upstream_reader: asyncio.StreamReader,
-        upstream_writer: asyncio.StreamWriter,
-        entry: _AuditEntry,
-    ) -> None:
-        """Copy bytes both ways until both sides finish or neither sends for the idle timeout."""
-        loop = asyncio.get_running_loop()
-
-        async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, upload: bool) -> None:
-            try:
-                while data := await reader.read(_CHUNK):
-                    idle.reschedule(loop.time() + self._idle_timeout)
-                    if upload:
-                        entry.bytes_up += len(data)
-                    else:
-                        entry.bytes_down += len(data)
-                    writer.write(data)
-                    await writer.drain()
-                if writer.can_write_eof():
-                    writer.write_eof()
-            except OSError:
-                writer.transport.abort()
-
-        with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(self._idle_timeout) as idle, asyncio.TaskGroup() as group:
-                group.create_task(pump(client.reader, upstream_writer, upload=True))
-                group.create_task(pump(upstream_reader, client.writer, upload=False))
-
-    async def _forward_plain(self, client: _Peer, request: h11.Request, claims: WorkerClaims) -> bool:
+    async def _forward_plain(self, client: Peer, request: h11.Request, claims: WorkerClaims) -> bool:
         """Forward one absolute-form ``http://`` request, routed by its URL and never its Host header.
 
         Requests a rule matches are refused with ``tls_required`` instead: the broker never puts a
@@ -521,90 +250,41 @@ class EgressBroker:
         try:
             host, port, authority, target = _parse_absolute_http(request.target)
         except ValueError:
-            await _send_json(client, 400, {"error": "bad_request"})
+            await send_json(client, 400, {"error": "bad_request"})
             return False
         path = target.split(b"?", 1)[0].decode("ascii")
-        entry = _AuditEntry(claims=claims, kind="request", method=request.method.decode("ascii"), host=host, path=path)
-        config = await self._read_config(client, entry)
+        entry = AuditEntry(claims=claims, kind="request", method=request.method.decode("ascii"), host=host, path=path)
+        config = await self._relay.read_config(client, entry)
         if config is None:
             return False
         has_rules = host_has_rules(config, host, port)
         if config.unmatched_hosts == "deny" and not has_rules:
-            await self._deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
+            await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
             return False
         if (match := match_rule(config, host, port, path)) is not None:
             entry.service = match.service
-            await self._deny(client, entry, {"error": "tls_required", "service": match.service})
+            await self._relay.deny(client, entry, {"error": "tls_required", "service": match.service})
             return False
-        headers = _upstream_request_headers(list(request.headers), authority)
+        headers = upstream_request_headers(list(request.headers), host=authority, keep_upgrade=False)
         upstream_request = h11.Request(method=request.method, target=target, headers=headers)
         return await self._forward(client, entry, port, upstream_request, strip_cookies=has_rules)
 
     async def _forward(
         self,
-        client: _Peer,
-        entry: _AuditEntry,
+        client: Peer,
+        entry: AuditEntry,
         port: int,
         request: h11.Request,
         *,
         strip_cookies: bool,
     ) -> bool:
         """Send one request over a fresh upstream connection; return whether the client connection stays open."""
-        declared = next((int(value) for name, value in request.headers if name == b"content-length"), 0)
-        if declared > self._max_body_bytes:
-            await self._reject(client, entry, 413, {"error": "request_body_too_large"})
+        if await self._relay.refuse_large_body(client, entry, request):
             return False
-        upstream = await self._open_upstream(client, entry, port)
+        upstream = await self._relay.open_upstream(client, entry, port, ssl_context=None)
         if upstream is None:
             return False
-        upstream_reader, upstream_writer = upstream
         try:
-            await self._exchange(
-                client,
-                _Peer(h11.Connection(h11.CLIENT), upstream_reader, upstream_writer, idle_timeout=self._idle_timeout),
-                request,
-                entry,
-                strip_cookies=strip_cookies,
-            )
-        except _RequestFailedError as exc:
-            # A failure after the response head went out keeps that status; the client just sees the cut.
-            entry.status = entry.status or exc.status
-            await _send_json(client, exc.status, {"error": exc.code})
-            return False
+            return await self._relay.forward(client, upstream, request, entry, strip_cookies=strip_cookies)
         finally:
-            upstream_writer.transport.abort()
-            await self._record(entry)
-        return client.conn.our_state is h11.DONE and client.conn.their_state is h11.DONE
-
-    async def _exchange(
-        self,
-        client: _Peer,
-        upstream: _Peer,
-        request: h11.Request,
-        entry: _AuditEntry,
-        *,
-        strip_cookies: bool,
-    ) -> None:
-        """Send one request upstream and stream both bodies, never following redirects."""
-        await _from_upstream(upstream.send(request))
-        if client.conn.they_are_waiting_for_100_continue:
-            await client.send(h11.InformationalResponse(status_code=100, headers=[]))
-        while isinstance(event := await client.next_event(), h11.Data):
-            entry.bytes_up += len(event.data)
-            if entry.bytes_up > self._max_body_bytes:
-                raise _RequestFailedError(413, "request_body_too_large")
-            await _from_upstream(upstream.send(event))
-        await _from_upstream(upstream.send(h11.EndOfMessage()))
-        response = await _from_upstream(_read_response(upstream))
-        entry.status = response.status_code
-        await client.send(
-            h11.Response(
-                status_code=response.status_code,
-                reason=response.reason,
-                headers=_downstream_response_headers(list(response.headers), strip_cookies=strip_cookies),
-            ),
-        )
-        while isinstance(event := await _from_upstream(upstream.next_event()), h11.Data):
-            entry.bytes_down += len(event.data)
-            await client.send(event)
-        await client.send(h11.EndOfMessage())
+            upstream.writer.transport.abort()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import socket
 import time
 from typing import TYPE_CHECKING
@@ -13,14 +12,20 @@ import pytest
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
 from mindroom.egress_broker import TokenSigner
-from tests.egress_broker.conftest import DEFAULT_CLAIMS, read_raw_response
+from tests.egress_broker.conftest import (
+    DEFAULT_CLAIMS,
+    audit_records,
+    connect_request,
+    proxy_authorization,
+    read_raw_response,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
     import httpx
 
-    from mindroom.egress_broker import AuditLog, AuditRecord
+    from mindroom.egress_broker import AuditLog
     from mindroom.egress_broker.proxy import EgressBroker
     from tests.egress_broker.conftest import BrokerFactory, RawResponse, Upstream, UpstreamCA
 
@@ -33,32 +38,12 @@ def _config(host: str, *, path_prefix: str = "/") -> EgressBrokerConfig:
     return EgressBrokerConfig(services={"svc": EgressService(rules=[rule])})
 
 
-def _connect(target: str, *, authorization: str | None = None) -> bytes:
-    lines = [f"CONNECT {target} HTTP/1.1", f"Host: {target}"]
-    if authorization is not None:
-        lines.append(f"Proxy-Authorization: {authorization}")
-    return ("\r\n".join(lines) + "\r\n\r\n").encode()
-
-
-def _basic(token: str) -> str:
-    return "Basic " + base64.b64encode(f"{token}:".encode()).decode()
-
-
-async def _audit_records(audit: AuditLog, count: int) -> list[AuditRecord]:
-    """Wait for the broker to write `count` records; tunnels are audited only after they close."""
-    async with asyncio.timeout(5):
-        # The broker writes from its own thread, so the database is the only thing to watch.
-        while len(records := audit.query()) < count:  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
-    return records
-
-
 @pytest.mark.asyncio
 async def test_missing_token_gets_407(broker: BrokerFactory, raw_proxy: RawProxy) -> None:
     """A CONNECT without Proxy-Authorization is challenged with Basic auth."""
     started = await broker()
 
-    response = await raw_proxy(started.port, _connect("localhost:443"))
+    response = await raw_proxy(started.port, connect_request("localhost:443"))
 
     assert response.status == 407
     assert response.headers["proxy-authenticate"] == 'Basic realm="mindroom-egress-broker"'
@@ -74,14 +59,14 @@ async def test_bad_token_gets_407(broker: BrokerFactory, raw_proxy: RawProxy, cr
     """Unparseable, foreign-signed, and expired tokens are all challenged like a missing one."""
     started = await broker()
     authorization = {
-        "garbage": _basic("mrb1.not.valid"),
-        "foreign-key": _basic(TokenSigner(b"x" * 32).mint(DEFAULT_CLAIMS)),
-        "expired": _basic(broker.signer.mint(DEFAULT_CLAIMS, now=time.time() - 10 * 604800)),
+        "garbage": proxy_authorization("mrb1.not.valid"),
+        "foreign-key": proxy_authorization(TokenSigner(b"x" * 32).mint(DEFAULT_CLAIMS)),
+        "expired": proxy_authorization(broker.signer.mint(DEFAULT_CLAIMS, now=time.time() - 10 * 604800)),
         "bearer-garbage": "Bearer mrb1.not.valid",
         "not-base64": "Basic !!!",
     }[credential]
 
-    response = await raw_proxy(started.port, _connect("localhost:443", authorization=authorization))
+    response = await raw_proxy(started.port, connect_request("localhost:443", authorization=authorization))
 
     assert response.status == 407
     assert "proxy-authenticate" in response.headers
@@ -94,7 +79,7 @@ async def test_bearer_token_opens_tunnel(broker: BrokerFactory, tls_upstream: Up
 
     response = await raw_proxy(
         started.port,
-        _connect(f"localhost:{tls_upstream.port}", authorization=f"Bearer {broker.token()}"),
+        connect_request(f"localhost:{tls_upstream.port}", authorization=f"Bearer {broker.token()}"),
     )
 
     assert response.status == 200
@@ -136,13 +121,16 @@ async def test_unmatched_host_denied_under_deny_policy(
     )
     started = await broker(config)
 
-    response = await raw_proxy(started.port, _connect("localhost:443", authorization=_basic(broker.token())))
+    response = await raw_proxy(
+        started.port,
+        connect_request("localhost:443", authorization=proxy_authorization(broker.token())),
+    )
 
     assert response.status == 403
     assert response.headers["content-type"] == "application/json"
     assert response.headers["connection"] == "close"
     assert response.json() == {"error": "host_not_allowed", "services": ["github", "openai"]}
-    [record] = await _audit_records(audit, 1)
+    [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.host, record.method) == ("denied", 403, "localhost", "CONNECT")
 
 
@@ -155,7 +143,10 @@ async def test_default_policy_blocks_loopback(
     target: str,
 ) -> None:
     """The dial guard refuses loopback tunnels, including bracketed IPv6 CONNECT targets."""
-    response = await raw_proxy(broker_default_policy.port, _connect(target, authorization=_basic(broker.token())))
+    response = await raw_proxy(
+        broker_default_policy.port,
+        connect_request(target, authorization=proxy_authorization(broker.token())),
+    )
 
     assert response.status == 403
     assert response.json() == {"error": "destination_blocked"}
@@ -167,21 +158,9 @@ async def test_connect_without_valid_port_gets_400(broker: BrokerFactory, raw_pr
     """A CONNECT target must name an explicit numeric port, and IPv6 literals need brackets."""
     started = await broker()
 
-    response = await raw_proxy(started.port, _connect(target, authorization=_basic(broker.token())))
+    response = await raw_proxy(started.port, connect_request(target, authorization=proxy_authorization(broker.token())))
 
     assert response.status == 400
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("host", ["localhost", "LOCALHOST.", "localhost."])
-async def test_connect_to_rule_host_is_not_tunnelled(broker: BrokerFactory, raw_proxy: RawProxy, host: str) -> None:
-    """A host with rules (case and one trailing dot normalized) never gets a blind tunnel; interception comes later."""
-    started = await broker(_config("localhost"))
-
-    response = await raw_proxy(started.port, _connect(f"{host}:443", authorization=_basic(broker.token())))
-
-    assert response.status == 501
-    assert response.json() == {"error": "not_implemented"}
 
 
 @pytest.mark.asyncio
@@ -197,7 +176,7 @@ async def test_unresolvable_connect_target_gets_502(broker: BrokerFactory, raw_p
     with patch("mindroom.egress_broker.dial.validated_connect_addresses", side_effect=unresolvable):
         response = await raw_proxy(
             started.port,
-            _connect("nonexistent.invalid:443", authorization=_basic(broker.token())),
+            connect_request("nonexistent.invalid:443", authorization=proxy_authorization(broker.token())),
         )
 
     assert response.status == 502
@@ -237,7 +216,7 @@ async def test_plain_http_matched_rule_requires_tls(
     assert response.headers["connection"] == "close"
     assert response.json() == {"error": "tls_required", "service": "svc"}
     assert http_upstream.hits == []
-    [record] = await _audit_records(audit, 1)
+    [record] = await audit_records(audit, 1)
     assert (record.kind, record.service, record.status, record.path) == ("denied", "svc", 403, "/echo")
 
 
@@ -260,7 +239,7 @@ async def test_plain_http_unmatched_path_on_rule_host_forwards_unmodified(
     assert "proxy-authorization" not in echoed["headers"]
     assert echoed["headers"]["host"] == [f"localhost:{http_upstream.port}"]
     assert echoed["query"] == {"page": "2"}
-    [record] = await _audit_records(audit, 1)
+    [record] = await audit_records(audit, 1)
     assert (record.kind, record.service, record.status, record.path) == ("request", None, 200, "/echo")
     assert (record.scope, record.agent_name, record.requester_id) == ("user_agent", "code", "@alice:example.org")
 
@@ -334,7 +313,7 @@ async def test_plain_http_drops_request_content_length_beside_chunked(
     request = (
         f"POST {http_upstream.url('/echo')} HTTP/1.1\r\n"
         f"Host: localhost:{http_upstream.port}\r\n"
-        f"Proxy-Authorization: {_basic(broker.token())}\r\n"
+        f"Proxy-Authorization: {proxy_authorization(broker.token())}\r\n"
         "Content-Length: 3\r\n"
         "Transfer-Encoding: chunked\r\n"
         "Connection: close\r\n\r\n"
@@ -397,9 +376,9 @@ async def test_plain_http_keepalive_reauthenticates_each_request(
                 f"Proxy-Authorization: {authorization}\r\n\r\n"
             ).encode()
 
-        writer.write(request(_basic(broker.token())))
+        writer.write(request(proxy_authorization(broker.token())))
         first = await read_raw_response(reader)
-        writer.write(request(_basic("mrb1.not.valid")))
+        writer.write(request(proxy_authorization("mrb1.not.valid")))
         second = await read_raw_response(reader)
     finally:
         writer.transport.abort()
@@ -424,7 +403,7 @@ async def test_plain_http_streamed_body_over_limit_gets_413(
         (
             f"POST {http_upstream.url('/upload')} HTTP/1.1\r\n"
             f"Host: localhost:{http_upstream.port}\r\n"
-            f"Proxy-Authorization: {_basic(broker.token())}\r\n"
+            f"Proxy-Authorization: {proxy_authorization(broker.token())}\r\n"
             "Transfer-Encoding: chunked\r\n\r\n"
         ).encode()
         + b"".join(b"200\r\n" + chunk + b"\r\n" for _ in range(4))
@@ -435,7 +414,7 @@ async def test_plain_http_streamed_body_over_limit_gets_413(
 
     assert response.status == 413
     assert response.json() == {"error": "request_body_too_large"}
-    [record] = await _audit_records(audit, 1)
+    [record] = await audit_records(audit, 1)
     assert (record.kind, record.status) == ("request", 413)
 
 
@@ -457,9 +436,9 @@ async def test_config_provider_failure_gets_502_and_listener_survives(
         raise RuntimeError(msg)
 
     started = await broker(config_provider=failing_provider)
-    authorization = _basic(broker.token())
+    authorization = proxy_authorization(broker.token())
     request = (
-        _connect("localhost:443", authorization=authorization)
+        connect_request("localhost:443", authorization=authorization)
         if transport == "connect"
         else f"GET http://localhost:1/echo HTTP/1.1\r\nHost: localhost:1\r\nProxy-Authorization: {authorization}\r\n\r\n".encode()
     )
@@ -469,7 +448,7 @@ async def test_config_provider_failure_gets_502_and_listener_survives(
 
     assert (first.status, first.json()) == (502, {"error": "broker_error"})
     assert (second.status, second.json()) == (502, {"error": "broker_error"})
-    records = await _audit_records(audit, 2)
+    records = await audit_records(audit, 2)
     assert {(record.kind, record.status) for record in records} == {
         ("tunnel" if transport == "connect" else "request", 502),
     }
@@ -529,7 +508,7 @@ async def test_plain_http_unreachable_upstream_gets_502(
 
     assert response.status_code == 502
     assert response.json() == {"error": "upstream_unreachable"}
-    [record] = await _audit_records(audit, 1)
+    [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path) == ("request", 502, "/echo")
 
 
@@ -547,7 +526,7 @@ async def test_tunnel_audited_without_query(
     assert (await client.get(tls_upstream.url("/echo?token=abc"))).status_code == 200
     await client.aclose()
 
-    [record] = await _audit_records(audit, 1)
+    [record] = await audit_records(audit, 1)
 
     assert (record.kind, record.host, record.path, record.method, record.status) == (
         "tunnel",
@@ -568,7 +547,7 @@ async def test_malformed_request_does_not_break_listener(broker: BrokerFactory, 
     started = await broker()
 
     malformed = await raw_proxy(started.port, b"\x16\x03\x01 not http\r\n\r\n")
-    following = await raw_proxy(started.port, _connect("localhost:443"))
+    following = await raw_proxy(started.port, connect_request("localhost:443"))
 
     assert malformed.status == 400
     assert following.status == 407
@@ -602,7 +581,7 @@ async def test_close_drops_established_tunnel(broker: BrokerFactory, tls_upstrea
     """Close also ends tunnels that are already relaying."""
     started = await broker()
     reader, writer = await asyncio.open_connection("127.0.0.1", started.port)
-    writer.write(_connect(f"localhost:{tls_upstream.port}", authorization=_basic(broker.token())))
+    writer.write(connect_request(f"localhost:{tls_upstream.port}", authorization=proxy_authorization(broker.token())))
     assert (await read_raw_response(reader)).status == 200
 
     await started.close()
