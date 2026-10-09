@@ -20,7 +20,7 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skills import SkillMarkdownError, parse_skill_markdown, workspace_entry_names
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from agno.tools.function import Function
@@ -227,7 +227,10 @@ def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaPr
 
 
 def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: int) -> list[str]:
-    """Return every toolkit this agent may use, including deferred toolkits it loads on demand."""
+    """Return every toolkit this agent may use, including deferred toolkits it loads on demand.
+
+    Matrix room tools are listed too; a child naming one outside a Matrix room refuses to start.
+    """
     deferred = [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
     surface = visible_tool_surface(
         agent_name=agent_name,
@@ -235,6 +238,7 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
         loaded_tools=deferred,
         delegation_depth=delegation_depth,
         enable_dynamic_tools_manager=True,
+        include_matrix_room_runtime_tools=True,
     )
     # A preset has no functions of its own; its member toolkits are listed by their own names.
     return [entry.name for entry in surface.runtime_tool_configs if not config.is_tool_preset(entry.name)]
@@ -294,6 +298,18 @@ def validate_persona_tools(
         yours = cap if cap is not None else sorted(set(available_toolkits))
         msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours)}."
         raise PersonaError(msg)
+
+
+def require_built_persona_tools(tools: tuple[str, ...], built: Mapping[str, Collection[str]]) -> None:
+    """Refuse to start an authored child without every tool it names, whatever removed it.
+
+    ``built`` maps each toolkit the child built to its functions, after configuration filters.
+    """
+    for entry in tools:
+        toolkit, separator, function = entry.partition(".")
+        if toolkit not in built or (separator and function not in built[toolkit]):
+            msg = f"Cannot delegate: tool '{entry}' is not available to you."
+            raise PersonaError(msg)
 
 
 def no_longer_available(entry: str) -> str:

@@ -89,7 +89,8 @@ A new or edited profile appears in the list on the agent's next run, and `run_su
 
 Starting a subagent from a profile freezes the resolved persona into the subagent's retained state.
 Follow-ups through `continue_subagent` keep that frozen persona even if the file later changes or is deleted, so a subagent's behavior never shifts mid-conversation.
-A follow-up fails when the caller has lost a toolkit the persona names; if an operator removes single functions, the follow-up runs with fewer functions, never more.
+A child, fresh or a follow-up, refuses to start unless every toolkit and function its persona names is built for it, so a configuration filter, a failed toolkit build, or a function an MCP server does not expose stops it instead of running it with fewer tools.
+Matrix room tools such as `invite_router` count as caller tools, and a child naming one outside a Matrix room refuses to start.
 Editing a profile affects only subagents started afterwards.
 
 ## Delegate tool changes

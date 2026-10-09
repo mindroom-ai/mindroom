@@ -165,6 +165,7 @@ Authoring errors:
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
 - `Cannot delegate: subagent profiles need an agent workspace.` - give the agent `memory_backend: file` or a `private:` configuration.
 - `Subagent tool '<entry>' is no longer available to you; start a new subagent.` - the caller lost a tool the subagent uses; start a new one.
+- `Cannot delegate: tool '<entry>' is not available to you.` - the caller's tool configuration excludes that function, or the toolkit could not load in this conversation; fix the configuration or name a tool the caller can use.
 
 ### Delegation Records
 

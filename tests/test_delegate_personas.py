@@ -47,7 +47,7 @@ You are a hostile critic.
 """
 
 
-def _config(*, tools: tuple[str, ...] = ("file",), approval: bool = False) -> Config:
+def _config(*, tools: tuple[str | dict[str, object], ...] = ("file",), approval: bool = False) -> Config:
     return Config(
         agents={
             "leader": AgentConfig(
@@ -261,6 +261,41 @@ async def test_follow_up_after_caller_lost_tool_is_refused(tmp_path: Path, monke
     )
 
     assert result == "Subagent tool 'file' is no longer available to you; start a new subagent."
+    assert harness.model.system_prompts == ["P"]
+
+
+@pytest.mark.asyncio
+async def test_persona_naming_a_function_its_caller_lacks_never_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function the caller's configuration removes is refused instead of starting a child without it."""
+    harness = _Harness(tmp_path, monkeypatch, _config(tools=({"file": {"include_tools": ["read_file"]}},)))
+
+    result = await harness.run(
+        harness.toolkit.run_subagent(task="Save it", system_prompt="P", tools=["file.save_file"]),
+    )
+
+    assert "'file.save_file' is not available to you" in result
+    assert harness.model.system_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_follow_up_after_caller_lost_a_function_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A follow-up never runs with fewer functions than its persona names."""
+    harness = _Harness(tmp_path, monkeypatch, _config())
+    await harness.run(harness.toolkit.run_subagent(task="Save", system_prompt="P", tools=["file.save_file"]))
+    subagent_id = str(harness.session_child()["subagent_id"])
+
+    result = await harness.run(
+        harness.toolkit.continue_subagent(subagent_id=subagent_id, message="Again"),
+        config=_config(tools=({"file": {"include_tools": ["read_file"]}},)),
+    )
+
+    assert "'file.save_file' is not available to you" in result
     assert harness.model.system_prompts == ["P"]
 
 

@@ -25,6 +25,7 @@ from mindroom.delegation.personas import (
     persona_allows,
     persona_disabled_toolkits,
     persona_function_filter,
+    require_built_persona_tools,
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
@@ -1602,6 +1603,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     local_tool_names: list[str] = []
     worker_routed_tool_names: list[str] = []
     deferred_toolkits: list[_NativeDeferredToolkit] = []
+    persona_built: dict[str, frozenset[str]] = {}
 
     def build_entry(tool_entry: EffectiveToolConfig) -> Toolkit | None:
         tool_name = tool_entry.name
@@ -1628,6 +1630,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             if persona_tools is not None:
                 # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
                 _keep_persona_functions(toolkit, tool_name, persona_tools)
+                persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
             # Function policies match on the owning toolkit, so stamp it before pruning.
             _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
@@ -1701,6 +1704,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
+    if persona_tools is not None:
+        require_built_persona_tools(persona_tools, persona_built)
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,

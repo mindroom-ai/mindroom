@@ -14,7 +14,7 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
 from mindroom.config.agent import AgentConfig
-from mindroom.delegation.personas import caller_toolkit_names, inline_persona
+from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
@@ -108,6 +108,45 @@ async def test_persona_function_entry_exposes_only_that_function(tmp_path: Path)
         persona=inline_persona("P", ["file.read_file"]),
     )
     assert await _function_names(agent) == ["read_file"]
+
+
+def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: Path) -> None:
+    """A named function the caller's configuration filters out stops construction."""
+    runtime = _runtime(tmp_path, tools=[{"file": {"include_tools": ["read_file"]}}])
+
+    with pytest.raises(PersonaError, match=r"'file\.save_file' is not available to you"):
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            None,
+            persist_runtime_state=False,
+            persona=inline_persona("P", ["file.read_file", "file.save_file"]),
+        )
+
+
+def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A named toolkit that cannot be built stops construction instead of being skipped."""
+    runtime = _runtime(tmp_path, tools=["file", "calculator"])
+    build = agents.build_agent_toolkit
+
+    def failing_build(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name == "calculator":
+            msg = "calculator is unavailable"
+            raise ValueError(msg)
+        return build(tool_name, **kwargs)
+
+    monkeypatch.setattr(agents, "build_agent_toolkit", failing_build)
+
+    with pytest.raises(PersonaError, match="'calculator' is not available to you"):
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            None,
+            persist_runtime_state=False,
+            persona=inline_persona("P", ["file", "calculator"]),
+        )
 
 
 @pytest.mark.asyncio
@@ -242,6 +281,34 @@ async def test_persona_loads_named_member_of_deferred_preset(tmp_path: Path) -> 
         persona=inline_persona("P", ["shell"]),
     )
     assert "run_shell_command" in await _function_names(agent)
+
+
+@pytest.mark.asyncio
+async def test_persona_may_name_the_matrix_room_runtime_tool(tmp_path: Path) -> None:
+    """A Matrix caller's injected room tool can be named, and the child refuses to start where it is absent."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    persona = inline_persona("P", ["invite_router"])
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        build_execution_identity_from_runtime_context(runtime),
+        persist_runtime_state=False,
+        persona=persona,
+    )
+
+    assert "invite_router" in caller_toolkit_names("helper", runtime.config, delegation_depth=0)
+    assert await _function_names(agent) == ["invite_router"]
+    with pytest.raises(PersonaError, match="'invite_router' is not available to you"):
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            None,
+            persist_runtime_state=False,
+            persona=persona,
+        )
 
 
 @pytest.mark.asyncio
