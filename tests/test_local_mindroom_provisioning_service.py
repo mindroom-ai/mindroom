@@ -1341,7 +1341,6 @@ def test_connected_pair_sessions_are_pruned_after_one_more_code_lifetime(
     started_at = provisioning._now_utc()
 
     with TestClient(app) as client:
-        first_complete = _pair_local_client(client)
         device = _start_device_pairing(client, "device")
         client.post(
             "/v1/local-mindroom/pair/device/approve",
@@ -1369,9 +1368,8 @@ def test_connected_pair_sessions_are_pruned_after_one_more_code_lifetime(
         listed = client.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()
 
     assert [session["client_name"] for session in _stored_rows(state_path, "pair_sessions")] == ["latest"]
-    connection_ids = {first_complete["client_id"], device_complete["client_id"]}
-    assert {connection["id"] for connection in _stored_rows(state_path, "connections")} == connection_ids
-    assert {connection["id"] for connection in listed["connections"]} == connection_ids
+    stored_ids = [connection["id"] for connection in _stored_rows(state_path, "connections")]
+    assert stored_ids == [connection["id"] for connection in listed["connections"]] == [device_complete["client_id"]]
 
 
 def test_pairing_beyond_the_per_user_cap_deletes_revoked_then_least_recently_seen_connections(
