@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -81,7 +82,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.pre_model_preparation import (
@@ -125,6 +126,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_to
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractContextManager
+    from pathlib import Path
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
@@ -1045,6 +1047,28 @@ def _minimal_turn_enrichment(
     return render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required])
 
 
+async def _prepare_turn_memory(
+    ctx: ResponseTurnContext,
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> MemoryPromptParts:
+    """Recall memories for a configured agent turn; an authored persona sees only its own prompt and task."""
+    if ctx.persona is not None:
+        return MemoryPromptParts()
+    return await build_memory_prompt_parts(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     ctx: ResponseTurnContext,
@@ -1113,6 +1137,7 @@ async def _prepare_agent_and_prompt(
                 eager_deferred_tools=eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
                 agent_cli_in_shell=True,
+                persona=ctx.persona,
             )
             prewarm_agent_model_client(
                 agent,
@@ -1147,13 +1172,15 @@ async def _prepare_agent_and_prompt(
         ):
             try:
                 prompt_parts, runtime_model, agent = await prepare_prompt_branches(
-                    prepare_memory=lambda: build_memory_prompt_parts(
+                    prepare_memory=partial(
+                        _prepare_turn_memory,
+                        ctx,
                         prompt,
                         agent_name,
                         storage_path,
                         config,
                         runtime_paths,
-                        execution_identity=execution_identity,
+                        execution_identity,
                     ),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
@@ -1169,13 +1196,14 @@ async def _prepare_agent_and_prompt(
         )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await build_memory_prompt_parts(
+        prompt_parts = await _prepare_turn_memory(
+            ctx,
             prompt,
             agent_name,
             storage_path,
             config,
             runtime_paths,
-            execution_identity=execution_identity,
+            execution_identity,
         )
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,

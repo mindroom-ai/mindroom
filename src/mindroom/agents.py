@@ -20,6 +20,7 @@ from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, na
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
+from mindroom.delegation.personas import persona_disabled_toolkits, persona_function_filter
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
@@ -90,6 +91,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
     from mindroom.credentials import CredentialsManager
+    from mindroom.delegation.personas import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
@@ -1425,13 +1427,50 @@ def _generated_function_visible(
     )
 
 
+def _persona_tool_policy(
+    persona: SubagentPersona | None,
+    agent_name: str,
+    config: Config,
+    *,
+    session_id: str | None,
+    delegation_depth: int,
+    tool_function_filter: Callable[[Function], bool] | None,
+    disabled_tool_names: frozenset[str],
+) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
+    """Narrow this agent's own tools to an authored persona's subset; its principal is unchanged."""
+    persona_filter = persona_function_filter(persona)
+    if persona_filter is None:
+        return tool_function_filter, disabled_tool_names
+    unused = persona_disabled_toolkits(
+        persona,
+        get_agent_toolkit_names(agent_name, config, session_id=session_id, delegation_depth=delegation_depth),
+    )
+    if tool_function_filter is None:
+        return persona_filter, disabled_tool_names | unused
+    caller_filter = tool_function_filter
+
+    def visible(function: Function) -> bool:
+        return caller_filter(function) and persona_filter(function)
+
+    return visible, disabled_tool_names | unused
+
+
+def _apply_persona(agent: Agent, persona: SubagentPersona) -> None:
+    """Present the authored prompt verbatim, without MindRoom framing or session-state substitution."""
+    agent.system_message = persona.system_prompt
+    agent.resolve_in_context = False
+    if isinstance(agent, MinimalAgent):
+        agent.bootstrap_message = persona.system_prompt
+        agent.persona_hint = True
+
+
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
 def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
     """Attach the configured toolkit identity to its executable functions."""
-    for function in toolkit.get_async_functions().values():
+    for function in (*toolkit.functions.values(), *toolkit.get_async_functions().values()):
         function.owning_toolkit = authored_name
 
 
@@ -1562,6 +1601,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
+            # Function policies such as a persona's tool subset match on the owning toolkit.
+            _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
         toolkit = apply_tool_approval_capability(
             toolkit,
@@ -1578,7 +1619,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
         return toolkit
 
     cli_deferred = []
@@ -1847,6 +1887,7 @@ def create_agent(
     required_tool_names: tuple[str, ...] = (),
     agent_mode: AgentMode = "standard",
     agent_cli_in_shell: bool = False,
+    persona: SubagentPersona | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1892,6 +1933,7 @@ def create_agent(
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
+        persona: Authored subagent presentation: its whole system prompt and optional tool subset.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -1937,6 +1979,15 @@ def create_agent(
         )
     )
 
+    tool_function_filter, disabled_tool_names = _persona_tool_policy(
+        persona,
+        agent_name,
+        config,
+        session_id=session_id,
+        delegation_depth=delegation_depth,
+        tool_function_filter=tool_function_filter,
+        disabled_tool_names=disabled_tool_names,
+    )
     tool_assembly = _assemble_agent_toolkits(
         agent_name,
         config,
@@ -1971,7 +2022,7 @@ def create_agent(
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and persona is None and _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -2094,7 +2145,9 @@ def create_agent(
             ),
         ),
         db=storage,
-        learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if persist_runtime_state else False,
+        learning=_resolve_agent_learning(agent_config, defaults, learning_storage)
+        if persist_runtime_state and persona is None
+        else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
@@ -2145,6 +2198,8 @@ def create_agent(
         )
         agent.delegation_depth = delegation_depth
         agent.refresh_scheduler = refresh_scheduler
+    if persona is not None:
+        _apply_persona(agent, persona)
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
 
