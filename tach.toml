@@ -2181,6 +2181,7 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.identity",
+    "mindroom.matrix.media",
     "mindroom.matrix.member_display_names",
     "mindroom.matrix.message_builder",
     "mindroom.matrix.thread_room_scan",

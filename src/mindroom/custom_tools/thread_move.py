@@ -35,6 +35,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.media import MATRIX_MEDIA_MSGTYPES
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
@@ -68,7 +69,6 @@ _COPIED_CONTENT_KEYS = (
 _IN_PROGRESS_STREAM_STATUSES = frozenset(
     {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING},
 )
-_MEDIA_MSGTYPES = frozenset({"m.image", "m.file", "m.audio", "m.video"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +119,7 @@ def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
     # No source kind: the relay is attributed in prompts but never becomes a human turn.
     content[ORIGINAL_SENDER_KEY] = sender
     body = str(content.get("body", ""))
-    if content.get("msgtype") in _MEDIA_MSGTYPES:
+    if content.get("msgtype") in MATRIX_MEDIA_MSGTYPES:
         # With a filename present, clients show the body as the caption.
         content["filename"] = content.get("filename") or body
     content["body"] = f"{name}: {body}"

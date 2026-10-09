@@ -639,3 +639,40 @@ async def test_move_thread_reports_tag_failure_as_warning(tmp_path: Path) -> Non
     assert payload["status"] == "ok"
     assert payload["warnings"] == ["Could not mark the original thread resolved: forbidden"]
     assert mocks.send.await_args_list[-1].args[2]["msgtype"] == "m.notice"
+
+
+@pytest.mark.asyncio
+async def test_move_thread_reports_each_follow_up_failure_as_a_warning(tmp_path: Path) -> None:
+    """Failing to read tags, copy a tag, or post the notice leaves a complete copy and says what is missing."""
+    move = _move(tmp_path)
+    sends = _delivered_sends()
+
+    async def send(
+        client: object,
+        room_id: str,
+        content: dict[str, Any],
+        **kwargs: object,
+    ) -> DeliveredMatrixEvent | None:
+        return None if room_id == SOURCE_ROOM_ID else await sends(client, room_id, content, **kwargs)
+
+    with _matrix(move, _thread(move), send=AsyncMock(side_effect=send)):
+        with patch(f"{MODULE}.get_thread_tags", new=AsyncMock(side_effect=ThreadTagsError("unreadable"))):
+            unreadable = await _run()
+        record = ThreadTagRecord(set_by=REQUESTER_ID, set_at="2026-10-09T12:00:00Z")
+        tags = ThreadTagsState(room_id=SOURCE_ROOM_ID, thread_root_id=ROOT_ID, tags={"ideas": record})
+        with (
+            patch(f"{MODULE}.get_thread_tags", new=AsyncMock(return_value=tags)),
+            patch(f"{MODULE}.set_thread_tag", new=AsyncMock(side_effect=[ThreadTagsError("forbidden"), None])),
+        ):
+            uncopied = await _run()
+
+    assert unreadable["status"] == "ok"
+    assert unreadable["warnings"] == [
+        "Could not read the thread's tags: unreadable",
+        "Could not post the move notice in the original thread.",
+    ]
+    assert uncopied["tags_copied"] == []
+    assert uncopied["warnings"] == [
+        "Could not copy tag ideas: forbidden",
+        "Could not post the move notice in the original thread.",
+    ]

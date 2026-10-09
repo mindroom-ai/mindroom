@@ -108,7 +108,7 @@ Messages posted in the source thread after the move starts are not copied.
 ## Known Limitations
 
 - Copies have new timestamps, edits are flattened to their latest revision, and reactions and in-thread reply targets are not copied.
-- Router-posted human copies do not count as distinct humans, so a moved thread that had several humans behaves like a single-human thread until those humans post again.
+- Router-posted human copies do not count as people in a thread, so until two people have posted in the moved thread, agents treat it as a one-person thread and may answer untagged messages; counting the person named on MindRoom's own relays would fix this for every relay and is a turn-policy change left out of this feature.
 
 ## Testing
 
