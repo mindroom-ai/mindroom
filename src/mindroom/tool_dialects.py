@@ -241,7 +241,10 @@ def canonical_tool_calls(
     errors: list[_ToolCallError] = []
     for call in tool_calls:
         name = call.get("function", {}).get("name")
-        wire_function = None if name in functions else by_wire_name.get(name)
+        wire_function = by_wire_name.get(name)
+        # A name that is a real function belongs to it, unless that function is the dialect's own same-named one.
+        if wire_function is not None and name in functions and name != wire_function.key.function:
+            wire_function = None
         function = functions.get(wire_function.key.function) if wire_function is not None else None
         if wire_function is None or function is None or not _is_canonical(function, wire_function.key):
             translated.append(call)

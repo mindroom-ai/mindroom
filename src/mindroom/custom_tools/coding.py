@@ -767,7 +767,7 @@ class CodingTools(Toolkit):
         modified: list[str] = []
         deleted: list[str] = []
         for hunk in hunks:
-            resolved = self._patch_link(hunk.path) if isinstance(hunk, DeleteFile) else self._patch_path(hunk.path)
+            resolved = self._patch_link(hunk.path, overlay, deleting=isinstance(hunk, DeleteFile))
             if isinstance(hunk, AddFile):
                 self._check_patch_target(resolved, hunk.path, overlay)
                 overlay[resolved] = hunk.contents
@@ -781,7 +781,7 @@ class CodingTools(Toolkit):
             else:
                 original = self._patch_source(resolved, hunk.path, overlay, action="update")
                 new_contents = updated_contents(original, hunk.path, hunk.chunks)
-                target = resolved if hunk.move_to is None else self._patch_path(hunk.move_to)
+                target = resolved if hunk.move_to is None else self._patch_link(hunk.move_to, overlay, deleting=False)
                 self._check_patch_target(target, hunk.move_to or hunk.path, overlay)
                 overlay[target] = new_contents
                 writes.append((target, new_contents.encode("utf-8")))
@@ -800,11 +800,16 @@ class CodingTools(Toolkit):
             raise PatchError(blocked_git_metadata_message("applying patch", path))
         return resolved
 
-    def _patch_link(self, path: str) -> Path:
-        """Return the path a delete removes: a link itself, not its target, like Codex."""
+    def _patch_link(self, path: str, overlay: dict[Path, str | None], *, deleting: bool) -> Path:
+        """Return the path a hunk touches: a link itself when deleting it or after this patch deleted it.
+
+        Like Codex, a delete removes the link, not its target, so a later hunk writes a new file in its place.
+        """
         parent = self._patch_path(str(Path(path).parent))
         link = parent / Path(path).name
-        return link if link.is_symlink() and not is_git_metadata_path(link) else self._patch_path(path)
+        if link.is_symlink() and not is_git_metadata_path(link) and (deleting or link in overlay):
+            return link
+        return self._patch_path(path)
 
     def _check_patch_target(self, resolved: Path, path: str, overlay: dict[Path, str | None]) -> None:
         """Refuse a write that must fail, onto a directory or below a file, as earlier hunks leave the tree."""

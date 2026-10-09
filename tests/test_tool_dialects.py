@@ -391,3 +391,21 @@ def test_identity_named_functions_render_results_when_presented() -> None:
     [rendered] = wire_messages(dialect, [result], frozenset({"run_shell_command"}))
 
     assert rendered.content == "Poll"
+
+
+def test_same_named_dialect_function_translates_its_arguments() -> None:
+    """A dialect function that keeps its canonical name still translates the arguments the model sends."""
+    same_name = replace(_TOY.functions[0], wire_name="run_shell_command")
+    dialect = ToolDialect(name="codex", functions=(same_name,))
+    functions = {"run_shell_command": _function("run_shell_command", "shell")}
+
+    [translated], errors = canonical_tool_calls(dialect, [_call("a", "run_shell_command", {"cmd": "ls"})], functions)
+    [foreign], _ = canonical_tool_calls(
+        dialect,
+        [_call("b", "run_shell_command", {"cmd": "ls"})],
+        {"run_shell_command": _function("run_shell_command", "mcp_server")},
+    )
+
+    assert errors == []
+    assert json.loads(translated["function"]["arguments"]) == {"args": "ls"}
+    assert json.loads(foreign["function"]["arguments"]) == {"cmd": "ls"}

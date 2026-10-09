@@ -269,3 +269,18 @@ def test_delete_through_symlink_removes_the_link(tmp_path: Path) -> None:
     assert result == "Success. Updated the following files:\nD current.log"
     assert not (tmp_path / "current.log").is_symlink()
     assert (tmp_path / "logs" / "real.log").read_text() == "keep\n"
+
+
+def test_replacing_a_symlink_keeps_its_old_target(tmp_path: Path) -> None:
+    """Deleting a link and adding a file at its path writes a new file there, not through the old link."""
+    (tmp_path / "original.txt").write_text("keep\n")
+    (tmp_path / "current.txt").symlink_to("original.txt")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Delete File: current.txt\n*** Add File: current.txt\n+new\n*** End Patch",
+    )
+
+    assert result.startswith("Success.")
+    assert not (tmp_path / "current.txt").is_symlink()
+    assert (tmp_path / "current.txt").read_text() == "new\n"
+    assert (tmp_path / "original.txt").read_text() == "keep\n"

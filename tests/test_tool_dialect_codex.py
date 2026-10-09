@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from agno.tools.function import Function
 
@@ -10,7 +12,7 @@ from mindroom.shell_execution import _format_background_handle_message, _format_
 from mindroom.tool_dialect_claude import CLAUDE_DIALECT
 from mindroom.tool_dialect_codex import CODEX_DIALECT
 from mindroom.tool_dialect_types import DialectArgumentError, WireFunction
-from mindroom.tool_dialects import resolve_tool_dialect, wire_tools
+from mindroom.tool_dialects import canonical_tool_calls, resolve_tool_dialect, wire_tools
 from mindroom.tool_system.tool_access import ToolKey
 
 
@@ -192,3 +194,18 @@ def test_exec_command_yields_like_codex() -> None:
 
     assert to_canonical({"cmd": "ls"}) == {"args": "ls", "timeout": 10}
     assert to_canonical({"cmd": "ls", "yield_time_ms": 600000}) == {"args": "ls", "timeout": 30}
+
+
+def test_kill_shell_command_call_dispatches_with_the_handle() -> None:
+    """A Codex model's kill_shell_command(session_id) reaches the canonical function with its handle."""
+    kill = _function("kill_shell_command", "shell")
+    call = {
+        "id": "c1",
+        "type": "function",
+        "function": {"name": "kill_shell_command", "arguments": json.dumps({"session_id": 0x0123ABCD})},
+    }
+
+    [translated], errors = canonical_tool_calls(CODEX_DIALECT, [call], {"kill_shell_command": kill})
+
+    assert errors == []
+    assert json.loads(translated["function"]["arguments"]) == {"handle": "shell:0123abcd", "force": False}
