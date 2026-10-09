@@ -101,7 +101,7 @@ async def _display_to_client(reader: asyncio.StreamReader, websocket: WebSocket)
 
 
 @router.websocket("/stream")
-async def stream(websocket: WebSocket, session_id: str, generation: str) -> None:  # noqa: C901 - one owned stream lifecycle
+async def stream(websocket: WebSocket, session_id: str, generation: str) -> None:  # noqa: C901, PLR0915 - one owned stream lifecycle
     """Bridge only this worker's private display with per-message input checks."""
     token = app_runner_token(websocket.app)
     supplied = websocket.headers.get("x-mindroom-sandbox-token", "")
@@ -123,14 +123,17 @@ async def stream(websocket: WebSocket, session_id: str, generation: str) -> None
         reader, writer = await asyncio.open_unix_connection(computer.display.socket_path)
         await websocket.accept(subprotocol="binary" if "binary" in websocket.scope.get("subprotocols", []) else None)
         tasks = [
-            asyncio.create_task(_client_to_display(websocket, writer, computer, session_id, lease)),
-            asyncio.create_task(_display_to_client(reader, websocket)),
-            asyncio.create_task(lease.wait()),
+            asyncio.create_task(_client_to_display(websocket, writer, computer, session_id, lease), name="viewer"),
+            asyncio.create_task(_display_to_client(reader, websocket), name="display"),
+            asyncio.create_task(lease.wait(), name="lease"),
         ]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        logger.info("Worker computer stream ended", ended_by=sorted(task.get_name() for task in done))
         for task in done:
             task.result()
-    except (WebSocketDisconnect, OSError, RfbProtocolError):
+    except RfbProtocolError as error:
+        logger.warning("Worker computer stream rejected client input", reason=str(error))
+    except (WebSocketDisconnect, OSError):
         pass
     except Exception as error:
         logger.warning("Worker computer stream failed", error_type=type(error).__name__)
