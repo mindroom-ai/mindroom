@@ -24,11 +24,11 @@ function statusLabel(service: EgressCredentialService): string {
 }
 
 function EgressServiceRow({
-  agentName,
+  path,
   service,
   onChanged,
 }: {
-  agentName: string;
+  path: string;
   service: EgressCredentialService;
   onChanged: () => void;
 }) {
@@ -38,7 +38,6 @@ function EgressServiceRow({
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const operation = useRef<AbortController | null>(null);
-  const path = `/api/connections/egress/agents/${encodeURIComponent(agentName)}/${encodeURIComponent(service.name)}`;
   const keyLabel = `${service.display_name} API key`;
 
   useEffect(() => () => operation.current?.abort(), []);
@@ -223,13 +222,28 @@ function EgressServiceRow({
   );
 }
 
-/** API keys the egress broker injects into one agent's outbound requests. */
+/** Where one service's secret is written and removed. */
+type SecretTarget =
+  | { agentName: string; secretPath?: undefined }
+  | { agentName?: undefined; secretPath: (serviceName: string) => string };
+
+function secretPathFor(target: SecretTarget, serviceName: string): string {
+  if (target.secretPath) return target.secretPath(serviceName);
+  return `/api/connections/egress/agents/${encodeURIComponent(target.agentName)}/${encodeURIComponent(serviceName)}`;
+}
+
+/**
+ * API keys the egress broker injects into outbound requests.
+ *
+ * Rows target one agent's personal connections API by default. Pass
+ * `secretPath` instead of `agentName` to write to another endpoint, such as
+ * the dashboard's.
+ */
 export function EgressServiceRows({
-  agentName,
   services,
   onChanged,
-}: {
-  agentName: string;
+  ...target
+}: SecretTarget & {
   services: EgressCredentialService[];
   onChanged: () => void;
 }) {
@@ -238,7 +252,7 @@ export function EgressServiceRows({
       {services.map((service) => (
         <EgressServiceRow
           key={service.name}
-          agentName={agentName}
+          path={secretPathFor(target, service.name)}
           service={service}
           onChanged={onChanged}
         />

@@ -60,6 +60,15 @@ export const API_ENDPOINTS = {
       `${API_BASE_URL}/api/credentials/${encodeURIComponent(service)}/test`,
   },
 
+  // Egress broker operations
+  egressBroker: {
+    services: `${API_BASE_URL}/api/egress-broker/services`,
+    secret: (service: string) =>
+      `${API_BASE_URL}/api/egress-broker/services/${encodeURIComponent(service)}/secret`,
+    logs: `${API_BASE_URL}/api/egress-broker/logs`,
+    caPem: `${API_BASE_URL}/api/egress-broker/ca.pem`,
+  },
+
   // Other endpoints
   tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,

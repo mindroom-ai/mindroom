@@ -128,6 +128,23 @@ describe("egress service rows", () => {
     );
   });
 
+  it("writes to a custom secret path instead of the connections API", async () => {
+    render(
+      <EgressServiceRows
+        secretPath={(name) => `/custom/${name}/secret`}
+        services={[github]}
+        onChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Set GitHub API key" }));
+    fireEvent.change(screen.getByLabelText("GitHub API key"), {
+      target: { value: "abc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe("/custom/github/secret");
+  });
+
   it("cancels without sending anything and drops the typed value", () => {
     render(
       <EgressServiceRows
