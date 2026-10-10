@@ -1656,7 +1656,7 @@
         },
         "path_prefix": {
           "default": "/",
-          "description": "Path prefix to match",
+          "description": "Path prefix to match by segment: one ending in / matches every path under it; otherwise the exact path or that path followed by / (/repos/o/r never matches /repos/o/r-old)",
           "title": "Path Prefix",
           "type": "string"
         },
@@ -1744,6 +1744,12 @@
           "default": false,
           "description": "Use a requester's own connected account (GitHub, Atlassian) in shared sandboxes too: shared and unscoped agents, and any agent on the static runner. Every user of such a sandbox can act with another user's connected account until that user's proxy token expires; presets never set this",
           "title": "Oauth On Shared Workers",
+          "type": "boolean"
+        },
+        "restrict_to_rules": {
+          "default": false,
+          "description": "Refuse requests to this service's hosts whose path matches no rule of any service (403 path_not_allowed) instead of forwarding them without credentials. GraphQL (/graphql) is then refused unless a rule lists it; a listed GraphQL endpoint reaches everything the credential can. Presets never set this",
+          "title": "Restrict To Rules",
           "type": "boolean"
         }
       },

@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import quote, unquote, urlparse
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule  # noqa: TC001
 
 __all__ = [
+    "Route",
     "RuleMatch",
     "host_has_rules",
     "inject_credentials",
+    "is_ambiguous_path",
     "match_rule",
+    "path_matches",
+    "route_request",
     "strip_request_headers",
     "strip_response_headers",
 ]
@@ -37,6 +42,26 @@ class RuleMatch:
 
     service: str
     rule: EgressRule
+
+
+@dataclass(frozen=True)
+class Route:
+    """How the broker handles one request, decided from the target host, port, and path alone.
+
+    `match` names the rule whose service secret is injected. `refusal` is the error code when the request
+    is refused instead: `bad_request` (400) for an ambiguous path, `path_not_allowed` (403) for a path no rule
+    lists on a host restricted to its rules. With neither, the request is forwarded without credentials;
+    when `host_has_rules` is false no rule names the host at all, so `unmatched_hosts` decides.
+    """
+
+    host_has_rules: bool
+    match: RuleMatch | None = None
+    refusal: Literal["bad_request", "path_not_allowed"] | None = None
+
+    @property
+    def refusal_status(self) -> int:
+        """Return the HTTP status that goes with `refusal`."""
+        return 400 if self.refusal == "bad_request" else 403
 
 
 def _host_matches(rule_host: str, request_host: str) -> bool:
@@ -80,21 +105,54 @@ def _rule_priority(rule: EgressRule, request_port: int) -> tuple[int, int, int]:
     return (host_priority, port_priority, path_priority)
 
 
+def _rule_applies(rule: EgressRule, host: str, port: int) -> bool:
+    """Return whether `rule` names this host and port; a rule bound to another port never applies."""
+    if rule.port is not None and rule.port != port:
+        return False
+    return _host_matches(rule.host, host)
+
+
+def path_matches(prefix: str, path: str) -> bool:
+    """Return whether `path` falls under `prefix`, comparing whole path segments.
+
+    A prefix ending in ``/`` matches by plain prefix, so ``/`` matches every path. Any other prefix matches
+    the exact path or the path followed by ``/``: ``/repos/o/r`` matches ``/repos/o/r/pulls`` but never
+    ``/repos/o/r-old``.
+    """
+    if prefix.endswith("/"):
+        return path.startswith(prefix)
+    return path == prefix or path.startswith(f"{prefix}/")
+
+
+def is_ambiguous_path(path: str) -> bool:
+    """Return whether an upstream could resolve `path` to a different resource than its raw segments name.
+
+    That covers dot segments (``.`` or ``..``, raw or percent-encoded, also with a ``;`` parameter as in
+    ``..;``), empty segments (``//``), backslashes (raw or ``%5c``), and encoded slashes (``%2f``) inside a
+    segment. The broker refuses such paths rather than normalizing them, because servers disagree on how.
+    """
+    if "\\" in path or "//" in path:
+        return True
+    for segment in path.split("/"):
+        decoded = unquote(segment)
+        if "/" in decoded or "\\" in decoded:
+            return True
+        if decoded.partition(";")[0] in {".", ".."}:
+            return True
+    return False
+
+
 def host_has_rules(config: EgressBrokerConfig, host: str, port: int) -> bool:
     """Check if any rule matches the given host and port."""
     host = host.lower()
-    for service in config.services.values():
-        for rule in service.rules:
-            # Port constraint: rule with different port never matches
-            if rule.port is not None and rule.port != port:
-                continue
-            if _host_matches(rule.host, host):
-                return True
-    return False
+    return any(_rule_applies(rule, host, port) for service in config.services.values() for rule in service.rules)
 
 
 def match_rule(config: EgressBrokerConfig, host: str, port: int, path: str) -> RuleMatch | None:
     """Find the best matching rule for the given request.
+
+    Paths match by segment (see `path_matches`). This does not refuse ambiguous paths;
+    request handling goes through `route_request`, which does.
 
     Matching priority:
     1. Exact host beats wildcard
@@ -103,25 +161,12 @@ def match_rule(config: EgressBrokerConfig, host: str, port: int, path: str) -> R
     4. Declaration order (across services and rules)
     """
     host = host.lower()
-    candidates: list[tuple[str, EgressRule, tuple[int, int, int]]] = []
-
-    # Collect all matching rules with priorities
-    for service_name, service in config.services.items():
-        for rule in service.rules:
-            # Port constraint: rule with different port never matches
-            if rule.port is not None and rule.port != port:
-                continue
-
-            # Host match
-            if not _host_matches(rule.host, host):
-                continue
-
-            # Path prefix match
-            if not path.startswith(rule.path_prefix):
-                continue
-
-            priority = _rule_priority(rule, port)
-            candidates.append((service_name, rule, priority))
+    candidates: list[tuple[str, EgressRule, tuple[int, int, int]]] = [
+        (service_name, rule, _rule_priority(rule, port))
+        for service_name, service in config.services.items()
+        for rule in service.rules
+        if _rule_applies(rule, host, port) and path_matches(rule.path_prefix, path)
+    ]
 
     if not candidates:
         return None
@@ -132,6 +177,32 @@ def match_rule(config: EgressBrokerConfig, host: str, port: int, path: str) -> R
 
     service_name, rule, _ = candidates[0]
     return RuleMatch(service=service_name, rule=rule)
+
+
+def route_request(config: EgressBrokerConfig, host: str, port: int, path: str) -> Route:
+    """Decide how to handle a request for `path` (origin-form, query removed) on `host`:`port`.
+
+    Hosts without rules are left to `unmatched_hosts` whatever their path. On a host with rules,
+    an ambiguous path is refused before matching, so path tricks cannot select a different rule.
+    A path no rule matches is forwarded without credentials, unless a service with rules on this host
+    sets `restrict_to_rules`, in which case it is refused.
+    """
+    host = host.lower()
+    services_on_host = [
+        service
+        for service in config.services.values()
+        if any(_rule_applies(rule, host, port) for rule in service.rules)
+    ]
+    if not services_on_host:
+        return Route(host_has_rules=False)
+    if is_ambiguous_path(path):
+        return Route(host_has_rules=True, refusal="bad_request")
+    match = match_rule(config, host, port, path)
+    if match is not None:
+        return Route(host_has_rules=True, match=match)
+    if any(service.restrict_to_rules for service in services_on_host):
+        return Route(host_has_rules=True, refusal="path_not_allowed")
+    return Route(host_has_rules=True)
 
 
 def _inject_query_param(target: bytes, param_name: str, template: str, secret: str) -> bytes:

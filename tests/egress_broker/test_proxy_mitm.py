@@ -269,6 +269,68 @@ async def test_non_origin_form_target_is_refused(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    ["/private/../echo", "/private/%2e%2e/echo", "/private/%2E%2e/echo", "/private//echo", "/private\\..\\echo"],
+    ids=["dot-dot", "encoded", "mixed-case", "empty-segment", "backslash"],
+)
+async def test_ambiguous_path_on_rule_host_is_refused(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    audit: AuditLog,
+    target: str,
+) -> None:
+    """A path an upstream could resolve differently is refused before matching, so it cannot borrow a rule."""
+    await broker(_config(path_prefix="/private"), secrets={"svc": SECRET})
+    reader, writer = await _open_tunnel(broker, f"localhost:{tls_upstream.port}")
+    try:
+        writer.write(f"GET {target}?page=2 HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+        response = await read_raw_response(reader)
+    finally:
+        writer.transport.abort()
+
+    assert response.status == 400
+    assert response.headers["connection"] == "close"
+    assert response.json() == {"error": "bad_request"}
+    assert tls_upstream.hits == []
+    assert broker.resolved == []
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.path, record.service) == ("denied", 400, target, None)
+
+
+@pytest.mark.asyncio
+async def test_restrict_to_rules_refuses_unlisted_paths_in_tunnel(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+) -> None:
+    """A restricted service's host serves only listed paths; others get 403 instead of an unauthenticated forward."""
+    rule = EgressRule(host="localhost", path_prefix="/echo", auth=EgressAuth(type="bearer"))
+    await broker(
+        EgressBrokerConfig(services={"svc": EgressService(restrict_to_rules=True, rules=[rule])}),
+        secrets={"svc": SECRET},
+    )
+    client = proxy_client(broker.token())
+
+    allowed = await client.get(tls_upstream.url("/echo"))
+    refused = await client.get(tls_upstream.url("/ok?page=2"))
+
+    assert allowed.status_code == 200
+    assert allowed.json()["headers"]["authorization"] == [f"Bearer {SECRET}"]
+    assert refused.status_code == 403
+    assert refused.headers["connection"] == "close"
+    assert refused.json() == {"error": "path_not_allowed"}
+    assert tls_upstream.hits == ["/echo"]
+    assert broker.resolved == ["svc"]
+    records = await audit_records(audit, 2)
+    assert {record.path: (record.kind, record.status, record.service) for record in records} == {
+        "/echo": ("request", 200, "svc"),
+        "/ok": ("denied", 403, None),
+    }
+
+
+@pytest.mark.asyncio
 async def test_redirect_is_returned_not_followed(
     broker: BrokerFactory,
     tls_upstream: Upstream,

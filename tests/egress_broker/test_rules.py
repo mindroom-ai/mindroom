@@ -14,9 +14,13 @@ from mindroom.config.egress_broker import (
     EgressService,
 )
 from mindroom.egress_broker.rules import (
+    Route,
     host_has_rules,
     inject_credentials,
+    is_ambiguous_path,
     match_rule,
+    path_matches,
+    route_request,
     strip_request_headers,
     strip_response_headers,
 )
@@ -153,6 +157,182 @@ def test_no_rule_returns_none_and_host_has_rules_false() -> None:
     assert match_rule(config, "other.example.com", 443, "/") is None
     assert not host_has_rules(config, "other.example.com", 443)
     assert host_has_rules(config, "api.example.com", 443)
+
+
+def _github_repo_config(*, restrict: bool, graphql: bool = False) -> EgressBrokerConfig:
+    """Return a GitHub service limited to basnijholt/agent-cli, as the repository helper would write it."""
+    prefixes = ["/repos/basnijholt/agent-cli"] + (["/graphql"] if graphql else [])
+    return EgressBrokerConfig(
+        services={
+            "github": EgressService(
+                restrict_to_rules=restrict,
+                rules=[
+                    EgressRule(host="api.github.com", path_prefix=prefix, auth=EgressAuth(type="bearer"))
+                    for prefix in prefixes
+                ],
+            ),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "path", "expected"),
+    [
+        ("/repos/basnijholt/agent-cli", "/repos/basnijholt/agent-cli", True),
+        ("/repos/basnijholt/agent-cli", "/repos/basnijholt/agent-cli/", True),
+        ("/repos/basnijholt/agent-cli", "/repos/basnijholt/agent-cli/pulls", True),
+        ("/repos/basnijholt/agent-cli", "/repos/basnijholt/agent-cli-old", False),
+        ("/repos/basnijholt/agent-cli", "/repos/basnijholt/agent-clix/pulls", False),
+        ("/repos/basnijholt/agent-cli", "/repos/basnijholt/agent", False),
+        ("/repos/basnijholt/agent-cli", "/repos/basnijholt/agent-cli.git", False),
+        ("/drive/", "/drive/v3/files", True),
+        ("/drive/", "/drive/", True),
+        ("/drive/", "/drive", False),
+        ("/drive/", "/drivex/v3", False),
+        ("/", "/", True),
+        ("/", "/anything/at/all", True),
+    ],
+)
+def test_path_matches_by_segment(prefix: str, path: str, expected: bool) -> None:
+    """A prefix without a trailing slash matches whole segments; one with a trailing slash matches by plain prefix."""
+    assert path_matches(prefix, path) is expected
+
+
+def test_match_rule_skips_sibling_repository_sharing_a_prefix() -> None:
+    """`/repos/o/agent-cli` never selects the rule for `/repos/o/agent-cli-old`, so it gets no credentials."""
+    config = _github_repo_config(restrict=False)
+
+    assert match_rule(config, "api.github.com", 443, "/repos/basnijholt/agent-cli/pulls") is not None
+    assert match_rule(config, "api.github.com", 443, "/repos/basnijholt/agent-cli-old") is None
+    assert match_rule(config, "api.github.com", 443, "/repos/basnijholt/agent-cli-old/pulls") is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/repos/basnijholt/agent-cli/../other",
+        "/repos/basnijholt/agent-cli/..",
+        "/repos/basnijholt/agent-cli/./pulls",
+        "/repos/basnijholt/agent-cli/.",
+        "/repos/basnijholt/agent-cli/%2e%2e/other",
+        "/repos/basnijholt/agent-cli/%2E%2e/other",
+        "/repos/basnijholt/agent-cli/.%2E/other",
+        "/repos/basnijholt/agent-cli/%2e/pulls",
+        "/repos/basnijholt/agent-cli/..;/other",
+        "/repos/basnijholt/agent-cli/%2e%2e%3b/other",
+        "/repos/basnijholt/agent-cli//pulls",
+        "//repos/basnijholt/agent-cli",
+        "/repos/basnijholt/agent-cli/\\..\\other",
+        "/repos/basnijholt/agent-cli\\pulls",
+        "/repos/basnijholt/agent-cli%5c..%5Cother",
+        "/repos/basnijholt/agent-cli%2f..%2Fother",
+        "/repos/basnijholt%2Fagent-cli",
+    ],
+)
+def test_ambiguous_paths_are_detected(path: str) -> None:
+    """Dot segments (raw or percent-encoded), empty segments, backslashes, and encoded slashes are ambiguous."""
+    assert is_ambiguous_path(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/repos/basnijholt/agent-cli",
+        "/repos/basnijholt/agent-cli/",
+        "/repos/basnijholt/agent-cli/contents/.github/workflows",
+        "/repos/basnijholt/agent-cli/compare/main...feature",
+        "/files/a..b",
+        "/files/.../x",
+        "/search/hello%20world",
+        "/files/%2e%2e%2e",
+    ],
+)
+def test_ordinary_paths_are_not_ambiguous(path: str) -> None:
+    """Dots inside names, trailing slashes, and other percent-encoding are left alone."""
+    assert not is_ambiguous_path(path)
+
+
+def test_route_matches_injects_and_forwards_unmatched_paths_without_restriction() -> None:
+    """Without `restrict_to_rules`, an unmatched path on a rule host is forwarded without credentials."""
+    config = _github_repo_config(restrict=False)
+
+    matched = route_request(config, "api.github.com", 443, "/repos/basnijholt/agent-cli/pulls")
+    unmatched = route_request(config, "API.GITHUB.COM", 443, "/repos/basnijholt/agent-cli-old")
+
+    assert matched.host_has_rules
+    assert matched.match is not None
+    assert matched.match.service == "github"
+    assert matched.refusal is None
+    assert unmatched == Route(host_has_rules=True)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/repos/basnijholt/agent-cli/../other/repo", "/repos/basnijholt/agent-cli/%2E%2e/x", "//user", "/user\\x"],
+)
+def test_route_refuses_ambiguous_paths_only_on_rule_hosts(path: str) -> None:
+    """Ambiguous paths get 400 `bad_request` on hosts with rules; hosts without rules are left alone."""
+    config = _github_repo_config(restrict=False)
+
+    refused = route_request(config, "api.github.com", 443, path)
+
+    assert refused == Route(host_has_rules=True, refusal="bad_request")
+    assert refused.refusal_status == 400
+    assert route_request(config, "example.com", 443, path) == Route(host_has_rules=False)
+
+
+def test_restrict_to_rules_refuses_unmatched_paths() -> None:
+    """With `restrict_to_rules`, a path no rule matches gets 403 `path_not_allowed` instead of being forwarded."""
+    config = _github_repo_config(restrict=True)
+
+    for path in ["/repos/basnijholt/agent-cli-old", "/repos/basnijholt/other", "/user", "/"]:
+        refused = route_request(config, "api.github.com", 443, path)
+        assert refused == Route(host_has_rules=True, refusal="path_not_allowed")
+        assert refused.refusal_status == 403
+    allowed = route_request(config, "api.github.com", 443, "/repos/basnijholt/agent-cli/issues")
+    assert allowed.match is not None
+    assert route_request(config, "example.com", 443, "/user") == Route(host_has_rules=False)
+
+
+def test_restrict_to_rules_refuses_graphql_unless_listed() -> None:
+    """GraphQL can reach any repository the key can, so a restricted service refuses it unless a rule lists it."""
+    assert route_request(_github_repo_config(restrict=True), "api.github.com", 443, "/graphql").refusal == (
+        "path_not_allowed"
+    )
+    listed = route_request(_github_repo_config(restrict=True, graphql=True), "api.github.com", 443, "/graphql")
+    assert listed.match is not None
+    assert listed.match.rule.path_prefix == "/graphql"
+
+
+def test_restrict_from_any_service_on_the_host_applies() -> None:
+    """One restricting service on a host refuses paths no service matches; other hosts and ports are unaffected."""
+    restricting = EgressService(
+        restrict_to_rules=True,
+        rules=[EgressRule(host="api.example.com", path_prefix="/a", auth=EgressAuth(type="bearer"))],
+    )
+    open_service = EgressService(
+        rules=[
+            EgressRule(host="api.example.com", path_prefix="/b", auth=EgressAuth(type="bearer")),
+            EgressRule(host="other.example.com", auth=EgressAuth(type="bearer")),
+        ],
+    )
+    config = EgressBrokerConfig(services={"open": open_service, "restricting": restricting})
+
+    assert route_request(config, "api.example.com", 443, "/c").refusal == "path_not_allowed"
+    assert route_request(config, "api.example.com", 443, "/b/x").match.service == "open"  # type: ignore[union-attr]
+    assert route_request(config, "other.example.com", 443, "/c") == Route(
+        host_has_rules=True,
+        match=match_rule(config, "other.example.com", 443, "/c"),
+    )
+
+    port_bound = EgressService(
+        restrict_to_rules=True,
+        rules=[EgressRule(host="api.example.com", port=8443, path_prefix="/a", auth=EgressAuth(type="bearer"))],
+    )
+    config = EgressBrokerConfig(services={"open": open_service, "port_bound": port_bound})
+    assert route_request(config, "api.example.com", 443, "/c") == Route(host_has_rules=True)
+    assert route_request(config, "api.example.com", 8443, "/c").refusal == "path_not_allowed"
 
 
 def test_inject_bearer() -> None:

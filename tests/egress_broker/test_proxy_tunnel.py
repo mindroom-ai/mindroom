@@ -38,6 +38,15 @@ def _config(host: str, *, path_prefix: str = "/") -> EgressBrokerConfig:
     return EgressBrokerConfig(services={"svc": EgressService(rules=[rule])})
 
 
+def _plain_get(upstream: Upstream, target: str, token: str) -> bytes:
+    """Return a raw absolute-form GET for `target` on `upstream`, which httpx would normalize."""
+    return (
+        f"GET http://localhost:{upstream.port}{target} HTTP/1.1\r\n"
+        f"Host: localhost:{upstream.port}\r\n"
+        f"Proxy-Authorization: {proxy_authorization(token)}\r\n\r\n"
+    ).encode()
+
+
 @pytest.mark.asyncio
 async def test_missing_token_gets_407(broker: BrokerFactory, raw_proxy: RawProxy) -> None:
     """A CONNECT without Proxy-Authorization is challenged with Basic auth."""
@@ -242,6 +251,67 @@ async def test_plain_http_unmatched_path_on_rule_host_forwards_unmodified(
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.service, record.status, record.path) == ("request", None, 200, "/echo")
     assert (record.scope, record.agent_name, record.requester_id) == ("user_agent", "code", "@alice:example.org")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["/private/../echo", "/private/%2E%2e/echo", "/private//echo", "/private\\echo"])
+async def test_plain_http_ambiguous_path_on_rule_host_gets_400(
+    broker: BrokerFactory,
+    http_upstream: Upstream,
+    raw_proxy: RawProxy,
+    audit: AuditLog,
+    target: str,
+) -> None:
+    """Plain requests use the same route decision as tunnels: an ambiguous path on a rule host is refused."""
+    started = await broker(_config("localhost", path_prefix="/private"), secrets={"svc": "s3cret"})
+
+    response = await raw_proxy(started.port, _plain_get(http_upstream, f"{target}?page=2", broker.token()))
+
+    assert response.status == 400
+    assert response.json() == {"error": "bad_request"}
+    assert http_upstream.hits == []
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.path) == ("denied", 400, target)
+
+
+@pytest.mark.asyncio
+async def test_plain_http_ambiguous_path_on_host_without_rules_is_forwarded(
+    broker: BrokerFactory,
+    http_upstream: Upstream,
+    raw_proxy: RawProxy,
+    audit: AuditLog,
+) -> None:
+    """Hosts without rules are untouched: the broker forwards their paths as sent and leaves them to the upstream."""
+    started = await broker(_config("api.github.com", path_prefix="/private"))
+
+    response = await raw_proxy(started.port, _plain_get(http_upstream, "/private/../echo", broker.token()))
+
+    # The fake upstream does not resolve dot segments, so its 404 shows the path arrived exactly as sent.
+    assert response.status == 404
+    assert http_upstream.hits == ["/private/../echo"]
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.path) == ("request", 404, "/private/../echo")
+
+
+@pytest.mark.asyncio
+async def test_plain_http_restricted_host_refuses_unlisted_path(
+    broker: BrokerFactory,
+    http_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+) -> None:
+    """An unlisted path on a restricted host is refused over plain HTTP too, not forwarded without credentials."""
+    rule = EgressRule(host="localhost", path_prefix="/private", auth=EgressAuth(type="bearer"))
+    await broker(EgressBrokerConfig(services={"svc": EgressService(restrict_to_rules=True, rules=[rule])}))
+    client = proxy_client(broker.token())
+
+    response = await client.get(http_upstream.url("/echo?page=2"))
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "path_not_allowed"}
+    assert http_upstream.hits == []
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.path, record.service) == ("denied", 403, "/echo", None)
 
 
 @pytest.mark.asyncio

@@ -21,7 +21,7 @@ from mindroom.egress_broker._relay import (
     serve_peer,
     upstream_request_headers,
 )
-from mindroom.egress_broker.rules import RuleMatch, host_has_rules, inject_credentials, match_rule
+from mindroom.egress_broker.rules import RuleMatch, inject_credentials, route_request
 from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect, SecretUnavailable
 from mindroom.logging_config import get_logger
 
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from mindroom.egress_broker._relay import Relay
     from mindroom.egress_broker.ca import BrokerCA
     from mindroom.egress_broker.proxy import ManageUrl, SecretResolver
+    from mindroom.egress_broker.rules import Route
     from mindroom.egress_broker.secrets import SecretResult
     from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
@@ -186,19 +187,19 @@ class TlsInterceptor:
         config = await self._relay.read_config(client, entry)
         if config is None:
             return False
-        has_rules = host_has_rules(config, tunnel.host, tunnel.port)
+        route = route_request(config, tunnel.host, tunnel.port, entry.path)
         upstream_request = await self._upstream_request(
             client,
             entry,
             tunnel,
             request,
             config,
-            has_rules=has_rules,
+            route=route,
             host_header=host_header,
         )
         if upstream_request is None:
             return False
-        return await self._forward(client, entry, tunnel, upstream_request, strip_cookies=has_rules)
+        return await self._forward(client, entry, tunnel, upstream_request, strip_cookies=route.host_has_rules)
 
     async def _admit(
         self,
@@ -235,17 +236,20 @@ class TlsInterceptor:
         request: h11.Request,
         config: EgressBrokerConfig,
         *,
-        has_rules: bool,
+        route: Route,
         host_header: bytes | None,
     ) -> h11.Request | None:
         """Return the request to send upstream, injected when a rule matches; otherwise answer, audit, and return None."""
-        if not has_rules and config.unmatched_hosts == "deny":
+        if not route.host_has_rules and config.unmatched_hosts == "deny":
             await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
+            return None
+        if route.refusal is not None:
+            await self._relay.deny(client, entry, {"error": route.refusal}, status=route.refusal_status)
             return None
         headers = upstream_request_headers(list(request.headers), host=host_header or tunnel.authority)
         if _is_websocket_upgrade(list(request.headers)):
             headers += [(b"connection", b"Upgrade"), (b"upgrade", b"websocket")]
-        match = match_rule(config, tunnel.host, tunnel.port, entry.path)
+        match = route.match
         if match is None:
             return h11.Request(method=request.method, target=request.target, headers=headers)
         entry.service = match.service

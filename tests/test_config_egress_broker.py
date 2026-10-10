@@ -231,3 +231,21 @@ def test_oauth_on_shared_workers_survives_the_authored_dump() -> None:
 
     assert dumped == {"services": {"github": {"preset": "github", "oauth_on_shared_workers": True}}}
     assert Config(**config.authored_model_dump()).egress_broker.services["github"].oauth_on_shared_workers is True
+
+
+def test_restrict_to_rules_defaults_off_and_no_preset_sets_it() -> None:
+    """Unlisted paths are forwarded without credentials unless the service opts in; presets never opt in."""
+    service = EgressService.model_validate({"preset": "github"})
+
+    assert service.restrict_to_rules is False
+    assert all("restrict_to_rules" not in preset for preset in EGRESS_PRESETS.values())
+
+
+def test_restrict_to_rules_survives_the_authored_dump() -> None:
+    """The restriction is an authored field, so saving config keeps it next to the preset reference."""
+    config = Config(egress_broker={"services": {"github": {"preset": "github", "restrict_to_rules": True}}})
+
+    dumped = config.authored_model_dump()["egress_broker"]
+
+    assert dumped == {"services": {"github": {"preset": "github", "restrict_to_rules": True}}}
+    assert Config(**config.authored_model_dump()).egress_broker.services["github"].restrict_to_rules is True

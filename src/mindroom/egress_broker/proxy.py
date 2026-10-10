@@ -24,7 +24,7 @@ from mindroom.egress_broker._relay import (
 )
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.mitm import TlsInterceptor
-from mindroom.egress_broker.rules import host_has_rules, match_rule
+from mindroom.egress_broker.rules import host_has_rules, route_request
 
 if TYPE_CHECKING:
     import ssl
@@ -242,7 +242,8 @@ class EgressBroker:
         """Forward one absolute-form ``http://`` request, routed by its URL and never its Host header.
 
         Requests a rule matches are refused with ``tls_required`` instead: the broker never puts a
-        secret on an unencrypted connection. Other requests to hosts with rules pass unmodified.
+        secret on an unencrypted connection. Paths the route decision refuses (ambiguous, or unlisted on a
+        restricted host) are refused as in a tunnel. Other requests to hosts with rules pass unmodified.
         """
         try:
             host, port, authority, target = _parse_absolute_http(request.target)
@@ -254,17 +255,20 @@ class EgressBroker:
         config = await self._relay.read_config(client, entry)
         if config is None:
             return False
-        has_rules = host_has_rules(config, host, port)
-        if config.unmatched_hosts == "deny" and not has_rules:
+        route = route_request(config, host, port, path)
+        if config.unmatched_hosts == "deny" and not route.host_has_rules:
             await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
             return False
-        if (match := match_rule(config, host, port, path)) is not None:
-            entry.service = match.service
-            await self._relay.deny(client, entry, {"error": "tls_required", "service": match.service})
+        if route.refusal is not None:
+            await self._relay.deny(client, entry, {"error": route.refusal}, status=route.refusal_status)
+            return False
+        if route.match is not None:
+            entry.service = route.match.service
+            await self._relay.deny(client, entry, {"error": "tls_required", "service": route.match.service})
             return False
         headers = upstream_request_headers(list(request.headers), host=authority)
         upstream_request = h11.Request(method=request.method, target=target, headers=headers)
-        return await self._forward(client, entry, port, upstream_request, strip_cookies=has_rules)
+        return await self._forward(client, entry, port, upstream_request, strip_cookies=route.host_has_rules)
 
     async def _forward(
         self,
