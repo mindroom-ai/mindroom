@@ -72,6 +72,8 @@ Each plan entry holds the posting entity name and the content without its thread
   Media copies keep their media fields, set `filename` to the original filename (or the original body when there is none), and use `Name: <caption or filename>` as the body, which Matrix clients show as the caption.
   Names come from `room_member_display_names` for the source room, falling back to the Matrix user ID.
 
+- **People in the thread:** a message one of MindRoom's own accounts posted on someone's behalf counts that person when deciding whether a thread has several people, so agents stay quiet on untagged messages in a moved thread that several people took part in, as they did in the original.
+
 ### Execution
 
 1. Post the plan in order.
@@ -102,13 +104,12 @@ The tool reaches it through `ToolRuntimeContext.orchestrator`; no tool imports `
 ## What Does Not Move
 
 Saved agent sessions (tool-call results and compaction summaries), per-thread model choices, agent modes, todos, scheduled tasks, external triggers, pending approvals, and attachment records stay with the source thread.
-Media messages are re-posted and registered again as attachments when agents read the new thread.
+Images, files, and videos are re-posted and registered again as attachments when agents read the new thread; voice recordings are re-posted and keep their transcript, but MindRoom registers audio as an attachment only when it arrives through voice handling, so agents cannot open a copied recording.
 Messages posted in the source thread after the move starts are not copied.
 
 ## Known Limitations
 
 - Copies have new timestamps, edits are flattened to their latest revision, and reactions and in-thread reply targets are not copied.
-- Router-posted human copies do not count as people in a thread, so until two people have posted in the moved thread, agents treat it as a one-person thread and may answer untagged messages; counting the person named on MindRoom's own relays would fix this for every relay and is a turn-policy change left out of this feature.
 
 ## Testing
 

@@ -11,16 +11,14 @@ import nio
 from agno.tools import Toolkit
 
 from mindroom.constants import (
+    NONTERMINAL_STREAM_STATUSES,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
-    STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
     TOOL_TRACE_CONTENT_KEY,
 )
 from mindroom.custom_tools.attachment_helpers import (
-    resolve_canonical_tool_thread_target,
+    resolve_current_room_thread_root,
     resolve_requested_room_id,
     room_access_allowed,
 )
@@ -39,7 +37,6 @@ from mindroom.matrix.media import MATRIX_MEDIA_MSGTYPES
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
-from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -68,9 +65,6 @@ _COPIED_CONTENT_KEYS = (
     "org.matrix.msc1767.audio",
     TOOL_TRACE_CONTENT_KEY,
 )
-_IN_PROGRESS_STREAM_STATUSES = frozenset(
-    {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING},
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +90,7 @@ def _plan_thread_copy(
     """
     plan: list[_PlannedCopy] = []
     for message in messages:
-        if message.content.get("msgtype") == "m.notice" or message.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+        if message.content.get("msgtype") == "m.notice" or message.stream_status in NONTERMINAL_STREAM_STATUSES:
             continue
         content = {key: message.content[key] for key in _COPIED_CONTENT_KEYS if key in message.content}
         # Copies are history, never requests: no mention in them may wake an agent.
@@ -220,7 +214,7 @@ async def _prepare_move(  # noqa: PLR0911
     thread_id: str | None,
 ) -> _PreparedMove | str:
     """Check every precondition before anything is written, or return why the move is refused."""
-    root_id, thread_error = await _source_thread_root(context, thread_id)
+    root_id, thread_error = await resolve_current_room_thread_root(context, thread_id)
     if thread_error is not None:
         return thread_error
     assert root_id is not None
@@ -261,25 +255,6 @@ async def _prepare_move(  # noqa: PLR0911
         skipped=len(history) - len(plan),
         poster_clients=poster_clients,
     )
-
-
-async def _source_thread_root(context: ToolRuntimeContext, thread_id: str | None) -> tuple[str | None, str | None]:
-    """Return the root of the thread to move, or why none resolves; the active thread is already its root."""
-    if thread_id is None and context.resolved_thread_id is not None:
-        return context.resolved_thread_id, None
-    target = await resolve_canonical_tool_thread_target(
-        context,
-        room_id=context.room_id,
-        thread_id=thread_id,
-        normalize_thread_id=lambda room, event_id: resolve_thread_root_event_id_for_client(
-            context.client,
-            room,
-            event_id,
-            relations=context.relations,
-        ),
-        fail_closed_on_normalization_error=True,
-    )
-    return target.canonical_thread_id, target.error
 
 
 async def _target_room_id(context: ToolRuntimeContext, room_id: str) -> tuple[str | None, str | None]:

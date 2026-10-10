@@ -9,6 +9,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.thread_utils import has_multiple_non_agent_users_in_thread
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
@@ -110,6 +111,57 @@ def test_internal_account_excludes_persisted_and_configured_identity(config: Con
     config.mindroom_user = MindRoomUserConfig(username="renamed_internal")
     assert not has_multiple_non_agent_users_in_thread(
         [make_visible_message(sender=sender)],
+        config,
+        runtime_paths_for(config),
+        current_sender_id="@alice:localhost",
+    )
+
+
+def test_a_relay_counts_the_person_it_speaks_for(config: Config) -> None:
+    """A thread whose people were re-posted by the router, such as a moved thread, still knows who took part."""
+    relay = make_visible_message(
+        sender="@mindroom_router:localhost",
+        body="Alice: is this the outage?",
+        content={ORIGINAL_SENDER_KEY: "@alice:localhost"},
+    )
+
+    assert has_multiple_non_agent_users_in_thread(
+        [relay],
+        config,
+        runtime_paths_for(config),
+        current_sender_id="@bob:localhost",
+    )
+
+
+def test_a_relay_of_the_same_person_adds_no_one(config: Config) -> None:
+    """A handoff or voice transcript naming someone who also posted counts that person once."""
+    history = [
+        make_visible_message(sender="@alice:localhost", body="help"),
+        make_visible_message(
+            sender="@mindroom_router:localhost",
+            body="@helper could you help with this?",
+            content={ORIGINAL_SENDER_KEY: "@bridge_alice:localhost"},
+        ),
+    ]
+
+    assert not has_multiple_non_agent_users_in_thread(
+        history,
+        config,
+        runtime_paths_for(config),
+        current_sender_id="@alice:localhost",
+    )
+
+
+def test_a_person_cannot_claim_to_speak_for_someone_else(config: Config) -> None:
+    """Only MindRoom's own accounts can name the person a message speaks for."""
+    claimed = make_visible_message(
+        sender="@alice:localhost",
+        body="hi",
+        content={ORIGINAL_SENDER_KEY: "@bob:localhost"},
+    )
+
+    assert not has_multiple_non_agent_users_in_thread(
+        [claimed],
         config,
         runtime_paths_for(config),
         current_sender_id="@alice:localhost",

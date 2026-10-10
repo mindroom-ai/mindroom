@@ -165,7 +165,6 @@ A move is refused when the requester is not joined to the target room, when the 
 Copies have new timestamps and keep only the latest edit of each message.
 Reactions, notices such as thread summaries, and replies still being written are not copied.
 Earlier tool-call results, per-thread model choices, agent modes, todos, scheduled tasks, and pending approvals stay with the original thread.
-Agents count only the people who post after the move, so until two people have posted in the moved thread, an agent that took part may answer untagged messages there.
 
 ## [`thread_summary`]
 
