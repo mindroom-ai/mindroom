@@ -58,6 +58,7 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_jobs.wait_timeout import ToolWaitMode, application_arguments, read_wait_timeout
+from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
@@ -69,7 +70,7 @@ if TYPE_CHECKING:
 
     from agno.tools.function import Function
 
-    from mindroom.tool_jobs.resources import ExecutionResourceReference
+    from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.results import ReplayItem
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -482,6 +483,24 @@ def _unaskable(call: FunctionCall) -> ToolCallResult:
     return _failed_call(call, ValueError("This call needs approval, which it cannot ask for here, so it did not run."))
 
 
+async def _record_start(call: FunctionCall) -> Callable[[FunctionCall], Awaitable[None]]:
+    """Record a managed call on the reply before its job starts, as an inline call's hooks do, and return its finish.
+
+    A restart's account then names the call, and a Stop committed first refuses it; the job body runs unrecorded.
+    """
+    recorder = tool_call_recorder()
+    arguments = dict(call.arguments or {})
+    record_id = None if recorder is None else await recorder.started(call.function.name, arguments)
+
+    async def finished(returned: FunctionCall) -> None:
+        if recorder is not None and record_id is not None:
+            # A released wait's call returned its job handle, which names the job the account points to.
+            outcome = returned.result if returned.error is None else returned.error
+            await recorder.finished(record_id, call.function.name, arguments, outcome)
+
+    return finished
+
+
 def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
     """Expose invalid framework arguments through Agno's ordinary tool failure contract."""
     with Timer() as timer:
@@ -492,7 +511,7 @@ def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
-    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901, PLR0911 - Keep admission and cleanup together.
+    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: PLR0911 - Keep admission and cleanup together.
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()
@@ -522,6 +541,27 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             check_current_execution_authority()
             if mode != "managed" or call.function.external_execution:
                 return await _execute_inline(original, call, mode=mode)
+        return await managed(
+            call,
+            runtime,
+            context,
+            resources,
+            owner,
+            wait_timeout=wait_timeout,
+            job_approval=job_approval,
+        )
+
+    async def managed(
+        call: FunctionCall,
+        runtime: ToolJobRuntime,
+        context: ToolRuntimeContext,
+        resources: ExecutionResources,
+        owner: ToolExecutionIdentity,
+        *,
+        wait_timeout: float | None,
+        job_approval: bool,
+    ) -> ToolCallResult:
+        """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned."""
         run_context = function_run_context(call.function)
         if run_context is None or not run_context.run_id or not call.call_id:
             msg = "Managed tool execution requires an exact run and tool-call identity"
@@ -538,6 +578,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         owned_call = isolated_function_call(call)
         owned_call.arguments = application_arguments(owned_call.arguments)
         baseline = deepcopy(run_context.session_state or {})
+        record_return = await _record_start(owned_call)
         reference = resources.acquire()
         approval = _job_approval(runtime, job_id, owned_call, owner, context) if job_approval else None
 
@@ -560,9 +601,11 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
             if waited.claim is None:
                 call.result = format_job_handle(waited.job)
-                return True, timer, call, FunctionExecutionResult(status="success", result=call.result)
-            response = await _consume_result(runtime, waited.job, waited.claim, call, timer)
-            retained = True
+                response = True, timer, call, FunctionExecutionResult(status="success", result=call.result)
+            else:
+                response = await _consume_result(runtime, waited.job, waited.claim, call, timer)
+                retained = True
+            await record_return(call)
             return response
         finally:
             if not retained:

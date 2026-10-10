@@ -4908,6 +4908,7 @@ path = "mindroom.tool_system.call_record"
 depends_on = []
 visibility = [
     "mindroom.reply_scope",
+    "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -7865,6 +7866,7 @@ path = "mindroom.tool_jobs.agno_execution"
 depends_on = [
     "mindroom.custom_tools.job",
     "mindroom.tool_approval",
+    "mindroom.tool_system.call_record",
     "mindroom.tool_jobs.agno_compat_functions",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.authorization",

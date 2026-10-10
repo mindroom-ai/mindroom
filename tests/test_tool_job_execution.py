@@ -54,6 +54,7 @@ from mindroom.tool_jobs.results import (
     read_result_payload,
 )
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -70,6 +71,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from agno.db.base import BaseDb
@@ -1132,5 +1134,77 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
                 with pytest.raises(AgentRunException, match="stop requested") as stopped:
                     await JobTools(paths, owner).job(action="wait", job_id=jobs[0].job_id, wait_timeout=0)
                 assert stopped.value.stop_execution
+    finally:
+        await runtime.shutdown()
+
+
+class _SpanRecorder:
+    """Stand in for the reply span's tool-call records, refusing every call once a Stop committed."""
+
+    def __init__(self, *, stopped: bool) -> None:
+        self.stopped = stopped
+        self.records: list[tuple[str, str, dict[str, object], object]] = []
+
+    async def started(self, tool_name: str, args: Mapping[str, object]) -> str | None:
+        if self.stopped:
+            raise asyncio.CancelledError
+        self.records.append(("started", tool_name, dict(args), None))
+        return "record-1"
+
+    async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+        assert call_id == "record-1"
+        self.records.append(("finished", tool_name, dict(args), result))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["waited", "released", "stopped"])
+async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path, case: str) -> None:
+    """A restart's account names a job's call as it names an inline one, and a Stop committed first refuses it."""
+    ran: list[str] = []
+
+    async def write_note(text: str) -> str:
+        ran.append(text)
+        return f"noted {text}"
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    arguments: dict[str, object] = {"text": "hello"}
+    if case == "released":
+        arguments["wait_timeout"] = 0
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("write_note", "note-call", **arguments)]),
+            ModelResponse(content="done"),
+        ],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[assembled_function(write_note)])
+    recorder = _SpanRecorder(stopped=case == "stopped")
+    owner = build_execution_identity_from_runtime_context(context)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context), recording_tool_calls(recorder):
+                if case == "stopped":
+                    with pytest.raises(asyncio.CancelledError):
+                        await agent.arun("Note", session_id=context.session_id)
+                    assert (ran, recorder.records, await runtime.list_jobs(owner=owner, depth=0)) == ([], [], [])
+                    return
+                response = await agent.arun("Note", session_id=context.session_id)
+        assert response.tools is not None
+        result = response.tools[0].result
+        # The record keeps the call's application arguments, never the reserved wait budget.
+        assert recorder.records[0] == ("started", "write_note", {"text": "hello"}, None)
+        assert recorder.records[1] == ("finished", "write_note", {"text": "hello"}, result)
+        if case == "released":
+            handle = json.loads(str(result))
+            assert handle["tool"] == "write_note"
+            await wait_for_status(runtime, handle["job_id"], "completed")
+        else:
+            assert result == "noted hello"
+        assert ran == ["hello"]
     finally:
         await runtime.shutdown()
