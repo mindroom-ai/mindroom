@@ -20,7 +20,6 @@ The **Usage** tab shows organization-wide token usage from the [usage report](#u
 - Model detail across agents, requesters, and daily activity, keeping providers separate
 
 The token selector also offers reasoning and audio counters when the provider reports them.
-Output counts include reasoning tokens.
 Select a row in any breakdown to open its detail panel.
 Date ranges apply only to daily activity; agent and model totals stay cumulative.
 Daily and requester detail can be lower than cumulative totals when older attribution is missing, and undated runs appear only in totals.
@@ -35,6 +34,7 @@ The tab waits automatically while a report is prepared.
 This section describes what every usage view counts.
 
 **Counters.** Each total has nine counters: `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `audio_input_tokens`, `audio_output_tokens`, and `audio_total_tokens`.
+`output_tokens` includes `reasoning_tokens`.
 Missing counters are reported as zero, so a zero does not prove a provider used none of that category.
 Models are grouped by provider and model; usage that cannot be attributed to a model appears under model `unknown`.
 

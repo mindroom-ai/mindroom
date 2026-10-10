@@ -154,18 +154,28 @@ class MindRoomGoogleGemini(Gemini):
 
         return formatted_messages, system_message
 
-    # AGNO_COMPAT: Gemini usage leaves thinking out of output and drops tool-use prompt tokens.
+    # AGNO_COMPAT: Gemini usage leaves thinking out of output and totals only input and output.
     # Reason: Agno maps candidates_token_count to output, keeps thoughts_token_count only as reasoning,
-    # ignores tool_use_prompt_token_count, and totals input and output. Google bills thinking as output
-    # and tool-use prompts as input, and every other provider reports reasoning inside output.
-    # Upstream issue: Tracking gap; no issue identified.
+    # and totals input and output. Google bills thinking as output, and every other provider reports
+    # reasoning inside output, so Gemini output and totals missed all thinking.
+    # Upstream issue: https://github.com/agno-agi/agno/issues/10763
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10764 counts thinking in output;
+    # https://github.com/agno-agi/agno/pull/10722 also uses the provider total. Neither counts tool-use prompts.
+    # Remove when: The pinned Agno release counts thinking in output and keeps the provider's total.
+    # Coverage: tests/test_provider_usage_metrics.py::test_gemini_output_includes_thinking_and_input_includes_tool_prompts.
+    # AGNO_COMPAT: Gemini usage drops tool-use prompt tokens.
+    # Reason: Agno ignores tool_use_prompt_token_count, which Google bills as input for built-in tools.
+    # Upstream issue: Tracking gap; issue #10763 and its PRs cover thinking only.
     # Upstream PR: None identified.
-    # Remove when: Agno's Gemini metrics count thinking in output, tool-use prompts in input, and keep the
-    # provider's total.
+    # Remove when: The pinned Agno release counts tool-use prompt tokens in input.
     # Coverage: tests/test_provider_usage_metrics.py::test_gemini_output_includes_thinking_and_input_includes_tool_prompts.
     def _get_metrics(self, response_usage: GenerateContentResponseUsageMetadata) -> MessageMetrics:
         metrics = super()._get_metrics(response_usage)
-        metrics.input_tokens += response_usage.tool_use_prompt_token_count or 0
-        metrics.output_tokens += metrics.reasoning_tokens
+        # Read the provider fields directly, so an upstream fix to one counter cannot double count it.
+        metrics.input_tokens = (response_usage.prompt_token_count or 0) + (
+            response_usage.tool_use_prompt_token_count or 0
+        )
+        metrics.reasoning_tokens = response_usage.thoughts_token_count or 0
+        metrics.output_tokens = (response_usage.candidates_token_count or 0) + metrics.reasoning_tokens
         metrics.total_tokens = response_usage.total_token_count or metrics.input_tokens + metrics.output_tokens
         return metrics
