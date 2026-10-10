@@ -67,7 +67,7 @@ A wait is the span's exit: its sources settle answered, its turn records like an
 The coordinator admits one internal `job_wake` journal source per set of ready outcomes of a waiting reply, or one that ends a wait no work is left for; each wake is named by what it was admitted for, so admitting it again changes nothing.
 Under the conversation lock the wake finds which work is still ready: it claims a `wake` span and continues with that work, or runs nothing and settles; a wait whose key has no outstanding work left ends with its answer.
 A wake that pauses for an approval, or that a process stop cuts short, keeps its source pending, and its retry continues as a wake.
-A reply continues with ready results at most 20 times in one span, apart from dynamic tool continuations; then the next reply takes the remaining work.
+A reply continues with ready results at most 20 times in one span, apart from dynamic tool continuations, and a waiting message is woken at most 20 times; then the next reply takes the remaining work.
 A reply that a process stop cuts short continues in place by journal replay, below what the stopped attempt showed, with an account that names the finished calls it must not repeat (see [Bot Runtime](../architecture/bot-runtime.md)); background jobs add no restart path of their own.
 A detached job start is such a finished call, and its result names the job ID.
 Jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the new attempt at its response boundary like any other ready work.

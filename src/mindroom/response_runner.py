@@ -158,7 +158,7 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.completion import HoldKey, completion_prompt, conversation_work
 from mindroom.tool_jobs.disabled import approval_is_parked
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_jobs.wakes import WAKE_RETRY_PROMPT, wake_envelope, woken_reply_id
+from mindroom.tool_jobs.wakes import WAKE_LIMIT, WAKE_RETRY_PROMPT, wake_envelope, woken_reply_id
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -3508,15 +3508,26 @@ class ResponseRunner:
         claimed = asyncio.Event()
         handoff = asyncio.Event()
         if reply is not None and reply.hold_key is not None and not reply.terminal:
-            key = HoldKey.decode(reply.hold_key)
-            request = await self._job_wake_request(reply, key, event.event_id, claimed=claimed, handoff=handoff)
-            await self._generate_job_wake(request, key)
+            if await self._woken_enough(reply, event.event_id):
+                # The requester's next answered message takes the remaining work, as a span's joins do.
+                await self.deps.delivery_gateway.end_wait(reply.reply_id)
+            else:
+                key = HoldKey.decode(reply.hold_key)
+                request = await self._job_wake_request(reply, key, event.event_id, claimed=claimed, handoff=handoff)
+                await self._generate_job_wake(request, key)
         if claimed.is_set() or handoff.is_set():
             # The wake's span settles its source, or keeps it pending for its retry.
             return
         if reply_id is not None:
             await self._release_unheld_wait(reply_id)
         await self.deps.approval_store.settle(event.event_id)
+
+    async def _woken_enough(self, reply: rl.Reply, wake_id: str) -> bool:
+        """Return whether a new wake would continue its message more often than a message continues."""
+        spans = await self.deps.replies.store.replies.spans(reply.reply_id)
+        wakes = {span.delivery_id for span in spans if span.kind is rl.SpanKind.WAKE}
+        # A retry continues the wake it retries.
+        return wake_id not in wakes and len(wakes) >= WAKE_LIMIT
 
     async def _release_unheld_wait(self, reply_id: str) -> None:
         """End a waiting reply whose key has no outstanding work left, keeping its answer."""

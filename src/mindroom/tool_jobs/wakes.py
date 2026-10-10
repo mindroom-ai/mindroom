@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.completion import HoldKey
     from mindroom.tool_jobs.runtime import BackgroundJob
 
+# How many times one waiting message continues with results; the requester's next answered message takes the rest.
+WAKE_LIMIT = 20
 # What a wake a restart cut short continues with, once what it retrieved is no longer ready to retrieve again.
 WAKE_RETRY_PROMPT = (
     "Internal runtime update, not a new human request. A restart interrupted continuing this conversation with "

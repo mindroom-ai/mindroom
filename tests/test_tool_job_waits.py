@@ -370,6 +370,28 @@ async def test_a_wake_no_span_took_settles_and_ends_a_wait_no_work_is_left_for(t
     assert ended.state is rl.ReplyState.COMPLETED
 
 
+async def test_a_message_woken_its_limit_of_times_ends_its_wait_for_the_next_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message stops continuing with results once woken its limit of times, keeping its answer, however much is ready."""
+    monkeypatch.setattr("mindroom.response_runner.WAKE_LIMIT", 0)
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    principal = bot.journal_principal()
+    reply = await _waiting_reply(principal, _runner_key(bot))
+    event = await _wake(principal, reply, "job-wake:ready")
+    runner.generate_response = AsyncMock(return_value=None)
+
+    await runner._run_job_wake(event)
+
+    runner.generate_response.assert_not_awaited()
+    assert not await principal.is_pending("job-wake:ready")
+    ended = await principal.replies.load(reply.reply_id)
+    assert ended is not None
+    assert ended.state is rl.ReplyState.COMPLETED
+
+
 async def test_a_stop_of_an_older_waiting_reply_leaves_a_newer_turns_work_alone(tmp_path: Path) -> None:
     """Work a later message of the conversation started belongs to that message's reply, which stops it."""
     owner = job_owner()
