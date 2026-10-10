@@ -303,14 +303,21 @@ def validate_persona_tools(
         raise PersonaError(msg)
 
 
-def require_built_persona_tools(tools: tuple[str, ...], built: Mapping[str, Collection[str]]) -> None:
+def require_built_persona_tools(
+    tools: tuple[str, ...],
+    built: Mapping[str, Collection[str]],
+    hidden: Mapping[str, Collection[str]],
+) -> None:
     """Refuse to start an authored child without every tool it names, whatever removed it.
 
-    ``built`` maps each toolkit the child built to its functions, after configuration filters.
+    ``built`` maps each toolkit the child built to its functions after the caller's filters, and
+    ``hidden`` the functions the session's MCP collision projection removed from them.
     """
     for entry in tools:
         toolkit, separator, function = entry.partition(".")
-        if toolkit not in built or (separator and function not in built[toolkit]):
+        if toolkit not in built or (
+            separator and (function not in built[toolkit] or function in hidden.get(toolkit, ()))
+        ):
             msg = f"Cannot delegate: tool '{entry}' is not available to you."
             raise PersonaError(msg)
 
@@ -420,26 +427,24 @@ def _capped_persona(
     return persona
 
 
-def persona_function_filter(persona: SubagentPersona | None) -> Callable[[Function], bool] | None:
-    """Hide generated functions, such as skills and knowledge search, from a persona that lists its tools.
+def persona_tool_policy(
+    persona_tools: tuple[str, ...] | None,
+    available_toolkits: Callable[[], Sequence[str]],
+    tool_function_filter: Callable[[Function], bool] | None,
+    disabled_tool_names: frozenset[str],
+) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
+    """Narrow an agent's own tools to an authored persona's explicit list; its principal is unchanged.
 
-    Toolkit functions are narrowed by concrete toolkit name while the agent's toolkits are built.
+    Toolkits the list never names are not built, nor is the deferred-tool manager, since a persona
+    loads every toolkit it names. Generated functions such as skills and knowledge search stay hidden;
+    toolkit functions are narrowed by concrete toolkit name while the toolkits are built.
     """
-    if persona is None or persona.tools is None:
-        return None
-    return _has_toolkit_owner
+    if persona_tools is None:
+        return tool_function_filter, disabled_tool_names
+    named = {entry.partition(".")[0] for entry in persona_tools}
+    unused = {toolkit for toolkit in available_toolkits() if toolkit not in named}
 
+    def visible(function: Function) -> bool:
+        return function.owning_toolkit is not None and (tool_function_filter is None or tool_function_filter(function))
 
-def _has_toolkit_owner(function: Function) -> bool:
-    return function.owning_toolkit is not None
-
-
-def persona_disabled_toolkits(persona: SubagentPersona | None, available_toolkits: Sequence[str]) -> frozenset[str]:
-    """Return the caller toolkits a persona never uses, so they are not constructed.
-
-    The deferred-tool manager is always among them, since a persona loads every toolkit it names.
-    """
-    if persona is None or persona.tools is None:
-        return frozenset()
-    named = {entry.partition(".")[0] for entry in persona.tools}
-    return frozenset({*(toolkit for toolkit in available_toolkits if toolkit not in named), "dynamic_tools"})
+    return visible, disabled_tool_names | unused | {"dynamic_tools"}

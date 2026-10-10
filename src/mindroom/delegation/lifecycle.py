@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import SubagentPersona
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 MAX_DELEGATION_DEPTH = 3
@@ -66,6 +67,17 @@ def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
         msg = "Delegation child execution identity does not match its retained wait"
         raise RuntimeError(msg)
     return identity
+
+
+def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:
+    """Rebind a caller's tool context to one child turn, carrying its persona's tool cap."""
+    return replace(
+        context,
+        agent_name=child.child_agent_name,
+        active_model_name=child.model_name,
+        target=replace(context.target, session_id=child.session_id),
+        persona_tools=child.persona.tools if child.persona is not None else None,
+    )
 
 
 async def reserve_child_turn(

@@ -47,6 +47,7 @@ from mindroom.delegation.execution import drive_delegation_stream, drive_delegat
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
+    child_tool_runtime_context,
     delegation_grant,
     note_child_run_id,
     observe_child_event,
@@ -127,7 +128,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_to
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractContextManager
-    from pathlib import Path
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
@@ -1051,8 +1051,6 @@ def _minimal_turn_enrichment(
 async def _prepare_turn_memory(
     ctx: ResponseTurnContext,
     prompt: str,
-    agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
@@ -1062,8 +1060,8 @@ async def _prepare_turn_memory(
         return MemoryPromptParts()
     return await build_memory_prompt_parts(
         prompt,
-        agent_name,
-        storage_path,
+        ctx.entity_label,
+        runtime_paths.storage_root,
         config,
         runtime_paths,
         execution_identity=execution_identity,
@@ -1177,8 +1175,6 @@ async def _prepare_agent_and_prompt(
                         _prepare_turn_memory,
                         ctx,
                         prompt,
-                        agent_name,
-                        storage_path,
                         config,
                         runtime_paths,
                         execution_identity,
@@ -1197,15 +1193,7 @@ async def _prepare_agent_and_prompt(
         )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await _prepare_turn_memory(
-            ctx,
-            prompt,
-            agent_name,
-            storage_path,
-            config,
-            runtime_paths,
-            execution_identity,
-        )
+        prompt_parts = await _prepare_turn_memory(ctx, prompt, config, runtime_paths, execution_identity)
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
@@ -1430,17 +1418,7 @@ async def run_delegated_child_response(
         execution_identity=identity,
     )
     context = get_tool_runtime_context()
-    child_context = (
-        replace(
-            context,
-            agent_name=child.child_agent_name,
-            active_model_name=child.model_name,
-            target=replace(context.target, session_id=child.session_id),
-            persona_tools=child.persona.tools if child.persona is not None else None,
-        )
-        if context is not None
-        else None
-    )
+    child_context = child_tool_runtime_context(context, child) if context is not None else None
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
         persona=child.persona,

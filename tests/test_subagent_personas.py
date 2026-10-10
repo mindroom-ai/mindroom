@@ -19,8 +19,7 @@ from mindroom.delegation.personas import (
     list_profiles,
     load_profile,
     persona_allows,
-    persona_disabled_toolkits,
-    persona_function_filter,
+    persona_tool_policy,
     render_profile_listing,
     validate_persona_tools,
 )
@@ -95,7 +94,8 @@ def test_empty_tool_list_means_no_tools() -> None:
     persona = inline_persona("P", [])
     assert persona.tools == ()
     assert not persona_allows((), "file", "read_file")
-    assert persona_disabled_toolkits(persona, ["file", "shell"]) == frozenset({"file", "shell", "dynamic_tools"})
+    _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None, frozenset())
+    assert disabled == frozenset({"file", "shell", "dynamic_tools"})
 
 
 def test_parse_profile_reads_frontmatter_and_body() -> None:
@@ -296,24 +296,25 @@ def test_persona_allows_whole_toolkits_and_single_functions() -> None:
     assert not persona_allows(entries, "shell", "run_shell_command")
 
 
-def test_persona_function_filter_hides_generated_functions() -> None:
-    """A persona that lists its tools never sees functions that belong to no toolkit."""
-    function_filter = persona_function_filter(inline_persona("P", ["file"]))
-    assert function_filter is not None
-    assert function_filter(_function("read_file", "file"))
-    assert not function_filter(_function("generated", None))
-    assert persona_function_filter(None) is None
-    assert persona_function_filter(inline_persona("P", None)) is None
+def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
+    """An explicit list hides generated functions, keeps the caller's filter, and skips unnamed toolkits."""
 
+    def caller_filter(function: Function) -> bool:
+        return function.name != "write_file"
 
-def test_persona_disabled_toolkits_skips_unnamed_toolkits() -> None:
-    """Toolkits no entry names, and the deferred-tool manager, are not constructed; a function entry keeps its toolkit."""
-    persona = inline_persona("P", ["gmail.search_emails"])
-    assert persona_disabled_toolkits(persona, ["file", "gmail", "shell"]) == frozenset(
-        {"file", "shell", "dynamic_tools"},
+    visible, disabled = persona_tool_policy(
+        ("gmail.search_emails", "file"),
+        lambda: ["file", "gmail", "shell"],
+        caller_filter,
+        frozenset({"memory"}),
     )
-    assert persona_disabled_toolkits(inline_persona("P", None), ["file"]) == frozenset()
-    assert persona_disabled_toolkits(None, ["file"]) == frozenset()
+
+    assert visible is not None
+    assert visible(_function("read_file", "file"))
+    assert not visible(_function("write_file", "file"))
+    assert not visible(_function("generated", None))
+    assert disabled == frozenset({"memory", "shell", "dynamic_tools"})
+    assert persona_tool_policy(None, lambda: ["file"], caller_filter, frozenset()) == (caller_filter, frozenset())
 
 
 def test_list_profiles_marks_non_string_keys_invalid(tmp_path: Path) -> None:

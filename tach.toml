@@ -817,6 +817,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.mcp.registry",
     "mindroom.cli_shell_agent",
     "mindroom.delegation.personas",
     "mindroom.path_confinement",

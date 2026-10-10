@@ -36,6 +36,7 @@ from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
     child_run_context,
+    child_tool_runtime_context,
     finish_child_turn,
     note_child_run_id,
     observe_child_event,
@@ -228,13 +229,7 @@ async def _execute_child(
     if context is None or context.requester_id != identity.requester_id or context.room_id != identity.room_id:
         msg = "Delegation requester context does not match its retained wait"
         raise RuntimeError(msg)
-    child_context = replace(
-        context,
-        agent_name=child.child_agent_name,
-        active_model_name=child.model_name,
-        target=replace(context.target, session_id=child.session_id),
-        persona_tools=child.persona.tools if child.persona is not None else None,
-    )
+    child_context = child_tool_runtime_context(context, child)
     if fresh:
         return await _start_child_envelope(
             child,
