@@ -59,14 +59,14 @@ def cost_usd(totals: TokenTotals, priced: PricedModel) -> float:
 
 
 @dataclass(frozen=True, slots=True)
-class PriceTable:
+class _PriceTable:
     """Prices by recorded (provider, model ID) usage identity, and whether every priced model could be built."""
 
     prices: Mapping[tuple[str, str], PricedModel]
     complete: bool
 
 
-def price_table(config: Config, runtime_paths: RuntimePaths) -> PriceTable:
+def price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
     """Map each priced model's recorded (provider, model ID) usage identity to its prices.
 
     Usage records the provider name of the live model object, which can differ from the
@@ -98,7 +98,7 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> PriceTable:
             if _price_weight(existing.pricing) >= _price_weight(priced.pricing):
                 continue
         table[key] = priced
-    return PriceTable(prices=table, complete=complete)
+    return _PriceTable(prices=table, complete=complete)
 
 
 def _price_weight(pricing: ModelPricing) -> tuple[float, float, float]:

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.budgets.pricing import PricedModel, PriceTable, cost_usd, price_table
+from mindroom.budgets.pricing import PricedModel, _PriceTable, cost_usd, price_table
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -202,4 +202,4 @@ def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -
     with patch("mindroom.budgets.pricing.get_model_instance", side_effect=RuntimeError("missing SDK")):
         table = price_table(config, _paths(tmp_path))
 
-    assert table == PriceTable(prices={}, complete=False)
+    assert table == _PriceTable(prices={}, complete=False)
