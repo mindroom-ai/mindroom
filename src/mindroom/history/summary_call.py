@@ -293,6 +293,15 @@ async def generate_compaction_summary(
         )
         raise
 
+    # Classify cap stops before the empty check: reasoning shares the output cap
+    # and can exhaust it before any summary text, which still needs the cap retry.
+    completion = summary_completion_status(response, output_token_limit=summary_output_limit)
+    if completion == "context_limit":
+        msg = "compaction summary filled the model context window; refusing to persist incomplete summary"
+        raise ContextWindowExceededError(message=msg, model_name=model.name, model_id=model.id)
+    if completion == "output_limit":
+        msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
+        raise CompactionSummaryOutputLimitError(msg, output_token_limit=summary_output_limit)
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:
@@ -302,13 +311,6 @@ async def generate_compaction_summary(
             f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
-    completion = summary_completion_status(response, output_token_limit=summary_output_limit)
-    if completion == "context_limit":
-        msg = "compaction summary filled the model context window; refusing to persist incomplete summary"
-        raise ContextWindowExceededError(message=msg, model_name=model.name, model_id=model.id)
-    if completion == "output_limit":
-        msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
-        raise CompactionSummaryOutputLimitError(msg, output_token_limit=summary_output_limit)
     if completion == "incomplete":
         msg = "provider returned an incomplete compaction summary; refusing to persist partial text"
         raise CompactionSummaryIncompleteError(msg)

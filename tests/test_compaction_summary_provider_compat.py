@@ -30,6 +30,8 @@ from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 if TYPE_CHECKING:
     from agno.models.anthropic import Claude
 
+    from mindroom.history.compaction import _GeneratedSummaryChunk
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -72,7 +74,12 @@ def _model(provider: str, transport: httpx.MockTransport, request_params: dict[s
     )
 
 
-def _response(*, output_tokens: int, stop_reason: str = "end_turn") -> httpx.Response:
+def _response(
+    *,
+    output_tokens: int,
+    stop_reason: str = "end_turn",
+    content: list[dict[str, str]] | None = None,
+) -> httpx.Response:
     return httpx.Response(
         200,
         json={
@@ -80,7 +87,7 @@ def _response(*, output_tokens: int, stop_reason: str = "end_turn") -> httpx.Res
             "type": "message",
             "role": "assistant",
             "model": "claude-sonnet-5",
-            "content": [{"type": "text", "text": "Project facts"}],
+            "content": [{"type": "text", "text": "Project facts"}] if content is None else content,
             "stop_reason": stop_reason,
             "stop_sequence": None,
             "usage": {"input_tokens": 3000, "output_tokens": output_tokens},
@@ -305,13 +312,7 @@ async def test_summary_uses_stop_reason_and_raw_body_precedence(provider: str, s
     assert params == {"max_tokens": 4096, "extra_body": {"max_tokens": 1024}}
 
 
-@pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
-async def test_context_window_stop_retries_with_a_smaller_input(provider: str) -> None:
-    """A context-window stop retries with fewer runs, not the same input with a shorter target.
-
-    Regression: this stop reason was classified like a ``max_tokens`` stop, so the
-    retry resent an input that already filled the context window.
-    """
+async def _summarize_three_runs_with_retry(model: Claude) -> _GeneratedSummaryChunk:
     runs = [
         RunOutput(
             run_id=f"run-{index}",
@@ -333,6 +334,27 @@ async def test_context_window_stop_retries_with_a_smaller_input(provider: str) -
         token_estimator=len,
     )
     assert len(initial_runs) == 3
+    return await _generate_compaction_summary_with_retry(
+        summary_model=SummaryModel(model, "summary-model", 100_000),
+        previous_summary="prior facts",
+        compactable_runs=runs,
+        initial_summary_input=initial_input,
+        initial_included_runs=initial_runs,
+        session_id="session-1",
+        scope=HistoryScope(kind="agent", scope_id="agent"),
+        history_settings=history_settings,
+        summary_prompt="Summarize",
+        timeout_seconds=10,
+    )
+
+
+@pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
+async def test_context_window_stop_retries_with_a_smaller_input(provider: str) -> None:
+    """A context-window stop retries with fewer runs, not the same input with a shorter target.
+
+    Regression: this stop reason was classified like a ``max_tokens`` stop, so the
+    retry resent an input that already filled the context window.
+    """
     requests: list[dict[str, Any]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -344,18 +366,7 @@ async def test_context_window_stop_retries_with_a_smaller_input(provider: str) -
 
     model = _model(provider, httpx.MockTransport(respond), {"max_tokens": 1024})
     try:
-        generated = await _generate_compaction_summary_with_retry(
-            summary_model=SummaryModel(model, "summary-model", 100_000),
-            previous_summary="prior facts",
-            compactable_runs=runs,
-            initial_summary_input=initial_input,
-            initial_included_runs=initial_runs,
-            session_id="session-1",
-            scope=HistoryScope(kind="agent", scope_id="agent"),
-            history_settings=history_settings,
-            summary_prompt="Summarize",
-            timeout_seconds=10,
-        )
+        generated = await _summarize_three_runs_with_retry(model)
     finally:
         await model.async_client.close()
     assert generated.summary.summary == "Project facts"
@@ -365,6 +376,36 @@ async def test_context_window_stop_retries_with_a_smaller_input(provider: str) -
     assert "run-2" not in retry_input
     assert [run.run_id for run in generated.included_runs] == ["run-0"]
     assert ["keep the summary under 512 tokens." in json.dumps(request["system"]) for request in requests] == [True] * 2
+
+
+@pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
+async def test_output_cap_stop_without_text_retries_same_input_with_shorter_target(provider: str) -> None:
+    """Reasoning that uses the whole output cap gets the same-input shorter-summary retry.
+
+    Regression: the empty-text check ran before the stop reason was classified, so a
+    thinking-only ``max_tokens`` stop shrank the input instead of asking for a shorter summary.
+    """
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            thinking = {"type": "thinking", "thinking": "Weighing which facts to keep", "signature": "sig"}
+            return _response(output_tokens=1024, stop_reason="max_tokens", content=[thinking])
+        return _response(output_tokens=100)
+
+    model = _model(provider, httpx.MockTransport(respond), {"max_tokens": 1024})
+    try:
+        generated = await _summarize_three_runs_with_retry(model)
+    finally:
+        await model.async_client.close()
+    assert generated.summary.summary == "Project facts"
+    assert len(requests) == 2
+    first, retry = requests
+    assert retry["messages"] == first["messages"]
+    assert len(generated.included_runs) == 3
+    assert "keep the summary under 512 tokens." in json.dumps(first["system"])
+    assert "keep the summary under 256 tokens." in json.dumps(retry["system"])
 
 
 @pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])

@@ -549,8 +549,8 @@ async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
     failure from the fallback propagates. The switch shares the retry policy's
     attempt bound, so a
     refusal after an earlier shrink or transient retry propagates without a
-    fallback call. All other failures keep the existing shrink and transient
-    same-input retry behavior.
+    fallback call. All other failures keep the existing shrink, transient
+    same-input, and output-limit shorter-summary retry behavior.
     """
     summary_input = initial_summary_input
     included_runs = initial_included_runs
