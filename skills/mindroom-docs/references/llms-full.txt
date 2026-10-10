@@ -12222,7 +12222,7 @@ The child runs as the caller, with the caller's workspace, credentials, file acc
 It sees exactly the authored prompt, with no role, instructions, date, memories, or tool guidance added, plus the task and the schemas of its tools.
 [Minimal subagents](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) describes what an authored subagent started with `minimal=True` needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
-An authored subagent that has `delegate` can author further copies only within its own tools, a copy without `tools` inherits them, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
+An authored subagent whose `tools` include `delegate` can author further copies only within those tools, a copy without `tools` inherits them, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
 A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools.
 
