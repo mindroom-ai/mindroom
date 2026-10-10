@@ -186,7 +186,7 @@ Edits:
 - A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply's exit applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
 - When the stopped reply's terminal row is still unresolved, or the approval that holds it has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps what the Stop left: its cancelled note, or an approved answer that was already final.
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
-- While a deferred claim stays blocked by an unresolved row or by the approval it waits for, each retry backs off that room's event lane for between 1 and 30 seconds until the row resolves or the approval ends.
+- An edit whose claim stays blocked by an unresolved row or by the approval it waits for is retried once the row resolves or the approval ends; if that wake is lost, the journal's scan for work without a live owner retries it within 30 seconds.
 - After a restart, a regeneration may be told about tool calls the attempt before the edit made, which errs toward not repeating a side effect.
 - A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming or held reply, so the reply keeps what the Stop left, such as its partial answer with the cancelled note.
 

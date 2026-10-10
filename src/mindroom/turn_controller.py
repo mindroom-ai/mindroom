@@ -579,15 +579,15 @@ class TurnController:
             target,
         ):
             return
-        mentioned_agents, am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
             source,
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
         )
-        if mentioned_agents and not am_i_mentioned:
-            # A message for another agent does not wait for this one.
+        if not am_i_mentioned and (mentioned_agents or has_non_agent_mentions):
+            # A message for another agent or person does not wait for this one.
             return
         create_background_task(
             self.deps.delivery_gateway.send_judgment_reaction(

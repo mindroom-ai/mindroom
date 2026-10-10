@@ -1067,6 +1067,7 @@ class _InboxResponseOwnership:
     shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
     room_id: str
+    retry_on_finish: Callable[[], bool] | None = None
     drain_intent: RuntimeShutdownIntent | None = None
     proof_task: asyncio.Task[bool] | None = None
 
@@ -1143,8 +1144,12 @@ class ResponseRunner:
         on_failure: Callable[[], None] | None = None,
         on_terminal: Callable[[], None] | None = None,
         source_event_ids: tuple[str, ...] = (),
+        retry_on_finish: Callable[[], bool] | None = None,
     ) -> asyncio.Task[None]:
-        """Own one detached inbox response until it completes or a drain settles it."""
+        """Own one detached inbox response until it completes or a drain settles it.
+
+        Its sources go back to the journal when it finishes, unless ``retry_on_finish`` says another owner retries them.
+        """
         if self._process_shutdown_started:
             response.close()
             raise ResponseAdmissionRefusedError
@@ -1159,6 +1164,7 @@ class ResponseRunner:
             on_failure=on_failure,
             shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
+            retry_on_finish=retry_on_finish,
             room_id=room_id,
         )
         if on_terminal is not None:
@@ -1206,7 +1212,11 @@ class ResponseRunner:
         ownership = self._inbox_response_tasks.get(task)
         if ownership is not None and ownership.drain_intent is None:
             self._inbox_response_tasks.pop(task)
-        if ownership is not None and ownership.source_event_ids:
+        if (
+            ownership is not None
+            and ownership.source_event_ids
+            and (ownership.retry_on_finish is None or ownership.retry_on_finish())
+        ):
             self.deps.retry_approval_sources(ownership.room_id, tuple(ownership.source_event_ids))
         if task.cancelled():
             return
@@ -2959,9 +2969,9 @@ class ResponseRunner:
 
         While it waits it rechecks that each approval holding the conversation
         still exists, so a hold whose end never reached this bot, as after a
-        departure it did not see, cannot keep it waiting. The first recheck
-        waits a full interval, so a pause still committing is not mistaken for
-        an ended approval.
+        departure it did not see, cannot keep it waiting. A recheck that lands
+        while a pause is still committing can take the new approval for an
+        ended one, which only lets a waiting message run early.
         """
         while True:
             try:

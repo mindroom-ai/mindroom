@@ -1793,7 +1793,10 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("held", "mention"), [(False, None), (True, None), (True, "general"), (True, "research")])
+@pytest.mark.parametrize(
+    ("held", "mention"),
+    [(False, None), (True, None), (True, "general"), (True, "research"), (True, "person")],
+)
 async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
     config: Config,
     tmp_path: Path,
@@ -1806,12 +1809,13 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
     room = _room_with_members(config, "general", "research")
     event = _text_event("and what about tomorrow?")
     if mention is not None:
-        event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, mention)]}
+        mentioned = "@someone:localhost" if mention == "person" else _entity_user_id(config, mention)
+        event.source["content"]["m.mentions"] = {"user_ids": [mentioned]}
 
     await harness.controller.handle_text_event(room, event)
     await wait_for_background_tasks(timeout=5.0, owner=harness.controller.deps.runtime)
 
-    waits = held and mention != "research"
+    waits = held and mention in {None, "general"}
     assert harness.gateway.reactions == ([(event.event_id, "⏳", "approval_wait")] if waits else [])
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -31,7 +31,7 @@ from tests.conftest import make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Callable, Coroutine
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -335,6 +335,42 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert recorded.response_owner == AGENT_NAME
     assert recorded.history_scope == record.history_scope
     assert recorded.conversation_target == record.conversation_target
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_a_deferred_regeneration_leaves_its_edit_to_the_wake_that_retries_it(
+    tmp_path: Path,
+    deferred: bool,
+) -> None:
+    """Its end does not hand the edit back to the journal at once, which would retry the blocked claim in a loop."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    ownerships: list[dict[str, object]] = []
+
+    async def regenerate(request: ResponseRequest) -> None:
+        assert request.source_handoff is not None
+        if deferred:
+            # As the runner does when the reply's earlier writes or its approval block the claim.
+            request.source_handoff.set()
+
+    def track_inbox_response(response: Coroutine[Any, Any, None], **ownership: object) -> asyncio.Task[None]:
+        ownerships.append(ownership)
+        task = asyncio.create_task(response)
+        harness.regenerations.append(task)
+        return task
+
+    harness.regenerator.deps = replace(
+        harness.regenerator.deps,
+        generate_response=regenerate,
+        track_inbox_response=track_inbox_response,
+    )
+    event, event_info = _edit_event(new_body="what is 3+3?")
+
+    await _handle_edit(harness, event, event_info)
+
+    [ownership] = ownerships
+    retry_on_finish = cast("Callable[[], bool]", ownership["retry_on_finish"])
+    assert retry_on_finish() is not deferred
 
 
 @pytest.mark.asyncio
