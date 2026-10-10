@@ -144,11 +144,18 @@ describe("signInWithMatrix", () => {
     vi.mocked(fetch).mockResolvedValue(new Response("{}", { status: 200 }));
   });
 
-  it("posts token and client origin to the session endpoint", async () => {
+  async function signInAfterReply() {
     const win = makeWindow();
     const pending = signInWithMatrix(win);
     reply(win);
-    await expect(pending).resolves.toBe(true);
+    return pending;
+  }
+
+  it("posts token and client origin to the session endpoint", async () => {
+    await expect(signInAfterReply()).resolves.toEqual({
+      ok: true,
+      status: 200,
+    });
     expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/connections/session", {
       method: "POST",
       credentials: "same-origin",
@@ -160,25 +167,52 @@ describe("signInWithMatrix", () => {
     });
   });
 
-  it("returns false and skips the request without a token", async () => {
+  it("reports no status and skips the request without a token", async () => {
     const win = makeWindow(null);
-    await expect(signInWithMatrix(win)).resolves.toBe(false);
+    await expect(signInWithMatrix(win)).resolves.toEqual({ ok: false });
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("returns false when the server rejects the token", async () => {
-    vi.mocked(fetch).mockResolvedValue(new Response("{}", { status: 403 }));
-    const win = makeWindow();
-    const pending = signInWithMatrix(win);
-    reply(win);
-    await expect(pending).resolves.toBe(false);
+  it("reports the status and detail when the server rejects the token", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json(
+        { detail: "Connections sign-in is not allowed from this client" },
+        { status: 403 },
+      ),
+    );
+    await expect(signInAfterReply()).resolves.toEqual({
+      ok: false,
+      status: 403,
+      detail: "Connections sign-in is not allowed from this client",
+    });
   });
 
-  it("returns false when the request cannot reach the server", async () => {
+  it.each([
+    ["a body that is not JSON", new Response("Bad gateway", { status: 502 })],
+    [
+      "a detail that is not a string",
+      Response.json(
+        { detail: [{ input: openidToken.access_token }] },
+        { status: 401 },
+      ),
+    ],
+    [
+      "a detail that contains the token",
+      Response.json(
+        { detail: `Rejected ${openidToken.access_token}` },
+        { status: 401 },
+      ),
+    ],
+  ])("reports no detail for %s", async (_case, response) => {
+    vi.mocked(fetch).mockResolvedValue(response);
+    await expect(signInAfterReply()).resolves.toEqual({
+      ok: false,
+      status: response.status,
+    });
+  });
+
+  it("reports status 0 when the request cannot reach the server", async () => {
     vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
-    const win = makeWindow();
-    const pending = signInWithMatrix(win);
-    reply(win);
-    await expect(pending).resolves.toBe(false);
+    await expect(signInAfterReply()).resolves.toEqual({ ok: false, status: 0 });
   });
 });

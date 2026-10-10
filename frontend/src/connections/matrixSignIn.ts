@@ -56,20 +56,59 @@ export async function requestOpenIdFromOpener(
 }
 
 /**
+ * Outcome of one Matrix sign-in attempt.
+ *
+ * `status` is the HTTP status of the session request, `0` when the request could not reach the server, and absent
+ * when the opener gave no token. `detail` is the server's error message, when it sent one.
+ */
+export type MatrixSignInResult = {
+  ok: boolean;
+  status?: number;
+  detail?: string;
+};
+
+async function errorDetail(
+  response: Response,
+  openidToken: unknown,
+): Promise<string | undefined> {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return undefined;
+  }
+  const detail =
+    typeof body === "object" && body !== null
+      ? (body as { detail?: unknown }).detail
+      : undefined;
+  if (typeof detail !== "string" || !detail.trim()) return undefined;
+  // The server never echoes the token, but a detail that contains it must never reach the page.
+  const accessToken = (openidToken as { access_token?: unknown }).access_token;
+  if (
+    typeof accessToken === "string" &&
+    accessToken &&
+    detail.includes(accessToken)
+  )
+    return undefined;
+  return detail;
+}
+
+/**
  * Exchange an OpenID token from the opener for a Connections session cookie.
  *
  * @param win - Window whose opener supplies the token.
  * @param signal - Optional signal that stops waiting for the opener.
- * @returns `true` when the server created the session, otherwise `false`.
+ * @returns Whether the server created the session, with the status and error detail when it did not.
  */
 export async function signInWithMatrix(
   win: Window = window,
   signal?: AbortSignal,
-): Promise<boolean> {
+): Promise<MatrixSignInResult> {
   const answer = await requestOpenIdFromOpener(win, undefined, signal);
-  if (!answer) return false;
+  if (!answer) return { ok: false };
+  let response: Response;
   try {
-    const response = await fetch(SESSION_PATH, {
+    response = await fetch(SESSION_PATH, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -78,8 +117,14 @@ export async function signInWithMatrix(
         client_origin: answer.origin,
       }),
     });
-    return response.ok;
   } catch {
-    return false;
+    return { ok: false, status: 0 };
   }
+  if (response.ok) return { ok: true, status: response.status };
+  const detail = await errorDetail(response, answer.openidToken);
+  return {
+    ok: false,
+    status: response.status,
+    ...(detail === undefined ? {} : { detail }),
+  };
 }
