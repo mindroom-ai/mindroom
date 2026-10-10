@@ -3909,7 +3909,7 @@ async def test_a_span_that_runs_for_an_approval_never_waits(alice: PrincipalStor
         assert handle.waits_for is None
 
 
-def test_a_streamed_answer_that_waits_shows_the_note_below_it() -> None:
+async def test_a_streamed_answer_that_waits_shows_the_note_below_it() -> None:
     """The waiting note follows a streamed answer, or replaces a placeholder that showed nothing else."""
     content = {
         "msgtype": "m.text",

@@ -701,7 +701,12 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
         # The reply's latest write is its wait: the wake answers below what it showed, without the waiting note.
         base = replace(shown, trailing_note=None, placeholder=empty.placeholder, show_tool_calls=empty.show_tool_calls)
         body, trace = render_body(base)
-        answered = UnfinishedStreamedReply(visible_text=body, tool_trace=trace, interrupted=False)
+        # A wait that showed no answer showed only its placeholder, which the wake replaces rather than continues.
+        answered = (
+            None
+            if body == base.placeholder
+            else UnfinishedStreamedReply(visible_text=body, tool_trace=trace, interrupted=False)
+        )
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=base, resumed=answered)
     # A replay, or a wake an interruption cut short, continues below what the stopped attempt may have shown: its
     # work, then the restart note.

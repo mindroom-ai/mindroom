@@ -7,7 +7,7 @@ import inspect
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -41,7 +41,7 @@ from mindroom.reply_lifecycle import (
     SpanKind,
     SpanOutcome,
 )
-from mindroom.reply_presentation import Presentation, encode_presentation
+from mindroom.reply_presentation import NoteKind, Presentation, Segment, encode_presentation, note_segment
 from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.tool_system.events import ToolTraceEntry
@@ -1886,6 +1886,27 @@ async def _waiting(principal: PrincipalStore, *, source: str = "$source", reply_
     assert waited.transition.reply is not None
     assert waited.transition.reply.state is ReplyState.WAITING
     return waited.transition.reply
+
+
+@pytest.mark.parametrize("answered", [False, True])
+async def test_a_wake_continues_below_the_answer_its_wait_showed(*, answered: bool) -> None:
+    """A wake resumes after the waiting answer; a wait that showed no answer leaves it nothing to resume."""
+    transition = _first_claim()
+    assert transition.reply is not None
+    assert transition.claimed is not None
+    shown = Presentation(
+        segments=(Segment(kind="answer", text="answer", span_id="span-1"),) if answered else (),
+        trailing_note=note_segment(NoteKind.JOB_WAIT),
+    )
+    reply = replace(transition.reply, presentation=encode_presentation(shown), possibly_shown=None)
+    wake = replace(transition.claimed, kind=SpanKind.WAKE)
+    handle = reply_scope._handle_for(MagicMock(), reply, wake, Presentation())
+    assert handle.base.trailing_note is None
+    if answered:
+        assert handle.resumed is not None
+        assert handle.resumed.visible_text == "answer"
+    else:
+        assert handle.resumed is None
 
 
 async def test_an_owed_write_without_a_note_round_trips(journal_store: EventJournalStore) -> None:
