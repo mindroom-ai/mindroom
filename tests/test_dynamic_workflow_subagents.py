@@ -11,7 +11,6 @@ import yaml
 from agno.models.response import ModelResponse
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools import dynamic_workflow as workflow_module
@@ -20,9 +19,9 @@ from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_personas import _ToolRecordingModel
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
+from tests.test_delegation_envelopes import _InstructionRecordingModel
 from tests.test_delegation_execution import _call
 
 if TYPE_CHECKING:
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _config(*, tools: list[object] | None = None) -> Config:
+def _config(*, tools: list[object] | None = None, rules: dict[str, str] | None = None) -> Config:
     return Config(
         agents={
             "leader": AgentConfig(
@@ -47,6 +46,7 @@ def _config(*, tools: list[object] | None = None) -> Config:
             "default": ModelConfig(provider="test", id="default-model"),
             "haiku": ModelConfig(provider="test", id="haiku-model"),
         },
+        tool_approval={"rules": [{"match": match, "action": action} for match, action in (rules or {}).items()]},
     )
 
 
@@ -78,13 +78,13 @@ class _Workflow:
         self.paths: RuntimePaths = _runtime_paths(tmp_path)
         self.config = config
         entity_ids(config, self.paths)
-        self.model = _ToolRecordingModel(
+        self.model = _InstructionRecordingModel(
             id="test",
             responses=responses if responses is not None else [ModelResponse(content=f"Answer {i}.") for i in range(4)],
         )
         self.models_loaded: list[str] = []
 
-        def load_model(*args: object) -> _ToolRecordingModel:
+        def load_model(*args: object) -> _InstructionRecordingModel:
             self.models_loaded.append(str(args[2]))
             return self.model
 
@@ -106,6 +106,12 @@ class _Workflow:
 
     def workspace(self) -> Path:
         return self.paths.storage_root / "agents" / "leader" / "workspace"
+
+    def profile(self, name: str, content: str) -> Path:
+        path = self.workspace() / "subagents" / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        return path
 
 
 @pytest.mark.asyncio
@@ -184,9 +190,7 @@ async def test_participant_without_tools_gets_none(tmp_path: Path, monkeypatch: 
 async def test_profile_participant_runs_workspace_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant can run a saved subagents/<name>.md profile from the caller's workspace."""
     workflow = _Workflow(tmp_path, monkeypatch, _config())
-    profile = workflow.workspace() / "subagents" / "critic.md"
-    profile.parent.mkdir(parents=True)
-    profile.write_text("---\ndescription: Critic.\ntools: []\n---\nYou criticize.\n")
+    workflow.profile("critic", "---\ndescription: Critic.\ntools: []\n---\nYou criticize.\n")
 
     run = await workflow.run(_spec([{"id": "critic", "profile": "critic"}]))
 
@@ -210,31 +214,6 @@ async def test_preapproved_participant_tool_runs(tmp_path: Path, monkeypatch: py
     assert run["status"] == "completed", run
     assert workflow.model.responses == []
     assert "add" in workflow.model.offered[0]
-
-
-def test_subagent_participant_accepts_inline_and_profile(tmp_path: Path) -> None:
-    """Inline and profile subagent participants validate."""
-    store = DynamicWorkflowStore(tmp_path)
-    inline = {"id": "critic", "kind": "subagent", "system_prompt": "P", "tools": ["file"], "model": "haiku"}
-    store.validate_workflow(_spec([inline], tools=["file"]))
-    store.validate_workflow(_spec([{"id": "critic", "kind": "subagent", "profile": "critic"}]))
-    store.validate_workflow(_spec([{"id": "critic", "system_prompt": "P"}]))
-
-
-@pytest.mark.parametrize(
-    "participant",
-    [
-        {"id": "critic", "profile": "critic", "system_prompt": "P"},
-        {"id": "critic", "profile": "critic", "tools": []},
-        {"id": "critic"},
-        {"id": "critic", "kind": "ephemeral_agent", "name": "Critic", "role": "Criticize"},
-        {"id": "critic", "system_prompt": "P", "mode": "fast"},
-    ],
-)
-def test_invalid_subagent_participants_are_rejected(tmp_path: Path, participant: dict[str, object]) -> None:
-    """Profiles exclude inline fields, a prompt is required, and the retired kind is rejected for new specs."""
-    with pytest.raises(DynamicWorkflowError):
-        DynamicWorkflowStore(tmp_path).validate_workflow(_spec([participant]))
 
 
 def _write_legacy_revision(tmp_path: Path) -> DynamicWorkflowStore:
@@ -324,9 +303,7 @@ def test_update_of_legacy_revision_writes_current_format(tmp_path: Path) -> None
 async def test_profile_tools_must_be_granted_by_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A profile's own tool list obeys a workflow's permissions.tools like an inline list."""
     workflow = _Workflow(tmp_path, monkeypatch, _config())
-    profile = workflow.workspace() / "subagents" / "adder.md"
-    profile.parent.mkdir(parents=True)
-    profile.write_text("---\ndescription: Adds.\ntools: [calculator]\n---\nYou add.\n")
+    workflow.profile("adder", "---\ndescription: Adds.\ntools: [calculator]\n---\nYou add.\n")
 
     created = await workflow.create(_spec([{"id": "adder", "profile": "adder"}], tools=["file"]))
 
@@ -354,9 +331,7 @@ async def test_participant_runs_the_profile_validated_at_run_start(
             ModelResponse(content="Second answer."),
         ],
     )
-    profile = workflow.workspace() / "subagents" / "second.md"
-    profile.parent.mkdir(parents=True)
-    profile.write_text("---\ndescription: B.\ntools: []\n---\nOriginal prompt.\n")
+    profile = workflow.profile("second", "---\ndescription: B.\ntools: []\n---\nOriginal prompt.\n")
     spec = _spec(
         [{"id": "first", "system_prompt": "You edit files.", "tools": ["file"]}, {"id": "second", "profile": "second"}],
     )
@@ -392,13 +367,7 @@ async def test_declared_toolkits_are_never_built_just_for_approvals(
             {"dynamic_workflow": {"allowed_tools": ["file"]}},
             {"file": {"include_tools": ["read_file", "list_files"]}},
         ],
-    )
-    config = config.model_copy(
-        update={
-            "tool_approval": config.tool_approval.model_copy(
-                update={"rules": [ApprovalRuleConfig(match="save_file", action="require_approval")]},
-            ),
-        },
+        rules={"save_file": "require_approval"},
     )
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
@@ -412,14 +381,7 @@ async def test_declared_toolkits_are_never_built_just_for_approvals(
 @pytest.mark.asyncio
 async def test_function_entry_allowed_by_operator_rule_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant may name one function an operator auto-approves even when its toolkit is not pre-approved."""
-    config = _config(tools=["dynamic_workflow", "calculator"])
-    config = config.model_copy(
-        update={
-            "tool_approval": config.tool_approval.model_copy(
-                update={"rules": [ApprovalRuleConfig(match="add", action="auto_approve")]},
-            ),
-        },
-    )
+    config = _config(tools=["dynamic_workflow", "calculator"], rules={"add": "auto_approve"})
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
     run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator.add"]}]))
@@ -429,51 +391,18 @@ async def test_function_entry_allowed_by_operator_rule_runs(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_named_function_an_operator_gates_fails_loudly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A participant that names a function an operator rule still gates fails instead of silently losing it."""
-    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file"])
-    config = config.model_copy(
-        update={
-            "tool_approval": config.tool_approval.model_copy(
-                update={"rules": [ApprovalRuleConfig(match="save_file", action="require_approval")]},
-            ),
-        },
-    )
-    workflow = _Workflow(tmp_path, monkeypatch, config)
-
-    run = await workflow.run(_spec([{"id": "writer", "system_prompt": "Write.", "tools": ["file.save_file"]}]))
-
-    assert run["status"] == "failed"
-    assert "save_file require approval and cannot suspend" in run["error"]
-    assert workflow.model.system_prompts == []
-
-
-@pytest.mark.asyncio
 async def test_later_step_fails_when_its_named_function_becomes_gated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An operator gating a named function during a run fails the next step instead of silently hiding the function."""
-    auto = _config(tools=["dynamic_workflow", "calculator"])
-    auto = auto.model_copy(
-        update={
-            "tool_approval": auto.tool_approval.model_copy(
-                update={"rules": [ApprovalRuleConfig(match="add", action="auto_approve")]},
-            ),
-        },
-    )
-    gated = auto.model_copy(
-        update={
-            "tool_approval": auto.tool_approval.model_copy(
-                update={"rules": [ApprovalRuleConfig(match="add", action="require_approval")]},
-            ),
-        },
-    )
+    auto = _config(tools=["dynamic_workflow", "calculator"], rules={"add": "auto_approve"})
+    gated = _config(tools=["dynamic_workflow", "calculator"], rules={"add": "require_approval"})
     workflow = _Workflow(tmp_path, monkeypatch, auto)
     live = [auto]
     record = workflow.model
 
-    def load_model(*_args: object) -> _ToolRecordingModel:
+    def load_model(*_args: object) -> _InstructionRecordingModel:
         live[0] = gated
         return record
 

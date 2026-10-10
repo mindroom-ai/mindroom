@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.tools.function import Function
@@ -12,6 +12,7 @@ from agno.tools.function import Function
 import mindroom.tools  # noqa: F401 - registers built-in tool metadata, including function names
 from mindroom.delegation.personas import (
     PersonaError,
+    PersonaRequest,
     _InvalidPersonaProfile,
     _parse_profile,
     _PersonaProfile,
@@ -21,6 +22,7 @@ from mindroom.delegation.personas import (
     persona_allows,
     persona_tool_policy,
     render_profile_listing,
+    resolve_persona_request,
     validate_persona_tools,
 )
 from mindroom.delegation.state import SubagentPersona
@@ -132,6 +134,7 @@ def test_parse_profile_defaults_optional_fields() -> None:
         "---\ndescription: D\n---\n\n",
         "---\ndescription: " + "d" * 1025 + "\n---\nBody\n",
         "---\ndescription: D\nmodel: [a]\n---\nBody\n",
+        "---\ndescription: D\n1: x\nrole: y\n---\nBody\n",
         "No frontmatter at all\n",
     ],
 )
@@ -214,6 +217,61 @@ def test_list_profiles_charges_unreadable_text_to_its_budget(tmp_path: Path) -> 
 
     assert 0 < len(entries) < 20
     assert all(isinstance(entry, _InvalidPersonaProfile) for entry in entries)
+
+
+def _resolve(workspace: Path, **arguments: object) -> PersonaRequest | str:
+    """Resolve one ``run_subagent`` call by ``leader`` for itself, with file and shell as its tools."""
+    defaults: dict[str, Any] = {
+        "caller_name": "leader",
+        "agent_name": "leader",
+        "system_prompt": None,
+        "tools": None,
+        "profile": None,
+        "model": None,
+        "minimal": False,
+        "workspace_root": workspace,
+        "available_toolkits": lambda: ["file", "shell"],
+    }
+    return resolve_persona_request(**{**defaults, **arguments})
+
+
+def test_resolve_persona_request_mode_and_model_rules(tmp_path: Path) -> None:
+    """Profiles supply model and mode; explicit arguments override them; plain calls pass through."""
+    _profile_file(tmp_path, "fast.md", "---\ndescription: D\nmode: minimal\nmodel: haiku\n---\nBe quick.\n")
+    _profile_file(tmp_path, "plain.md", "---\ndescription: D\n---\nBe careful.\n")
+
+    fast = _resolve(tmp_path, profile="fast")
+    plain_minimal = _resolve(tmp_path, profile="plain", model="sonnet", minimal=True)
+
+    assert isinstance(fast, PersonaRequest)
+    assert fast.persona is not None
+    assert (fast.model, fast.agent_mode, fast.persona.system_prompt) == ("haiku", "minimal", "Be quick.")
+    assert isinstance(plain_minimal, PersonaRequest)
+    assert (plain_minimal.model, plain_minimal.agent_mode) == ("sonnet", "minimal")
+    assert _resolve(tmp_path, minimal=True) == PersonaRequest(persona=None, model=None, agent_mode="minimal")
+    assert _resolve(None, profile="fast") == "Cannot delegate: subagent profiles need an agent workspace."
+
+
+def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_path: Path) -> None:
+    """A model that fills every optional argument with empty values starts a plain copy, or runs its profile."""
+    _profile_file(tmp_path, "critic.md", "---\ndescription: Critic.\ntools: [file]\n---\nCritic prompt.\n")
+
+    plain = _resolve(tmp_path, system_prompt="", tools=[], profile="")
+    profiled = _resolve(tmp_path, system_prompt="", tools=[], profile="critic")
+
+    assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
+    assert isinstance(profiled, PersonaRequest)
+    assert profiled.persona is not None
+    assert (profiled.persona.source_name, profiled.persona.tools) == ("critic", ("file",))
+
+
+def test_minimal_persona_with_tools_must_keep_shell(tmp_path: Path) -> None:
+    """A minimal persona that lists its tools is refused up front unless it keeps shell."""
+    refused = _resolve(tmp_path, system_prompt="P", tools=["file"], minimal=True)
+
+    assert refused == "Cannot delegate: a minimal subagent needs shell among its tools."
+    assert isinstance(_resolve(tmp_path, system_prompt="P", tools=["file", "shell"], minimal=True), PersonaRequest)
+    assert isinstance(_resolve(tmp_path, system_prompt="P", minimal=True), PersonaRequest)
 
 
 def test_load_profile_reads_one_file(tmp_path: Path) -> None:
@@ -315,17 +373,6 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
     assert not visible(_function("generated", None))
     assert disabled == frozenset({"memory", "shell", "dynamic_tools"})
     assert persona_tool_policy(None, lambda: ["file"], caller_filter, frozenset()) == (caller_filter, frozenset())
-
-
-def test_list_profiles_marks_non_string_keys_invalid(tmp_path: Path) -> None:
-    """A frontmatter key YAML reads as a number or boolean makes that profile invalid, not the listing crash."""
-    _profile_file(tmp_path, "odd.md", "---\ndescription: D\n1: x\nrole: y\n---\nBody\n")
-    _profile_file(tmp_path, "critic.md", _CRITIC)
-
-    entries = list_profiles(tmp_path)
-
-    assert [entry.name for entry in entries] == ["critic", "odd"]
-    assert isinstance(entries[1], _InvalidPersonaProfile)
 
 
 def test_function_level_cap_admits_only_named_functions() -> None:

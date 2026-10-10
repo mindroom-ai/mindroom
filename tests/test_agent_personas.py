@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.run import RunContext
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
 
+    from mindroom.delegation.state import SubagentPersona
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _BASH_HINT = "MindRoom tools are callable from Bash through mindroom-agent; run mindroom-agent --help to list them."
@@ -64,18 +65,35 @@ async def _function_names(agent: Agent) -> list[str]:
     return sorted(names)
 
 
+def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "P", **options: Any) -> Agent:  # noqa: ANN401
+    """Build the helper agent as an authored child that names ``tools``."""
+    options = {"execution_identity": None, "persist_runtime_state": False, **options}
+    return agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        persona=inline_persona(prompt, tools),
+        **options,
+    )
+
+
+async def _prepare(runtime: ToolRuntimeContext, persona: SubagentPersona, prompt: str) -> ai._PreparedAgentRun:
+    """Prepare one turn of the helper agent presenting ``persona``."""
+    return await ai._prepare_agent_and_prompt(
+        replace(_turn_context(), persona=persona),
+        prompt=prompt,
+        runtime_paths=runtime.runtime_paths,
+        config=runtime.config,
+        execution_identity=build_execution_identity_from_runtime_context(runtime),
+    )
+
+
 @pytest.mark.asyncio
 async def test_persona_system_message_is_verbatim(tmp_path: Path) -> None:
     """The model receives the authored prompt byte for byte, with no MindRoom framing or state substitution."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
     prompt = "Plain {not_a_var} text\n"
-    prepared = await ai._prepare_agent_and_prompt(
-        replace(_turn_context(), persona=inline_persona(prompt, None)),
-        prompt="task",
-        runtime_paths=runtime.runtime_paths,
-        config=runtime.config,
-        execution_identity=build_execution_identity_from_runtime_context(runtime),
-    )
+    prepared = await _prepare(runtime, inline_persona(prompt, None), "task")
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
 
@@ -86,14 +104,7 @@ async def test_persona_system_message_is_verbatim(tmp_path: Path) -> None:
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
     """Only the named toolkit is built; unnamed caller toolkits are never constructed."""
     runtime = _runtime(tmp_path, tools=["file", "shell"])
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        persona=inline_persona("P", ["file"]),
-    )
+    agent = _child(runtime, ["file"])
     toolkit_functions = {name for tool in agent.tools or [] if isinstance(tool, Toolkit) for name in tool.functions}
     assert "read_file" in toolkit_functions
     assert "run_shell_command" not in toolkit_functions
@@ -103,14 +114,7 @@ def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
 async def test_persona_function_entry_exposes_only_that_function(tmp_path: Path) -> None:
     """A toolkit.function entry keeps one function of its toolkit visible."""
     runtime = _runtime(tmp_path, tools=["file"])
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        persona=inline_persona("P", ["file.read_file"]),
-    )
+    agent = _child(runtime, ["file.read_file"])
     assert await _function_names(agent) == ["read_file"]
 
 
@@ -119,14 +123,7 @@ def test_persona_refuses_a_function_its_caller_configuration_removes(tmp_path: P
     runtime = _runtime(tmp_path, tools=[{"file": {"include_tools": ["read_file"]}}])
 
     with pytest.raises(PersonaError, match=r"'file\.save_file' is not available to you"):
-        agents.create_agent(
-            "helper",
-            runtime.config,
-            runtime.runtime_paths,
-            None,
-            persist_runtime_state=False,
-            persona=inline_persona("P", ["file.read_file", "file.save_file"]),
-        )
+        _child(runtime, ["file.read_file", "file.save_file"])
 
 
 @pytest.mark.parametrize(
@@ -141,31 +138,14 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
         return function.name != "save_file" and function.owning_toolkit != "calculator"
 
     with pytest.raises(PersonaError, match=f"{missing} is not available to you"):
-        agents.create_agent(
-            "helper",
-            runtime.config,
-            runtime.runtime_paths,
-            None,
-            persist_runtime_state=False,
-            tool_function_filter=caller_filter,
-            persona=inline_persona("P", tools),
-        )
+        _child(runtime, tools, tool_function_filter=caller_filter)
 
 
 def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> None:
     """A minimal persona's mindroom-agent catalog offers neither unnamed deferred toolkits nor the deferred-tool manager."""
     runtime = _runtime(tmp_path, tools=["shell", {"file": {"defer": True}}])
 
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        session_id="session-1",
-        persist_runtime_state=False,
-        agent_mode="minimal",
-        persona=inline_persona("P", ["shell"]),
-    )
+    agent = _child(runtime, ["shell"], session_id="session-1", agent_mode="minimal")
 
     assert isinstance(agent, MinimalAgent)
     assert [deferred.name for deferred in agent.deferred_toolkits] == []
@@ -241,28 +221,14 @@ def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypat
     monkeypatch.setattr(agents, "build_agent_toolkit", failing_build)
 
     with pytest.raises(PersonaError, match="'calculator' is not available to you"):
-        agents.create_agent(
-            "helper",
-            runtime.config,
-            runtime.runtime_paths,
-            None,
-            persist_runtime_state=False,
-            persona=inline_persona("P", ["file", "calculator"]),
-        )
+        _child(runtime, ["file", "calculator"])
 
 
 @pytest.mark.asyncio
 async def test_empty_persona_tools_build_toolless_agent(tmp_path: Path) -> None:
     """An explicit empty tool list leaves the child with no provider-visible functions."""
     runtime = _runtime(tmp_path, tools=["file", "shell"])
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        persona=inline_persona("P", []),
-    )
+    agent = _child(runtime, [])
     assert await _function_names(agent) == []
 
 
@@ -270,13 +236,7 @@ def test_persona_disables_learning(tmp_path: Path) -> None:
     """A persona child never runs Agno learning for the caller."""
     runtime = _runtime(tmp_path, tools=["file"], learning=True)
     configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None)
-    persona = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persona=inline_persona("P", None),
-    )
+    persona = _child(runtime, None, persist_runtime_state=True)
     assert configured.learning
     assert not persona.learning
 
@@ -291,28 +251,14 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
         raise AssertionError(msg)
 
     monkeypatch.setattr(ai, "build_memory_prompt_parts", recall)
-    prepared = await ai._prepare_agent_and_prompt(
-        replace(_turn_context(), persona=inline_persona("P", None)),
-        prompt="the task",
-        runtime_paths=runtime.runtime_paths,
-        config=runtime.config,
-        execution_identity=build_execution_identity_from_runtime_context(runtime),
-    )
+    prepared = await _prepare(runtime, inline_persona("P", None), "the task")
     assert "the task" in prepared.prompt_text
 
 
 def test_minimal_persona_uses_authored_prompt_and_bash_hint(tmp_path: Path) -> None:
     """A minimal persona presents the authored prompt and tells the model where its tools are."""
     runtime = _runtime(tmp_path, tools=["shell"])
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        agent_mode="minimal",
-        persona=inline_persona("Authored minimal prompt", None),
-    )
+    agent = _child(runtime, None, prompt="Authored minimal prompt", agent_mode="minimal")
     assert isinstance(agent, MinimalAgent)
     assert agent.bootstrap_message == "Authored minimal prompt"
     assert agent.system_message == "Authored minimal prompt"
@@ -353,14 +299,7 @@ async def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) ->
     """A preset's member toolkit keeps its functions when a persona names it."""
     runtime = _runtime(tmp_path, tools=["openclaw_compat"])
     names = caller_toolkit_names("helper", runtime.config, delegation_depth=0)
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        persona=inline_persona("P", ["shell", "coding.read_file"]),
-    )
+    agent = _child(runtime, ["shell", "coding.read_file"])
 
     functions = await _function_names(agent)
 
@@ -374,14 +313,7 @@ async def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) ->
 async def test_persona_loads_named_member_of_deferred_preset(tmp_path: Path) -> None:
     """A deferred preset member that a persona names is present from the child's first request."""
     runtime = _runtime(tmp_path, tools=[{"openclaw_compat": {"defer": True}}])
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        persona=inline_persona("P", ["shell"]),
-    )
+    agent = _child(runtime, ["shell"])
     assert "run_shell_command" in await _function_names(agent)
 
 
@@ -389,42 +321,24 @@ async def test_persona_loads_named_member_of_deferred_preset(tmp_path: Path) -> 
 async def test_persona_may_name_the_matrix_room_runtime_tool(tmp_path: Path) -> None:
     """A Matrix caller's injected room tool can be named, and the child refuses to start where it is absent."""
     runtime = _runtime(tmp_path, tools=["file"])
-    persona = inline_persona("P", ["invite_router"])
 
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(runtime),
-        persist_runtime_state=False,
-        persona=persona,
+    agent = _child(
+        runtime,
+        ["invite_router"],
+        execution_identity=build_execution_identity_from_runtime_context(runtime),
     )
 
     assert "invite_router" in caller_toolkit_names("helper", runtime.config, delegation_depth=0)
     assert await _function_names(agent) == ["invite_router"]
     with pytest.raises(PersonaError, match="'invite_router' is not available to you"):
-        agents.create_agent(
-            "helper",
-            runtime.config,
-            runtime.runtime_paths,
-            None,
-            persist_runtime_state=False,
-            persona=persona,
-        )
+        _child(runtime, ["invite_router"])
 
 
 @pytest.mark.asyncio
 async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_path: Path) -> None:
     """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"], delegate_to=["helper"])
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        persona=inline_persona("P", ["delegate", "file"]),
-    )
+    agent = _child(runtime, ["delegate", "file"])
     [delegate] = [
         tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "run_subagent" in tool.async_functions
     ]

@@ -165,6 +165,32 @@ def test_subagent_participant_requires_prompt_or_profile() -> None:
         validate_workflow_spec(_spec(participants=[{"id": "writer"}]))
 
 
+@pytest.mark.parametrize(
+    "participant",
+    [
+        {"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["file"], "model": "haiku"},
+        {"id": "writer", "kind": "subagent", "profile": "critic"},
+    ],
+)
+def test_subagent_participant_accepts_inline_fields_or_a_profile(participant: dict[str, object]) -> None:
+    """A subagent participant authors its prompt, tools, and model inline, or names a saved profile."""
+    validate_workflow_spec(_spec(participants=[participant], permissions={"tools": ["file"]}))
+
+
+@pytest.mark.parametrize(
+    "participant",
+    [
+        {"id": "writer", "profile": "critic", "system_prompt": "P"},
+        {"id": "writer", "profile": "critic", "tools": []},
+        {"id": "writer", "kind": "ephemeral_agent", "name": "Writer", "role": "Writes"},
+    ],
+)
+def test_profile_excludes_inline_fields_and_the_retired_kind_is_rejected(participant: dict[str, object]) -> None:
+    """A profile participant cannot add inline fields, and new specs cannot use the retired ephemeral kind."""
+    with pytest.raises(DynamicWorkflowError):
+        validate_workflow_spec(_spec(participants=[participant]))
+
+
 def test_participant_tools_must_be_granted_by_permissions() -> None:
     """Participant tools must appear in permissions.tools when the spec narrows tools that way."""
     participants = [{"id": "writer", "system_prompt": "P", "tools": ["shell"]}]
@@ -693,7 +719,7 @@ def test_collect_errors_does_not_mutate_the_input_spec() -> None:
     assert "tools" not in spec["participants"][0]
 
 
-@pytest.mark.parametrize("mode", [["standard"], {"standard": True}])
+@pytest.mark.parametrize("mode", [["standard"], {"standard": True}, "fast"])
 def test_subagent_participant_mode_must_be_a_known_string(mode: object) -> None:
     """A non-string mode is a validation error, not a crash."""
     with pytest.raises(DynamicWorkflowError, match="field 'mode' must be 'standard' or 'minimal'"):

@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agno.agent import Agent
@@ -22,9 +22,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, reserve_child_turn, start_child_turn
 from mindroom.delegation.records import DelegationRecordOwner
-from mindroom.delegation.state import DelegationState, SubagentPersona
+from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
@@ -41,11 +40,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class _InstructionRecordingModel(DelegationModel):
-    """Keep every child system prompt, including its first resumed model request."""
+    """Keep every child system prompt and offered function names, including its first resumed model request."""
 
     system_prompts: list[str] = field(default_factory=list)
+    offered: list[list[str]] = field(default_factory=list)
 
     async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        tools = cast("list[dict[str, Any]]", kwargs.get("tools") or [])
+        self.offered.append(sorted(str(tool.get("function", tool).get("name")) for tool in tools))
         if not self.responses:
             msg = "Child provider unavailable."
             raise RuntimeError(msg)
@@ -392,51 +394,3 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
             )
     finally:
         storage.close()
-
-
-@pytest.mark.asyncio
-async def test_child_turn_runs_with_its_persona_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A persona child's model request carries exactly the authored system prompt."""
-    config = Config(
-        agents={"leader": AgentConfig(display_name="Leader", role="Configured role", delegate_to=["leader"])},
-        defaults=DefaultsConfig(tools=[], learning=False),
-        memory={"backend": "none"},
-    )
-    paths = _runtime_paths(tmp_path)
-    entity_ids(config, paths)
-    model = _InstructionRecordingModel(id="test", responses=[ModelResponse(content="Reviewed.")])
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
-    identity = _identity()
-    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="Authored {x} prompt")
-    child = prepare_child_turn(
-        "leader",
-        "leader",
-        "Review this",
-        owner=identity,
-        config=config,
-        runtime_paths=paths,
-        depth=0,
-        persona=persona,
-    )
-
-    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        await reserve_child_turn(child, owner=identity, runtime_paths=paths)
-        await start_child_turn(
-            child,
-            parent_run_id=None,
-            config=config,
-            runtime_paths=paths,
-            caller_execution_identity=identity,
-        )
-        async with child_run_context(child, config=config, runtime_paths=paths):
-            result = await run_delegated_child_response(
-                child,
-                prompt=child.task,
-                config=config,
-                runtime_paths=paths,
-                refresh_scheduler=None,
-                supports_native_tool_approval=False,
-            )
-
-    assert result == "Reviewed."
-    assert model.system_prompts == ["Authored {x} prompt"]

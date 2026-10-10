@@ -39,23 +39,8 @@ async def test_handle_reservations_are_scoped_and_reject_overlapping_followups(t
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
     owner = _identity()
-    subagent_id = uuid4().hex
-    child = DelegationChild(
-        delegation_id=subagent_id,
-        subagent_id=subagent_id,
-        parent_tool_call_id="call",
-        caller_agent_name="leader",
-        child_agent_name="leader",
-        task="First task",
-        session_id=f"delegate:leader:leader:{subagent_id}",
-        run_id=uuid4().hex,
-        model_name="default",
-        depth=1,
-        execution_identity=serialize_tool_execution_identity(
-            replace(owner, session_id=f"delegate:leader:leader:{subagent_id}"),
-        ),
-        storage_bindings=freeze_delegation_storage(config, ("leader",)),
-    )
+    child = _self_child(config, owner, task="First task")
+    subagent_id = child.delegation_id
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
     child.status = "completed"
     child.result = "First answer"
@@ -129,23 +114,8 @@ async def test_liveness_distinguishes_active_from_abandoned_turn(tmp_path: Path)
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     owner = _identity()
-    subagent_id = uuid4().hex
-    child = DelegationChild(
-        delegation_id=subagent_id,
-        subagent_id=subagent_id,
-        parent_tool_call_id="call",
-        caller_agent_name="leader",
-        child_agent_name="leader",
-        task="First task",
-        session_id=f"delegate:leader:leader:{subagent_id}",
-        run_id=uuid4().hex,
-        model_name="default",
-        depth=1,
-        execution_identity=serialize_tool_execution_identity(
-            replace(owner, session_id=f"delegate:leader:leader:{subagent_id}"),
-        ),
-        storage_bindings=freeze_delegation_storage(config, ("leader",)),
-    )
+    child = _self_child(config, owner, task="First task")
+    subagent_id = child.delegation_id
     options = {"owner": owner, "config": config, "runtime_paths": paths, "depth": 0}
     async with subagent_liveness(child, paths):
         await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
@@ -172,7 +142,14 @@ async def test_liveness_distinguishes_active_from_abandoned_turn(tmp_path: Path)
         await load_subagent(subagent_id, **options)
 
 
-def _persona_child(config: Config, owner: ToolExecutionIdentity, persona: SubagentPersona | None) -> DelegationChild:
+def _self_child(
+    config: Config,
+    owner: ToolExecutionIdentity,
+    persona: SubagentPersona | None = None,
+    *,
+    task: str = "Review the plan",
+) -> DelegationChild:
+    """A fresh child of ``leader`` running itself."""
     subagent_id = uuid4().hex
     session_id = f"delegate:leader:leader:{subagent_id}"
     return DelegationChild(
@@ -181,7 +158,7 @@ def _persona_child(config: Config, owner: ToolExecutionIdentity, persona: Subage
         parent_tool_call_id="call",
         caller_agent_name="leader",
         child_agent_name="leader",
-        task="Review the plan",
+        task=task,
         session_id=session_id,
         run_id=uuid4().hex,
         model_name="default",
@@ -204,7 +181,7 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
         system_prompt="You are a critic {x}.",
         tools=("file",),
     )
-    child = _persona_child(config, owner, persona)
+    child = _self_child(config, owner, persona)
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
     child.status = "completed"
     await update_subagent_turn(child, paths)
@@ -226,7 +203,7 @@ async def test_child_snapshot_without_persona_reads_as_configured_child(tmp_path
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
     owner = _identity()
-    child = _persona_child(config, owner, None)
+    child = _self_child(config, owner, None)
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
     record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
     payload = json.loads(record.read_text())

@@ -54,6 +54,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.history_helpers import RecordingModel
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
+from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -980,15 +981,7 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
         defaults=DefaultsConfig(tools=[]),
     )
     override = Config(agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"])})
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="leader",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="parent-session",
-    )
+    identity = _identity()
     options = {"runtime_paths": paths, "execution_identity": identity, "depth": 0}
 
     with tool_runtime_context(_delegate_runtime_context(with_workflow, paths, execution_identity=identity)):
@@ -1050,15 +1043,7 @@ def test_workflow_grant_runs_for_requester_the_caller_already_serves(
         agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"], delegate_to=["leader"])},
         defaults=DefaultsConfig(tools=[]),
     )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="leader",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="parent-session",
-    )
+    identity = _identity()
     options = {"config": config, "runtime_paths": paths, "execution_identity": identity, "depth": 0}
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
