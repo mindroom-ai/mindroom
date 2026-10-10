@@ -158,7 +158,7 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.completion import HoldKey, completion_prompt, conversation_work
 from mindroom.tool_jobs.disabled import approval_is_parked
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_jobs.wakes import WAKE_LIMIT, WAKE_RETRY_PROMPT, wake_envelope, woken_reply_id
+from mindroom.tool_jobs.wakes import WAKE_LIMIT, WAKE_RETRY_PROMPT, ends_wait, wake_envelope, woken_reply_id
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -3519,7 +3519,7 @@ class ResponseRunner:
             # The wake's span settles its source, or keeps it pending for its retry.
             return
         if reply_id is not None:
-            await self._release_unheld_wait(reply_id)
+            await self._release_unheld_wait(reply_id, released=ends_wait(event.event_id))
         await self.deps.approval_store.settle(event.event_id)
 
     async def _woken_enough(self, reply: rl.Reply, wake_id: str) -> bool:
@@ -3529,12 +3529,16 @@ class ResponseRunner:
         # A retry continues the wake it retries.
         return wake_id not in wakes and len(wakes) >= WAKE_LIMIT
 
-    async def _release_unheld_wait(self, reply_id: str) -> None:
-        """End a waiting reply whose key has no outstanding work left, keeping its answer."""
+    async def _release_unheld_wait(self, reply_id: str, *, released: bool) -> None:
+        """End a waiting reply whose key has no outstanding work left, keeping its answer.
+
+        A wake admitted to end the wait ends it whatever work started since, which the key's next reply takes, so
+        that wake's one name for the reply never needs admitting again.
+        """
         reply = await self.deps.replies.store.replies.load(reply_id)
         if reply is None or reply.state is not rl.ReplyState.WAITING or reply.hold_key is None:
             return
-        work = await self._held_work(HoldKey.decode(reply.hold_key))
+        work = None if released else await self._held_work(HoldKey.decode(reply.hold_key))
         if work is None or not work.jobs:
             await self.deps.delivery_gateway.end_wait(reply_id)
 

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.completion import HoldKey
     from mindroom.tool_jobs.runtime import BackgroundJob
 
+_RELEASE = "release"
 # How many times one waiting message continues with results; the requester's next answered message takes the rest.
 WAKE_LIMIT = 20
 # What a wake a restart cut short continues with, once what it retrieved is no longer ready to retrieve again.
@@ -34,9 +35,14 @@ def wake_event_id(reply_id: str, ready: Sequence[BackgroundJob]) -> str:
     Admitting the same wake again changes nothing, and outcomes that become ready later name a new one.
     """
     if not ready:
-        return f"job-wake:{reply_id}:release"
+        return f"job-wake:{reply_id}:{_RELEASE}"
     digest = hashlib.sha256(",".join(sorted(job.job_id for job in ready)).encode()).hexdigest()[:16]
     return f"job-wake:{reply_id}:{digest}"
+
+
+def ends_wait(wake_id: str) -> bool:
+    """Whether a wake was admitted to end a wait no work was left for."""
+    return wake_id.endswith(f":{_RELEASE}")
 
 
 def wake_event(reply: Reply, wake_id: str, *, sender_id: str, now_ms: int) -> InboundEvent:

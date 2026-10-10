@@ -370,6 +370,50 @@ async def test_a_wake_no_span_took_settles_and_ends_a_wait_no_work_is_left_for(t
     assert ended.state is rl.ReplyState.COMPLETED
 
 
+@pytest.mark.parametrize("released", [False, True])
+async def test_a_wake_admitted_to_end_a_wait_ends_it_despite_work_started_since(
+    tmp_path: Path,
+    *,
+    released: bool,
+) -> None:
+    """Work that started after the release wake was admitted goes to the key's next reply; other wakes keep waiting."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    principal = bot.journal_principal()
+    reply = await _waiting_reply(principal, key)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
+    register_background_runtime(bot.runtime_paths, runtime)
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(
+            runtime,
+            "later",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=_runner_owner(key),
+            operation=forever,
+        )
+        wake_id = wake_event_id(reply.reply_id, ()) if released else "job-wake:other"
+        event = await _wake(principal, reply, wake_id)
+        runner.generate_response = AsyncMock(return_value=None)
+
+        await runner._run_job_wake(event)
+
+        assert not await principal.is_pending(wake_id)
+        after = await principal.replies.load(reply.reply_id)
+        assert after is not None
+        assert after.state is (rl.ReplyState.COMPLETED if released else rl.ReplyState.WAITING)
+    finally:
+        await runtime.shutdown()
+
+
 async def test_a_message_woken_its_limit_of_times_ends_its_wait_for_the_next_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
