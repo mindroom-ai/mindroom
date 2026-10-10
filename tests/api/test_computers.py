@@ -422,6 +422,41 @@ def test_periodic_authorization_revocation_disconnects_controller(
     assert client.get(path, headers=headers).status_code == 401
 
 
+def test_revoking_a_session_closes_its_stream_during_a_running_recheck(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting a viewer closes its stream at once, even while a periodic check is still running."""
+    client, _peer, _app = gateway
+    checked_status = computers._checked_status
+    calls = 0
+
+    async def hang_periodic_check(connection: WebSocket, session: computers.ComputerSession) -> object:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:  # stream ticket and stream upgrade
+            return await checked_status(connection, session)
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    monkeypatch.setattr(computers, "_checked_status", hang_periodic_check)
+    monkeypatch.setattr(computers, "_STREAM_RECHECK_TIMEOUT_SECONDS", 3600.0)
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    with client.websocket_connect(
+        path + "/stream",
+        subprotocols=["binary", "mindroom-ticket." + ticket],
+        headers={"Origin": "https://chat.example.org"},
+    ) as websocket:
+        assert websocket.receive_bytes() == b"screen"
+        assert client.delete(path, headers=headers).status_code == 204
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_bytes()
+    assert calls == 3
+
+
 def test_missing_stream_ticket_denies_upgrade_with_401(gateway: Gateway) -> None:
     """Websocket authentication failures retain the public HTTP error contract."""
     client, _, _ = gateway
@@ -535,7 +570,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
     monkeypatch: pytest.MonkeyPatch,
     slow_phase: str,
 ) -> None:
-    """A slow successful check fits, but a later overdue phase revokes at 30 seconds."""
+    """A nine-second check fits, but a later overdue phase revokes at 30 seconds."""
     loop = asyncio.get_running_loop()
     now = 0.0
     monkeypatch.setattr(loop, "time", lambda: now)
@@ -555,7 +590,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
         for phase in ("authorization", "manager", "status"):
             if phase == slow_phase and len(starts) > 1:
                 try:
-                    await asyncio.sleep(4 if len(starts) == 2 else 18)
+                    await asyncio.sleep(9 if len(starts) == 2 else 18)
                 except asyncio.CancelledError:
                     cancelled.append(phase)
                     raise
@@ -573,14 +608,14 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
 
     try:
         await advance(0)
-        await advance(25)
-        assert starts == [0, 25]
-        await advance(29)
-        assert completed == [0, 29]
+        await advance(15)
+        assert starts == [0, 15]
+        await advance(24)
+        assert completed == [0, 24]
         assert not task.done()
-        await advance(50)
-        assert starts == [0, 25, 50]
-        await advance(55)
+        await advance(30)
+        assert starts == [0, 15, 30]
+        await advance(45)
         assert task.done(), "Overdue authorization/worker check must close within 30 seconds"
         await task
         assert cancelled == [slow_phase]
@@ -1014,6 +1049,7 @@ def test_public_stream_invalid_frames_close_and_unexpected_errors_are_sanitized(
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_bytes()
     assert peer.runtime.status()["controller_session_id"] is None
+    assert [entry["ended_by"] for entry in logs if entry["event"] == "Computer stream ended"] == [["viewer"]]
     if termination == "bug":
         assert any(entry.get("error_type") == "KeyError" for entry in logs)
     assert "credential-bearing-secret" not in str(logs)
@@ -1043,6 +1079,24 @@ def test_requester_quota_rejects_before_allocating_worker(gateway: Gateway) -> N
     assert client.get(path, headers=headers).status_code == 200
     assert client.delete(path, headers=headers).status_code == 204
     peer.openid_subject = "@alice:example.org"
+    assert create(client).status_code == 200
+
+
+def test_abandoned_session_creation_does_not_hold_a_viewer_slot(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A viewer that gives up while its worker starts does not count against the requester quota."""
+    client, _peer, _app = gateway
+    disconnected = True
+
+    async def is_disconnected(_request: Request) -> bool:
+        return disconnected
+
+    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+    for _ in range(8):
+        assert create(client).status_code == 409
+    disconnected = False
     assert create(client).status_code == 200
 
 
