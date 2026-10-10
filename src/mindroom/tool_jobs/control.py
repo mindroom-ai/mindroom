@@ -1,4 +1,4 @@
-"""Lightweight human-follow-up signals and child tool cancellation checkpoints."""
+"""Lightweight queued-turn signals and child tool cancellation checkpoints."""
 
 from __future__ import annotations
 
@@ -63,23 +63,23 @@ class JobControl:
             raise asyncio.CancelledError
 
 
-_human_signal: ContextVar[QueuedTurnSignal | None] = ContextVar("job_human_signal", default=None)
+_turn_signal: ContextVar[QueuedTurnSignal | None] = ContextVar("job_turn_signal", default=None)
 _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
 
 
 def current_queued_turn_signal() -> QueuedTurnSignal | None:
     """Return the signal of the reply this task belongs to; background work has none."""
-    return _human_signal.get()
+    return _turn_signal.get()
 
 
 @contextmanager
 def queued_turn_signal_context(signal: QueuedTurnSignal | None) -> Iterator[None]:
-    """Bind the human signal of one response lifecycle, or clear it for background work."""
-    token = _human_signal.set(signal)
+    """Bind the queued-turn signal of one response lifecycle, or clear it for background work."""
+    token = _turn_signal.set(signal)
     try:
         yield
     finally:
-        _human_signal.reset(token)
+        _turn_signal.reset(token)
 
 
 @contextmanager

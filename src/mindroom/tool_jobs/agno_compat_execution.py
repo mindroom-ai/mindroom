@@ -1,4 +1,4 @@
-"""SDK schema and approved-call dispatch bindings."""
+"""SDK schema and managed-call dispatch bindings."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ def install_tool_job_execution(
     *,
     depth: int = 0,
 ) -> None:
-    """Bind the approved-call owner to primary and concrete fallback models."""
+    """Bind the managed-call owner, which also asks for a job-gated call's approval, to primary and fallback models."""
     _install_owned_dispatch_binding()
     models = [model]
     if fallback_config is not None:

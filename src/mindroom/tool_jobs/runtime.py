@@ -490,7 +490,7 @@ class ToolJobRuntime:
         try:
             try:
                 with (
-                    # Human follow-ups release replies, never the background work they wait for.
+                    # Queued turns release replies, never the background work they wait for.
                     queued_turn_signal_context(None),
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     without_tool_call_recording(),
@@ -571,16 +571,16 @@ class ToolJobRuntime:
             claim = entry.claim_for(claim)
             if claim is None:
                 return _JobWait(await self._snapshot(entry))
-            human_notified = asyncio.Event()
+            turn_queued = asyncio.Event()
 
-            def notify_human() -> None:
-                human_notified.set()
+            def notify_turn_queued() -> None:
+                turn_queued.set()
                 entry.notify_changed()
 
             # Only the waiting reply's own conversation releases it, when its agent answers a newer message there.
             turn_signal = current_queued_turn_signal()
             if turn_signal is not None:
-                turn_signal.subscribe(notify_human)
+                turn_signal.subscribe(notify_turn_queued)
         try:
             while True:
                 async with self._lock:
@@ -596,14 +596,14 @@ class ToolJobRuntime:
                     if entry.job.status == "awaiting_approval" and approval_deadline is not None:
                         approval_remaining = approval_deadline - now
                         remaining = approval_remaining if remaining is None else min(remaining, approval_remaining)
-                    if human_notified.is_set() or (remaining is not None and remaining <= 0):
+                    if turn_queued.is_set() or (remaining is not None and remaining <= 0):
                         return _JobWait(await self._snapshot(entry))
                     changed = entry.changed
                 with suppress(TimeoutError):
                     await asyncio.wait_for(changed.wait(), remaining)
         finally:
             if turn_signal is not None:
-                turn_signal.unsubscribe(notify_human)
+                turn_signal.unsubscribe(notify_turn_queued)
             if not retained:
                 await self.release_wait(job_id, claim)
 
