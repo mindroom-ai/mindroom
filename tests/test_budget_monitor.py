@@ -324,7 +324,7 @@ def test_status_before_first_scan_reports_current_month_without_spend(tmp_path: 
     assert payload["users"] == []
 
 
-def test_decision_cost_does_not_grow_with_configured_users(tmp_path: Path) -> None:
+def test_decision_resolves_the_requester_once_regardless_of_configured_users(tmp_path: Path) -> None:
     users = {f"@user{index}:example.test": 50.0 for index in range(200)}
     config = _config(users=users, monthly_limit_usd=0)
     paths = _paths(tmp_path)
@@ -391,5 +391,21 @@ async def test_idle_tick_rescans_usage_no_reply_reported(tmp_path: Path, monkeyp
     clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
     await _until(
         lambda: (snapshot := monitor.status().snapshot) is not None and snapshot.period_start == date(2026, 11, 1),
+    )
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_never_marks_bots_over_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config().model_copy(update={"bot_accounts": ["@bridgebot:example.test"]})
+    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {"@bridgebot:example.test": 50.0}, config)
+
+    (bot,) = monitor.status().users
+
+    assert bot == _BudgetUserStatus(
+        user_id="@bridgebot:example.test",
+        spend_usd=50.0,
+        limit_usd=None,
+        over_budget=False,
     )
     await monitor.stop()

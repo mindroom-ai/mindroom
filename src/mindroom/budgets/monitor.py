@@ -198,7 +198,12 @@ class BudgetMonitor:
         user_ids = set(spend) | {config.authorization.resolve_alias(user_id) for user_id in config.budgets.users}
         users = []
         for user_id in user_ids:
-            limit = _budget_limit_usd(config, user_id)
+            # Replies for agents and bridge bots are never swapped, so they have no cap to be over.
+            limit = (
+                _budget_limit_usd(config, user_id)
+                if is_human_requester_id(user_id, config, self.runtime_paths)
+                else None
+            )
             user_spend = spend.get(user_id, 0.0)
             users.append(
                 _BudgetUserStatus(

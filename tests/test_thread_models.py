@@ -740,6 +740,22 @@ async def test_over_budget_switch_continues_this_response_on_the_fallback() -> N
 
 
 @pytest.mark.asyncio
+async def test_over_budget_next_turn_switch_says_replies_use_the_fallback() -> None:
+    """The agent should not promise the requested model while the requester is over budget."""
+    context = _make_tool_context()
+    context.config.models["large"].pricing = ModelPricing(input=5, output=30)
+    context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
+    context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+
+    with tool_runtime_context(context):
+        payload = json.loads(await ThreadModelTools().switch_thread_model("large"))
+
+    assert payload["model"] == "large"
+    assert "budget" in payload["note"]
+    assert "`cheap`" in payload["note"]
+
+
+@pytest.mark.asyncio
 async def test_thread_model_tool_rejects_unknown_switch_timing() -> None:
     """Accepting an unknown timing value could persist a change with undefined execution semantics."""
     context = _make_tool_context()
