@@ -66,7 +66,8 @@ A reply that already started finishes on its model.
 ## Over-Budget Replies
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
-This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, voice call replies, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
+This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
+The speech model of a realtime or live call profile is not priced or swapped; its usage is reported as [call duration](usage.md#voice-call-duration).
 Models without prices keep running, because they add no spend.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
 Requests without a human requester, such as unauthenticated OpenAI-compatible calls, are never budgeted.
