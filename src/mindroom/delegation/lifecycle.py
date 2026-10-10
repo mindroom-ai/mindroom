@@ -335,7 +335,7 @@ def prepare_child_turn(
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the model of the child it continues unless the owner's budget swaps it; callers pass its mode.
+    A follow-up keeps the requested model of the child it continues, checked again against the owner's budget; callers pass its mode.
     """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
@@ -348,21 +348,23 @@ def prepare_child_turn(
             session_id=session_id,
         )
     )
-    model_name = budget_model(
-        config,
-        runtime_paths,
-        budget_monitor,
-        owner.requester_id,
-        previous.model_name
-        if previous is not None
-        else config.resolve_runtime_model(
+    if previous is not None:
+        # LEGACY_COMPAT: Delegated children persisted without a requested model.
+        # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
+        # Last legacy release: v2026.10.229; replacement: the next release also persists requested_model_name.
+        # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
+        # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
+        requested_model_name = previous.requested_model_name or previous.model_name
+    else:
+        requested_model_name = config.resolve_runtime_model(
             entity_name=agent_name,
             active_model_name=model,
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
             runtime_paths=runtime_paths,
-        ).model_name,
-    )
+        ).model_name
+    # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
+    model_name = budget_model(config, runtime_paths, budget_monitor, owner.requester_id, requested_model_name)
     return DelegationChild(
         delegation_id=delegation_id,
         parent_tool_call_id=parent_tool_call_id,
@@ -372,6 +374,7 @@ def prepare_child_turn(
         session_id=session_id,
         run_id=uuid4().hex,
         model_name=model_name,
+        requested_model_name=requested_model_name,
         depth=depth + 1,
         execution_identity=serialize_tool_execution_identity(identity),
         subagent_id=previous.subagent_id if previous is not None else delegation_id,

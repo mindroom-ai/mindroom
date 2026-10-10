@@ -129,6 +129,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 | S24 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained subagent without `agent_mode` as standard, so delegations saved before minimal subagents continue unchanged. |
 | S25 | Tiny retained default | [`scheduling.py`][scheduling] reads a scheduled workflow without `pre_approved_call` as an ordinary task, since no task saved before scheduled tool calls carried a call approval. |
+| S26 | Tiny retained default | [`delegation/lifecycle.py`][delegation-lifecycle] reads a retained subagent without `requested_model_name` as requested on its recorded model, so follow-ups of delegations saved before budgets keep that model. |
 
 ## Configuration and credentials
 
@@ -300,6 +301,7 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
 [delegation-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/delegation/state.py
+[delegation-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/delegation/lifecycle.py
 [script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
 [session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
 [skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py

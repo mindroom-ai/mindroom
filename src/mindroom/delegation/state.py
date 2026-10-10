@@ -41,6 +41,8 @@ class DelegationChild:
     # Handling: The dataclass default reads an absent mode as standard, so retained children and follow-ups keep their behavior.
     # Coverage: tests/test_delegation_minimal_mode.py::test_child_snapshot_without_mode_continues_in_standard_mode.
     agent_mode: AgentMode = "standard"
+    # The model the child was asked to use before the requester's budget picked the one it runs on.
+    requested_model_name: str | None = None
 
 
 @dataclass
