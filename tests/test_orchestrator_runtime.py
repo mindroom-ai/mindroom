@@ -41,6 +41,7 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -107,6 +108,30 @@ from tests.conftest import (
     make_matrix_client_mock,
     runtime_paths_for,
 )
+
+
+def test_running_entity_client_returns_only_running_bot_clients(tmp_path: Path) -> None:
+    """Only a running bot with a live client lends that client to runtime collaborators."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    running_client = AsyncMock(spec=nio.AsyncClient)
+
+    def bot(*, running: bool, client: nio.AsyncClient | None) -> AgentBot:
+        managed_bot = MagicMock(spec=AgentBot)
+        managed_bot.running = running
+        managed_bot.client = client
+        return managed_bot
+
+    orchestrator.agent_bots = {
+        "running": bot(running=True, client=running_client),
+        "stopped": bot(running=False, client=AsyncMock(spec=nio.AsyncClient)),
+        "clientless": bot(running=True, client=None),
+    }
+
+    assert orchestrator.running_entity_client("running") is running_client
+    assert orchestrator.running_entity_client("stopped") is None
+    assert orchestrator.running_entity_client("clientless") is None
+    assert orchestrator.running_entity_client("unknown") is None
 
 
 @pytest.mark.asyncio

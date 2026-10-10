@@ -1484,6 +1484,13 @@ class _MultiAgentOrchestrator:
             return None
         return build_hook_matrix_admin(router_bot.client, self.runtime_paths, config=self.config)
 
+    def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
+        """Return the Matrix client of one running managed entity."""
+        bot = self.agent_bots.get(entity_name)
+        if bot is None or not bot.running:
+            return None
+        return bot.client
+
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
         if failed_agents:

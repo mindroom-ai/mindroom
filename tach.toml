@@ -637,6 +637,7 @@ depends_on = [
     "mindroom.matrix.thread_history_result",
 ]
 visibility = [
+    "mindroom.custom_tools.thread_move",
     "mindroom.bot",
     "mindroom.command_turn_executor",
     "mindroom.commands.handler",
@@ -2056,6 +2057,7 @@ path = "mindroom.custom_tools.attachment_helpers"
 depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.state",
+    "mindroom.matrix.thread_room_scan",
     "mindroom.requester_identity",
 ]
 
@@ -2171,10 +2173,29 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.thread_move"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.media",
+    "mindroom.matrix.member_display_names",
+    "mindroom.matrix.message_builder",
+    "mindroom.matrix.message_extras",
+    "mindroom.matrix.sidecar_content",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.thread_resolution"
 depends_on = [
     "mindroom.custom_tools.attachment_helpers",
-    "mindroom.matrix.thread_room_scan",
     "mindroom.thread_tags",
     "mindroom.tool_system.runtime_context",
 ]
@@ -3356,6 +3377,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
+    "mindroom.custom_tools.thread_move",
     "mindroom.matrix.personal_rooms",
     "mindroom.custom_tools.matrix_message_idempotency",
     "mindroom.approval_transport",
@@ -3413,6 +3435,7 @@ depends_on = [
     "mindroom.thread_tags",
 ]
 visibility = [
+    "mindroom.custom_tools.thread_move",
     "mindroom.matrix.personal_rooms",
     "mindroom.api.matrix_operations",
     "mindroom.bot",
@@ -6022,7 +6045,7 @@ expose = [
 ]
 from = ["mindroom.matrix.thread_room_scan"]
 visibility = [
-    "mindroom.custom_tools.thread_resolution",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.thread_summary",
     "mindroom.custom_tools.thread_tags",
     "mindroom.matrix.thread_mutation_impact",

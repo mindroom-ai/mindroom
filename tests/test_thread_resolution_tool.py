@@ -226,7 +226,7 @@ async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_pat
 
     with (
         patch(
-            "mindroom.custom_tools.thread_resolution.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id_for_client",
             new=AsyncMock(side_effect=RuntimeError("lookup failed")),
         ),
         patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_set,

@@ -134,7 +134,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.

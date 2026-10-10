@@ -45,7 +45,7 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
+    UNFINISHED_REPLY_STATUSES,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -3639,12 +3639,7 @@ class ResponseRunner:
                 interrupted_tools=interrupted_tools,
             )
             instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
-        elif message is None or message.stream_status in {
-            None,
-            STREAM_STATUS_PENDING,
-            STREAM_STATUS_STREAMING,
-            STREAM_STATUS_APPROVAL_PENDING,
-        }:
+        elif message is None or message.stream_status is None or message.stream_status in UNFINISHED_REPLY_STATUSES:
             # Unreadable, or stopped before showing anything (an acknowledgement,
             # hidden or non-streamed tool calls): unknown work, not absent work.
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
