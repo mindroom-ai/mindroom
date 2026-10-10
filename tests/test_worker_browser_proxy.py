@@ -117,8 +117,8 @@ def test_primary_egress_follows_curl_proxy_precedence(
     """Scheme proxies win over all_proxy, which applies only to schemes without one."""
     egress = browser_egress({}, env, egress_control=False)
     assert (egress.http, egress.https, egress.by_hostname) == (expected_http, expected_https, False)
-    assert egress._upstream_for(80) == expected_http
-    assert egress._upstream_for(443) == egress._upstream_for(8443) == expected_https
+    assert egress.upstream_for(80) == expected_http
+    assert egress.upstream_for(443) == egress.upstream_for(8443) == expected_https
 
 
 @pytest.mark.parametrize(
@@ -172,8 +172,8 @@ def test_runner_egress_fails_closed_on_unsupported_or_ambiguous_proxies(
 def test_no_proxy_matches_names_by_suffix_and_addresses_by_range(host: str, address: str, expected: bool) -> None:
     """NO_PROXY decides only whether an already validated destination skips the upstream proxy."""
     egress = BrowserEgress(no_proxy=(".corp.example", "printer", "10.0.0.0/8", "192.168.1.5", "[fd00::5]"))
-    assert egress._bypasses(host, ipaddress.ip_address(address)) is expected
-    assert BrowserEgress(no_proxy=("*",))._bypasses(host, ipaddress.ip_address(address)) is True
+    assert egress.bypasses(host, ipaddress.ip_address(address)) is expected
+    assert BrowserEgress(no_proxy=("*",)).bypasses(host, ipaddress.ip_address(address)) is True
 
 
 class _RecordingUpstream:
@@ -994,7 +994,7 @@ async def test_address_that_drops_connections_falls_back_to_the_next_validated_a
 @pytest.mark.asyncio
 async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     """A runner's egress proxy gets the name once and picks the address itself, so its slow tunnel is not cut short."""
-    original_tunnel = browser_proxy._open_upstream_tunnel
+    original_tunnel = browser_proxy.open_upstream_tunnel
 
     def validate(_host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
         return [ipaddress.IPv4Address("8.8.8.8"), ipaddress.IPv4Address("8.8.4.4")]
@@ -1009,7 +1009,7 @@ async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: p
         return await original_tunnel(upstream, target, port, tls)
 
     monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
-    monkeypatch.setattr(browser_proxy, "_open_upstream_tunnel", slow_tunnel)
+    monkeypatch.setattr(browser_proxy, "open_upstream_tunnel", slow_tunnel)
     monkeypatch.setattr(browser_proxy, "_ATTEMPT_DEADLINE", 0.05)
     recorder = _RecordingUpstream()
     async with recorder as upstream_proxy:

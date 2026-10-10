@@ -524,6 +524,77 @@ async def test_error_inside_context_still_stops_broker(
     assert _broker_threads() == []
 
 
+@pytest.fixture
+def no_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the test process's own proxy variables out of the broker's dial policy."""
+    for name in ("all_proxy", "http_proxy", "https_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+
+
+@pytest.mark.usefixtures("no_proxy_env")
+@pytest.mark.parametrize(
+    ("env", "https_proxy", "no_proxy"),
+    [
+        ({}, None, ()),
+        (
+            {"HTTPS_PROXY": "http://proxy.corp:3128", "NO_PROXY": ".svc, 10.0.0.0/8"},
+            ("proxy.corp", 3128),
+            (".svc", "10.0.0.0/8"),
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dial_policy_follows_the_primary_proxy_env(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    https_proxy: tuple[str, int] | None,
+    no_proxy: tuple[str, ...],
+) -> None:
+    """The broker dials upstreams through the primary's HTTPS_PROXY, honoring its NO_PROXY, and directly without them."""
+    policies: list[DialPolicy] = []
+
+    def dial_policy(**kwargs: object) -> DialPolicy:
+        policies.append(DialPolicy(**kwargs))  # type: ignore[arg-type]
+        return policies[-1]
+
+    monkeypatch.setattr(service, "DialPolicy", dial_policy)
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()), **env)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
+        pass
+    [policy] = policies
+    assert policy.egress is not None
+    upstream = policy.egress.upstream_for(443)
+    assert (None if upstream is None else (upstream.host, upstream.port)) == https_proxy
+    assert policy.egress.no_proxy == no_proxy
+    assert policy.egress.upstream_for(80) is None
+
+
+@pytest.mark.asyncio
+async def test_operator_proxy_error_stops_startup(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy configuration error refuses to start the broker, rather than dialing around the operator proxy."""
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        msg = "Browser cannot use https_proxy: it is not a valid proxy URL."
+        raise ValueError(msg)
+
+    monkeypatch.setattr(service, "browser_egress", refuse)
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
+    with pytest.raises(ValueError, match="Browser cannot use https_proxy"):
+        async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
+            pytest.fail("the broker must not start")
+    assert _broker_threads() == []
+    assert active_audit_log() is None
+    assert not (tmp_path / "mindroom_data" / "egress_broker").exists()
+
+
 @pytest.mark.asyncio
 async def test_bind_error_propagates(
     tmp_runtime_paths: Callable[..., RuntimePaths],

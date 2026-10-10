@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from mindroom.runtime_env_policy import (
     EGRESS_BROKER_ENV_BY_KEY,
     credentials_encryption_key_value,
 )
+from mindroom.worker_computer.browser_proxy import browser_egress
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
@@ -180,6 +182,10 @@ class _BrokerService:
 
     def start(self) -> None:
         """Load or create the broker state, then block until the listener is bound; re-raise the bind error."""
+        # Upstream dials follow the primary's own HTTPS_PROXY and NO_PROXY, like its other outbound traffic.
+        dial_policy = DialPolicy(
+            egress=browser_egress(self._runtime_paths.process_env, os.environ, egress_control=False),
+        )
         state_dir = self._runtime_paths.storage_root / "egress_broker"
         key = credentials_encryption_key_value(self._runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV))
         ca = BrokerCA.load_or_create(state_dir, key_password=None if key is None else key.encode())
@@ -193,7 +199,7 @@ class _BrokerService:
             config_provider=_egress_config_reader(self._config_provider),
             resolve_secret=lambda claims, name: load_secret(credentials_manager, claims.to_worker_target(), name),
             audit=audit,
-            dial_policy=DialPolicy(),
+            dial_policy=dial_policy,
             # None selects the broker's verifying context: system roots plus certifi.
             upstream_ssl_context=None,
             manage_url=lambda _claims: link,
