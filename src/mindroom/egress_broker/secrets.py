@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mindroom.config.egress_broker import EgressService
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 __all__ = [
+    "EgressServiceStatus",
+    "OAuthStatus",
+    "OAuthStatusReader",
+    "Secret",
+    "SecretMissing",
+    "SecretNeedsReconnect",
+    "SecretResult",
     "SecretStatus",
     "delete_secret",
     "egress_credential_service",
     "load_secret",
     "save_secret",
     "secret_status",
+    "service_status",
 ]
 
 _MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
@@ -208,4 +219,93 @@ def secret_status(
     return SecretStatus(
         configured=True,
         updated_at=credentials.get("_updated_at"),  # type: ignore[arg-type]
+    )
+
+
+@dataclass(frozen=True)
+class Secret:
+    """The secret the broker injects for one request; its value never appears in a repr."""
+
+    value: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class SecretMissing:
+    """No secret in scope: no stored key and no usable OAuth connection.
+
+    `provider` and `connect_url` name the OAuth account the user can connect instead, when the service has a
+    connectable provider. The URL carries a one-time connect token, so it stays out of reprs and logs.
+    """
+
+    provider: str | None = None
+    connect_url: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class SecretNeedsReconnect:
+    """The scope's OAuth connection exists but cannot supply a token: the grant was revoked or refresh failed.
+
+    `reset_required` means the stored credential is unreadable and must be reset before reconnecting.
+    """
+
+    provider: str
+    connect_url: str | None = field(default=None, repr=False)
+    reset_required: bool = False
+
+
+type SecretResult = Secret | SecretMissing | SecretNeedsReconnect
+
+
+@dataclass(frozen=True)
+class OAuthStatus:
+    """Connection state of a service's OAuth provider for one scope; never holds a token."""
+
+    provider: str
+    display_name: str
+    connected: bool
+    account_label: str | None
+    can_connect: bool
+    reset_required: bool
+
+
+type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatus | None]
+
+
+@dataclass(frozen=True)
+class EgressServiceStatus:
+    """Which secret source a service has in one scope; an explicit key wins over OAuth."""
+
+    configured: bool
+    active_source: Literal["key", "oauth"] | None
+    key_configured: bool
+    key_updated_at: str | None
+    oauth: OAuthStatus | None
+
+
+def service_status(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    service: EgressService,
+    name: str,
+    *,
+    oauth_status: OAuthStatusReader,
+) -> EgressServiceStatus:
+    """Return both secret sources of an egress service for a worker target or the global store.
+
+    `oauth_status(provider_id, target)` reports the service's OAuth provider for the same target; it is not
+    called for services without one. Never returns a secret or token.
+    """
+    key = secret_status(manager, target, name)
+    oauth = oauth_status(service.oauth_provider, target) if service.oauth_provider is not None else None
+    active_source: Literal["key", "oauth"] | None = None
+    if key.configured:
+        active_source = "key"
+    elif oauth is not None and oauth.connected:
+        active_source = "oauth"
+    return EgressServiceStatus(
+        configured=active_source is not None,
+        active_source=active_source,
+        key_configured=key.configured,
+        key_updated_at=key.updated_at,
+        oauth=oauth,
     )

@@ -22,6 +22,7 @@ from mindroom.egress_broker._relay import (
     upstream_request_headers,
 )
 from mindroom.egress_broker.rules import RuleMatch, host_has_rules, inject_credentials, match_rule
+from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from mindroom.egress_broker._relay import Relay
     from mindroom.egress_broker.ca import BrokerCA
     from mindroom.egress_broker.proxy import ManageUrl, SecretResolver
+    from mindroom.egress_broker.secrets import SecretResult
     from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
 __all__ = ["TlsInterceptor"]
@@ -259,21 +261,38 @@ class TlsInterceptor:
     async def _secret(self, client: Peer, entry: AuditEntry, service: str) -> str | None:
         """Return the worker scope's secret for `service`; otherwise answer the client, audit, and return None."""
         try:
-            secret = await asyncio.to_thread(self._resolve_secret, entry.claims, service)
-            manage_url = None if secret else self._manage_url(entry.claims)
+            result = await asyncio.to_thread(self._resolve_secret, entry.claims, service)
+            if isinstance(result, Secret) and result.value:
+                return result.value
+            body = self._refusal(entry.claims, service, result)
         except Exception as exc:
             logger.warning("egress_broker_secret_lookup_failed", error_type=type(exc).__name__)
             await self._relay.reject(client, entry, 502, {"error": "broker_error"})
             return None
-        if not secret:
-            body: dict[str, object] = {
-                "error": "credential_not_configured",
+        await self._relay.deny(client, entry, body)
+        return None
+
+    def _refusal(self, claims: WorkerClaims, service: str, result: SecretResult) -> dict[str, object]:
+        """Return the 403 body for a lookup without a secret: where to reconnect, or where to set one."""
+        if isinstance(result, SecretNeedsReconnect):
+            reconnect: dict[str, object] = {
+                "error": "oauth_connection_required",
                 "service": service,
-                "manage_url": manage_url,
+                "provider": result.provider,
+                "connect_url": result.connect_url,
             }
-            await self._relay.deny(client, entry, body)
-            return None
-        return secret
+            if result.reset_required:
+                reconnect["reset_required"] = True
+            return reconnect
+        missing: dict[str, object] = {
+            "error": "credential_not_configured",
+            "service": service,
+            "manage_url": self._manage_url(claims),
+        }
+        if isinstance(result, SecretMissing) and result.provider is not None:
+            missing["provider"] = result.provider
+            missing["connect_url"] = result.connect_url
+        return missing
 
     async def _forward(
         self,

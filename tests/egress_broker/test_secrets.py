@@ -6,19 +6,25 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.config.egress_broker import EgressService
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import CredentialsManager
 from mindroom.egress_broker.secrets import (
+    EgressServiceStatus,
+    OAuthStatus,
     delete_secret,
     egress_credential_service,
     load_secret,
     save_secret,
     secret_status,
+    service_status,
 )
 from mindroom.egress_broker.tokens import WorkerClaims
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 def _manager(tmp_path: Path) -> CredentialsManager:
@@ -272,3 +278,76 @@ def test_none_target_uses_global_store(tmp_path: Path) -> None:
         assert list(private_oauth_dir.rglob("egress_github*")) == []
     if workers_dir.exists():
         assert list(workers_dir.rglob("egress_github*")) == []
+
+
+_RULES = [{"host": "api.github.com", "auth": {"type": "bearer"}}]
+
+
+def _oauth(*, connected: bool) -> OAuthStatus:
+    return OAuthStatus(
+        provider="github",
+        display_name="GitHub",
+        connected=connected,
+        account_label="alice@example.org" if connected else None,
+        can_connect=True,
+        reset_required=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "oauth_connected", "active_source"),
+    [
+        (True, True, "key"),
+        (True, False, "key"),
+        (False, True, "oauth"),
+        (False, False, None),
+    ],
+)
+def test_service_status_prefers_the_key_over_oauth(
+    tmp_path: Path,
+    key: bool,
+    oauth_connected: bool,
+    active_source: str | None,
+) -> None:
+    """A stored key is the active source whenever it is set; a connected OAuth account is used otherwise."""
+    manager = _manager(tmp_path)
+    target = _claims(worker_scope="user_agent").to_worker_target()
+    if key:
+        save_secret(manager, target, "github", "secret-value")
+    calls: list[tuple[str, ResolvedWorkerTarget | None]] = []
+
+    def oauth_status(provider_id: str, scope: ResolvedWorkerTarget | None) -> OAuthStatus:
+        calls.append((provider_id, scope))
+        return _oauth(connected=oauth_connected)
+
+    service = EgressService(rules=_RULES, oauth_provider="github")
+    status = service_status(manager, target, service, "github", oauth_status=oauth_status)
+
+    assert status == EgressServiceStatus(
+        configured=active_source is not None,
+        active_source=active_source,  # type: ignore[arg-type]
+        key_configured=key,
+        key_updated_at=status.key_updated_at,
+        oauth=_oauth(connected=oauth_connected),
+    )
+    assert (status.key_updated_at is not None) == key
+    assert calls == [("github", target)]
+    assert "secret-value" not in repr(status)
+
+
+def test_service_status_without_oauth_provider_skips_oauth(tmp_path: Path) -> None:
+    """A service without an OAuth provider reports only its key and never asks for OAuth status."""
+    manager = _manager(tmp_path)
+
+    def oauth_status(_provider_id: str, _scope: ResolvedWorkerTarget | None) -> OAuthStatus:
+        pytest.fail("a service without oauth_provider has no OAuth status")
+
+    status = service_status(manager, None, EgressService(rules=_RULES), "github", oauth_status=oauth_status)
+
+    assert status == EgressServiceStatus(
+        configured=False,
+        active_source=None,
+        key_configured=False,
+        key_updated_at=None,
+        oauth=None,
+    )

@@ -32,11 +32,12 @@ if TYPE_CHECKING:
     from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.egress_broker.audit import AuditLog
     from mindroom.egress_broker.ca import BrokerCA
+    from mindroom.egress_broker.secrets import SecretResult
     from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
 __all__ = ["EgressBroker", "ManageUrl", "SecretResolver"]
 
-type SecretResolver = Callable[[WorkerClaims, str], str | None]
+type SecretResolver = Callable[[WorkerClaims, str], SecretResult]
 type ManageUrl = Callable[[WorkerClaims], str | None]
 
 

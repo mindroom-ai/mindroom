@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import socket
 import ssl
 import stat
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -23,7 +24,7 @@ from mindroom.egress_broker import service
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
-from mindroom.egress_broker.secrets import save_secret
+from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import (
     active_audit_log,
     active_ca_pem,
@@ -32,7 +33,14 @@ from mindroom.egress_broker.service import (
     serve_egress_broker,
 )
 from mindroom.egress_broker.tokens import TokenSigner
+from mindroom.oauth.github import github_oauth_provider
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
+from tests.oauth_test_utils import (
+    DelayedTokenEndpointOutcome,
+    publish_oauth_credentials,
+    rotated_token_response,
+    serve_token_endpoint,
+)
 
 from .conftest import audit_records, connect_request, proxy_authorization
 
@@ -40,7 +48,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.config.egress_broker import EgressService
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
     from .conftest import RawResponse, Upstream, UpstreamCA
@@ -55,6 +65,9 @@ _OPENAI = {
     "rules": [{"host": "api.openai.com", "auth": {"type": "bearer"}}],
     "placeholder_env": {"OPENAI_API_KEY": _PLACEHOLDER},
 }
+_GITHUB_OAUTH = {**_GITHUB, "oauth_provider": "github"}
+_PUBLIC_URL = "https://chat.example.org"
+_OAUTH_REFRESH_TOKEN = "github-refresh"  # noqa: S105 - test credential
 
 
 @pytest.fixture
@@ -108,8 +121,8 @@ def _broker_env(port: int, **extra: str) -> dict[str, str]:
     }
 
 
-def _target(requester_id: str = "@alice:example.org", agent_name: str = "code") -> ResolvedWorkerTarget:
-    identity = ToolExecutionIdentity(
+def _identity(requester_id: str, agent_name: str = "code") -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
         requester_id=requester_id,
@@ -120,7 +133,20 @@ def _target(requester_id: str = "@alice:example.org", agent_name: str = "code") 
         tenant_id=None,
         account_id=None,
     )
-    return resolve_worker_target("user_agent", agent_name, identity, private_agent_names=frozenset())
+
+
+def _target(
+    requester_id: str = "@alice:example.org",
+    agent_name: str = "code",
+    *,
+    scope: WorkerScope = "user_agent",
+) -> ResolvedWorkerTarget:
+    return resolve_worker_target(
+        scope,
+        agent_name,
+        _identity(requester_id, agent_name),
+        private_agent_names=frozenset(),
+    )
 
 
 def _config(**services: object) -> Config:
@@ -375,15 +401,21 @@ async def test_secret_status_failure_skips_only_that_service(
     target = _target()
     save_secret(manager, target, "github", "s3cret")
     save_secret(manager, target, "openai", "sk-s3cret")
-    real_secret_status = service.secret_status
+    real_service_status = service.service_status
 
-    def flaky_secret_status(store: CredentialsManager, scope: ResolvedWorkerTarget, name: str) -> object:
+    def flaky_service_status(
+        store: CredentialsManager,
+        scope: ResolvedWorkerTarget,
+        egress_service: EgressService,
+        name: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> object:
         if name == "openai":
             msg = "sk-s3cret could not be decrypted"
             raise OSError(msg)
-        return real_secret_status(store, scope, name)
+        return real_service_status(store, scope, egress_service, name, **kwargs)
 
-    monkeypatch.setattr(service, "secret_status", flaky_secret_status)
+    monkeypatch.setattr(service, "service_status", flaky_service_status)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         with capture_logs() as logs:
             env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
@@ -655,3 +687,192 @@ async def test_bind_error_propagates(
 def test_manage_url(tmp_runtime_paths: Callable[..., RuntimePaths], env: dict[str, str], expected: str | None) -> None:
     """The manage link is the personal egress page behind trusted upstream auth, else the dashboard."""
     assert manage_url(tmp_runtime_paths(**env)) == expected
+
+
+@pytest.fixture
+def github_oauth_client(manager: CredentialsManager) -> None:
+    """Configure the GitHub OAuth app, so GitHub accounts can be connected and refreshed."""
+    manager.save_credentials("github_oauth_client", {"client_id": "github-client-id", "client_secret": "gh-secret"})
+
+
+def _connect_github(
+    manager: CredentialsManager,
+    requester_id: str,
+    token: str,
+    *,
+    expires_at: float = 4_102_444_800.0,
+) -> None:
+    """Store a GitHub connection in the requester's own store, as the connect flow does for every agent scope."""
+    provider = github_oauth_provider()
+    publish_oauth_credentials(
+        provider,
+        {
+            "token": token,
+            "refresh_token": _OAUTH_REFRESH_TOKEN,
+            "token_uri": provider.token_url,
+            "client_id": "github-client-id",
+            "scopes": [],
+            "expires_at": expires_at,
+            "_source": "oauth",
+            "_oauth_provider": "github",
+        },
+        credentials_manager=manager,
+        worker_target=resolve_worker_target("user", "code", _identity(requester_id)),
+    )
+
+
+def _oauth_runtime(tmp_runtime_paths: Callable[..., RuntimePaths]) -> RuntimePaths:
+    return tmp_runtime_paths(
+        **_broker_env(_free_port()),
+        MINDROOM_PUBLIC_URL=_PUBLIC_URL,
+        MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
+    )
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_stored_key_wins_over_oauth_and_its_removal_falls_back_without_restart(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """With both sources the stored key is injected; once it is removed the same token gets the OAuth token."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    target = _target()
+    save_secret(manager, target, "github", "s3cret")
+    _connect_github(manager, "@alice:example.org", "alice-oauth")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        with_key = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+        delete_secret(manager, target, "github")
+        with_oauth = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert with_key.json()["headers"]["authorization"] == ["Bearer s3cret"]
+    assert with_oauth.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+
+
+@pytest.mark.usefixtures("github_oauth_client")
+@pytest.mark.asyncio
+async def test_placeholder_env_when_only_oauth_is_connected(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """A connected OAuth account alone gives the scope its placeholders; the token itself never enters the env."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    _connect_github(manager, "@alice:example.org", "alice-oauth")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        bob_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target("@bob:example.org"))
+    assert alice_env["GH_TOKEN"] == _PLACEHOLDER
+    assert "alice-oauth" not in str(alice_env)
+    assert "GH_TOKEN" not in bob_env
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_requester_scoped_oauth_on_a_shared_agent_injects_the_callers_token(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """Two requesters on one shared agent each get their own GitHub token, from their own verified proxy token."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    _connect_github(manager, "@alice:example.org", "alice-oauth")
+    _connect_github(manager, "@bob:example.org", "bob-oauth")
+    alice = _target(scope="shared")
+    bob = _target("@bob:example.org", scope="shared")
+    assert alice.worker_key == bob.worker_key
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=alice)
+        bob_env = execution_env_for_worker(runtime_paths, config=config, worker_target=bob)
+        alice_response = await _get_through(alice_env, tls_upstream.url("/echo"), tmp_path / "runner")
+        bob_response = await _get_through(bob_env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert alice_response.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+    assert bob_response.json()["headers"]["authorization"] == ["Bearer bob-oauth"]
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_concurrent_requests_refresh_an_expired_token_once(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several tunnels hitting an expired token at once share a single refresh and all inject the new token."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    _connect_github(manager, "@alice:example.org", "stale-oauth", expires_at=1.0)
+    presented = serve_token_endpoint(monkeypatch, [DelayedTokenEndpointOutcome(0.3, rotated_token_response())])
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        worker_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        assert apply_runner_ca_bundle(worker_env, tmp_path / "runner")
+        async with httpx.AsyncClient(
+            proxy=worker_env["HTTPS_PROXY"],
+            verify=ssl.create_default_context(cafile=worker_env["SSL_CERT_FILE"]),
+            trust_env=False,
+        ) as client:
+            responses = await asyncio.gather(*(client.get(tls_upstream.url("/echo")) for _ in range(6)))
+    assert [response.json()["headers"]["authorization"] for response in responses] == [
+        ["Bearer rotated-access-token"],
+    ] * 6
+    assert presented == [_OAUTH_REFRESH_TOKEN]
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_revoked_grant_returns_oauth_connection_required(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh the provider rejects answers 403 with a reconnect link; no token reaches the body or the logs."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    _connect_github(manager, "@alice:example.org", "stale-oauth", expires_at=1.0)
+    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        with capture_logs() as logs:
+            response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    body = response.json()
+    assert response.status_code == 403
+    assert body.keys() == {"error", "service", "provider", "connect_url"}
+    assert (body["error"], body["service"], body["provider"]) == ("oauth_connection_required", "github", "github")
+    assert body["connect_url"].startswith(f"{_PUBLIC_URL}/api/oauth/github/authorize?connect_token=")
+    assert tls_upstream.hits == []
+    for leaked in ("stale-oauth", _OAUTH_REFRESH_TOKEN):
+        assert leaked not in response.text
+    for leaked in ("stale-oauth", _OAUTH_REFRESH_TOKEN, urlsplit(body["connect_url"]).query):
+        assert leaked not in repr(logs)
+    assert any(entry["event"] == "egress_broker_oauth_token_unavailable" for entry in logs)
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_missing_connection_returns_connect_url(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """With neither a key nor a connection, the 403 offers both the key page and a link to connect the account."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    body = response.json()
+    assert response.status_code == 403
+    assert body.keys() == {"error", "service", "manage_url", "provider", "connect_url"}
+    assert (body["error"], body["service"], body["provider"]) == ("credential_not_configured", "github", "github")
+    assert body["manage_url"] == f"{_PUBLIC_URL}/connections/egress"
+    assert body["connect_url"].startswith(f"{_PUBLIC_URL}/api/oauth/github/authorize?connect_token=")
+    assert tls_upstream.hits == []

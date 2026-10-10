@@ -25,6 +25,7 @@ from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, Egress
 from mindroom.egress_broker.ca import materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.mitm import _verifying_context
+from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect
 from tests.egress_broker.conftest import audit_records, connect_request, proxy_authorization, read_raw_response
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     ProxyClient = Callable[..., httpx.AsyncClient]
 
 MANAGE_URL = "https://m.test/connections/egress"
+CONNECT_URL = "https://m.test/api/oauth/github/authorize?connect_token=one-time-token"
 SECRET = "s3cret"  # noqa: S105 - test credential the fake upstream expects
 _PROXY_ENV = {"http_proxy", "https_proxy", "all_proxy", "no_proxy", "git_askpass", "ssh_askpass"}
 
@@ -336,6 +338,79 @@ async def test_missing_secret_returns_403_with_manage_url(
     assert tls_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.service, record.path) == ("denied", 403, "svc", "/echo")
+
+
+@pytest.mark.asyncio
+async def test_missing_secret_offers_oauth_connect_link(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+) -> None:
+    """A service whose OAuth provider can be connected names it and the link beside the key page."""
+    await broker(
+        _config(),
+        resolve_secret=lambda _claims, _service: SecretMissing(provider="github", connect_url=CONNECT_URL),
+        manage_url=lambda _claims: MANAGE_URL,
+    )
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "svc",
+        "manage_url": MANAGE_URL,
+        "provider": "github",
+        "connect_url": CONNECT_URL,
+    }
+    assert tls_upstream.hits == []
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.service) == ("denied", 403, "svc")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            SecretNeedsReconnect(provider="github", connect_url=CONNECT_URL),
+            {"error": "oauth_connection_required", "service": "svc", "provider": "github", "connect_url": CONNECT_URL},
+        ),
+        (
+            SecretNeedsReconnect(provider="github", reset_required=True),
+            {
+                "error": "oauth_connection_required",
+                "service": "svc",
+                "provider": "github",
+                "connect_url": None,
+                "reset_required": True,
+            },
+        ),
+    ],
+)
+async def test_oauth_reconnect_required_gets_403_without_reaching_upstream(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+    result: SecretNeedsReconnect,
+    expected: dict[str, object],
+) -> None:
+    """A connection that cannot supply a token tells the agent to reconnect, or to reset first, and is audited."""
+    await broker(_config(), resolve_secret=lambda _claims, _service: result, manage_url=lambda _claims: MANAGE_URL)
+    client = proxy_client(broker.token())
+
+    with capture_logs() as logs:
+        response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 403
+    assert response.json() == expected
+    assert tls_upstream.hits == []
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.service, record.path) == ("denied", 403, "svc", "/echo")
+    assert "one-time-token" not in repr(logs)
 
 
 @pytest.mark.asyncio
@@ -806,7 +881,7 @@ async def test_secret_with_line_break_gets_502_without_leaking(
     audit: AuditLog,
 ) -> None:
     """A stored secret that is not a valid header value fails the request without reaching logs or the upstream."""
-    await broker(_config(), resolve_secret=lambda _claims, _service: f"{SECRET}\r\nX-Injected: y")
+    await broker(_config(), resolve_secret=lambda _claims, _service: Secret(f"{SECRET}\r\nX-Injected: y"))
     client = proxy_client(broker.token())
 
     with capture_logs() as logs:

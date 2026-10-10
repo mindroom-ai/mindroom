@@ -27,6 +27,8 @@ can_use  # JSON response field consumed by connections portal (src/mindroom/api/
 avatar  # FastAPI route (src/mindroom/api/connections.py)
 can_connect  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
+key_configured  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
+key_updated_at  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
 localhostProfile  # Kubernetes wire TypedDict key (src/mindroom/workers/backends/kubernetes_config.py)
 connection_url  # TypedDict field consumed by gateway clients (src/mindroom/mcp_gateway/types.py)
 inputSchema  # TypedDict field consumed by gateway clients (src/mindroom/mcp_gateway/types.py)

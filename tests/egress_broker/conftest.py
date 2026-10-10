@@ -25,6 +25,7 @@ from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.proxy import EgressBroker, ManageUrl, SecretResolver
+from mindroom.egress_broker.secrets import Secret, SecretMissing
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
 if TYPE_CHECKING:
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.egress_broker.audit import AuditRecord
+    from mindroom.egress_broker.secrets import SecretResult
 
 DEFAULT_CLAIMS = WorkerClaims(
     worker_key="worker-alice-code",
@@ -352,9 +354,11 @@ class BrokerFactory:
         """
         current = config or EgressBrokerConfig()
         stored = dict(secrets or {})
-        lookup = resolve_secret or (lambda _claims, service: stored.get(service))
+        lookup = resolve_secret or (
+            lambda _claims, service: Secret(stored[service]) if service in stored else SecretMissing()
+        )
 
-        def recording_lookup(claims: WorkerClaims, service: str) -> str | None:
+        def recording_lookup(claims: WorkerClaims, service: str) -> SecretResult:
             self.resolved.append(service)
             return lookup(claims, service)
 

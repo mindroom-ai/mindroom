@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import threading
 from contextlib import asynccontextmanager, suppress
@@ -16,8 +17,16 @@ from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import broker_execution_env, primary_callback_hosts
+from mindroom.egress_broker.oauth_source import Missing, Token, oauth_status, resolve_oauth_token
 from mindroom.egress_broker.proxy import EgressBroker
-from mindroom.egress_broker.secrets import load_secret, secret_status
+from mindroom.egress_broker.secrets import (
+    Secret,
+    SecretMissing,
+    SecretNeedsReconnect,
+    SecretResult,
+    load_secret,
+    service_status,
+)
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import (
@@ -160,26 +169,69 @@ def manage_url(runtime_paths: RuntimePaths) -> str | None:
     return f"{public_url}/"
 
 
-def _egress_config_reader(config_provider: Callable[[], Config | None]) -> Callable[[], EgressBrokerConfig]:
-    """Adapt the primary's config provider to the broker, which reads it once per CONNECT or request.
+class _LastGoodConfig:
+    """The primary's config as the broker reads it: once per CONNECT, request, and secret lookup.
 
     While the provider has no valid config (it returns None or raises, for example after an invalid edit),
     the broker keeps the last config it read, so a broken save cannot turn ``deny`` into ``passthrough``.
     Before any good read the broker has no rules: nothing is injected.
     """
-    last_good = EgressBrokerConfig()
 
-    def read() -> EgressBrokerConfig:
-        nonlocal last_good
+    def __init__(self, config_provider: Callable[[], Config | None]) -> None:
+        self._config_provider = config_provider
+        self._config: Config | None = None
+
+    def current(self) -> Config | None:
         try:
-            config = config_provider()
+            config = self._config_provider()
         except Exception:
-            return last_good
+            return self._config
         if config is not None:
-            last_good = config.egress_broker
-        return last_good
+            self._config = config
+        return self._config
 
-    return read
+    def egress(self) -> EgressBrokerConfig:
+        config = self.current()
+        return config.egress_broker if config is not None else EgressBrokerConfig()
+
+
+def _resolve_secret(
+    claims: WorkerClaims,
+    name: str,
+    *,
+    config: _LastGoodConfig,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+) -> SecretResult:
+    """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token."""
+    target = claims.to_worker_target()
+    if key := load_secret(credentials_manager, target, name):
+        return Secret(key)
+    current = config.current()
+    egress_service = current.egress_broker.services.get(name) if current is not None else None
+    if current is None or egress_service is None or egress_service.oauth_provider is None:
+        return SecretMissing()
+    provider_id = egress_service.oauth_provider
+    result = resolve_oauth_token(
+        service=name,
+        provider_id=provider_id,
+        config=current,
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=target,
+    )
+    if isinstance(result, Token):
+        return Secret(result.value)
+    if isinstance(result, Missing):
+        # Only a connectable provider has a connect link, and only then is it worth naming.
+        if result.connect_url is None:
+            return SecretMissing()
+        return SecretMissing(provider=provider_id, connect_url=result.connect_url)
+    return SecretNeedsReconnect(
+        provider=provider_id,
+        connect_url=result.connect_url,
+        reset_required=result.reset_required,
+    )
 
 
 class _BrokerService:
@@ -219,11 +271,17 @@ class _BrokerService:
         self._audit = audit = AuditLog(state_dir / "requests.sqlite3")
         credentials_manager = self._credentials_manager
         link = manage_url(self._runtime_paths)
+        config = _LastGoodConfig(self._config_provider)
         broker = EgressBroker(
             ca=ca,
             signer=signer,
-            config_provider=_egress_config_reader(self._config_provider),
-            resolve_secret=lambda claims, name: load_secret(credentials_manager, claims.to_worker_target(), name),
+            config_provider=config.egress,
+            resolve_secret=functools.partial(
+                _resolve_secret,
+                config=config,
+                runtime_paths=self._runtime_paths,
+                credentials_manager=credentials_manager,
+            ),
             audit=audit,
             dial_policy=dial_policy,
             # None selects the broker's verifying context: system roots plus certifi.
@@ -324,9 +382,9 @@ def execution_env_for_worker(
     """Return the broker env for one worker-routed call: a fresh scope-bound token, the CA, and placeholders.
 
     Empty when the broker is not running, there is no config, or the target has no worker identity to sign.
-    Placeholders come only from services with a secret in the target's scope, checked in the store the broker
-    injects from. `call_env` is the env the call already carries; overlaying the result on it keeps its Git
-    config entries.
+    Placeholders come only from services with a secret in the target's scope, a stored key or a usable OAuth
+    connection, checked in the stores the broker injects from. `call_env` is the env the call already carries;
+    overlaying the result on it keeps its Git config entries.
     """
     runtime = _active.runtime
     if runtime is None or config is None or worker_target is None:
@@ -340,8 +398,21 @@ def execution_env_for_worker(
     for name, egress_service in config.egress_broker.services.items():
         if not egress_service.placeholder_env:
             continue
+        read_oauth_status = functools.partial(
+            oauth_status,
+            service=name,
+            config=config,
+            runtime_paths=runtime_paths,
+            credentials_manager=runtime.credentials_manager,
+        )
         try:
-            configured = secret_status(runtime.credentials_manager, scope_target, name).configured
+            configured = service_status(
+                runtime.credentials_manager,
+                scope_target,
+                egress_service,
+                name,
+                oauth_status=read_oauth_status,
+            ).configured
         except Exception as exc:
             # One unreadable secret must not fail the call; the broker reports it if the service is used.
             logger.warning("egress_broker_secret_status_failed", service=name, error_type=type(exc).__name__)
