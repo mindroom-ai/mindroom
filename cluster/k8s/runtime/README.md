@@ -897,7 +897,7 @@ With the broker on, each of them still gets the personal Connections page at `/c
 - Their own keys, and **Connect** and **Disconnect** for their Google, GitHub, and Atlassian accounts.
 - Their own request log, a **Recent requests** table per agent.
 
-The Connections portal's egress rows link to the agent's section on this page with **Manage services**.
+The Connections portal links every agent the user may use for egress to its section on this page with **Manage services**, even an agent that has no services yet.
 Services from `config.yaml` appear read-only as "Added by your administrator".
 Users' services can narrow what the administrator allows but never widen it; see [User services](../../../docs/deployment/egress-broker.md#user-services).
 
@@ -928,8 +928,9 @@ env:
 The JWT must carry the email claim, and the Matrix identity comes from a signed claim as above or from an email-to-Matrix template.
 See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every variable, the Matrix identity options, and the Connections portal.
 
-Recommended: also set `MINDROOM_CONNECTIONS_AGENT` to a private agent (`private.per: user` or `user_agent`), as in the example.
-The egress page does not need it, only the portal's catalog does, but it keeps ordinary dashboard routes limited to `administrators`; without it, every user the gateway admits can read and change dashboard configuration.
+Required for multi-user self-service: also set `MINDROOM_CONNECTIONS_AGENT` to a private agent (`private.per: user` or `user_agent`), as in the example.
+The egress page itself works without it, and only the portal's catalog needs it, but without it `_require_connections_route_authorized` returns early, so nothing keeps trusted users outside the administrator routes and every user the gateway admits gets full dashboard access: configuration edits, shared keys, and the full admin request log, whatever `administrators` lists.
+With it, a user outside `administrators` reaches only the Connections routes and the OAuth callback pages.
 Without trusted upstream auth with JWT, only administrators can manage keys and accounts, on the dashboard Credentials tab, and users cannot add services or see their requests.
 
 ## Matrix Managed Account Authentication

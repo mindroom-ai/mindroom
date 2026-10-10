@@ -222,6 +222,7 @@ Enter one `owner/repo` or `owner/*` per line and it replaces the service's rules
 - `owner/*` gives the owner-wide prefixes `/repos/owner/` and `/owner/`.
 - `uploads.github.com` (release assets) and `/graphql` stay off unless you tick them.
 - Other API paths, such as `/user` or search, stop working while the restriction is on.
+- On a **Custom** service that has no placeholder variables, it also adds `GH_TOKEN` and `GITHUB_TOKEN` with the value `mindroom-brokered`, so `gh` and other GitHub tooling in the worker find a token to send. A service that already has placeholders keeps them.
 
 **What it cannot do:**
 
@@ -341,6 +342,7 @@ The status API returns, for each service and scope, whether a key is set and whe
 The example is abbreviated: each service also has `display_name`, `description`, and `updated_at` (the key's timestamp, kept for older clients), and `source`, which is `config` for a service in `config.yaml` and `user` for a [user service](#user-services).
 Both listings add `rules` (the `host`, `port`, and `path_prefix` of each rule, never its auth, which clients use to warn about overlapping rules).
 The personal listing also adds `is_shared` and `can_manage` per service, and gives each agent `shared` (a shared or unscoped agent) and `can_manage` (the caller may change its keys and services), so a client can offer **Add service** only where it works, even for an agent that has no services yet.
+It also gives each agent `inactive_services`, the entries stored in that agent's scope that the broker ignores, as `{"name": "...", "reason": "shadowed"}` (a config service has that name now) or `"invalid"` (the entry no longer validates); see [User services](#user-services).
 `display_name` can be `null` in the dashboard listing, while the personal listing falls back to the title-cased service name.
 `oauth` is `null` for a service without an account provider.
 `unavailable_reason` is `"shared_sandbox"` when the scope runs in a shared sandbox (a shared or unscoped agent, or any agent on the static runner) and the provider is GitHub or Atlassian without `oauth_on_shared_workers`; the account part is then not connected and not connectable.
@@ -354,7 +356,8 @@ It opens the provider's login in a popup; a connected row then reads "Connected 
 A row whose saved connection cannot be read reads "Reset required" and offers only **Reset connection**; **Connect** returns once the reset is done.
 **Use an API key instead** keeps the Set, Replace, and Remove actions, and a row with a key set says the key is in use.
 In a shared sandbox (a shared or unscoped agent, or any agent on the static runner) a GitHub or Atlassian row offers no **Connect** and says personal accounts are not used in a shared sandbox, unless the service sets `oauth_on_shared_workers`, in which case the row warns that everyone using the agent can act with the connected account.
-The Connections portal cards do not edit services: their egress rows come with a **Manage services** link to the agent's section on the personal page (`/connections/egress#egress-agent-<agent>`), where services are added, edited, and deleted.
+Where the status offers no **Connect** because the scope runs in a shared sandbox, the connect and disconnect routes agree and answer 409 with a message instead of starting a login.
+The Connections portal cards do not edit services: every agent the user may use for egress has a **Manage services** link to its section on the personal page (`/connections/egress#egress-agent-<agent>`), even an agent that has no services yet, where services are added, edited, and deleted.
 
 An agent can also send a user straight to the login: the 403 `credential_not_configured` and `oauth_connection_required` responses and the [`egress_credentials` tool](#agent-tool) point at where to connect, and the broker's responses carry a `connect_url`, a short-lived single-use link.
 The link carries only the connect target, not a login: the browser that opens it must be signed in to MindRoom as the requester the link was minted for.
@@ -373,6 +376,7 @@ The panel's scopes are shared and unscoped agents, which are shared sandboxes, s
 
 The personal egress page and its API, `/api/connections/egress`, authenticate with `require_connections_user`: they need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
 Without that signed identity gate, such as on a lab host that has no upstream proxy, only the dashboard can manage secrets.
+When more than one user can sign in through the gateway, `MINDROOM_CONNECTIONS_AGENT` is required as well: the egress routes themselves work without it, but without it every user the gateway admits has full dashboard access, including configuration edits, shared keys, and every requester's log (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
 On the personal page, users manage their own keys, accounts, and [services](#user-services) for `user` and `user_agent` agents, while keys, accounts, and services for shared and unscoped agents are managed only by administrators and the agent's `credential_managers`.
 
 **Dashboard API routes** (all require dashboard authentication):
@@ -383,8 +387,8 @@ On the personal page, users manage their own keys, accounts, and [services](#use
 | `/api/egress-broker/presets` | GET | List the built-in presets the services editor offers, in the shape described under [Services editor](#services-editor) |
 | `/api/egress-broker/services/<name>/secret?agent_name=<name>` | PUT | Set a secret; body `{"secret": "<value>"}`. 404 when the name is neither a config service nor one of the scope's own services |
 | `/api/egress-broker/services/<name>/secret?agent_name=<name>` | DELETE | Delete a secret |
-| `/api/egress-broker/services/<name>/connect?agent_name=<name>` | POST | Start the OAuth login of the service's provider for that scope; returns the authorization URL. 404 when the name is not a config service or the service has no known provider, 409 while a shared service account replaces personal accounts |
-| `/api/egress-broker/services/<name>/disconnect?agent_name=<name>` | POST | Reset the connected account for that scope; 404 as for connect |
+| `/api/egress-broker/services/<name>/connect?agent_name=<name>` | POST | Start the OAuth login of the service's provider for that scope; returns the authorization URL. 404 when the name is not a config service or the service has no known provider, 409 while a shared service account replaces personal accounts and 409 when the scope's sandbox is shared and the broker would not use a requester's own account there (GitHub and Atlassian without `oauth_on_shared_workers`) |
+| `/api/egress-broker/services/<name>/disconnect?agent_name=<name>` | POST | Reset the connected account for that scope; 404 and the shared-sandbox 409 as for connect. It stays possible while a shared service account is configured, so an account connected earlier can be revoked |
 | `/api/egress-broker/logs?agent_name=&host=&service=&limit=` | GET | Query request audit logs for every requester; each row carries `code`; returns 409 when the broker is not running |
 | `/api/egress-broker/ca.pem` | GET | Download the broker's root CA certificate; returns 409 when the broker is not running |
 
@@ -404,13 +408,14 @@ The routes that name an agent answer 404 for an unknown agent and for one the ca
 | `/api/connections/egress/logs?agent_name=&limit=` | GET | 200 with the caller's own rows, see [Personal request log](#personal-request-log). 400 for any other query parameter, 409 when the broker is not running, 422 for a non-integer `limit`, 503 when no config is loaded |
 | `/api/connections/egress/agents/<agent>/<service>` | PUT | Set a key; body `{"secret": "<value>"}`. 204; 403 without credential management on a shared or unscoped agent; 404 for a service that is neither a config service nor one of the scope's own; 422 for an invalid secret |
 | `/api/connections/egress/agents/<agent>/<service>` | DELETE | Delete a key. 204; 403 and 404 as for PUT |
-| `/api/connections/egress/agents/<agent>/<service>/connect` | POST | Start the OAuth login of the service's provider. Same checks as the key routes, with the requester-scoped exception above, then the provider's OAuth connect flow; 404 for a service without a known provider, 409 while a shared service account replaces personal accounts |
-| `/api/connections/egress/agents/<agent>/<service>/disconnect` | POST | Reset the connected account, with the same checks |
+| `/api/connections/egress/agents/<agent>/<service>/connect` | POST | Start the OAuth login of the service's provider. Same checks as the key routes, with the requester-scoped exception above, then the provider's OAuth connect flow; 404 for a service without a known provider, 409 while a shared service account replaces personal accounts and 409, with a string detail, where the agent runs in a shared sandbox and the broker would not use the requester's own account there (see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes)) |
+| `/api/connections/egress/agents/<agent>/<service>/disconnect` | POST | Reset the connected account, with the same checks, the 404, and the shared-sandbox 409. It stays possible while a shared service account is configured, so an account connected earlier can be revoked |
 | `/api/connections/egress/agents/<agent>/services/<name>` | GET | 200 with one of the scope's own services as authored, so a preset stays `{"preset": "github"}`. 404 for a config service or a name only another scope has. Any user of the agent may read it, because a service holds no secret |
-| `/api/connections/egress/agents/<agent>/services/<name>` | PUT | Create or replace one of the scope's own services; the body has the fields of a [config service](#custom-services) except `oauth_on_shared_workers`. 204; 403 for a user who cannot manage services there; 409 when a config service has the name; 413 for a body over 16 KiB; 422 for an invalid service or one of the limits and rules in [User services](#user-services) |
-| `/api/connections/egress/agents/<agent>/services/<name>` | DELETE | Delete one of the scope's own services together with its key. 204; 403 as for PUT; 404 when the scope has no such service; 409 for the name of a config service |
+| `/api/connections/egress/agents/<agent>/services/<name>` | PUT | Create or replace one of the scope's own services; the body has the fields of a [config service](#custom-services) except `oauth_on_shared_workers`. 204; 403 for a user who cannot manage services there; 409 when a config service has the name; 413 for a body over 16 KiB; 422 with a string detail for a body that is not a JSON object, an invalid service, or one of the limits and rules in [User services](#user-services) |
+| `/api/connections/egress/agents/<agent>/services/<name>` | DELETE | Delete one of the scope's own services together with its key, or an [inactive entry](#user-services) of either reason (a shadowed entry keeps the key, which the config service uses). 204; 403 as for PUT; 404 when the scope has no such entry; 409 for the name of a config service that has no entry of its own |
 
 The portal's catalog, `/api/connections`, lists the same egress rows as the personal listing, so each row there has `source` and `rules` too.
+An agent's `egress_services` there is a list, empty when the agent has no services, for every agent the user may use for egress, and `null` for any other agent, so the portal links **Manage services** exactly for the first kind.
 
 ## User services
 
@@ -426,6 +431,7 @@ They have the same fields and validators as a config service (a preset or `rules
 **Where they live.**
 A service is stored per scope, in the same primary-only store as that scope's keys, as one document under the reserved credential name `egress__services`; a service name starts with a letter or digit, so no key can take it.
 It follows the placement in the [scope table](#secret-management): per requester (and agent for `user_agent`), per agent for `shared`, and in the global store for unscoped agents, where every agent without a worker scope shares it.
+So a service saved on one of a user's `user` agents applies to all of that user's `user` agents, together with its key, while each `user_agent` agent has its own. Beside **Add service** and **Delete service** on a personal agent, the personal page notes that the service applies to all of your personal agents that share its scope.
 Workers never read that store.
 The broker merges the config services and the calling scope's own services per request, from a small per-scope cache that every save or delete clears, so a change applies to the next request without a restart.
 A user service routes only that scope's keys and accounts, so it cannot reach anyone else's credentials.
@@ -434,6 +440,12 @@ A user service routes only that scope's keys and accounts, so it cannot reach an
 
 - Config names win. Saving a name that a config service already uses returns 409, and a user entry that a config service later shadows is ignored. It can still be deleted, and its key then stays, because the config service uses that key.
 - On a host that both a config service and a user service name, the usual order applies (exact host, specific port, longest path prefix, then declaration order, with config services first), so a longer user prefix takes those paths for that user only.
+
+**Inactive entries.**
+The broker ignores a stored entry that a config service now shadows (`shadowed`) and one that no longer validates, for example after an upgrade tightened a rule (`invalid`), but the entry stays in the scope's store.
+The personal listing reports each as `inactive_services` with its reason, and the personal page shows them under the agent as **Inactive** with the reason and a **Delete** button where the caller may manage services.
+Inactive entries count toward the limits below until they are deleted, so a scope full of them cannot take a new service.
+Deleting a shadowed entry keeps the key, which the config service uses, and deleting an invalid entry removes its key.
 
 **Limits.** A scope can have at most 50 user services, a service at most 50 rules, a service at most 16 KiB (as stored, in its authored form), and all of a scope's services at most 256 KiB.
 Going over one of these is a 422, except that a request body over 16 KiB is refused with 413 before its fields are checked.
@@ -462,8 +474,8 @@ A stored entry that no longer passes these rules is skipped (or loses the offend
 
 One editor adds, edits, and deletes services in two places:
 
-- **Personal egress page** (`/connections/egress`): each agent has an **Add service** button where the caller may manage services (their own personal agents, and shared or unscoped agents they manage as an administrator or credential manager). A user's own services have **Edit service** and **Delete service**, and deleting also deletes the service's key. Services from `config.yaml` appear read-only with the label "Added by your administrator" and keep their key and account controls.
-- **Dashboard Credentials tab**: the egress panel has **Add service**, and **Edit service** and **Delete service** on the services of `config.yaml`. Deleting one removes it from the configuration but keeps its saved keys, which apply again if a service with the same name is added back. A save writes `config.yaml` through the same config API as Settings and keeps the preset form you wrote (`{preset: github}` is not expanded), so later preset updates still reach the service; because a save writes the whole configuration draft, when the Settings draft holds other unsaved changes the panel says so and asks you to confirm before it saves or deletes. A failed save restores the draft. The selected scope's user services show read-only with a "User service" badge, since users edit them on their own page.
+- **Personal egress page** (`/connections/egress`): each agent has an **Add service** button where the caller may manage services (their own personal agents, and shared or unscoped agents they manage as an administrator or credential manager). A user's own services have **Edit service** and **Delete service**, and deleting also deletes the service's key. Services from `config.yaml` appear read-only with the label "Added by your administrator" and keep their key and account controls. [Inactive entries](#user-services) are listed under the agent with their reason, and can be deleted by anyone who may manage services there.
+- **Dashboard Credentials tab**: the egress panel has **Add service**, and **Edit service** and **Delete service** on the services of `config.yaml`. Deleting one removes it from the configuration but keeps its saved keys, which apply again if a service with the same name is added back. A save writes `config.yaml` through the same config API as Settings and keeps the preset form you wrote (`{preset: github}` is not expanded), so later preset updates still reach the service; because a save writes the whole configuration draft, when the Settings draft holds other unsaved changes the panel says so and asks you to confirm before it saves or deletes. When the save fails with an error, the draft goes back to what it was before the write; when the configuration changed while saving (a stale save), the panel asks you to reload the page and check the service list instead. The selected scope's user services show read-only with a "User service" badge, since users edit them on their own page.
 
 The fields are the name (fixed once saved), a preset or **Custom**, display name, description, the rules (host, path prefix, optional port, and auth type with its username, header name, query parameter, or template), the placeholder variables (under **Advanced**), `restrict_to_rules` with its GraphQL caveat, the account login (`oauth_provider`), and the GitHub **Limit to repositories** helper described in [Limiting paths and repositories](#limiting-paths-and-repositories).
 Rules you write next to a preset replace the preset's rules as a whole, which the form says when you tick **Replace the preset's rules with my own**.
@@ -488,6 +500,7 @@ Both return the presets as the config model expands them:
 The example is abbreviated to one preset and one rule.
 Rules carry no auth settings, and `display_name` falls back to the preset id.
 The editor checks what it can before saving, and shows the server's message for the rest (a name that is taken, a limit, or a rule the server refuses).
+On the personal page the placeholder fields apply the user-service rules from [User services](#user-services) as you type (the name and value patterns and the refused words), and the hint under them lists those rules, so a placeholder the server would reject is flagged before saving.
 
 ## Personal request log
 
@@ -497,7 +510,7 @@ It returns only rows whose requester is the caller (after human-alias resolution
 Administrators keep the full log, with host, service, and agent filters, at `/api/egress-broker/logs`.
 
 Each row has `at`, `kind` (`request`, `tunnel`, or `denied`), `scope`, `agent_name`, `requester_id`, `method`, `host`, `path` (without the query string), `service`, `status`, `bytes_up`, `bytes_down`, `duration_ms`, and `code`.
-`code` is the `error` value of the JSON body the broker itself answered with, for example `path_not_allowed`, `bad_request`, `host_not_allowed`, `tls_required`, `destination_blocked`, `credential_not_configured`, `oauth_connection_required`, `oauth_refresh_failed`, `broker_error`, `request_body_too_large`, `upstream_unreachable`, or `upstream_timeout`.
+`code` is the `error` value of the JSON body the broker itself answered with, for example `path_not_allowed`, `bad_request`, `host_mismatch`, `host_not_allowed`, `tls_required`, `destination_blocked`, `credential_not_configured`, `oauth_connection_required`, `oauth_refresh_failed`, `broker_error`, `request_body_too_large`, `upstream_unreachable`, or `upstream_timeout`.
 It is `null` when the upstream's response was relayed, and for rows written before the column existed.
 A 407 and a malformed request the broker rejects before it can route it write no row.
 

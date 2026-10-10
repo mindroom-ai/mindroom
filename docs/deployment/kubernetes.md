@@ -202,7 +202,9 @@ Users who have no dashboard access still manage their own egress on the personal
 - Their own request log, a **Recent requests** table per agent.
 
 This needs [trusted upstream auth](trusted-upstream-auth.md) with JWT, set through `env.extra` because the runtime chart has no values for it, an HTTPS `MINDROOM_PUBLIC_URL`, and a gateway that forwards `/connections`, `/api/connections`, and `/api/oauth` to the runtime.
-Setting `MINDROOM_CONNECTIONS_AGENT` is recommended: the egress page does not need it, but it keeps ordinary dashboard routes limited to administrators.
+`MINDROOM_CONNECTIONS_AGENT` is required whenever more than one user can sign in through the gateway; set it to a private agent (`private.per: user` or `user_agent`).
+The egress page itself works without it, but without it every user the gateway admits gets full dashboard access, whatever `administrators` lists: they can edit the configuration, set shared keys, and read every requester's request log.
+With it, a user outside `administrators` reaches only the Connections routes and the OAuth callback pages.
 Personal GitHub and Atlassian accounts also need agents with worker scope `user` or `user_agent` (`worker_scope`, or `private.per` for private agents) on the Kubernetes worker backend.
 The runtime chart's [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section has the variables and an example.
 
