@@ -26,7 +26,6 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import (
     MatrixDeliveryFailure,
-    cached_room,
     resolve_room_encryption_outcome,
     send_message_result,
 )
@@ -240,12 +239,11 @@ async def _prepare_move(  # noqa: PLR0911
     encryption_error = await _encryption_error(context.client, context.room_id, target_room_id)
     if encryption_error is not None:
         return encryption_error
-    room = cached_room(context.client, context.room_id)
     plan = _plan_thread_copy(
         history,
         entity_name_for_sender=registry.current_entity_name_for_user_id,
         target_posters=frozenset(poster_clients),
-        display_names=room_member_display_names(room) if room is not None else {},
+        display_names=room_member_display_names(context.room) if context.room is not None else {},
     )
     if not plan:
         return "This thread has no messages to move."

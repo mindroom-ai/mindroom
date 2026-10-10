@@ -90,7 +90,8 @@ The tool reaches it through `ToolRuntimeContext.orchestrator`; no tool imports `
 
 ### Errors
 
-- A send failure stops the move and returns an error naming how many messages were copied and the partial new thread's link; the source thread is left untouched.
+- A send failure stops the move and returns an error naming how many messages were copied and, when anything reached the target room, the partial new thread's link; the source thread is left untouched.
+- A copy that went out with different content and no full-content attachment, which is what a large message becomes when its attachment upload fails, counts as a failed send, so a move never completes with a message cut short or its collapsible sections dropped.
 - A failure in steps 2 to 4 (a `ThreadTagsError` or a failed notice send) does not fail the move, because the copy is already complete and retrying would duplicate it; the result lists each failure in `warnings`.
 - A thread whose messages are all skipped is refused before anything is posted.
 - No durable move journal exists, so a crash mid-copy leaves a partial copy and an untouched source thread.
