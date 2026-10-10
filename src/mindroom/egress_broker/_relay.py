@@ -70,6 +70,7 @@ class AuditEntry:
     status: int = 0
     bytes_up: int = 0
     bytes_down: int = 0
+    code: str | None = None
     started: float = field(default_factory=time.monotonic)
 
 
@@ -300,6 +301,8 @@ class Relay:
 
     async def reject(self, client: Peer, entry: AuditEntry, status: int, body: dict[str, object]) -> None:
         entry.status = status
+        error = body.get("error")
+        entry.code = error if isinstance(error, str) else None
         await send_json(client, status, body)
         await self.record(entry)
 
@@ -318,6 +321,7 @@ class Relay:
             bytes_up=entry.bytes_up,
             bytes_down=entry.bytes_down,
             duration_ms=int((time.monotonic() - entry.started) * 1000),
+            code=entry.code,
         )
         try:
             await asyncio.to_thread(self.audit.record, record)
@@ -380,6 +384,7 @@ class Relay:
         except _RequestFailedError as exc:
             # A failure after the response head went out keeps that status; the client just sees the cut.
             entry.status = entry.status or exc.status
+            entry.code = exc.code
             await send_json(client, exc.status, {"error": exc.code})
             return False
         finally:

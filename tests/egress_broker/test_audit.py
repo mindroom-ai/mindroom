@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 - Required at runtime for test fixtures
 
@@ -388,3 +390,61 @@ def test_concurrent_record_from_threads(tmp_path: Path) -> None:
     assert all(f"agent_{i}" in agent_names for i in range(8))
 
     log.close()
+
+
+def test_refusal_code_is_stored_and_a_forward_has_none(tmp_path: Path, sample_record: AuditRecord) -> None:
+    """A refusal keeps the error code its body carried; a forwarded request reads back as None."""
+    log = AuditLog(tmp_path / "audit.db")
+    now = datetime.now(UTC)
+    log.record(replace(sample_record, at=now - timedelta(seconds=1), path="/ok"))
+    log.record(replace(sample_record, at=now, kind="denied", status=403, path="/other", code="path_not_allowed"))
+
+    refused, forwarded = log.query()
+
+    assert (refused.path, refused.code) == ("/other", "path_not_allowed")
+    assert (forwarded.path, forwarded.code) == ("/ok", None)
+    log.close()
+
+
+def test_a_log_from_before_refusal_codes_gains_the_column(tmp_path: Path, sample_record: AuditRecord) -> None:
+    """Opening a log written without the `code` column adds it, keeps old rows, and accepts new ones."""
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("""
+        CREATE TABLE audit (
+            at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            agent_name TEXT,
+            requester_id TEXT,
+            method TEXT NOT NULL,
+            host TEXT NOT NULL,
+            path TEXT NOT NULL,
+            service TEXT,
+            status INTEGER NOT NULL,
+            bytes_up INTEGER NOT NULL,
+            bytes_down INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL
+        )
+    """)
+    old.execute(
+        "INSERT INTO audit VALUES (?, 'denied', 'user', 'a', '@u:x', 'GET', 'h', '/old', 's', 403, 1, 2, 3)",
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(),),
+    )
+    old.commit()
+    old.close()
+
+    log = AuditLog(path)
+    log.record(replace(sample_record, path="/new", kind="denied", status=403, code="bad_request"))
+    newest, oldest = log.query()
+    log.close()
+    reopened = AuditLog(path)
+    rows = reopened.query()
+    reopened.close()
+
+    assert (oldest.path, oldest.code) == ("/old", None)
+    assert (newest.path, newest.code) == ("/new", "bad_request")
+    assert [(row.path, row.code) for row in rows] == [("/new", "bad_request"), ("/old", None)]
+    check = sqlite3.connect(path)
+    assert [row[1] for row in check.execute("PRAGMA table_info(audit)")].count("code") == 1
+    check.close()

@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle, oauth
+from mindroom.config.egress_broker import EgressService
+from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
 from mindroom.egress_broker.user_services import effective_config
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
@@ -21,7 +23,6 @@ if TYPE_CHECKING:
     from fastapi import Request
 
     from mindroom.api.config_lifecycle import ApiSnapshot
-    from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.credentials import CredentialsManager
     from mindroom.egress_broker.audit import AuditRecord
@@ -50,6 +51,54 @@ def service_source(config: Config, name: str) -> EgressServiceSource:
     return "config" if name in config.egress_broker.services else "user"
 
 
+class EgressRuleSummary(BaseModel):
+    """Where one rule applies, for a client that needs to see what a service covers; never its auth settings."""
+
+    host: str
+    port: int | None
+    path_prefix: str
+
+
+def rule_summaries(service: EgressService) -> list[EgressRuleSummary]:
+    """Describe the hosts, ports, and paths a service's rules match, in rule order."""
+    return [EgressRuleSummary(host=rule.host, port=rule.port, path_prefix=rule.path_prefix) for rule in service.rules]
+
+
+class EgressPresetResponse(BaseModel):
+    """One built-in service preset as the editor shows it."""
+
+    id: str
+    display_name: str
+    description: str
+    oauth_provider: str | None
+    rules: list[EgressRuleSummary]
+    placeholder_env: dict[str, str]
+
+
+class PresetsResponse(BaseModel):
+    """The built-in service presets."""
+
+    presets: list[EgressPresetResponse]
+
+
+def presets_response() -> PresetsResponse:
+    """List the presets as the config model expands them, so the editor shows what a `preset:` entry resolves to."""
+    presets = []
+    for preset_id in EGRESS_PRESETS:
+        service = EgressService.model_validate({"preset": preset_id})
+        presets.append(
+            EgressPresetResponse(
+                id=preset_id,
+                display_name=service.display_name or preset_id,
+                description=service.description,
+                oauth_provider=service.oauth_provider,
+                rules=rule_summaries(service),
+                placeholder_env=service.placeholder_env,
+            ),
+        )
+    return PresetsResponse(presets=presets)
+
+
 class AuditRecordResponse(BaseModel):
     """One audit log record for API responses."""
 
@@ -66,6 +115,7 @@ class AuditRecordResponse(BaseModel):
     bytes_up: int
     bytes_down: int
     duration_ms: int
+    code: str | None
 
 
 class AuditLogsResponse(BaseModel):
@@ -92,6 +142,7 @@ def audit_logs_response(records: Iterable[AuditRecord]) -> AuditLogsResponse:
                 bytes_up=rec.bytes_up,
                 bytes_down=rec.bytes_down,
                 duration_ms=rec.duration_ms,
+                code=rec.code,
             )
             for rec in records
         ],

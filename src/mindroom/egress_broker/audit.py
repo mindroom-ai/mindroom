@@ -27,6 +27,8 @@ class AuditRecord:
     bytes_up: int
     bytes_down: int
     duration_ms: int
+    code: str | None = None
+    """The `error` code of the JSON body a refusal answered with; None for a forwarded request."""
 
 
 class AuditLog:
@@ -85,9 +87,15 @@ class AuditLog:
                 status INTEGER NOT NULL,
                 bytes_up INTEGER NOT NULL,
                 bytes_down INTEGER NOT NULL,
-                duration_ms INTEGER NOT NULL
+                duration_ms INTEGER NOT NULL,
+                code TEXT
             )
         """)
+
+        # Logs written before refusal codes existed lack the column.
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(audit)")}
+        if "code" not in columns:
+            self._conn.execute("ALTER TABLE audit ADD COLUMN code TEXT")
 
         # Create indices for common query patterns
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_at ON audit(at DESC)")
@@ -116,8 +124,8 @@ class AuditLog:
                 """
                 INSERT INTO audit (
                     at, kind, scope, agent_name, requester_id, method,
-                    host, path, service, status, bytes_up, bytes_down, duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    host, path, service, status, bytes_up, bytes_down, duration_ms, code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rec.at.isoformat(),
@@ -133,6 +141,7 @@ class AuditLog:
                     rec.bytes_up,
                     rec.bytes_down,
                     rec.duration_ms,
+                    rec.code,
                 ),
             )
             self._conn.commit()
@@ -193,7 +202,7 @@ class AuditLog:
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         query = f"""
             SELECT at, kind, scope, agent_name, requester_id, method,
-                   host, path, service, status, bytes_up, bytes_down, duration_ms
+                   host, path, service, status, bytes_up, bytes_down, duration_ms, code
             FROM audit
             WHERE {where_clause}
             ORDER BY at DESC
@@ -221,6 +230,7 @@ class AuditLog:
                 bytes_up=row[10],
                 bytes_down=row[11],
                 duration_ms=row[12],
+                code=row[13],
             )
             for row in rows
         ]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -20,6 +20,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker import secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.oauth_source import Token, resolve_oauth_token
+from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.oauth import credential_store as oauth_credential_store
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
@@ -1653,11 +1654,14 @@ def _record_request(
     *,
     host: str = "api.github.com",
     path: str = "/user",
+    kind: Literal["request", "tunnel", "denied"] = "request",
+    status: int = 200,
+    code: str | None = None,
 ) -> None:
     log.record(
         AuditRecord(
             at=_LOG_START + timedelta(seconds=seconds),
-            kind="request",
+            kind=kind,
             scope="shared" if agent_name == "shared_dev" else "user_agent",
             agent_name=agent_name,
             requester_id=requester_id,
@@ -1665,10 +1669,11 @@ def _record_request(
             host=host,
             path=path,
             service="github",
-            status=200,
+            status=status,
             bytes_up=1,
             bytes_down=2,
             duration_ms=3,
+            code=code,
         ),
     )
 
@@ -1720,6 +1725,7 @@ def test_personal_log_returns_only_the_callers_rows_newest_first(
         "bytes_up": 1,
         "bytes_down": 2,
         "duration_ms": 3,
+        "code": None,
     }
 
     bob = _get_logs(portal, "bob")
@@ -1810,3 +1816,151 @@ def test_personal_log_requires_a_signed_user(egress_portal: dict[str, Any], audi
     assert expected in {401, 403}
     assert client.get("/api/connections/egress/logs").status_code == expected
     assert client.get("/api/connections/egress/logs?agent_name=personal").status_code == expected
+
+
+# --- Agent flags, rule summaries, presets, and refusal codes in the listing and the log ---
+
+
+def _listed_agents(portal: dict[str, Any], user: str) -> dict[str, dict[str, Any]]:
+    response = portal["client"].get("/api/connections/egress", headers=portal["headers"][user])
+    assert response.status_code == 200, response.text
+    return {agent["agent_name"]: agent for agent in response.json()["agents"]}
+
+
+def test_listing_reports_whether_each_agent_is_shared_and_whether_the_caller_manages_it(
+    egress_portal: dict[str, Any],
+) -> None:
+    """Every agent says if its services are shared and if the caller may change them, as the write routes decide."""
+    portal = egress_portal
+    alice = _listed_agents(portal, "alice")
+    assert (alice["personal"]["shared"], alice["personal"]["can_manage"]) == (False, True)
+    assert (alice["shared_dev"]["shared"], alice["shared_dev"]["can_manage"]) == (True, False)
+    bob = _listed_agents(portal, "bob")
+    assert (bob["personal"]["shared"], bob["personal"]["can_manage"]) == (False, True)
+    assert (bob["shared_dev"]["shared"], bob["shared_dev"]["can_manage"]) == (True, True)
+    # The per-service flags the page already used say the same.
+    for agent in (*alice.values(), *bob.values()):
+        assert {service["can_manage"] for service in agent["services"]} == {agent["can_manage"]}
+        assert {service["is_shared"] for service in agent["services"]} == {agent["shared"]}
+    # What the flags promise is what the write routes do.
+    assert _put_service(portal, "alice", "shared_dev", "mine").status_code == 403
+    assert _put_service(portal, "bob", "shared_dev", "mine").status_code == 204
+
+
+def test_an_agent_without_services_still_reports_the_flags(egress_portal: dict[str, Any]) -> None:
+    """With no service to carry them, the agent's own flags tell the page whether Add service is allowed."""
+    portal = egress_portal
+    portal["payload"]["egress_broker"]["services"] = {}
+    _publish_config(main.app, portal["paths"], portal["payload"])
+    _use_runtime_auth_settings(main.app)
+
+    alice = _listed_agents(portal, "alice")
+    assert {agent["agent_name"]: agent["services"] for agent in alice.values()} == {"personal": [], "shared_dev": []}
+    assert (alice["personal"]["shared"], alice["personal"]["can_manage"]) == (False, True)
+    assert (alice["shared_dev"]["shared"], alice["shared_dev"]["can_manage"]) == (True, False)
+    assert _listed_agents(portal, "bob")["shared_dev"]["can_manage"] is True
+
+
+def test_listing_summarizes_where_each_service_applies_and_nothing_else(egress_portal: dict[str, Any]) -> None:
+    """Rules show host, port, and path prefix, in rule order, for config, preset, and user services; never auth."""
+    portal = egress_portal
+    portal["payload"]["egress_broker"]["services"]["drive"] = {"preset": "google_drive"}
+    _publish_config(main.app, portal["paths"], portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    own = {
+        "rules": [
+            {
+                "host": "api.own.example.com",
+                "port": 8443,
+                "path_prefix": "/v1/",
+                "auth": {"type": "header", "name": "X-Own-Key", "template": "Token-{secret}"},
+            },
+            {"host": "*.own.example.com", "auth": {"type": "basic", "username": "bot-user"}},
+        ],
+    }
+    assert _put_service(portal, "alice", "personal", "own", own).status_code == 204
+
+    rows = {service["name"]: service for service in _listed_services(portal, "alice", "personal")}
+
+    assert rows["github"]["rules"] == [{"host": "api.github.com", "port": None, "path_prefix": "/"}]
+    assert rows["drive"]["rules"] == [
+        {"host": "www.googleapis.com", "port": None, "path_prefix": "/drive/"},
+        {"host": "www.googleapis.com", "port": None, "path_prefix": "/upload/drive/"},
+    ]
+    assert rows["own"]["rules"] == [
+        {"host": "api.own.example.com", "port": 8443, "path_prefix": "/v1/"},
+        {"host": "*.own.example.com", "port": None, "path_prefix": "/"},
+    ]
+    listing = portal["client"].get("/api/connections/egress", headers=portal["headers"]["alice"]).text
+    for hidden in ("X-Own-Key", "Token-", "bot-user", "x-access-token", "bearer"):
+        assert hidden not in listing
+    # Another requester's private services never show up in the summaries.
+    assert "own" not in {service["name"] for service in _listed_services(portal, "bob", "personal")}
+    catalog = portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).json()
+    personal = next(agent for agent in catalog["agents"] if agent["agent_name"] == "personal")
+    assert {row["name"]: row["rules"] for row in personal["egress_services"]}["own"] == rows["own"]["rules"]
+
+
+def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict[str, Any]) -> None:
+    """The editor learns every preset's name, login, rules, and placeholders from the server, with no auth settings."""
+    response = egress_portal["client"].get("/api/connections/egress/presets", headers=egress_portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    presets = response.json()["presets"]
+    assert [preset["id"] for preset in presets] == list(EGRESS_PRESETS)
+    by_id = {preset["id"]: preset for preset in presets}
+    assert by_id["github"] == {
+        "id": "github",
+        "display_name": "GitHub",
+        "description": "GitHub API, gh CLI, and git over HTTPS",
+        "oauth_provider": "github",
+        "rules": [
+            {"host": "api.github.com", "port": None, "path_prefix": "/"},
+            {"host": "uploads.github.com", "port": None, "path_prefix": "/"},
+            {"host": "github.com", "port": None, "path_prefix": "/"},
+        ],
+        "placeholder_env": {"GH_TOKEN": "mindroom-brokered", "GITHUB_TOKEN": "mindroom-brokered"},
+    }
+    assert by_id["google_gmail"]["rules"] == [
+        {"host": "gmail.googleapis.com", "port": None, "path_prefix": "/"},
+        {"host": "www.googleapis.com", "port": None, "path_prefix": "/gmail/"},
+    ]
+    assert by_id["openai"]["oauth_provider"] is None
+    assert by_id["openai"]["placeholder_env"] == {"OPENAI_API_KEY": "mindroom-brokered"}
+    assert by_id["google_sheets"]["placeholder_env"] == {}
+    for preset in presets:
+        assert set(preset) == {"id", "display_name", "description", "oauth_provider", "rules", "placeholder_env"}
+        assert all(set(rule) == {"host", "port", "path_prefix"} for rule in preset["rules"])
+    assert "x-access-token" not in response.text
+
+
+def test_presets_need_a_signed_user_and_take_no_query(egress_portal: dict[str, Any]) -> None:
+    """The preset list uses the personal auth gate: no identity, no list, and no stray query parameters."""
+    client = egress_portal["client"]
+    expected = client.get("/api/connections/egress").status_code
+    assert expected in {401, 403}
+    assert client.get("/api/connections/egress/presets").status_code == expected
+    response = client.get("/api/connections/egress/presets?x=1", headers=egress_portal["headers"]["alice"])
+    assert response.status_code == 400
+
+
+def test_personal_log_returns_the_refusal_code_or_null(egress_portal: dict[str, Any], audit_log: AuditLog) -> None:
+    """A refused request carries the error code its body had; a forwarded one has null."""
+    _record_request(audit_log, "@alice:example.org", "personal", 1, path="/ok")
+    _record_request(
+        audit_log,
+        "@alice:example.org",
+        "personal",
+        2,
+        path="/repos/other/secret",
+        kind="denied",
+        status=403,
+        code="path_not_allowed",
+    )
+
+    response = _get_logs(egress_portal, "alice")
+
+    assert response.status_code == 200, response.text
+    assert [(row["path"], row["status"], row["code"]) for row in response.json()["records"]] == [
+        ("/repos/other/secret", 403, "path_not_allowed"),
+        ("/ok", 200, None),
+    ]

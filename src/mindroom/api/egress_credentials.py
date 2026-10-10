@@ -19,13 +19,17 @@ from mindroom.api.connection_agents import (
 )
 from mindroom.api.egress_status import (
     AuditLogsResponse,
+    EgressRuleSummary,
     EgressServiceSource,
     EgressSourceStatus,
+    PresetsResponse,
     audit_logs_response,
     effective_services,
     egress_oauth_status,
     egress_service_status,
     oauth_provider_of_service,
+    presets_response,
+    rule_summaries,
     service_oauth_provider,
     service_source,
     unavailable_egress_oauth_status,
@@ -68,7 +72,8 @@ class EgressCredentialService(EgressSourceStatus):
     """One egress service with its management permissions and its key and OAuth sources.
 
     `source` is `config` for a service the administrator defines and `user` for one defined in the agent's own
-    scope through the services routes.
+    scope through the services routes. `rules` says where the service applies (host, port, path prefix), so a client
+    can tell which services overlap; it carries no auth settings.
     """
 
     name: str
@@ -77,13 +82,21 @@ class EgressCredentialService(EgressSourceStatus):
     is_shared: bool
     can_manage: bool
     source: EgressServiceSource
+    rules: list[EgressRuleSummary]
 
 
 class EgressCredentialAgent(BaseModel):
-    """One agent with its egress services."""
+    """One agent with its egress services.
+
+    `shared` is true for a shared or unscoped agent, whose services and keys everyone using it shares, and
+    `can_manage` says whether the caller may change them: their own agent, or a shared one they manage. Both are
+    known even when the agent has no services yet.
+    """
 
     agent_name: str
     agent_display_name: str
+    shared: bool
+    can_manage: bool
     services: list[EgressCredentialService]
 
 
@@ -237,6 +250,7 @@ async def _build_service_for_agent(
         is_shared=is_shared,
         can_manage=can_manage,
         source=source,
+        rules=rule_summaries(service),
         **sources.model_dump(),
     )
 
@@ -249,13 +263,17 @@ async def egress_services_for_agent(
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
     manager: CredentialsManager,
+    *,
+    eligibility: tuple[bool, bool] | None = None,
 ) -> list[EgressCredentialService] | None:
     """List the brokered services for one agent, or ``None`` when the requester may not use it.
 
     The services are the config's, then the ones the requester's scope defines for itself.
-    ``requester_id`` must already be the resolved human requester alias.
+    ``requester_id`` must already be the resolved human requester alias. A caller that already ran the
+    eligibility check passes its ``(is_shared, can_manage)`` result.
     """
-    eligibility = _check_agent_eligibility(agent_name, requester_id, config, runtime_paths, membership_index)
+    if eligibility is None:
+        eligibility = _check_agent_eligibility(agent_name, requester_id, config, runtime_paths, membership_index)
     if eligibility is None:
         return None
     target = build_connection_agent_target(config, runtime_paths, requester_id, agent_name)
@@ -291,6 +309,10 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
 
     agents: list[EgressCredentialAgent] = []
     for agent_name, agent in config.agents.items():
+        eligibility = _check_agent_eligibility(agent_name, human_requester, config, runtime_paths, memberships)
+        if eligibility is None:
+            continue
+        is_shared, can_manage = eligibility
         services = await egress_services_for_agent(
             request,
             agent_name,
@@ -299,6 +321,7 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
             runtime_paths,
             memberships,
             manager,
+            eligibility=eligibility,
         )
         if services is None:
             continue
@@ -306,6 +329,8 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
             EgressCredentialAgent(
                 agent_name=agent_name,
                 agent_display_name=agent.display_name,
+                shared=is_shared,
+                can_manage=can_manage,
                 services=services,
             ),
         )
@@ -342,6 +367,12 @@ async def list_egress_credentials(request: Request, requester_id: _EgressUser) -
     """List egress services for every agent the user may use."""
     agents = await _load_egress_agents(request, requester_id)
     return EgressCredentialsResponse(agents=agents)
+
+
+@router.get("/presets", response_model=PresetsResponse)
+async def get_presets(_requester_id: _EgressUser) -> PresetsResponse:
+    """List the built-in service presets with the rules, login, and placeholders each one sets."""
+    return presets_response()
 
 
 @router.get("/logs", response_model=AuditLogsResponse)

@@ -18,13 +18,17 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.api.egress_status import (
     AuditLogsResponse,
+    EgressRuleSummary,
     EgressServiceSource,
     EgressSourceStatus,
+    PresetsResponse,
     audit_logs_response,
     effective_services,
     egress_oauth_provider,
     egress_oauth_status,
     egress_service_status,
+    presets_response,
+    rule_summaries,
     service_source,
     unavailable_egress_oauth_status,
 )
@@ -56,6 +60,7 @@ class _ServiceStatus(EgressSourceStatus):
     display_name: str | None
     description: str
     source: EgressServiceSource
+    rules: list[EgressRuleSummary]
 
 
 class ServicesResponse(BaseModel):
@@ -158,6 +163,7 @@ async def _load_service_statuses_for_target(
                 display_name=service_config.display_name,
                 description=service_config.description,
                 source=service_source(config, name),
+                rules=rule_summaries(service_config),
                 **sources.model_dump(),
             ),
         )
@@ -204,6 +210,12 @@ async def get_services(
 
     services = await _load_service_statuses_for_target(request, target)
     return ServicesResponse(services=services)
+
+
+@router.get("/presets", response_model=PresetsResponse)
+def get_presets() -> PresetsResponse:
+    """List the built-in service presets with the rules, login, and placeholders each one sets."""
+    return presets_response()
 
 
 @router.put("/services/{name}/secret", status_code=204)

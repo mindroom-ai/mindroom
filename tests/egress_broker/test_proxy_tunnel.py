@@ -233,6 +233,7 @@ async def test_unmatched_host_denied_under_deny_policy(
     assert response.json() == {"error": "host_not_allowed", "services": ["github", "openai"]}
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.host, record.method) == ("denied", 403, "localhost", "CONNECT")
+    assert record.code == "host_not_allowed"
 
 
 @pytest.mark.asyncio
@@ -319,6 +320,7 @@ async def test_plain_http_matched_rule_requires_tls(
     assert http_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.service, record.status, record.path) == ("denied", "svc", 403, "/echo")
+    assert record.code == "tls_required"
 
 
 @pytest.mark.asyncio
@@ -342,6 +344,7 @@ async def test_plain_http_unmatched_path_on_rule_host_forwards_unmodified(
     assert echoed["query"] == {"page": "2"}
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.service, record.status, record.path) == ("request", None, 200, "/echo")
+    assert record.code is None
     assert (record.scope, record.agent_name, record.requester_id) == ("user_agent", "code", "@alice:example.org")
 
 
@@ -368,6 +371,7 @@ async def test_plain_http_ambiguous_path_on_rule_host_gets_400(
     assert broker.resolved == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path, record.service) == ("denied", 400, target, None)
+    assert record.code == "bad_request"
 
 
 @pytest.mark.asyncio
@@ -387,6 +391,8 @@ async def test_plain_http_ambiguous_path_on_host_without_rules_is_forwarded(
     assert http_upstream.hits == ["/private/../echo"]
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path) == ("request", 404, "/private/../echo")
+    # The upstream's own 404 is a forwarded answer, not a refusal.
+    assert record.code is None
 
 
 @pytest.mark.asyncio
@@ -408,6 +414,7 @@ async def test_plain_http_restricted_host_refuses_unlisted_path(
     assert http_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path, record.service) == ("denied", 403, "/echo", None)
+    assert record.code == "path_not_allowed"
 
 
 @pytest.mark.asyncio
@@ -582,6 +589,7 @@ async def test_plain_http_streamed_body_over_limit_gets_413(
     assert response.json() == {"error": "request_body_too_large"}
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status) == ("request", 413)
+    assert record.code == "request_body_too_large"
 
 
 @pytest.mark.asyncio
@@ -676,6 +684,7 @@ async def test_plain_http_unreachable_upstream_gets_502(
     assert response.json() == {"error": "upstream_unreachable"}
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path) == ("request", 502, "/echo")
+    assert record.code == "upstream_unreachable"
 
 
 @pytest.mark.asyncio

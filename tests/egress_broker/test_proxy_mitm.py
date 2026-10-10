@@ -156,6 +156,8 @@ async def test_injects_bearer_and_client_never_sees_secret(
         "svc",
         200,
     )
+    # A forwarded request has no refusal code, whatever the upstream answered.
+    assert record.code is None
 
 
 @pytest.mark.asyncio
@@ -223,6 +225,7 @@ async def test_host_mismatch_is_refused(
     assert broker.resolved == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.host, record.path) == ("denied", 403, "localhost", "/echo")
+    assert record.code == "host_mismatch"
 
 
 @pytest.mark.asyncio
@@ -274,6 +277,7 @@ async def test_non_origin_form_target_is_refused(
     assert broker.resolved == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path) == ("denied", 400, "")
+    assert record.code == "bad_request"
 
 
 @pytest.mark.asyncio
@@ -311,6 +315,7 @@ async def test_ambiguous_path_on_rule_host_is_refused(
     assert broker.resolved == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path, record.service) == ("denied", 400, target, None)
+    assert record.code == "bad_request"
 
 
 @pytest.mark.asyncio
@@ -343,6 +348,7 @@ async def test_restrict_to_rules_refuses_unlisted_paths_in_tunnel(
         "/echo": ("request", 200, "svc"),
         "/ok": ("denied", 403, None),
     }
+    assert {record.path: record.code for record in records} == {"/echo": None, "/ok": "path_not_allowed"}
 
 
 @pytest.mark.asyncio
@@ -415,6 +421,7 @@ async def test_missing_secret_returns_403_with_manage_url(
     assert tls_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.service, record.path) == ("denied", 403, "svc", "/echo")
+    assert record.code == "credential_not_configured"
 
 
 @pytest.mark.asyncio
@@ -445,6 +452,7 @@ async def test_missing_secret_offers_oauth_connect_link(
     assert tls_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.service) == ("denied", 403, "svc")
+    assert record.code == "credential_not_configured"
 
 
 @pytest.mark.asyncio
@@ -487,6 +495,7 @@ async def test_oauth_reconnect_required_gets_403_without_reaching_upstream(
     assert tls_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.service, record.path) == ("denied", 403, "svc", "/echo")
+    assert record.code == "oauth_connection_required"
     assert "one-time-token" not in repr(logs)
 
 
@@ -512,6 +521,7 @@ async def test_oauth_refresh_outage_gets_retryable_503(
     assert tls_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.service, record.path) == ("request", 503, "svc", "/echo")
+    assert record.code == "oauth_refresh_failed"
 
 
 @pytest.mark.asyncio
@@ -545,6 +555,7 @@ async def test_resolve_secret_failure_gets_502_and_audit_row(
     assert {(record.kind, record.status, record.service, record.path) for record in records} == {
         ("request", 502, "svc", "/echo"),
     }
+    assert {record.code for record in records} == {"broker_error"}
 
 
 @pytest.mark.asyncio
@@ -607,6 +618,7 @@ async def test_upstream_unreachable_gets_502(
     assert response.json() == {"error": "upstream_unreachable"}
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.path, record.service) == ("request", 502, "/echo", "svc")
+    assert record.code == "upstream_unreachable"
 
 
 @pytest.mark.asyncio
@@ -652,6 +664,7 @@ async def test_blocked_upstream_gets_403(
     assert tls_upstream.hits == []
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status) == ("denied", 403)
+    assert record.code == "destination_blocked"
 
 
 @pytest.mark.asyncio

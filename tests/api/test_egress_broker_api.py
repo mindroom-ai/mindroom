@@ -17,6 +17,7 @@ from mindroom.config.egress_broker import EgressService
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker import secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
+from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.user_services import save_user_service
 from mindroom.oauth import registry as oauth_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -199,6 +200,82 @@ def test_logs_and_ca_409_when_inactive(
     response = broker_test_client.get("/api/egress-broker/ca.pem")
     assert response.status_code == 409
     assert "not running" in response.json()["detail"]
+
+
+def test_services_listing_summarizes_rules_without_auth(broker_test_client: TestClient) -> None:
+    """The dashboard sees where each service applies, never how it authenticates."""
+    response = broker_test_client.get("/api/egress-broker/services")
+
+    assert response.status_code == 200, response.text
+    github = next(service for service in response.json()["services"] if service["name"] == "github")
+    assert github["rules"] == [
+        {"host": "api.github.com", "port": None, "path_prefix": "/"},
+        {"host": "github.com", "port": None, "path_prefix": "/"},
+    ]
+    assert "x-access-token" not in response.text
+
+
+def test_presets_are_listed_with_their_rules_and_login(broker_test_client: TestClient) -> None:
+    """The dashboard editor gets the same preset list the personal page does."""
+    response = broker_test_client.get("/api/egress-broker/presets")
+
+    assert response.status_code == 200, response.text
+    presets = response.json()["presets"]
+    assert [preset["id"] for preset in presets] == list(EGRESS_PRESETS)
+    github = presets[0]
+    assert (github["id"], github["display_name"], github["oauth_provider"]) == ("github", "GitHub", "github")
+    assert github["rules"][0] == {"host": "api.github.com", "port": None, "path_prefix": "/"}
+    assert github["placeholder_env"] == {"GH_TOKEN": "mindroom-brokered", "GITHUB_TOKEN": "mindroom-brokered"}
+    assert next(preset for preset in presets if preset["id"] == "anthropic")["oauth_provider"] is None
+    assert all(set(rule) == {"host", "port", "path_prefix"} for preset in presets for rule in preset["rules"])
+
+
+def test_presets_route_sits_behind_the_dashboard_auth() -> None:
+    """The presets route is mounted with the dashboard's `verify_user` like every other egress-broker route."""
+    from mindroom.api import main  # noqa: PLC0415
+    from mindroom.api.auth import verify_user  # noqa: PLC0415
+
+    route = next(r for r in main.app.routes if getattr(r, "path", None) == "/api/egress-broker/presets")
+    assert any(dependency.call is verify_user for dependency in route.dependant.dependencies)  # type: ignore[attr-defined]
+
+
+def test_logs_return_the_refusal_code(broker_test_client: TestClient, tmp_path: Path) -> None:
+    """The administrator's log shows why a request was refused, and null for one that was forwarded."""
+    audit = AuditLog(tmp_path / "codes.sqlite3")
+    base = {
+        "scope": "shared",
+        "agent_name": "test_agent",
+        "requester_id": "@user:example.org",
+        "method": "GET",
+        "host": "api.github.com",
+        "service": "github",
+        "bytes_up": 0,
+        "bytes_down": 0,
+        "duration_ms": 1,
+    }
+    audit.record(
+        AuditRecord(at=datetime(2026, 10, 1, tzinfo=UTC), kind="request", path="/ok", status=200, **base),
+    )
+    audit.record(
+        AuditRecord(
+            at=datetime(2026, 10, 2, tzinfo=UTC),
+            kind="denied",
+            path="/nope",
+            status=403,
+            code="path_not_allowed",
+            **base,
+        ),
+    )
+
+    with patch("mindroom.api.egress_broker.active_audit_log", return_value=audit):
+        response = broker_test_client.get("/api/egress-broker/logs")
+
+    assert response.status_code == 200, response.text
+    assert [(row["path"], row["code"]) for row in response.json()["records"]] == [
+        ("/nope", "path_not_allowed"),
+        ("/ok", None),
+    ]
+    audit.close()
 
 
 def test_routes_require_dashboard_auth(broker_test_client: TestClient) -> None:
