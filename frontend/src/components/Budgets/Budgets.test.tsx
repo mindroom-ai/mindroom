@@ -83,11 +83,14 @@ function renderBudgets() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const page = () => (
     <QueryClientProvider client={client}>
       <Budgets />
     </QueryClientProvider>
   );
+  const result = render(page());
+  // The mocked store is not reactive; rerender to show a draft edit.
+  return { ...result, rerenderPage: () => result.rerender(page()) };
 }
 
 beforeEach(() => {
@@ -208,6 +211,31 @@ describe('Budgets', () => {
       ['budgets', 'users', '@carol:example.org'],
       5
     );
+  });
+
+  it("keeps a user's row while their cap is cleared and retyped", async () => {
+    vi.mocked(fetch).mockResolvedValue(respond({ ...status, users: [status.users[0]] }));
+    const { rerenderPage } = renderBudgets();
+    await screen.findByRole('row', { name: /@alice:example.org/ });
+
+    fireEvent.change(
+      screen.getByRole('spinbutton', {
+        name: 'Monthly cap for @bob:example.org',
+      }),
+      { target: { value: '' } }
+    );
+    setStore(
+      budgetConfig({
+        budgets: { monthly_limit_usd: 20, fallback_model: 'luna', users: {} },
+      })
+    );
+    rerenderPage();
+
+    expect(
+      screen.getByRole('spinbutton', {
+        name: 'Monthly cap for @bob:example.org',
+      })
+    ).toBeInTheDocument();
   });
 
   it('edits the default cap and the fallback model', async () => {

@@ -194,9 +194,11 @@ function UsersCard({
   const { toast } = useToast();
   const [newUserId, setNewUserId] = useState('');
   const [newUserCap, setNewUserCap] = useState<number | undefined>();
+  // Users edited on this page stay listed, so clearing a cap to retype it keeps the row.
+  const [editedUserIds, setEditedUserIds] = useState<ReadonlySet<string>>(() => new Set());
   const overrides = budgets.users ?? {};
   const spend = new Map((status?.users ?? []).map(user => [user.user_id, user.spend_usd]));
-  const userIds = [...new Set([...spend.keys(), ...Object.keys(overrides)])].sort(
+  const userIds = [...new Set([...spend.keys(), ...Object.keys(overrides), ...editedUserIds])].sort(
     (a, b) => (spend.get(b) ?? 0) - (spend.get(a) ?? 0) || a.localeCompare(b)
   );
   const defaultLabel =
@@ -223,6 +225,7 @@ function UsersCard({
       return;
     }
     updateConfigValue(['budgets', 'users', userId], newUserCap);
+    setEditedUserIds(previous => new Set(previous).add(userId));
     setNewUserId('');
     setNewUserCap(undefined);
   };
@@ -299,7 +302,10 @@ function UsersCard({
                         value={overrides[userId]}
                         placeholder={defaultLabel}
                         className="w-40"
-                        onCommit={value => updateConfigValue(['budgets', 'users', userId], value)}
+                        onCommit={value => {
+                          setEditedUserIds(previous => new Set(previous).add(userId));
+                          updateConfigValue(['budgets', 'users', userId], value);
+                        }}
                       />
                     </td>
                     <td className="sm:py-2">
