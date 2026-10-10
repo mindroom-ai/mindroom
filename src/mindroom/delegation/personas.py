@@ -144,10 +144,10 @@ def _parse_profile(name: str, content: str) -> _PersonaProfile:
     )
 
 
-def _profile_text(directory_fd: int, name: str) -> str:
+def _profile_bytes(directory_fd: int, name: str) -> bytes:
     """Read one profile file below its pinned directory, letting FileNotFoundError mean absent."""
     try:
-        data = read_regular_file_within_root(
+        return read_regular_file_within_root(
             directory_fd,
             f"{name}{_PROFILE_SUFFIX}",
             max_bytes=_MAX_PROFILE_FILE_BYTES,
@@ -160,27 +160,31 @@ def _profile_text(directory_fd: int, name: str) -> str:
     except OSError as exc:
         msg = "the file cannot be read as a regular file"
         raise PersonaError(msg) from exc
+
+
+def _decoded_profile(name: str, data: bytes) -> _PersonaProfile:
     try:
-        return data.decode()
+        text = data.decode()
     except UnicodeDecodeError as exc:
         msg = "the file is not UTF-8 text"
         raise PersonaError(msg) from exc
+    return _parse_profile(name, text)
 
 
 def _read_profile(directory_fd: int, name: str) -> tuple[_PersonaProfile | _InvalidPersonaProfile | None, int]:
-    """Read one profile below its pinned directory with its size; None when the file is absent."""
+    """Read one profile below its pinned directory with the bytes read; None when the file is absent."""
     if not _PROFILE_NAME.fullmatch(name):
         return _InvalidPersonaProfile(name=name, reason=_NAME_RULE), 0
     try:
-        text = _profile_text(directory_fd, name)
+        data = _profile_bytes(directory_fd, name)
     except FileNotFoundError:
         return None, 0
     except PersonaError as exc:
         return _InvalidPersonaProfile(name=name, reason=str(exc)), 0
     try:
-        return _parse_profile(name, text), len(text.encode())
+        return _decoded_profile(name, data), len(data)
     except PersonaError as exc:
-        return _InvalidPersonaProfile(name=name, reason=str(exc)), len(text.encode())
+        return _InvalidPersonaProfile(name=name, reason=str(exc)), len(data)
 
 
 def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPersonaProfile]:

@@ -207,6 +207,19 @@ def test_list_profiles_stops_at_its_total_budget(tmp_path: Path) -> None:
     assert load_profile(tmp_path, "p19").name == "p19"
 
 
+def test_list_profiles_charges_unreadable_text_to_its_budget(tmp_path: Path) -> None:
+    """A profile that is not UTF-8 still counts the bytes read against the listing budget."""
+    directory = tmp_path / "subagents"
+    directory.mkdir()
+    for index in range(20):
+        (directory / f"p{index:02d}.md").write_bytes(b"\xff" * (60 * 1024))
+
+    entries = list_profiles(tmp_path)
+
+    assert 0 < len(entries) < 20
+    assert all(isinstance(entry, _InvalidPersonaProfile) for entry in entries)
+
+
 def test_load_profile_reads_one_file(tmp_path: Path) -> None:
     """A named profile loads from subagents/<name>.md."""
     _profile_file(tmp_path, "critic.md", _CRITIC)

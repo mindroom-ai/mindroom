@@ -32,7 +32,7 @@ from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_fa
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
-from mindroom.mcp.toolkit import hide_mcp_function_collisions
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, hide_mcp_function_collisions
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.path_confinement import read_regular_file_within_root
@@ -80,7 +80,7 @@ from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from contextlib import AbstractContextManager
 
     from agno.db.base import BaseDb
@@ -630,15 +630,17 @@ def _log_toolkits_without_unique_model_functions(
             seen_function_names.update(function_names)
 
 
-def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> None:
-    """Project MCP functions against the exact session-local tool surface."""
-    for server_id, function_names in hide_mcp_function_collisions(toolkits).items():
+def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> dict[str, tuple[str, ...]]:
+    """Project MCP functions against the exact session-local tool surface, returning those hidden per server."""
+    hidden = hide_mcp_function_collisions(toolkits)
+    for server_id, function_names in hidden.items():
         logger.warning(
             "Hiding colliding MCP functions from session tool surface",
             agent=agent_name,
             server_id=server_id,
             function_names=list(function_names),
         )
+    return hidden
 
 
 class _MatrixRoomRuntimeToolCollisionError(ValueError):
@@ -1491,6 +1493,18 @@ def _keep_persona_functions(toolkit: Toolkit, tool_name: str, persona_tools: tup
             del functions[name]
 
 
+def _require_persona_surface(
+    persona_tools: tuple[str, ...],
+    built: dict[str, frozenset[str]],
+    mcp_servers: Mapping[str, str],
+    hidden_mcp_functions: Mapping[str, tuple[str, ...]],
+) -> None:
+    """Refuse an authored child missing a named tool once colliding MCP functions are hidden."""
+    for tool_name, server_id in mcp_servers.items():
+        built[tool_name] -= frozenset(hidden_mcp_functions.get(server_id, ()))
+    require_built_persona_tools(persona_tools, built)
+
+
 def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
     """Attach the configured toolkit identity to its executable functions."""
     for function in (*toolkit.functions.values(), *toolkit.get_async_functions().values()):
@@ -1604,6 +1618,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     worker_routed_tool_names: list[str] = []
     deferred_toolkits: list[_NativeDeferredToolkit] = []
     persona_built: dict[str, frozenset[str]] = {}
+    persona_mcp_servers: dict[str, str] = {}
 
     def build_entry(tool_entry: EffectiveToolConfig) -> Toolkit | None:
         tool_name = tool_entry.name
@@ -1636,6 +1651,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             if toolkit is not None and persona_tools is not None:
                 # Record what survives the caller's filters; approval capability below may still hide gated calls.
                 persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
+                if isinstance(toolkit, MindRoomMCPToolkit):
+                    persona_mcp_servers[tool_name] = toolkit.server_id
         toolkit = apply_tool_approval_capability(
             toolkit,
             config,
@@ -1706,8 +1723,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
+    hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
     if persona_tools is not None:
-        require_built_persona_tools(persona_tools, persona_built)
+        _require_persona_surface(persona_tools, persona_built, persona_mcp_servers, hidden_mcp_functions)
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,
@@ -2043,7 +2061,6 @@ def create_agent(
         minimal_mode=agent_mode == "minimal",
         persona_tools=persona.tools if persona is not None else None,
     )
-    _hide_session_mcp_function_collisions(tool_assembly.tools, agent_name=agent_name)
     storage = _open_agent_session_storage(
         agent_name,
         agent_runtime,

@@ -14,10 +14,14 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
 from mindroom.config.agent import AgentConfig
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
+from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+from tests.test_dynamic_toolkits import _base_config_data, _validated_config
+from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -175,6 +179,52 @@ def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
 
     assert "file" in names
     assert "dynamic_tools" not in names
+
+
+def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A named MCP function that the session's collision projection hides stops construction."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["sleep", "mcp_demo"]  # type: ignore[index]
+    raw["mcp_servers"] = {
+        "demo": {
+            "transport": "streamable-http",
+            "url": "https://mcp.example.test/mcp",
+            "auth": {
+                "type": "oauth",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        },
+    }
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _toolkit_runtime_paths(tmp_path)
+
+    def build(tool_name: str, **_kwargs: object) -> Toolkit:
+        if tool_name == "mcp_demo":
+            return MindRoomMCPToolkit(
+                server_id="demo",
+                manager=None,
+                catalog=None,
+                server_config=config.mcp_servers["demo"],
+                runtime_paths=runtime_paths,
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            )
+        local = Toolkit(name="local", auto_register=False)
+        local.functions["demo_list_tools"] = Function(name="demo_list_tools", entrypoint=lambda: "local")
+        return local
+
+    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+
+    with pytest.raises(PersonaError, match=r"'mcp_demo\.demo_list_tools' is not available to you"):
+        agents.create_agent(
+            "code",
+            config,
+            runtime_paths,
+            None,
+            persist_runtime_state=False,
+            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"]),
+        )
 
 
 def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
