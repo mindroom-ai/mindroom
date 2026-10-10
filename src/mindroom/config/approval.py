@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -92,17 +91,6 @@ class ToolApprovalConfig(BaseModel):
             "not only the exact arguments it was scheduled with"
         ),
     )
-
-    def matching_rule(self, tool_name: str) -> ApprovalRuleConfig | None:
-        """Return the first rule that matches *tool_name*."""
-        return next((rule for rule in self.rules if fnmatchcase(tool_name, rule.match)), None)
-
-    def may_require_approval(self, tool_name: str) -> bool:
-        """Return whether calls to *tool_name* can need approval."""
-        rule = self.matching_rule(tool_name)
-        if rule is None:
-            return self.default == "require_approval"
-        return rule.action != "auto_approve"
 
     @field_validator("timeout_days", mode="before")
     @classmethod

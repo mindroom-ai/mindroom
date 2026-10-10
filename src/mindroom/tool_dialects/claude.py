@@ -147,7 +147,7 @@ _BASH = WireFunction(
     key=ToolKey("shell", "run_shell_command"),
     wire_name="Bash",
     description=(
-        "Run a bash command and return its output.\n"
+        "Run a shell command with bash and return its output.\n"
         "- Every call starts a fresh non-login bash, so `cd` and exported variables do not carry over to the "
         "next call; chain dependent steps with `&&`.\n"
         "- `timeout` is in milliseconds (default and maximum 120000); a command still running then keeps running in the "

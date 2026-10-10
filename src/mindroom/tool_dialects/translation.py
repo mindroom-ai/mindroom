@@ -167,11 +167,21 @@ def wire_tools(
 
     Other functions stay ``Function`` objects so the model's own tool formatting still applies to them.
     """
+    return [presented for _tool, presented in wire_tool_pairs(dialect, tools, custom_tools=custom_tools)]
+
+
+def wire_tool_pairs(
+    dialect: ToolDialect,
+    tools: Sequence[Function | dict[str, Any]],
+    *,
+    custom_tools: bool,
+) -> list[tuple[Function | dict[str, Any], Function | dict[str, Any]]]:
+    """Return each tool *dialect* presents paired with how it presents it, in order, leaving hidden ones out."""
     taken = {tool.name if isinstance(tool, Function) else _tool_dict_name(tool) for tool in tools}
-    presented: list[Function | dict[str, Any]] = []
+    presented: list[tuple[Function | dict[str, Any], Function | dict[str, Any]]] = []
     for tool in tools:
         if not isinstance(tool, Function):
-            presented.append(tool)
+            presented.append((tool, tool))
             continue
         if not presents(dialect, tool, tools):
             continue
@@ -185,7 +195,7 @@ def wire_tools(
             )
             wire_function = None
         presented.append(
-            tool if wire_function is None else _wire_tool_dict(tool, wire_function, custom_tools=custom_tools),
+            (tool, tool if wire_function is None else _wire_tool_dict(tool, wire_function, custom_tools=custom_tools)),
         )
     return presented
 

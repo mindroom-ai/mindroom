@@ -54,6 +54,10 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
 
+# OpenAI's public API and the Codex backend share Responses features that compatible servers may lack.
+_OPENAI_NATIVE_ENDPOINTS = frozenset({"https://api.openai.com/v1", "https://chatgpt.com/backend-api/codex"})
+
+
 class OpenAIChatProviderCompat(AgnoOpenAIChatProviderCompat):
     """Repair canonical tool replay after provider parser compatibility.
 
@@ -328,11 +332,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
             self.store is not True
             and not self.background
             and self.id.startswith(("gpt-5.3-codex", "gpt-5.4", "gpt-6"))
-            and self.native_compaction_endpoint()
-            in {
-                "https://api.openai.com/v1",
-                "https://chatgpt.com/backend-api/codex",
-            }
+            and self.reaches_openai_native_api()
             and not any(
                 any(key in params for key in ("context_management", "previous_response_id", "background", "store"))
                 for params in (
@@ -342,6 +342,10 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
                 )
             )
         )
+
+    def reaches_openai_native_api(self) -> bool:
+        """Return whether requests go to OpenAI's own Responses API or the Codex backend, not a compatible server."""
+        return self.native_compaction_endpoint() in _OPENAI_NATIVE_ENDPOINTS
 
     def native_compaction_endpoint(self) -> str:
         """Bind replay to the effective client endpoint."""

@@ -801,7 +801,8 @@ class CodingTools(Toolkit):
                 new_contents = updated_contents(self._patch_source(source, hunk.path), hunk.path, hunk.chunks)
                 self._check_patch_target(target, hunk.move_to or hunk.path)
                 writes.append((target, new_contents.encode("utf-8")))
-                if entry != target:
+                # On a case-insensitive filesystem a case-only rename names the moved file itself.
+                if entry != target and not (target.exists() and os.path.samestat(entry.lstat(), target.lstat())):
                     writes.append((entry, None))
                 modified.append(f"M {hunk.move_to or hunk.path}")
         return writes, [*added, *modified, *deleted]

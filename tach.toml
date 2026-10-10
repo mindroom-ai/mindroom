@@ -2316,6 +2316,7 @@ depends_on = [
     "mindroom.agno_compat_prepared_tools",
     "mindroom.timing",
     "mindroom.token_budget",
+    "mindroom.tool_dialects.agno_compat_model",
     "mindroom.tool_schema_cache",
 ]
 

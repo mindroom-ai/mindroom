@@ -11,16 +11,17 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
-from mindroom.model_instance_checks import OPENAI_RESPONSES_CLASS, isinstance_of_loaded
-from mindroom.tool_dialects.translation import canonical_tool_calls, wire_messages, wire_tools
+from mindroom.model_instance_checks import MINDROOM_OPENAI_RESPONSES_CLASS, isinstance_of_loaded
+from mindroom.tool_dialects.translation import canonical_tool_calls, wire_messages, wire_tool_pairs, wire_tools
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 
     from agno.models.base import Model
     from agno.models.response import ModelResponse
     from agno.tools.function import Function, FunctionCall
 
+    from mindroom.openai_models import MindRoomOpenAIResponses
     from mindroom.tool_dialects.types import ToolDialect
 
 _TOOL_DIALECT_MARKER = "_mindroom_tool_dialect"
@@ -46,7 +47,7 @@ _TOOL_DIALECT_INVOKE_MARKER = "_mindroom_tool_dialect_invoke"
 # tests/test_tool_dialect_binding.py::test_overrides_bind_to_deepcopied_model.
 def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
     """Present this model's canonical tools in *dialect*, as freeform tools where the Responses API allows them."""
-    custom_tools = isinstance_of_loaded(model, OPENAI_RESPONSES_CLASS)
+    custom_tools = _accepts_freeform_tools(model)
     model_dict = vars(model)
     if model_dict.get(_TOOL_DIALECT_MARKER) is not None:
         return
@@ -101,6 +102,28 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
 def installed_tool_dialect(model: Model) -> ToolDialect | None:
     """Return the dialect bound to *model*, or None when it has none."""
     return vars(model).get(_TOOL_DIALECT_MARKER)
+
+
+def presented_tool_pairs(
+    model: Model,
+    tools: Sequence[Function | dict[str, Any]],
+) -> list[tuple[Function | dict[str, Any], Function | dict[str, Any]]]:
+    """Return each tool *model* shows paired with how its dialect shows it, before provider formatting."""
+    dialect = installed_tool_dialect(model)
+    if dialect is None:
+        return [(tool, tool) for tool in tools]
+    return wire_tool_pairs(dialect, tools, custom_tools=_accepts_freeform_tools(model))
+
+
+def _accepts_freeform_tools(model: Model) -> bool:
+    """Return whether *model* sends to OpenAI's Responses API or the Codex backend, which run freeform tools."""
+    return (
+        isinstance_of_loaded(model, MINDROOM_OPENAI_RESPONSES_CLASS)
+        and cast(
+            "MindRoomOpenAIResponses",
+            model,
+        ).reaches_openai_native_api()
+    )
 
 
 async def _invoke_in_dialect(

@@ -20,6 +20,7 @@ from openai import AsyncOpenAI
 from mindroom.agents import set_toolkit_owner
 from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.translation import resolve_tool_dialect
 from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -349,7 +350,7 @@ async def test_approval_pause_shows_canonical_call_and_resume_runs_it(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_mindroom_dialect_request_is_unchanged() -> None:
-    """An empty dialect sends exactly what an unbound model sends."""
+    """The shipped default dialect sends exactly what an unbound model sends for the tools it does not hide."""
     bound, unbound = (
         _Provider([_function_call("c1", "run_shell_command", '{"args": "ls"}')]),
         _Provider(
@@ -357,7 +358,7 @@ async def test_mindroom_dialect_request_is_unchanged() -> None:
         ),
     )
 
-    await _run(bound, [_shell([]), _coding([])], ToolDialect(name="mindroom"))
+    await _run(bound, [_shell([]), _coding([])], resolve_tool_dialect(None))
     await _run(unbound, [_shell([]), _coding([])], None)
 
     assert bound.requests == unbound.requests

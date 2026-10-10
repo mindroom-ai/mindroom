@@ -7,6 +7,7 @@ import inspect
 import json
 import threading
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
+    from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.event_journal import (
         ScheduledApprovalArmState,
@@ -169,9 +171,16 @@ def _clear_script_cache() -> None:
         _SCRIPT_CACHE.clear()
 
 
+def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
+    return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+
+
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:
     """Return whether one tool must use Agno's persisted confirmation boundary."""
-    return config.tool_approval.may_require_approval(tool_name)
+    rule = _matching_tool_approval_rule(config, tool_name)
+    if rule is None:
+        return config.tool_approval.default == "require_approval"
+    return rule.action != "auto_approve"
 
 
 def resolve_tool_approval_approver(
@@ -203,7 +212,7 @@ async def evaluate_tool_approval(
     if tool_call_is_approval_exempt(tool_name, arguments):
         return False, timeout_seconds
 
-    rule = config.tool_approval.matching_rule(tool_name)
+    rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:
         return require_approval, timeout_seconds
     if rule.timeout_days is not None:

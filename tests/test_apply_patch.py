@@ -201,6 +201,20 @@ def test_deleting_a_link_and_updating_its_target_both_apply(tmp_path: Path) -> N
     assert (tmp_path / "real" / "config.txt").read_text() == "changed\n"
 
 
+def test_moving_onto_another_name_for_the_same_file_keeps_it(tmp_path: Path) -> None:
+    """A move whose destination names the moved file itself, as a case-only rename does on macOS, deletes nothing."""
+    (tmp_path / "readme.md").write_text("x\n")
+    (tmp_path / "README.md").hardlink_to(tmp_path / "readme.md")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Update File: readme.md\n*** Move to: README.md\n@@\n-x\n+y\n*** End Patch",
+    )
+
+    assert result == "Success. Updated the following files:\nM README.md"
+    assert (tmp_path / "README.md").read_text() == "y\n"
+    assert (tmp_path / "readme.md").exists()
+
+
 def test_moving_a_link_onto_its_target_removes_the_link(tmp_path: Path) -> None:
     """Moving a link onto the file it points to writes that file and removes the link, like any move."""
     (tmp_path / "real.txt").write_text("x\n")

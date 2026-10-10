@@ -9,6 +9,7 @@ import httpx
 import pytest
 from agno.agent import Agent
 from agno.models.message import Message
+from agno.tools.function import Function
 from openai import AsyncOpenAI
 
 from mindroom.agents import set_toolkit_owner
@@ -263,3 +264,24 @@ async def test_codex_non_stream_invocation_projects_history_once(monkeypatch: py
 
     [call] = [item for item in requests[0]["input"] if item.get("type") == "function_call"]
     assert json.loads(call["arguments"]) == {"session_id": 0x0123ABCD}
+
+
+@pytest.mark.parametrize(
+    ("base_url", "freeform"),
+    [(None, True), ("https://api.openai.com/v1/", True), ("http://localhost:8000/v1", False)],
+    ids=["openai-default", "openai-explicit", "local-server"],
+)
+def test_freeform_apply_patch_only_on_openai_responses_endpoints(base_url: str | None, *, freeform: bool) -> None:
+    """A Responses server other than OpenAI's, such as a local one, gets the JSON apply_patch it can run."""
+    model = MindRoomOpenAIResponses(id="gpt-oss-120b", api_key="test", base_url=base_url)
+    install_tool_dialect(model, CODEX_DIALECT)
+    patch_function = Function(
+        name="apply_patch",
+        description="Apply a patch.",
+        parameters={"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"]},
+    )
+    patch_function.owning_toolkit = "coding"
+
+    [definition] = model._format_tools([patch_function])
+
+    assert (definition["type"] == "custom") is freeform
