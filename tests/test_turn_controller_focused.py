@@ -1822,7 +1822,7 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
     assert harness.gateway.reactions == ([(event.event_id, "⏳", "approval_wait")] if waits else [])
     await harness.gate.drain_all()
     assert [batch.event.for_another_participant for batch in harness.gate_batches] == [
-        mention not in {None, "general"},
+        {None: None, "general": False}.get(mention, True),
     ]
 
 

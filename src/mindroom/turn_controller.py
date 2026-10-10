@@ -475,10 +475,10 @@ class TurnController:
         """
         if envelope.origin.intent not in {TurnIntent.ROUTER_HANDOFF, TurnIntent.TRUSTED_INTERNAL_RELAY}:
             return True
-        return self._addressed_to_this_agent(room, event.source)
+        return self._mentions_another_participant(room, event.source) is not True
 
-    def _addressed_to_this_agent(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool:
-        """Return whether a message mentions this agent, or no other agent or person."""
+    def _mentions_another_participant(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
+        """Return whom a message mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people."""
         mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
             source,
             self.deps.matrix_id,
@@ -486,7 +486,9 @@ class TurnController:
             self.deps.runtime_paths,
             room=room,
         )
-        return am_i_mentioned or not (mentioned_agents or has_non_agent_mentions)
+        if am_i_mentioned:
+            return False
+        return True if mentioned_agents or has_non_agent_mentions else None
 
     def _voice_queued_notice_reservation(
         self,
@@ -583,7 +585,7 @@ class TurnController:
             target,
         ):
             return
-        if not self._addressed_to_this_agent(room, source):
+        if self._mentions_another_participant(room, source):
             # A message for another agent or person does not wait for this one.
             return
         create_background_task(
@@ -922,6 +924,7 @@ class TurnController:
             sender=event.sender,
             body=body,
             new_content=content,
+            for_another_participant=self._mentions_another_participant(room, {"content": content}),
         )
 
     def _log_unplaceable_event(self, room: nio.MatrixRoom, event: DispatchEvent | MatrixMediaEvent) -> None:
@@ -1149,7 +1152,7 @@ class TurnController:
                 trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
                 discovery_event_id=self.deps.ingress.discovery_event_id(event),
                 turn_dispatch_recovery=turn_dispatch_recovery_active(),
-                for_another_participant=not self._addressed_to_this_agent(room, prepared_event.source),
+                for_another_participant=self._mentions_another_participant(room, prepared_event.source),
             ),
             room=room,
             dispatch_metadata=dispatch_metadata,
@@ -2611,7 +2614,7 @@ class TurnController:
                         message_received_depth=envelope.message_received_depth,
                         trust_internal_payload_metadata=True,
                         turn_dispatch_recovery=turn_dispatch_recovery_active(),
-                        for_another_participant=not self._addressed_to_this_agent(room, normalized_event.source),
+                        for_another_participant=self._mentions_another_participant(room, normalized_event.source),
                     ),
                     room=room,
                     dispatch_metadata=(

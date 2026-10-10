@@ -1394,6 +1394,92 @@ async def test_active_follow_up_backlog_keeps_a_message_for_another_participant_
     assert calls == [["$a1:localhost"], ["$a2:localhost"], ["$a3:localhost"]]
 
 
+@pytest.mark.parametrize(
+    ("upload_mentions", "expected"),
+    [
+        (None, [["$img:localhost", "$caption:localhost"]]),
+        (False, [["$img:localhost"], ["$caption:localhost"]]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_upload_without_its_own_mention_stays_with_a_caption_for_another_participant(
+    upload_mentions: bool | None,
+    expected: list[list[str]],
+) -> None:
+    """An upload that mentions nobody leaves its addressing to its caption; one that mentions this agent does not."""
+    calls: list[list[str]] = []
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    for event, source_kind, for_another_participant in (
+        (_image_event("$img:localhost", 1_000_000), IMAGE_SOURCE_KIND, upload_mentions),
+        (_text_event("$caption:localhost", "@bob look at this", 1_000_001), MESSAGE_SOURCE_KIND, True),
+    ):
+        pending = make_pending_event(
+            event,
+            room,
+            source_kind=source_kind,
+            requester_user_id="@alice:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        )
+        await _admit_ready(
+            gate,
+            key,
+            replace(pending, event=replace(pending.event, for_another_participant=for_another_participant)),
+        )
+    await gate.drain_all()
+
+    assert calls == expected
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_addresses_another_participant_takes_its_queued_message_out_of_this_agents_turn() -> None:
+    """A queued message edited to mention someone else is batched by its edited addressing."""
+    calls: list[list[str]] = []
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    for event_id, body in (("$a1:localhost", "also check X"), ("$a2:localhost", "and Y")):
+        await _admit_ready(
+            gate,
+            key,
+            make_pending_event(
+                _text_event(event_id, body, 1_000_000),
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        )
+    assert gate.apply_pending_edit(
+        room_id="!room:localhost",
+        source_event_id="$a2:localhost",
+        sender="@user:localhost",
+        body="@bob and Y?",
+        new_content={"msgtype": "m.text", "body": "@bob and Y?"},
+        for_another_participant=True,
+    )
+    await gate.drain_all()
+
+    assert calls == [["$a1:localhost"], ["$a2:localhost"]]
+
+
 @pytest.mark.asyncio
 async def test_media_tailed_follow_up_backlog_flushes_immediately_at_idle() -> None:
     """A follow-up backlog ending in media flushes at idle without a debounce wait.
@@ -2404,6 +2490,7 @@ async def test_an_edit_of_a_queued_message_changes_what_its_turn_answers() -> No
         sender="@someone-else:localhost",
         body="what is 3+3?",
         new_content=edited,
+        for_another_participant=None,
     )
     assert gate.apply_pending_edit(
         room_id="!room:localhost",
@@ -2411,6 +2498,7 @@ async def test_an_edit_of_a_queued_message_changes_what_its_turn_answers() -> No
         sender="@user:localhost",
         body="what is 3+3?",
         new_content=edited,
+        for_another_participant=None,
     )
     await gate.drain_all()
 
@@ -2424,4 +2512,5 @@ async def test_an_edit_of_a_queued_message_changes_what_its_turn_answers() -> No
         sender="@user:localhost",
         body="too late",
         new_content={"msgtype": "m.text", "body": "too late"},
+        for_another_participant=None,
     )

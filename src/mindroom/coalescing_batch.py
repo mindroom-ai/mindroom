@@ -383,8 +383,8 @@ def pending_event_addressing(pending_event: PendingEvent) -> bool | None:
     participant never shares a batch with one for this agent: the agent would skip both.
     """
     event = pending_event.event
-    if event.raw_event is not None and not event.for_another_participant:
-        return None
+    if event.for_another_participant is None:
+        return None if event.raw_event is not None else False
     return event.for_another_participant
 
 

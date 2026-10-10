@@ -264,6 +264,7 @@ class CoalescingGate:
         sender: str,
         body: str,
         new_content: Mapping[str, Any],
+        for_another_participant: bool | None,
     ) -> bool:
         """Give a text message still waiting in a queue the text its sender edited it to; return whether one did.
 
@@ -285,7 +286,12 @@ class CoalescingGate:
                 relation = event.source.get("content", {}).get("m.relates_to")
                 if relation is not None:
                     content["m.relates_to"] = relation
-                pending_event.event = replace(event, body=body, source={**event.source, "content": content})
+                pending_event.event = replace(
+                    event,
+                    body=body,
+                    source={**event.source, "content": content},
+                    for_another_participant=for_another_participant,
+                )
                 return True
         return False
 

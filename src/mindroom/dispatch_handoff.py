@@ -70,8 +70,9 @@ class PreparedIngress:
     discovery_event_id: str | None = None
     turn_dispatch_recovery: bool = False
     raw_event: MediaDispatchEvent | None = None
-    # It mentions another agent or person and not this agent, so it never shares a turn with messages for this agent.
-    for_another_participant: bool = False
+    # Whom it mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people.
+    # A message for another participant never shares a turn with messages for this agent.
+    for_another_participant: bool | None = None
 
 
 @dataclass
