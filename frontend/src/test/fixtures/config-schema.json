@@ -1709,11 +1709,11 @@
           "type": "string"
         },
         "rules": {
-          "description": "Routing rules for this service",
+          "default": [],
+          "description": "Routing rules for this service; at least one is required unless a preset supplies them",
           "items": {
             "$ref": "#/$defs/EgressRule"
           },
-          "minItems": 1,
           "title": "Rules",
           "type": "array"
         },
@@ -1741,9 +1741,6 @@
           "title": "Oauth Provider"
         }
       },
-      "required": [
-        "rules"
-      ],
       "title": "EgressService",
       "type": "object"
     },

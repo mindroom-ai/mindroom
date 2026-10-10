@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.credential_policy import is_oauth_client_config_service, is_oauth_token_service
 from mindroom.egress_broker.presets import EGRESS_PRESETS
+
+if TYPE_CHECKING:
+    from pydantic import ModelWrapValidatorHandler
 
 _AuthType = Literal["bearer", "basic", "header", "query"]
 
@@ -192,9 +195,8 @@ class EgressService(BaseModel):
         description="Service description",
     )
     rules: list[EgressRule] = Field(
-        ...,
-        min_length=1,
-        description="Routing rules for this service",
+        default_factory=list,
+        description="Routing rules for this service; at least one is required unless a preset supplies them",
     )
     placeholder_env: dict[str, str] = Field(
         default_factory=dict,
@@ -209,23 +211,39 @@ class EgressService(BaseModel):
         ),
     )
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def expand_preset(cls, data: object) -> object:
-        """Merge the selected preset under the authored fields before field validation."""
+    def expand_preset(cls, data: object, handler: ModelWrapValidatorHandler[EgressService]) -> EgressService:
+        """Resolve the selected preset without marking its values as authored.
+
+        Preset values are merged under the authored fields before field validation,
+        so every existing validator runs on the resolved service.
+        Afterwards only the authored fields stay in `model_fields_set`,
+        so `Config.authored_model_dump()` keeps `{preset: github}` as written and later preset updates still apply.
+        """
         if not isinstance(data, dict):
-            return data
+            return cls._require_rules(handler(data))
         authored = cast("dict[str, object]", data)
         name = authored.get("preset")
         if not isinstance(name, str):
-            return data
+            return cls._require_rules(handler(data))
         preset = EGRESS_PRESETS.get(name)
         if preset is None:
             known = ", ".join(sorted(EGRESS_PRESETS))
             msg = f"unknown egress preset '{name}' (known presets: {known})"
             raise ValueError(msg)
         # Deep copy so validated models never alias the shared built-in table.
-        return {**copy.deepcopy(preset), **authored}
+        service = handler({**copy.deepcopy(preset), **authored})
+        service.model_fields_set.difference_update(set(preset) - set(authored))
+        return cls._require_rules(service)
+
+    @classmethod
+    def _require_rules(cls, service: EgressService) -> EgressService:
+        """Reject a service that resolves to no rules; the error path carries the service name."""
+        if not service.rules:
+            msg = "service must define at least one rule (set `rules` or choose a `preset`)"
+            raise ValueError(msg)
+        return service
 
     @field_validator("placeholder_env")
     @classmethod

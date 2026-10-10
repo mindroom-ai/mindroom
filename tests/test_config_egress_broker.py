@@ -114,12 +114,70 @@ def test_non_string_or_empty_preset_is_rejected(preset: object) -> None:
         EgressService.model_validate({"preset": preset})
 
 
-def test_service_without_preset_still_requires_rules() -> None:
-    """Existing behaviour: a service with neither preset nor rules is invalid."""
-    with pytest.raises(ValidationError, match="rules"):
-        EgressService.model_validate({"display_name": "Nothing"})
-    with pytest.raises(ValidationError):
+def test_service_without_rules_or_preset_is_rejected_naming_the_service() -> None:
+    """A service that resolves to no rules is invalid, and the error path names the service."""
+    with pytest.raises(ValidationError, match=r"(?s)services\.nothing\b.*at least one rule"):
+        Config(**yaml.safe_load("egress_broker:\n  services:\n    nothing:\n      display_name: Nothing\n"))
+    with pytest.raises(ValidationError, match="at least one rule"):
         EgressService.model_validate({"oauth_provider": "github"})
+    with pytest.raises(ValidationError, match="at least one rule"):
+        EgressService.model_validate({"preset": "github", "rules": []})
+
+
+def test_preset_only_service_round_trips_through_authored_dump() -> None:
+    """Expanded preset values are not authored, so saving config keeps just the preset reference."""
+    config = Config(**yaml.safe_load("egress_broker:\n  services:\n    github:\n      preset: github\n"))
+
+    assert config.authored_model_dump()["egress_broker"] == {"services": {"github": {"preset": "github"}}}
+    # The resolved model still exposes the full preset.
+    github = config.egress_broker.services["github"]
+    assert len(github.rules) == 3
+    assert github.oauth_provider == "github"
+    assert github.model_fields_set == {"preset"}
+
+
+def test_authored_overrides_stay_set_alongside_preset() -> None:
+    """Only explicitly authored fields are persisted; the rest keep coming from the preset."""
+    config = Config(
+        **yaml.safe_load(
+            "egress_broker:\n  services:\n    github:\n      preset: github\n      display_name: GH\n",
+        ),
+    )
+
+    assert config.authored_model_dump()["egress_broker"] == {
+        "services": {"github": {"preset": "github", "display_name": "GH"}},
+    }
+    github = config.egress_broker.services["github"]
+    assert github.display_name == "GH"
+    assert github.description
+    assert len(github.rules) == 3
+
+    rules_authored = Config(
+        egress_broker={
+            "services": {
+                "github": {"preset": "github", "rules": [{"host": "ghe.example.com", "auth": {"type": "bearer"}}]},
+            },
+        },
+    )
+    dumped = rules_authored.authored_model_dump()["egress_broker"]["services"]["github"]
+    assert set(dumped) == {"preset", "rules"}
+    assert dumped["rules"][0]["host"] == "ghe.example.com"
+
+
+def test_authored_dump_reloads_to_the_same_services() -> None:
+    """Re-validating the authored dump yields the same resolved services."""
+    config = Config(egress_broker={"services": {"github": {"preset": "github", "display_name": "GH"}}})
+
+    reloaded = Config(**config.authored_model_dump())
+
+    assert reloaded.egress_broker == config.egress_broker
+
+
+def test_rules_are_optional_in_the_schema() -> None:
+    """Presets can supply the rules, so the JSON schema must not require them."""
+    schema = EgressService.model_json_schema()
+
+    assert "rules" not in schema.get("required", [])
 
 
 @pytest.mark.parametrize("provider", ["github", "google_drive", "a", "0x", "my-provider_2"])
