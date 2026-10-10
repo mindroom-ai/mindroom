@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -21,12 +22,14 @@ from mindroom.api.egress_credentials import (
     source_status_fields,
     unavailable_egress_oauth_status,
 )
+from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
+    from mindroom.config.main import Config
     from mindroom.egress_broker.secrets import OAuthStatus
 
 router = APIRouter(prefix="/api/egress-broker", tags=["egress-broker"])
@@ -88,8 +91,10 @@ class AuditLogsResponse(BaseModel):
 
 async def _admin_oauth_status(
     request: Request,
+    config: Config,
+    target: RequestCredentialsTarget,
+    name: str,
     provider_id: str,
-    agent_name: str | None,
 ) -> OAuthStatus | None:
     """Load a provider's connection state for the selected scope with the dashboard's own OAuth status route."""
     from mindroom.api import config_lifecycle  # noqa: PLC0415
@@ -100,10 +105,22 @@ async def _admin_oauth_status(
     if provider is None:
         return None
     try:
-        result = await oauth.status(provider_id, request, agent_name=agent_name)
+        result = await oauth.status(provider_id, request, agent_name=target.agent_name)
     except HTTPException:
         return unavailable_egress_oauth_status(provider)
-    return egress_oauth_status(result, can_manage=True)
+    return await egress_oauth_status(
+        result,
+        can_manage=True,
+        stored_connection=partial(
+            oauth_status,
+            provider_id,
+            worker_target_for_credentials_target(target),
+            service=name,
+            config=config,
+            runtime_paths=target.runtime_paths,
+            credentials_manager=target.base_manager,
+        ),
+    )
 
 
 async def _load_service_statuses_for_target(
@@ -122,7 +139,7 @@ async def _load_service_statuses_for_target(
     services: list[ServiceStatus] = []
     for name, service_config in config.egress_broker.services.items():
         oauth_part = (
-            await _admin_oauth_status(request, service_config.oauth_provider, target.agent_name)
+            await _admin_oauth_status(request, config, target, name, service_config.oauth_provider)
             if service_config.oauth_provider is not None
             else None
         )

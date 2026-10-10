@@ -12,7 +12,10 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mindroom.api import main, oauth
+from mindroom.api.connection_agents import build_connection_agent_target
+from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.egress_broker.oauth_source import Token, resolve_oauth_token
 from mindroom.oauth import credential_store as oauth_credential_store
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
@@ -460,6 +463,7 @@ def test_status_shows_the_oauth_connection_and_a_stored_key_wins(oauth_egress_po
         "account_label": None,
         "can_connect": True,
         "reset_required": False,
+        "service_account": False,
     }
 
     _connect_account(portal, "alice", "personal", "drive", "google_drive")
@@ -719,12 +723,7 @@ def test_egress_oauth_status_agrees_with_the_portal_status(oauth_egress_portal: 
     assert alice["connected"] is False
 
 
-def test_egress_oauth_status_agrees_with_the_portal_for_a_service_account(
-    oauth_egress_portal: dict[str, Any],
-) -> None:
-    """A shared service account counts as connected for users, is no personal account, and cannot be connected."""
-    portal = oauth_egress_portal
-    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+def _enable_service_account(portal: dict[str, Any]) -> None:
     paths = replace(
         portal["paths"],
         process_env={**portal["paths"].process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"},
@@ -733,12 +732,66 @@ def test_egress_oauth_status_agrees_with_the_portal_for_a_service_account(
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
 
-    alice, bob, alice_shared, bob_shared = _assert_portal_and_egress_agree(portal)
-    # Managers of their own agents see no personal account to manage; plain users of a shared agent see it served.
-    assert alice == {"connected": False, "can_connect": False, "reset_required": False, "account_label": None}
-    assert bob == alice
-    assert alice_shared == {"connected": True, "can_connect": False, "reset_required": False, "account_label": None}
-    assert bob_shared == {"connected": False, "can_connect": False, "reset_required": False, "account_label": None}
+
+def test_service_account_is_reported_as_the_broker_sees_it_and_the_portal_keeps_its_semantics(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """The broker cannot inject a service account, so egress shows it as such while the portal status is unchanged."""
+    portal = oauth_egress_portal
+    _enable_service_account(portal)
+
+    not_connected = {"connected": False, "can_connect": False, "reset_required": False, "account_label": None}
+    for user, agent in (("alice", "personal"), ("bob", "personal"), ("alice", "shared_dev"), ("bob", "shared_dev")):
+        row = _egress_row(portal, user, agent, "drive")
+        assert row["oauth"]["service_account"] is True
+        assert _egress_oauth_view(portal, user, agent) == not_connected
+        assert row["active_source"] is None
+        assert row["configured"] is False
+    # The portal keeps its own view: managers see no personal account, plain users of a shared agent see it served.
+    assert _portal_oauth_view(portal, "alice", "personal") == not_connected
+    assert _portal_oauth_view(portal, "alice", "shared_dev") == {**not_connected, "connected": True}
+    assert _portal_oauth_view(portal, "bob", "shared_dev") == not_connected
+
+    put = portal["client"].put(
+        "/api/connections/egress/agents/personal/drive",
+        json={"secret": "alice-key"},
+        headers=portal["headers"]["alice"],
+    )
+    assert put.status_code == 204, put.text
+    row = _egress_row(portal, "alice", "personal", "drive")
+    assert row["active_source"] == "key"
+    assert row["oauth"]["connected"] is False
+
+
+def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_uses(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """A stored personal token is injected whatever the service account, so the status matches the broker."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _enable_service_account(portal)
+
+    row = _egress_row(portal, "alice", "personal", "drive")
+    assert row["oauth"] == {
+        "provider": "google_drive",
+        "display_name": "Test Drive",
+        "connected": True,
+        "account_label": None,
+        "can_connect": False,
+        "reset_required": False,
+        "service_account": True,
+    }
+    assert row["active_source"] == "oauth"
+    config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
+    token = resolve_oauth_token(
+        service="drive",
+        provider_id="google_drive",
+        config=config,
+        runtime_paths=portal["paths"],
+        credentials_manager=get_runtime_credentials_manager(portal["paths"]),
+        worker_target=build_connection_agent_target(config, portal["paths"], "@alice:example.org", "personal"),
+    )
+    assert isinstance(token, Token)
 
 
 def test_listing_never_refreshes_tokens(oauth_egress_portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -776,5 +829,54 @@ def test_an_unloadable_connection_state_does_not_fail_the_listing(
         "account_label": None,
         "can_connect": False,
         "reset_required": False,
+        "service_account": False,
     }
     assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 200
+
+
+def test_plain_user_of_a_shared_agent_connects_their_own_requester_scoped_account(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """GitHub-style connections belong to the requester, so connecting needs no credential management."""
+    portal = oauth_egress_portal
+    client = portal["client"]
+
+    before = _egress_row(portal, "alice", "shared_dev", "gh")
+    assert before["can_manage"] is False
+    assert before["oauth"]["can_connect"] is True
+    _connect_account(portal, "alice", "shared_dev", "gh", "github")
+
+    alice = _egress_row(portal, "alice", "shared_dev", "gh")
+    assert alice["oauth"]["connected"] is True
+    assert alice["oauth"]["account_label"] == "alice@example.com"
+    assert alice["active_source"] == "oauth"
+    assert _egress_row(portal, "bob", "shared_dev", "gh")["oauth"]["connected"] is False
+
+    # The API key stays a shared credential that only managers may set.
+    put = client.put(
+        "/api/connections/egress/agents/shared_dev/gh",
+        json={"secret": "alice-key"},
+        headers=portal["headers"]["alice"],
+    )
+    assert put.status_code == 403, put.text
+
+    disconnect = client.post(
+        "/api/connections/egress/agents/shared_dev/gh/disconnect",
+        headers=portal["headers"]["alice"],
+        json={},
+    )
+    assert disconnect.status_code == 200, disconnect.text
+    assert _egress_row(portal, "alice", "shared_dev", "gh")["oauth"]["connected"] is False
+
+
+def test_agent_scoped_provider_on_a_shared_agent_still_needs_management(oauth_egress_portal: dict[str, Any]) -> None:
+    """A shared connection is shared state: plain users cannot connect it and are not offered the action."""
+    portal = oauth_egress_portal
+    assert _egress_row(portal, "alice", "shared_dev", "drive")["oauth"]["can_connect"] is False
+    for action in ("connect", "disconnect"):
+        response = portal["client"].post(
+            f"/api/connections/egress/agents/shared_dev/drive/{action}",
+            headers=portal["headers"]["alice"],
+            json={},
+        )
+        assert response.status_code == 403, response.text

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -17,6 +19,7 @@ from mindroom.api.connection_agents import (
 )
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import (
     EgressServiceStatus,
     OAuthStatus,
@@ -29,9 +32,10 @@ from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -44,7 +48,11 @@ router = APIRouter(prefix="/api/connections/egress", tags=["egress-credentials"]
 
 
 class EgressOAuthStatus(BaseModel):
-    """Connection state of the OAuth account a service can use instead of an API key."""
+    """Connection state of the OAuth account a service can use instead of an API key.
+
+    `connected` means the broker would inject a personal access token. `service_account` marks a provider that a
+    shared service account serves instead: the broker cannot inject that, and personal accounts are not connectable.
+    """
 
     provider: str
     display_name: str
@@ -52,6 +60,7 @@ class EgressOAuthStatus(BaseModel):
     account_label: str | None
     can_connect: bool
     reset_required: bool
+    service_account: bool
 
 
 class EgressCredentialService(BaseModel):
@@ -100,16 +109,37 @@ class _EmptyMutation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def egress_oauth_status(result: oauth.OAuthStatusResponse, *, can_manage: bool) -> OAuthStatus:
-    """Return a service's OAuth status as the Connections portal shows it to the same viewer."""
-    view = oauth.personal_connection_view(result, can_manage=can_manage)
+async def egress_oauth_status(
+    result: oauth.OAuthStatusResponse,
+    *,
+    can_manage: bool,
+    stored_connection: Callable[[], OAuthStatus | None],
+) -> OAuthStatus:
+    """Return a service's OAuth status as the broker sees it.
+
+    Without a service account this is what the Connections portal shows the same viewer. A service account is not
+    a token the broker can inject, so with one `connected` only reflects a stored personal connection that the
+    broker would still use (`stored_connection` reads it like the broker does), and nothing is connectable.
+    """
+    if not result.has_service_account_config:
+        view = oauth.personal_connection_view(result, can_manage=can_manage)
+        return OAuthStatus(
+            provider=result.provider,
+            display_name=result.display_name,
+            connected=view.connected,
+            account_label=view.account_label,
+            can_connect=view.can_connect,
+            reset_required=view.reset_required,
+        )
+    stored = await asyncio.to_thread(stored_connection)
     return OAuthStatus(
         provider=result.provider,
         display_name=result.display_name,
-        connected=view.connected,
-        account_label=view.account_label,
-        can_connect=view.can_connect,
-        reset_required=view.reset_required,
+        connected=stored is not None and stored.connected,
+        account_label=None,
+        can_connect=False,
+        reset_required=result.reset_required,
+        service_account=True,
     )
 
 
@@ -148,6 +178,15 @@ def source_status_fields(status: EgressServiceStatus) -> dict[str, Any]:
     }
 
 
+def _service_oauth_provider(snapshot: ApiSnapshot, service_name: str) -> OAuthProvider | None:
+    """Return the registry's provider for a configured egress service, or None without a known one."""
+    config = snapshot.runtime_config
+    service = config.egress_broker.services.get(service_name) if config is not None else None
+    if service is None or service.oauth_provider is None:
+        return None
+    return load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
+
+
 def egress_oauth_provider(
     request: Request,
     service_name: str,
@@ -161,14 +200,9 @@ def egress_oauth_provider(
     """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
-    service = config.egress_broker.services.get(service_name) if config is not None else None
-    if service is None:
+    if config is None or service_name not in config.egress_broker.services:
         raise HTTPException(404, "Service is not configured", headers=headers)
-    provider = (
-        load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
-        if service.oauth_provider is not None
-        else None
-    )
+    provider = _service_oauth_provider(snapshot, service_name)
     if provider is None:
         raise HTTPException(404, "Service has no account connection", headers=headers)
     if oauth_provider_service_account_configured(provider, snapshot.runtime_paths):
@@ -216,17 +250,16 @@ async def _personal_oauth_status(
     runtime_paths: RuntimePaths,
     manager: CredentialsManager,
     target: ResolvedWorkerTarget,
-    provider_id: str,
+    service_name: str,
     *,
     can_manage: bool,
 ) -> OAuthStatus | None:
-    """Load a provider's connection state for one agent with the helper behind the portal's status route.
+    """Load a service's provider connection state for one agent with the helper behind the portal's status route.
 
     The token refresh is skipped so a listing never waits on the provider; an unknown provider has no status.
+    Requester-scoped connections (GitHub) belong to the requester, so every user of the agent manages their own.
     """
-    provider = load_oauth_providers_for_snapshot(config_lifecycle.bind_current_request_snapshot(request)).get(
-        provider_id,
-    )
+    provider = _service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service_name)
     if provider is None:
         return None
     try:
@@ -241,7 +274,19 @@ async def _personal_oauth_status(
         )
     except HTTPException:
         return unavailable_egress_oauth_status(provider)
-    return egress_oauth_status(result, can_manage=can_manage)
+    return await egress_oauth_status(
+        result,
+        can_manage=can_manage or provider.requester_scoped_credentials,
+        stored_connection=partial(
+            oauth_status,
+            provider.id,
+            target,
+            service=service_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            credentials_manager=manager,
+        ),
+    )
 
 
 async def _build_service_for_agent(
@@ -263,7 +308,7 @@ async def _build_service_for_agent(
             runtime_paths,
             manager,
             target,
-            service.oauth_provider,
+            name,
             can_manage=can_manage,
         )
         if service.oauth_provider is not None
@@ -364,8 +409,13 @@ def _resolve_agent_and_service(
     service: str,
     *,
     require_management: bool,
+    requester_owned_oauth: bool = False,
 ) -> tuple[Config, RuntimePaths, ResolvedWorkerTarget]:
-    """Resolve and authorize one agent and service for mutation or query."""
+    """Resolve and authorize one agent and service for mutation or query.
+
+    `requester_owned_oauth` is for connecting or disconnecting the service's OAuth account: a requester-scoped
+    provider's connection belongs to the requester, so any user of the agent may manage it.
+    """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     if config is None or agent_name not in config.agents:
@@ -390,7 +440,11 @@ def _resolve_agent_and_service(
 
     _is_shared, can_manage = eligibility
 
-    if require_management and not can_manage:
+    requester_owned = False
+    if requester_owned_oauth:
+        provider = _service_oauth_provider(snapshot, service)
+        requester_owned = provider is not None and provider.requester_scoped_credentials
+    if require_management and not can_manage and not requester_owned:
         raise HTTPException(403, "Credential management is required", headers=CONNECTIONS_HEADERS)
 
     # Always build target for the agent scope
@@ -466,7 +520,14 @@ async def connect_egress_account(
 ) -> oauth.OAuthConnectResponse:
     """Start the OAuth flow of a service's provider for one agent's credential scope."""
     _require_same_origin(request)
-    _resolve_agent_and_service(request, requester_id, agent_name, service, require_management=True)
+    _resolve_agent_and_service(
+        request,
+        requester_id,
+        agent_name,
+        service,
+        require_management=True,
+        requester_owned_oauth=True,
+    )
     provider = egress_oauth_provider(request, service, headers=CONNECTIONS_HEADERS)
     try:
         return await oauth.connect(provider.id, request, agent_name=agent_name)
@@ -488,7 +549,14 @@ async def disconnect_egress_account(
 ) -> dict[str, str]:
     """Reset the OAuth connection of a service's provider for one agent's credential scope."""
     _require_same_origin(request)
-    _resolve_agent_and_service(request, requester_id, agent_name, service, require_management=True)
+    _resolve_agent_and_service(
+        request,
+        requester_id,
+        agent_name,
+        service,
+        require_management=True,
+        requester_owned_oauth=True,
+    )
     provider = egress_oauth_provider(request, service, headers=CONNECTIONS_HEADERS)
     try:
         return await oauth.disconnect(provider.id, request, agent_name=agent_name)

@@ -505,3 +505,26 @@ def test_status_reports_connection_without_refreshing(
         reset_required=False,
     )
     assert presented == []
+
+
+def test_status_with_a_service_account_matches_what_the_broker_injects(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service account is never connectable and not a token, but a stored personal token is still used."""
+    monkeypatch.setattr(oauth_source, "oauth_provider_service_account_configured", lambda *_args: True)
+    _connect(manager, _github_store("@alice:example.org"), "alice-access", expires_at=FUTURE)
+
+    alice = _status(config, runtime_paths, manager, _broker_target("@alice:example.org", "shared"))
+    bob = _status(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"))
+
+    assert alice is not None
+    assert (alice.service_account, alice.connected, alice.can_connect) == (True, True, False)
+    assert bob is not None
+    assert (bob.service_account, bob.connected, bob.can_connect) == (True, False, False)
+    assert _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org", "shared")) == Token(
+        "alice-access",
+    )
+    assert _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared")) == Missing(None)

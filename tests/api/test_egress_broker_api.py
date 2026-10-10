@@ -442,6 +442,7 @@ def test_services_status_has_key_and_oauth_parts(oauth_broker_client: TestClient
         "account_label": None,
         "can_connect": True,
         "reset_required": False,
+        "service_account": False,
     }
     assert _service(oauth_broker_client, "ghost")["oauth"] is None
 
@@ -548,7 +549,12 @@ def test_connect_and_disconnect_409_for_a_service_account_provider(
 
     response = oauth_broker_client.post(f"/api/egress-broker/services/drive/{action}")
     assert response.status_code == 409, response.text
-    assert _service(oauth_broker_client, "drive")["oauth"]["can_connect"] is False
+    drive = _service(oauth_broker_client, "drive")
+    assert drive["oauth"]["service_account"] is True
+    assert drive["oauth"]["connected"] is False
+    assert drive["oauth"]["can_connect"] is False
+    assert drive["active_source"] is None
+    assert drive["configured"] is False
 
 
 def test_an_unloadable_connection_state_does_not_fail_the_listing(

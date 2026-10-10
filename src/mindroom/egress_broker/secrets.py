@@ -258,7 +258,12 @@ type SecretResult = Secret | SecretMissing | SecretNeedsReconnect
 
 @dataclass(frozen=True)
 class OAuthStatus:
-    """Connection state of a service's OAuth provider for one scope; never holds a token."""
+    """Connection state of a service's OAuth provider for one scope; never holds a token.
+
+    `connected` means the broker would inject a personal access token. A configured service account
+    (`service_account`) is not a token the broker can inject, so it never makes a scope connected by itself
+    and its provider is never connectable.
+    """
 
     provider: str
     display_name: str
@@ -266,6 +271,7 @@ class OAuthStatus:
     account_label: str | None
     can_connect: bool
     reset_required: bool
+    service_account: bool = False
 
 
 type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatus | None]

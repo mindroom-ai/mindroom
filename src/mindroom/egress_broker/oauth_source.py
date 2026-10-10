@@ -151,6 +151,7 @@ def oauth_status(
         account_label=oauth_verified_claim(credentials, "email") if connected and credentials else None,
         can_connect=_connectable(provider, runtime_paths),
         reset_required=reset_required,
+        service_account=oauth_provider_service_account_configured(provider, runtime_paths),
     )
 
 
