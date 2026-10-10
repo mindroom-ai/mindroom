@@ -63,7 +63,7 @@ class MindRoomGroq(Groq):
     def _get_metrics(self, response_usage: CompletionUsage) -> MessageMetrics:
         metrics = super()._get_metrics(response_usage)
         if response_usage.prompt_tokens_details is not None:
-            metrics.cache_read_tokens = response_usage.prompt_tokens_details.cached_tokens
+            metrics.cache_read_tokens = response_usage.prompt_tokens_details.cached_tokens or 0
         if response_usage.completion_tokens_details is not None:
-            metrics.reasoning_tokens = response_usage.completion_tokens_details.reasoning_tokens
+            metrics.reasoning_tokens = response_usage.completion_tokens_details.reasoning_tokens or 0
         return metrics

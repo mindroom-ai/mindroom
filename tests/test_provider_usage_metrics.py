@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from cerebras.cloud.sdk.types.chat.chat_completion import (
+    ChatChunkResponseUsage,
+    ChatChunkResponseUsagePromptTokensDetails,
     ChatCompletionResponseUsage,
     ChatCompletionResponseUsagePromptTokensDetails,
 )
@@ -61,14 +64,21 @@ def test_groq_reports_cached_input_and_reasoning() -> None:
     assert (metrics.cache_read_tokens, metrics.reasoning_tokens) == (4608, 120)
 
 
-def test_cerebras_reports_cached_input() -> None:
-    """Cerebras's cached input stays inside its prompt total."""
+@pytest.mark.parametrize(
+    ("usage_type", "details_type"),
+    [
+        (ChatCompletionResponseUsage, ChatCompletionResponseUsagePromptTokensDetails),
+        (ChatChunkResponseUsage, ChatChunkResponseUsagePromptTokensDetails),
+    ],
+)
+def test_cerebras_reports_cached_input(usage_type: type, details_type: type) -> None:
+    """Cerebras's cached input stays inside its prompt total, in full and streamed responses."""
     metrics = MindRoomCerebras(id="gpt-oss-120b")._get_metrics(
-        ChatCompletionResponseUsage(
+        usage_type(
             prompt_tokens=5000,
             completion_tokens=300,
             total_tokens=5300,
-            prompt_tokens_details=ChatCompletionResponseUsagePromptTokensDetails(cached_tokens=4096),
+            prompt_tokens_details=details_type(cached_tokens=4096),
         ),
     )
 
