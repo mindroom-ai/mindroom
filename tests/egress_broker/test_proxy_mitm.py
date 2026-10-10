@@ -279,8 +279,15 @@ async def test_non_origin_form_target_is_refused(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "target",
-    ["/private/../echo", "/private/%2e%2e/echo", "/private/%2E%2e/echo", "/private//echo", "/private\\..\\echo"],
-    ids=["dot-dot", "encoded", "mixed-case", "empty-segment", "backslash"],
+    [
+        "/private/../echo",
+        "/private/%2e%2e/echo",
+        "/private/%2E%2e/echo",
+        "/private/%252e%252e/echo",
+        "/private//echo",
+        "/private\\..\\echo",
+    ],
+    ids=["dot-dot", "encoded", "mixed-case", "double-encoded", "empty-segment", "backslash"],
 )
 async def test_ambiguous_path_on_rule_host_is_refused(
     broker: BrokerFactory,

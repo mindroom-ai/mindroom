@@ -226,11 +226,21 @@ def test_match_rule_skips_sibling_repository_sharing_a_prefix() -> None:
         "/repos/basnijholt/agent-cli\\pulls",
         "/repos/basnijholt/agent-cli%5c..%5Cother",
         "/repos/basnijholt/agent-cli%2f..%2Fother",
-        "/repos/basnijholt%2Fagent-cli",
+        "/repos/basnijholt/agent-cli/%252e%252e/other",
+        "/repos/basnijholt/agent-cli/x%252f..%252f..%252fother",
+        "/repos/basnijholt/agent-cli/%25252e%25252e/other",
+        "/repos/basnijholt/agent-cli/..%00/other",
+        "/repos/basnijholt/agent-cli/%00",
+        "/repos/basnijholt/agent-cli/%c0%ae%c0%ae/other",
+        "/repos/basnijholt/agent-cli/..%20/other",
+        "/repos/basnijholt/agent-cli/%2525252541",
     ],
 )
 def test_ambiguous_paths_are_detected(path: str) -> None:
-    """Dot segments (raw or percent-encoded), empty segments, backslashes, and encoded slashes are ambiguous."""
+    """Dot segments at any decoding layer, empty segments, backslashes, NUL, and invalid UTF-8 are ambiguous.
+
+    A path still changing after four rounds of percent-decoding is ambiguous too.
+    """
     assert is_ambiguous_path(path)
 
 
@@ -246,10 +256,18 @@ def test_ambiguous_paths_are_detected(path: str) -> None:
         "/files/.../x",
         "/search/hello%20world",
         "/files/%2e%2e%2e",
+        "/repos/basnijholt%2Fagent-cli",
+        "/api/v4/projects/group%2Fproject",
+        "/repos/basnijholt/agent-cli/labels/area%2Fbackend",
+        "/files/100%25.txt",
+        "/files/%25252541",
     ],
 )
 def test_ordinary_paths_are_not_ambiguous(path: str) -> None:
-    """Dots inside names, trailing slashes, and other percent-encoding are left alone."""
+    """Dots inside names, trailing slashes, encoded slashes, and up to four layers of encoding are left alone.
+
+    GitLab's `group%2Fproject` and clients that encode `/` in label or branch names must keep working.
+    """
     assert not is_ambiguous_path(path)
 
 
@@ -265,6 +283,8 @@ def test_route_matches_injects_and_forwards_unmatched_paths_without_restriction(
     assert matched.match.service == "github"
     assert matched.refusal is None
     assert unmatched == Route(host_has_rules=True)
+    with pytest.raises(ValueError, match="not refused"):
+        _ = unmatched.refusal_status
 
 
 @pytest.mark.parametrize(
@@ -320,7 +340,9 @@ def test_restrict_from_any_service_on_the_host_applies() -> None:
     config = EgressBrokerConfig(services={"open": open_service, "restricting": restricting})
 
     assert route_request(config, "api.example.com", 443, "/c").refusal == "path_not_allowed"
-    assert route_request(config, "api.example.com", 443, "/b/x").match.service == "open"  # type: ignore[union-attr]
+    open_route = route_request(config, "api.example.com", 443, "/b/x")
+    assert open_route.match is not None
+    assert open_route.match.service == "open"
     assert route_request(config, "other.example.com", 443, "/c") == Route(
         host_has_rules=True,
         match=match_rule(config, "other.example.com", 443, "/c"),

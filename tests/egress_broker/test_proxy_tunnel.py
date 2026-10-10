@@ -255,7 +255,10 @@ async def test_plain_http_unmatched_path_on_rule_host_forwards_unmodified(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", ["/private/../echo", "/private/%2E%2e/echo", "/private//echo", "/private\\echo"])
+@pytest.mark.parametrize(
+    "target",
+    ["/private/../echo", "/private/%2E%2e/echo", "/private/%252e%252e/echo", "/private//echo", "/private\\echo"],
+)
 async def test_plain_http_ambiguous_path_on_rule_host_gets_400(
     broker: BrokerFactory,
     http_upstream: Upstream,
@@ -271,8 +274,9 @@ async def test_plain_http_ambiguous_path_on_rule_host_gets_400(
     assert response.status == 400
     assert response.json() == {"error": "bad_request"}
     assert http_upstream.hits == []
+    assert broker.resolved == []
     [record] = await audit_records(audit, 1)
-    assert (record.kind, record.status, record.path) == ("denied", 400, target)
+    assert (record.kind, record.status, record.path, record.service) == ("denied", 400, target, None)
 
 
 @pytest.mark.asyncio

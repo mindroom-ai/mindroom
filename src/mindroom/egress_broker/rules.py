@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import quote, unquote, urlparse
@@ -36,6 +37,11 @@ _HOP_BY_HOP = {
 }
 
 
+# Percent-decoding rounds checked for dot segments; a path still changing after these is refused outright.
+_MAX_DECODE_LAYERS = 4
+_SEGMENT_SEPARATORS = re.compile(r"[/\\]")
+
+
 @dataclass(frozen=True)
 class RuleMatch:
     """A matched rule with its service name."""
@@ -60,8 +66,11 @@ class Route:
 
     @property
     def refusal_status(self) -> int:
-        """Return the HTTP status that goes with `refusal`."""
-        return 400 if self.refusal == "bad_request" else 403
+        """Return the HTTP status that goes with `refusal`; a route that is not refused has none."""
+        if self.refusal is None:
+            msg = "Route is not refused."
+            raise ValueError(msg)
+        return {"bad_request": 400, "path_not_allowed": 403}[self.refusal]
 
 
 def _host_matches(rule_host: str, request_host: str) -> bool:
@@ -124,22 +133,38 @@ def path_matches(prefix: str, path: str) -> bool:
     return path == prefix or path.startswith(f"{prefix}/")
 
 
-def is_ambiguous_path(path: str) -> bool:
-    """Return whether an upstream could resolve `path` to a different resource than its raw segments name.
+def _has_dot_segment(path: str) -> bool:
+    """Return whether any segment between slashes or backslashes is ``.`` or ``..``.
 
-    That covers dot segments (``.`` or ``..``, raw or percent-encoded, also with a ``;`` parameter as in
-    ``..;``), empty segments (``//``), backslashes (raw or ``%5c``), and encoded slashes (``%2f``) inside a
-    segment. The broker refuses such paths rather than normalizing them, because servers disagree on how.
+    ``;`` parameters and surrounding whitespace are removed first, as lenient servers read ``..;`` or ``..%20``.
+    """
+    return any(segment.partition(";")[0].strip() in {".", ".."} for segment in _SEGMENT_SEPARATORS.split(path))
+
+
+def is_ambiguous_path(path: str) -> bool:
+    """Return whether an upstream could resolve `path` above or beside the segments it appears to name.
+
+    Raw backslashes and empty segments (``//``) are refused outright. Then the raw path and every
+    percent-decoded layer must hold no dot segment and no NUL, which catches ``%2e%2e``, ``%252e%252e``,
+    and ``x%2f..%2fy``. A layer that is not valid UTF-8 (such as the overlong ``%c0%ae``) is refused, and so is
+    a path still changing after `_MAX_DECODE_LAYERS` rounds. A bare encoded slash such as GitLab's
+    ``group%2Fproject`` stays allowed: rules match the raw path, so only a dot segment can climb out of a prefix.
+    The broker refuses rather than normalizes, because servers disagree on how to normalize.
     """
     if "\\" in path or "//" in path:
         return True
-    for segment in path.split("/"):
-        decoded = unquote(segment)
-        if "/" in decoded or "\\" in decoded:
+    layer = path
+    for _ in range(_MAX_DECODE_LAYERS + 1):
+        if "\x00" in layer or _has_dot_segment(layer):
             return True
-        if decoded.partition(";")[0] in {".", ".."}:
+        try:
+            decoded = unquote(layer, errors="strict")
+        except UnicodeDecodeError:
             return True
-    return False
+        if decoded == layer:
+            return False
+        layer = decoded
+    return True
 
 
 def host_has_rules(config: EgressBrokerConfig, host: str, port: int) -> bool:

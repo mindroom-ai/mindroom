@@ -17495,7 +17495,7 @@ Service names use up to 63 lowercase letters, digits, `_`, and `-`, start with a
 - Prefer `bearer`, `basic`, or `header` auth. The broker returns upstream responses to the worker, so any response that echoes the request can reveal the secret to worker code.
 - `query` auth puts the secret in the URL. A redirect `Location` header, an error page, or a log line that echoes the URL can hand it back to the worker; use it only for APIs that accept nothing else.
 - `header` and `bearer` secrets are exposed the same way by upstream debug endpoints that echo request headers (such as `httpbin.org/headers`), so do not add rules for hosts that offer them.
-- `path_prefix` matches whole path segments: `/repos/o/r` matches `/repos/o/r` and `/repos/o/r/pulls` but not `/repos/o/r-old`, and a prefix ending in `/` matches every path under it. On a host with rules, paths with dot segments (`/../`, `%2e%2e`), empty segments (`//`), backslashes, or encoded slashes get 400 `bad_request` instead of being matched. A prefix still chooses which rule and secret apply rather than limiting access: other paths on the host are forwarded without credentials (or refused when a service sets `restrict_to_rules`), and the upstream's own permissions decide what the secret can reach.
+- `path_prefix` matches whole path segments: `/repos/o/r` matches `/repos/o/r` and `/repos/o/r/pulls` but not `/repos/o/r-old`, and a prefix ending in `/` matches every path under it. On a host with rules, a path gets 400 `bad_request` instead of being matched when it has empty segments (`//`) or raw backslashes, or when it or any percent-decoded form of it (up to four rounds) has a dot segment (`/../`, `%2e%2e`, `%252e%252e`), a NUL, or invalid UTF-8; so does a path still changing after four rounds of decoding. Encoded slashes such as `group%2Fproject` are allowed. A prefix still chooses which rule and secret apply rather than limiting access: other paths on the host are forwarded without credentials (or refused when a service sets `restrict_to_rules`), and the upstream's own permissions decide what the secret can reach.
 
 **Placeholder environment:**
 
@@ -17841,7 +17841,7 @@ The broker returns these errors to worker code:
 | Plain HTTP request matching a rule | 403 JSON `{"error": "tls_required", "service": "<name>"}` |
 | `Host` header inside an intercepted tunnel naming a different host than the CONNECT target | 403 JSON `{"error": "host_mismatch"}` |
 | Non-origin-form request target (absolute, authority, or asterisk form) inside an intercepted tunnel | 400 JSON `{"error": "bad_request"}` |
-| Path with dot segments, empty segments, backslashes, or encoded slashes on a host with rules | 400 JSON `{"error": "bad_request"}` |
+| Path on a host with rules with empty segments or backslashes, or with a dot segment, NUL, or invalid UTF-8 in it or any percent-decoded form of it | 400 JSON `{"error": "bad_request"}` |
 | Path no rule matches on a host where a service sets `restrict_to_rules` | 403 JSON `{"error": "path_not_allowed"}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked"}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed"}` with service list hint |
