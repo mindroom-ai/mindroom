@@ -15,25 +15,24 @@ from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.groq_model import MindRoomGroq
 
 
-def test_gemini_output_includes_thinking_and_input_includes_tool_prompts() -> None:
-    """Gemini bills thinking as output and tool-use prompts as input, as its total counts them."""
+def test_gemini_output_includes_thinking() -> None:
+    """Gemini bills thinking as output, as every other provider reports it."""
     metrics = MindRoomGoogleGemini(id="gemini-3.8-flash")._get_metrics(
         GenerateContentResponseUsageMetadata(
             prompt_token_count=1000,
             cached_content_token_count=400,
-            tool_use_prompt_token_count=300,
             candidates_token_count=200,
             thoughts_token_count=1500,
-            total_token_count=3000,
+            total_token_count=2700,
         ),
     )
 
-    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) == (1300, 1700, 3000)
+    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) == (1000, 1700, 2700)
     assert (metrics.reasoning_tokens, metrics.cache_read_tokens) == (1500, 400)
 
 
-def test_gemini_without_thinking_or_tool_prompts_keeps_its_counts() -> None:
-    """A Gemini reply without thinking or tool prompts keeps its prompt, answer, and total counts."""
+def test_gemini_without_thinking_keeps_its_counts() -> None:
+    """A Gemini reply without thinking keeps its prompt, answer, and total counts."""
     metrics = MindRoomGoogleGemini(id="gemini-3.8-flash")._get_metrics(
         GenerateContentResponseUsageMetadata(
             prompt_token_count=1000,

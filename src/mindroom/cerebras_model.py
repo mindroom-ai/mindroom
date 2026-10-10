@@ -33,6 +33,8 @@ class MindRoomCerebras(Cerebras):
     # AGNO_COMPAT: Cerebras usage drops cached input tokens.
     # Reason: Agno copies only prompt and completion totals, although Cerebras reports
     # prompt_tokens_details.cached_tokens inside the prompt total.
+    # Cerebras also reports completion_tokens_details.reasoning_tokens, but the pinned SDK does not declare
+    # that field, so Cerebras reasoning stays unmapped.
     # Upstream issue: Tracking gap; no issue identified.
     # Upstream PR: None identified.
     # Remove when: Agno's Cerebras metrics report cached input as cache reads.

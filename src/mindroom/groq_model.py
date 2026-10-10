@@ -46,12 +46,19 @@ class MindRoomGroq(Groq):
             raise ValueError(msg)
         return disable_tool_selection(request_params)
 
-    # AGNO_COMPAT: Groq usage drops cached input and reasoning tokens.
+    # AGNO_COMPAT: Groq usage drops cached input tokens.
     # Reason: Agno copies only prompt and completion totals, although Groq reports
-    # prompt_tokens_details.cached_tokens and completion_tokens_details.reasoning_tokens inside them.
+    # prompt_tokens_details.cached_tokens inside the prompt total.
     # Upstream issue: Tracking gap; no issue identified.
     # Upstream PR: None identified.
-    # Remove when: Agno's Groq metrics report cached input as cache reads and reasoning tokens.
+    # Remove when: Agno's Groq metrics report cached input as cache reads.
+    # Coverage: tests/test_provider_usage_metrics.py::test_groq_reports_cached_input_and_reasoning.
+    # AGNO_COMPAT: Groq usage drops reasoning tokens.
+    # Reason: Agno ignores completion_tokens_details.reasoning_tokens, which Groq reports inside the
+    # completion total.
+    # Upstream issue: Tracking gap; no issue identified.
+    # Upstream PR: None identified.
+    # Remove when: Agno's Groq metrics report reasoning tokens.
     # Coverage: tests/test_provider_usage_metrics.py::test_groq_reports_cached_input_and_reasoning.
     def _get_metrics(self, response_usage: CompletionUsage) -> MessageMetrics:
         metrics = super()._get_metrics(response_usage)
