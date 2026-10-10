@@ -7,16 +7,19 @@ import json
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+from structlog.testing import capture_logs
+
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools import egress_credentials as egress_credentials_module
 from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
-from mindroom.egress_broker import oauth_source
 from mindroom.egress_broker.secrets import save_secret
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -31,10 +34,12 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
+    from mindroom.oauth.providers import OAuthProvider
 
 _SECRET = "ghp_super_secret_token_value"  # noqa: S105
 _ACCESS_TOKEN = "gho_oauth_access_token_value"  # noqa: S105
 _CONNECT_PATH = "/api/oauth/github/authorize"
+_DRIVE_SERVICES: dict[str, object] = {"drive": {"preset": "google_drive"}}
 _PRESET_SERVICES: dict[str, object] = {
     "github": {"preset": "github"},
     "openai": {"preset": "openai"},
@@ -147,6 +152,52 @@ def _connect_github(manager: CredentialsManager, requester_id: str) -> None:
 
 def _github_tool(runtime_paths: RuntimePaths, requester_id: str = "@alice:example.org") -> EgressCredentialsTools:
     return EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target(requester_id))
+
+
+def _configure_drive_client(manager: CredentialsManager) -> None:
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {"client_id": "drive-client-id", "client_secret": "gd-secret"},
+    )
+
+
+def _connect_drive(
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    requester_id: str,
+    worker_scope: str | None,
+) -> None:
+    """Store a Google Drive connection where the provider's own scope policy puts it for that call."""
+    provider: OAuthProvider = google_drive_oauth_provider()
+    store = resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        manager,
+        _target(requester_id, worker_scope),
+    ).worker_target
+    publish_oauth_credentials(
+        provider,
+        {
+            "token": _ACCESS_TOKEN,
+            "refresh_token": "drive-refresh",
+            "token_uri": provider.token_url,
+            "client_id": "drive-client-id",
+            "scopes": list(provider.scopes),
+            "expires_at": 4_102_444_800.0,
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        credentials_manager=manager,
+        worker_target=store,
+    )
+
+
+def _drive_tool(
+    runtime_paths: RuntimePaths,
+    requester_id: str = "@alice:example.org",
+    worker_scope: str | None = "user_agent",
+) -> EgressCredentialsTools:
+    return EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target(requester_id, worker_scope))
 
 
 def test_reports_configured_status_per_requester_scope(tmp_path: Path) -> None:
@@ -284,7 +335,8 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = TOOL_METADATA["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert (
-        metadata.description == "See which API keys this agent can use through the egress broker and where to add them"
+        metadata.description
+        == "See which API keys and connected accounts this agent can use through the egress broker and where to add them"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE
@@ -394,19 +446,78 @@ def test_provider_without_a_client_cannot_be_connected(tmp_path: Path) -> None:
     assert (entry["can_connect_account"], entry["provider"]) == (False, None)
 
 
-def test_shared_service_account_is_not_injected_so_it_is_not_connected(
+def test_shared_service_account_is_not_injected_so_it_is_not_connected(tmp_path: Path) -> None:
+    """A Google service account never supplies a token, and personal accounts are not connectable beside it."""
+    runtime_paths = _runtime_paths(tmp_path, GOOGLE_SERVICE_ACCOUNT_FILE=str(tmp_path / "service-account.json"))
+    _configure_drive_client(get_runtime_credentials_manager(runtime_paths))
+
+    payload = _list(_drive_tool(runtime_paths), _context(runtime_paths, _DRIVE_SERVICES))
+
+    assert _entry(payload, "drive") == {
+        "name": "drive",
+        "display_name": "Google Drive",
+        "configured": False,
+        "active_source": None,
+        "can_connect_account": False,
+        "provider": None,
+    }
+
+
+def test_google_account_follows_the_agent_scope_not_the_requester(tmp_path: Path) -> None:
+    """A provider that is not requester-scoped uses the agent's connection: shared for all, per requester otherwise."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    _configure_drive_client(manager)
+    _connect_drive(runtime_paths, manager, "@alice:example.org", "shared")
+    context = _context(runtime_paths, _DRIVE_SERVICES)
+
+    shared_alice = _list(_drive_tool(runtime_paths, "@alice:example.org", "shared"), context)
+    shared_bob = _list(_drive_tool(runtime_paths, "@bob:example.org", "shared"), context)
+    per_requester_alice = _list(_drive_tool(runtime_paths, "@alice:example.org", "user_agent"), context)
+
+    assert _entry(shared_alice, "drive")["active_source"] == "oauth"
+    assert _entry(shared_bob, "drive")["active_source"] == "oauth"
+    assert _entry(per_requester_alice, "drive")["active_source"] is None
+    assert _entry(per_requester_alice, "drive")["can_connect_account"] is True
+    assert _entry(per_requester_alice, "drive")["provider"] == "google_drive"
+
+    _connect_drive(runtime_paths, manager, "@alice:example.org", "user_agent")
+    alice = _list(_drive_tool(runtime_paths, "@alice:example.org", "user_agent"), context)
+    bob = _list(_drive_tool(runtime_paths, "@bob:example.org", "user_agent"), context)
+
+    assert _entry(alice, "drive")["active_source"] == "oauth"
+    assert _entry(bob, "drive")["active_source"] is None
+
+
+def test_one_failing_provider_does_not_fail_the_whole_listing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A shared service account never supplies a token and personal accounts are not connectable beside it."""
-    monkeypatch.setattr(oauth_source, "oauth_provider_service_account_configured", lambda *_args: True)
+    """A service whose account status cannot be read is reported as unconfigured; the others still answer."""
     runtime_paths = _runtime_paths(tmp_path)
-    _configure_github_client(get_runtime_credentials_manager(runtime_paths))
+    save_secret(get_runtime_credentials_manager(runtime_paths), _target(), "openai", _SECRET)
 
-    payload = _list(_github_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
+    def failing_status(*_args: object, **_kwargs: object) -> None:
+        msg = f"provider exploded with {_ACCESS_TOKEN}"
+        raise RuntimeError(msg)
 
-    entry = _entry(payload, "github")
-    assert (entry["configured"], entry["active_source"], entry["can_connect_account"]) == (False, None, False)
+    monkeypatch.setattr(egress_credentials_module, "oauth_status", failing_status)
+
+    with capture_logs() as logs:
+        payload = _list(_github_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
+
+    assert _entry(payload, "github") == {
+        "name": "github",
+        "display_name": "GitHub",
+        "configured": False,
+        "active_source": None,
+        "can_connect_account": False,
+        "provider": None,
+    }
+    assert _entry(payload, "openai")["active_source"] == "key"
+    failures = [log for log in logs if log["event"] == "egress_credentials_status_failed"]
+    assert [(log["service"], log["error_type"]) for log in failures] == [("github", "RuntimeError")]
+    assert _ACCESS_TOKEN not in repr(logs)
 
 
 def test_unreadable_connection_cannot_be_connected_until_reset(tmp_path: Path) -> None:
@@ -468,14 +579,28 @@ def test_output_carries_no_token_or_connect_link(tmp_path: Path) -> None:
 
 
 def test_note_points_at_connecting_an_account_or_adding_a_key(tmp_path: Path) -> None:
-    """The note covers both fixes and still sends users to the manage page instead of the chat."""
+    """The note covers both fixes, where to do them, and that a key wins; it never asks for a pasted key."""
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
 
     payload = _list(_github_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
 
     note = str(payload["note"])
-    assert "can_connect_account" in note
-    assert "connect" in note
-    assert "key" in note
-    assert "https://mindroom.example/" in note
-    assert "paste" in note
+    assert "neither an API key nor a connected account" in note
+    assert "an API key wins over a connected account" in note
+    assert (
+        "When `can_connect_account` is true, the user can connect their `provider` account at https://mindroom.example/"
+        in note
+    )
+    assert "otherwise, or to use their own key instead, they can add an API key there" in note
+    assert "Never ask the user to paste a key into the chat." in note
+
+
+def test_note_without_a_public_url_sends_the_agent_to_the_operator(tmp_path: Path) -> None:
+    """With no manage link the note still names both fixes and tells the agent to ask the operator where to do them."""
+    runtime_paths = _runtime_paths(tmp_path)
+
+    payload = _list(_github_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
+
+    note = str(payload["note"])
+    assert "ask the operator for it" in note
+    assert "http" not in note

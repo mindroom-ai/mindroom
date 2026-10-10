@@ -7693,7 +7693,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "See which API keys this agent can use through the egress broker and where to add them",
+      "description": "See which API keys and connected accounts this agent can use through the egress broker and where to add them",
       "display_name": "Egress Credentials",
       "docs_url": null,
       "executes_code": false,

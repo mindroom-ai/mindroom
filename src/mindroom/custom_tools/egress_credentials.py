@@ -20,6 +20,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import service_status
 from mindroom.egress_broker.service import manage_url
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+logger = get_logger(__name__)
 
 _NO_WORKER_NOTE = (
     "No worker identity is available for this agent, so there is no secret scope to check. "
@@ -84,20 +87,35 @@ class EgressCredentialsTools(Toolkit):
         name: str,
         service: EgressService,
     ) -> dict[str, str | bool | None]:
-        """Describe one service's credential sources in this agent's scope, as the broker would use them."""
-        status = service_status(
-            manager,
-            self._worker_target,
-            service,
-            name,
-            oauth_status=functools.partial(
-                oauth_status,
-                service=name,
-                config=config,
-                runtime_paths=self._runtime_paths,
-                credentials_manager=manager,
-            ),
-        )
+        """Describe one service's credential sources in this agent's scope, as the broker would use them.
+
+        A service whose status cannot be read is reported as not configured and not connectable, so one failing
+        provider or unreadable secret does not fail the listing of the others. Only the error type is logged.
+        """
+        try:
+            status = service_status(
+                manager,
+                self._worker_target,
+                service,
+                name,
+                oauth_status=functools.partial(
+                    oauth_status,
+                    service=name,
+                    config=config,
+                    runtime_paths=self._runtime_paths,
+                    credentials_manager=manager,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("egress_credentials_status_failed", service=name, error_type=type(exc).__name__)
+            return {
+                "name": name,
+                "display_name": service.display_name or name,
+                "configured": False,
+                "active_source": None,
+                "can_connect_account": False,
+                "provider": None,
+            }
         entry: dict[str, str | bool | None] = {
             "name": name,
             "display_name": service.display_name or name,

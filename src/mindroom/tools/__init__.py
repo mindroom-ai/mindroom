@@ -473,7 +473,7 @@ def _agent_vault_access_tools() -> type[Toolkit]:
     file_access=ToolFileAccess.NONE,
     requires_primary_runtime=True,
     display_name="Egress Credentials",
-    description="See which API keys this agent can use through the egress broker and where to add them",
+    description="See which API keys and connected accounts this agent can use through the egress broker and where to add them",
     category=ToolCategory.INTEGRATIONS,
     icon="KeyRound",
     icon_color="text-amber-600",

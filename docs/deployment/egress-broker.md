@@ -200,14 +200,14 @@ They never reach a worker, its environment, or its filesystem; the worker holds 
 
 **Which account a request uses:**
 
-- The account follows the provider's own credential policy. GitHub is requester-scoped: the broker uses the requester named in the worker's verified token, even on a `shared` agent, so each user's requests use that user's own GitHub account and never another user's.
-- Other providers, such as Google and Atlassian, follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
-- A call without a requester has no GitHub account to use.
+- The account follows the provider's own credential policy. GitHub and Atlassian are requester-scoped: the broker uses the requester named in the worker's verified token, even on a `shared` agent, so each user's requests use that user's own account and never another user's.
+- The Google providers follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
+- A call without a requester has no requester-scoped account (GitHub or Atlassian) to use.
 
 **Service accounts are never injected.**
 A deployment that sets `GOOGLE_SERVICE_ACCOUNT_FILE` serves the Google providers through a shared Google service account instead of personal logins.
-The broker does not inject a service account's credentials, so the egress pages show such a service as "Uses a shared service account" with the account part as not connected, and personal accounts cannot be connected for that provider.
-A personal connection stored before the service account was configured keeps working until it is disconnected.
+The broker does not inject a service account's credentials, so the egress pages show such a service as "Uses a shared service account" and personal accounts cannot be connected for that provider.
+The account part shows as not connected unless a personal connection was stored earlier; such a connection keeps working, and shows as connected, until it is disconnected.
 Give the service an API key if workers need to call it in that deployment.
 
 **Unknown `oauth_provider` ids** are not a config error.
@@ -260,6 +260,7 @@ The status API returns, for each service and scope, whether a key is set and whe
 }
 ```
 
+The example is abbreviated: each service also has `display_name`, `description`, and `updated_at` (the key's timestamp, kept for older clients), and the personal API adds `is_shared` and `can_manage`.
 `oauth` is `null` for a service without an account provider.
 The OAuth part comes from the same helper as the Connections portal's per-provider status, so the egress pages and the portal agree.
 
@@ -269,14 +270,16 @@ On the personal egress page, the dashboard panel, and the Connections portal car
 It opens the provider's login in a popup; a connected row then reads "Connected as <account>" with a **Disconnect** button.
 **Use an API key instead** keeps the Set, Replace, and Remove actions, and a row with a key set says the key is in use.
 
-An agent can also send a user straight to the login: the 403 `credential_not_configured` and `oauth_connection_required` responses and the [`egress_credentials` tool](#agent-tool) point at where to connect, and the broker's responses carry a `connect_url`, a short-lived single-use link that works without a dashboard login.
+An agent can also send a user straight to the login: the 403 `credential_not_configured` and `oauth_connection_required` responses and the [`egress_credentials` tool](#agent-tool) point at where to connect, and the broker's responses carry a `connect_url`, a short-lived single-use link.
+The link carries only the connect target, not a login: the browser that opens it must be signed in to MindRoom as the requester the link was minted for, and only a link for a shared scope skips that sign-in.
+GitHub and Atlassian links are never for a shared scope, because those connections belong to the requester.
 The broker reuses one link per caller for 60 seconds, so a worker that retries in a loop does not mint a new one each time.
 
 Who may connect an account follows who may set a key, with one exception:
 
 - For `user` and `user_agent` agents, each user connects their own account on the personal page.
 - For `shared` and unscoped agents, administrators and the agent's `credential_managers` connect and disconnect accounts, and set keys.
-- GitHub is the exception. Its connection belongs to the requester, so any user who may use the agent can connect their own GitHub account on a shared agent too. API keys on shared agents stay with the managers.
+- GitHub and Atlassian are the exception. Their connections belong to the requester, so any user who may use the agent can connect their own account on a shared agent too. API keys on shared agents stay with the managers.
 
 The personal egress page and its API, `/api/connections/egress`, authenticate with `require_connections_user`: they need [trusted upstream auth](trusted-upstream-auth.md) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
 Without that signed identity gate, such as on a lab host that has no upstream proxy, only the dashboard can manage secrets.
@@ -297,7 +300,7 @@ On the personal page, users manage their own secrets for `user` and `user_agent`
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
 
 The personal egress API has matching routes under `/api/connections/egress/agents/<agent>/<service>`: `PUT` and `DELETE` for the key, and `POST .../connect` and `POST .../disconnect` for the account.
-The connect and disconnect routes run the same eligibility, same-origin, and permission checks as the key routes, with the GitHub exception above, and then delegate to the OAuth connect and disconnect flows of the service's provider.
+The connect and disconnect routes run the same eligibility, same-origin, and permission checks as the key routes, with the requester-scoped exception above, and then delegate to the OAuth connect and disconnect flows of the service's provider.
 
 ## Agent tool
 
@@ -341,8 +344,8 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 }
 ```
 
-- `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`. An explicit key wins over a connected account. The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub, their own account, and an agent with no worker scope reads the global store.
-- A service with nothing configured also reports `can_connect_account`. When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id. It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, or a stored connection is unreadable and needs a reset first; `provider` is then `null`.
+- `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`. An explicit key wins over a connected account. The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
+- A service with nothing configured also reports `can_connect_account`. When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id. It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, or a stored connection is unreadable and needs a reset first; `provider` is then `null`. A `true` value says the provider can be connected, not that this user may connect it: for providers that are not requester-scoped (the Google providers) on a shared agent, only administrators and credential managers can.
 - `display_name` falls back to the service name when the service sets none.
 - `manage_url` is the personal egress page when trusted upstream auth is enabled and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
 - The tool never returns secret values, access tokens, connect links, or update timestamps, and its note tells the agent not to ask users to paste a key into the chat. Users connect accounts and add keys at `manage_url`; the one-time `connect_url` only appears in the broker's HTTP responses to worker code.
