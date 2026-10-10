@@ -31,7 +31,7 @@ from mindroom.constants import (
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
 from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
-from mindroom.history.replay import apply_replay_plan, with_session_summary
+from mindroom.history.replay import apply_replay_plan, session_summary_context
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
@@ -59,6 +59,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.session.agent import AgentSession
+    from agno.session.team import TeamSession
     from agno.team import Team
 
     from mindroom.attachments import AttachmentRecord
@@ -816,6 +818,15 @@ async def _finalize_prepared_history(
     )
 
 
+def _persona_summary_messages(
+    ctx: ResponseTurnContext,
+    session: AgentSession | TeamSession | None,
+) -> tuple[Message, ...]:
+    """Carry a compacted session's summary beside a standard persona's turn, since its system message stays byte for byte."""
+    summary = session_summary_context(session) if ctx.persona is not None and ctx.agent_mode == "standard" else None
+    return () if summary is None else (Message(role="user", content=summary, add_to_agent_memory=False),)
+
+
 async def _prepare_execution_context_common(
     ctx: ResponseTurnContext,
     *,
@@ -881,6 +892,10 @@ async def _prepare_execution_context_common(
         )
 
     prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
+    transient_context_messages = (
+        *_persona_summary_messages(ctx, prepared_scope_history.session),
+        *transient_context_messages,
+    )
 
     final_messages = _messages_with_current_prompt(
         prompt,
@@ -1020,7 +1035,7 @@ async def prepare_agent_execution_context(
             active_context_window=runtime_model.context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
         )
-        prepared = await prepare_scope_history(
+        return await prepare_scope_history(
             agent=agent,
             agent_name=agent_name,
             resolved_inputs=resolved_inputs,
@@ -1031,10 +1046,6 @@ async def prepare_agent_execution_context(
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,
         )
-        if ctx.persona is not None and ctx.agent_mode == "standard" and agent.add_session_summary_to_context:
-            # The replay plan counts a compacted session's summary, which a verbatim prompt would otherwise drop.
-            agent.system_message = with_session_summary(ctx.persona.system_prompt, prepared.session)
-        return prepared
 
     def _estimate_agent_static_tokens(
         prepared_prompt: str,

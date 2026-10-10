@@ -110,7 +110,7 @@ async def test_persona_system_message_is_verbatim(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> None:
-    """A compacted session's summary still reaches an authored child, after its verbatim prompt."""
+    """A compacted session's summary reaches an authored child beside its turn, leaving its prompt byte for byte."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
     identity = build_execution_identity_from_runtime_context(runtime)
     old_run = RunOutput(
@@ -155,10 +155,14 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
     assert message is not None
-    assert str(message.content).startswith("P\n\n")
+    assert message.content == "P"
+    *context, current = prepared.messages
+    assert "task" in str(current.content)
+    [summary] = [item for item in context if "<summary_of_previous_interactions>" in str(item.content)]
     assert "<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>" in str(
-        message.content,
+        summary.content,
     )
+    assert summary.add_to_agent_memory is False
 
 
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:

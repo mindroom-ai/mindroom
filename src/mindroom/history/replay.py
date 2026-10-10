@@ -113,10 +113,10 @@ def _session_summary_block(summary: str) -> str:
     )
 
 
-def with_session_summary(system_prompt: str, session: AgentSession | TeamSession | None) -> str:
-    """Append a session's stored summary to a verbatim system prompt, which Agno's builder never sees."""
+def session_summary_context(session: AgentSession | TeamSession | None) -> str | None:
+    """Render a session's stored summary the way Agno's builder adds it, or None when it has none."""
     summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
-    return f"{system_prompt}\n\n{_session_summary_block(summary)}" if summary else system_prompt
+    return _session_summary_block(summary) if summary else None
 
 
 def _estimate_session_summary_tokens(summary_text: str | None) -> int:
