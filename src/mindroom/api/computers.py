@@ -369,7 +369,7 @@ def _stream_session(websocket: WebSocket, session_id: str) -> ComputerSession:
 @router.websocket("/sessions/{session_id}/stream")
 async def stream(websocket: WebSocket, session_id: str) -> None:
     """Consume a subprotocol ticket; only backend headers carry worker credentials."""
-    tasks: list[asyncio.Task[None]] = []
+    tasks: list[asyncio.Task[object]] = []
     session: ComputerSession | None = None
     stream_closed = asyncio.Event()
     accepted = False
@@ -385,11 +385,19 @@ async def stream(websocket: WebSocket, session_id: str) -> None:
             await websocket.accept(subprotocol="binary", headers=[(b"cache-control", b"no-store")])
             accepted = True
             tasks = [
-                asyncio.create_task(_upstream(websocket, upstream)),
-                asyncio.create_task(_downstream(websocket, upstream)),
-                asyncio.create_task(_maintain(websocket, session, stream_closed)),
+                asyncio.create_task(_upstream(websocket, upstream), name="viewer"),
+                asyncio.create_task(_downstream(websocket, upstream), name="worker"),
+                asyncio.create_task(_maintain(websocket, session, stream_closed), name="recheck"),
+                # Revocation must not wait for a periodic check that is still running.
+                asyncio.create_task(stream_closed.wait(), name="closed"),
             ]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            logger.info(
+                "Computer stream ended",
+                requester_id=session.target.requester_id,
+                agent_user_id=session.target.agent_user_id,
+                ended_by=sorted(task.get_name() for task in done),
+            )
             for task in done:
                 task.result()
     except ComputerError as error:
