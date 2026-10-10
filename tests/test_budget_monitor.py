@@ -417,17 +417,14 @@ async def test_status_lists_only_people(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_a_scan_missing_a_store_never_lowers_spend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A locked or unreadable usage store must not lift a cap by hiding spend."""
+async def test_lower_spend_applies_even_while_some_stores_are_unread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agents nobody has used yet have no store, so a price cut must still lower spend."""
     monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
-    scans.spend, scans.unavailable = {ALICE: 3.0, BOB: 1.0}, 1
+    scans.spend, scans.unavailable = {ALICE: 3.0}, 1
 
-    monitor.response_finished()
-    await _until(lambda: scans.calls == 2)
-    await _until(lambda: monitor._spend_usd(BOB) == 1.0)
-
-    assert monitor._spend_usd(ALICE) == 12.0
-    scans.unavailable = 0
     monitor.response_finished()
     await _until(lambda: monitor._spend_usd(ALICE) == 3.0)
     await monitor.stop()

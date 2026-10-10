@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
@@ -257,14 +257,6 @@ class BudgetMonitor:
             # Usage storage is external state; keep enforcing the last good scan.
             logger.warning("budget_scan_failed", exc_info=True)
             return
-        previous = self._current_snapshot()
-        if snapshot.unavailable_sources and previous is not None and previous.period_start == snapshot.period_start:
-            # A store that could not be read hides its spend, which must not lift anyone's cap.
-            spend = {
-                user_id: max(previous.spend_usd.get(user_id, 0.0), snapshot.spend_usd.get(user_id, 0.0))
-                for user_id in previous.spend_usd.keys() | snapshot.spend_usd.keys()
-            }
-            snapshot = replace(snapshot, spend_usd=spend)
         self._snapshot = snapshot
 
     def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
