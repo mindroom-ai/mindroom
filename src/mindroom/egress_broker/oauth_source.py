@@ -331,8 +331,13 @@ def _connectable(provider: OAuthProvider, runtime_paths: RuntimePaths) -> bool:
 
 
 def _connect_url(context: OAuthCredentialContext, reason: str | None = None) -> str | None:
-    """Return the caller's connect link, minting at most one per caller, provider, and reason every reuse period."""
-    if not _connectable(context.provider, context.runtime_paths):
+    """Return the caller's connect link, minting at most one per caller, provider, and reason every reuse period.
+
+    There is none for a shared scope: its link skips the browser sign-in, and the broker hands links to worker code,
+    where any process in the shared worker could read it.
+    """
+    shared = context.worker_target is not None and context.worker_target.worker_scope == "shared"
+    if shared or not _connectable(context.provider, context.runtime_paths):
         return None
     key = (context.runtime_paths.storage_root, context.provider.id, context.worker_target, reason)
     now = time.monotonic()

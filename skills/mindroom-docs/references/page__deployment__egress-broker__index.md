@@ -187,7 +187,7 @@ For each request the broker picks the secret in this order:
 
 1. The API key stored for the scope, if there is one. An explicit key always wins over a connected account, and removing the key falls back to the account.
 2. Otherwise, the connected account's access token. The primary refreshes it only when it is near expiry, through the same serialized refresh the tools that share the connection use, so there is no second refresh path.
-3. Otherwise, a 403 `credential_not_configured` that also carries a connect link when the account can be connected (see [Error responses](#error-responses)).
+3. Otherwise, a 403 `credential_not_configured` that also carries a connect link when the broker may hand one out for the account (see [Error responses](#error-responses)).
 
 The matched rule's auth type then formats the token like any other secret, so a connected GitHub account goes out as `Authorization: Bearer <token>` to `api.github.com` and as basic auth with username `x-access-token` to `github.com`.
 Placeholder environment variables are added when either source is available.
@@ -292,7 +292,8 @@ It opens the provider's login in a popup; a connected row then reads "Connected 
 On a shared or unscoped agent a GitHub or Atlassian row offers no **Connect** and says personal accounts are not used there, unless the service sets `oauth_on_shared_workers`, in which case the row warns that everyone using the agent can act with the connected account.
 
 An agent can also send a user straight to the login: the 403 `credential_not_configured` and `oauth_connection_required` responses and the [`egress_credentials` tool](#agent-tool) point at where to connect, and the broker's responses carry a `connect_url`, a short-lived single-use link.
-The link carries only the connect target, not a login: the browser that opens it must be signed in to MindRoom as the requester the link was minted for, and only a link for a shared scope skips that sign-in.
+The link carries only the connect target, not a login: the browser that opens it must be signed in to MindRoom as the requester the link was minted for.
+A link for a shared scope would skip that sign-in, and any process in the shared worker could read it from the response, so the broker never hands one out: on a shared agent the response has no `connect_url` and the user connects at `manage_url` instead.
 GitHub and Atlassian links are never for a shared scope, because those connections belong to the requester.
 The broker reuses one link per caller for 60 seconds, so a worker that retries in a loop does not mint a new one each time.
 
@@ -504,8 +505,8 @@ The broker returns these errors to worker code:
 | Non-origin-form request target (absolute, authority, or asterisk form) inside an intercepted tunnel | 400 JSON `{"error": "bad_request"}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked"}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed"}` with service list hint |
-| Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>"}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the service has an account provider that the user can connect |
-| Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>"}`; an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
+| Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>"}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the service's account provider is connectable and the broker may hand out a link for the scope (never for a shared scope). The link still requires its opener to be allowed to connect that account |
+| Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>"}`; `connect_url` is `null` for a shared scope, and an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
 | Provider outage, timeout, or network failure while refreshing the account's token | 503 JSON `{"error": "oauth_refresh_failed", "service": "<name>", "provider": "<id>"}`; retry later, do not reconnect |
 | Unresolvable destination | 502 |
 | Upstream connect or TLS failure | 502 |
@@ -602,7 +603,7 @@ Agents with the [`egress_credentials` tool](#agent-tool) can look up which servi
 **403 `oauth_connection_required` errors:**
 
 The account for that scope was revoked at the provider or its credential cannot be read.
-Reconnect through `connect_url` or the egress page.
+Reconnect through `connect_url`, or on the egress page when the response has no link (a shared agent).
 When the response has `reset_required`, reset the provider connection from the dashboard Tools tab first, because MindRoom cannot read the stored credential.
 Alternatively set an API key for the service, which takes priority over the account.
 

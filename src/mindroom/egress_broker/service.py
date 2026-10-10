@@ -246,7 +246,7 @@ def _oauth_secret_result(provider_id: str, result: OAuthTokenResult) -> SecretRe
     if isinstance(result, Token):
         return Secret(result.value)
     if isinstance(result, Missing):
-        # Only a connectable provider has a connect link, and only then is it worth naming.
+        # Only a connectable provider outside a shared scope has a connect link, and only then is it worth naming.
         if result.connect_url is None:
             return SecretMissing()
         return SecretMissing(provider=provider_id, connect_url=result.connect_url)

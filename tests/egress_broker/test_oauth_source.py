@@ -624,6 +624,28 @@ def test_agent_scoped_provider_on_a_shared_worker_is_not_gated(
 
 
 @pytest.mark.usefixtures("demo_registry")
+def test_shared_scope_connect_links_are_never_handed_out(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared-scope link skips sign-in and any process in the worker can read it, so the broker offers none."""
+    shared = _broker_target("@alice:example.org", "shared")
+    missing = _resolve(config, runtime_paths, manager, shared, provider_id="demo")
+    _connect(manager, _tool_target("@alice:example.org", "shared"), "stale-access", provider=_DEMO, expires_at=1.0)
+    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    revoked = _resolve(config, runtime_paths, manager, shared, provider_id="demo")
+    private = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"), provider_id="demo")
+
+    assert revoked == NeedsReconnect(connect_url=None)
+    assert missing == Missing(None)
+    assert isinstance(private, Missing)
+    assert private.connect_url is not None
+    assert "connect_token=" in urlsplit(private.connect_url).query
+
+
+@pytest.mark.usefixtures("demo_registry")
 def test_scoped_worker_never_reads_the_unscoped_store(
     config: Config,
     runtime_paths: RuntimePaths,

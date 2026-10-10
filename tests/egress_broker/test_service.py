@@ -21,7 +21,7 @@ from structlog.testing import capture_logs
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
-from mindroom.egress_broker import service
+from mindroom.egress_broker import oauth_source, service
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
@@ -35,6 +35,7 @@ from mindroom.egress_broker.service import (
 )
 from mindroom.egress_broker.tokens import TokenSigner
 from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
@@ -997,3 +998,34 @@ async def test_unconnectable_provider_gives_the_plain_missing_credential_body(
         "service": "github",
         "manage_url": f"{_PUBLIC_URL}/connections/egress",
     }
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream")
+@pytest.mark.asyncio
+async def test_shared_agent_scoped_provider_refusal_has_no_connect_link(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared-scope link skips sign-in and any process in the worker can read it, so a shared 403 only has the page."""
+    drive = google_drive_oauth_provider()
+    monkeypatch.setattr(oauth_source, "load_oauth_providers", lambda _config, _paths: {drive.id: drive})
+    manager.save_credentials("google_drive_oauth_client", {"client_id": "drive-client", "client_secret": "secret"})
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(drive={**_GITHUB, "oauth_provider": drive.id})
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        shared_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target(scope="shared"))
+        private_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        shared = await _get_through(shared_env, tls_upstream.url("/echo"), tmp_path / "runner")
+        private = await _get_through(private_env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert shared.status_code == 403
+    assert shared.json() == {
+        "error": "credential_not_configured",
+        "service": "drive",
+        "manage_url": f"{_PUBLIC_URL}/connections/egress",
+    }
+    assert private.status_code == 403
+    assert private.json()["provider"] == drive.id
+    assert "connect_token=" in private.json()["connect_url"]
