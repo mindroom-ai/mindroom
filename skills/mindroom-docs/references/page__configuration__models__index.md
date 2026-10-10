@@ -62,7 +62,7 @@ Blank `display_name` or `icon` values count as unset.
 ## Tool Dialect
 
 Claude and OpenAI models are trained inside their vendors' coding agents, so MindRoom shows each model the shell and file-editing tools in the shape it knows: `claude` follows Claude Code, `codex` follows the Codex CLI, and `mindroom` keeps MindRoom's own tools.
-With `auto`, models on `anthropic`, `vertexai_claude`, `bedrock_claude`, and OpenRouter `anthropic/` IDs use `claude`, GPT, o-series, and Codex models on `openai`, `azure`, `codex`, and OpenRouter `openai/` IDs use `codex`, and every other model uses `mindroom`.
+With `auto`, Claude models (on `anthropic`, `vertexai_claude`, `bedrock_claude`, or OpenRouter `anthropic/` IDs) use `claude`; GPT, o-series, and Codex models (on `openai`, `azure`, `codex`, or OpenRouter `openai/` IDs) use `codex`; every other model uses `mindroom`.
 Set `tool_dialect` explicitly when the model ID does not reveal the family, such as an Azure deployment name or a Claude model behind an OpenAI-compatible endpoint.
 The dialect follows the model that answers, so switching a thread's model also switches its tools from the next reply on.
 [Execution and Coding](https://docs.mindroom.chat/tools/execution-and-coding/) lists the tool names each dialect uses.

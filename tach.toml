@@ -2316,7 +2316,6 @@ depends_on = [
     "mindroom.agno_compat_prepared_tools",
     "mindroom.timing",
     "mindroom.token_budget",
-    "mindroom.tool_dialects.agno_compat_model",
     "mindroom.tool_schema_cache",
 ]
 
@@ -7029,7 +7028,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.native_compaction",
     "mindroom.token_budget",
-    "mindroom.tool_dialects.types",
 ]
 visibility = [
     "mindroom.ai",
@@ -7075,7 +7073,6 @@ depends_on = [
     "mindroom.history.replay",
     "mindroom.timing",
     "mindroom.token_budget",
-    "mindroom.tool_dialects.types",
 ]
 visibility = ["mindroom.history.compaction"]
 
@@ -8135,8 +8132,6 @@ depends_on = [
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
     "mindroom.tool_call_budget",
-    "mindroom.tool_dialects.agno_compat_model",
-    "mindroom.tool_dialects.translation",
 ]
 visibility = ["mindroom.skill_learning.runner"]
 
