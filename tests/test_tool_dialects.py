@@ -9,10 +9,12 @@ from typing import Any
 import pytest
 from agno.models.message import Message
 from agno.tools.function import Function
+from structlog.testing import capture_logs
 
 from mindroom.config.models import ModelConfig
 from mindroom.tool_dialects.translation import (
     _resolve_tool_dialect_name,
+    _warn_name_collision,
     canonical_tool_calls,
     wire_function_name,
     wire_messages,
@@ -162,6 +164,18 @@ def test_wire_name_collision_keeps_canonical() -> None:
     tools = [_function("run_shell_command", "shell"), _function("Run", "mcp_server")]
 
     assert _names(wire_tools(_TOY, tools, custom_tools=False)) == ["run_shell_command", "Run"]
+
+
+def test_wire_name_collision_warns_once() -> None:
+    """A collision is logged once, however many requests present the same tools."""
+    _warn_name_collision.cache_clear()
+    tools = [_function("run_shell_command", "shell"), _function("Run", "mcp")]
+
+    with capture_logs() as logs:
+        wire_tools(_TOY, tools, custom_tools=False)
+        wire_tools(_TOY, tools, custom_tools=False)
+
+    assert sum("collides" in entry["event"] for entry in logs) == 1
 
 
 def test_canonical_tool_calls_translate_lossless_calls_without_a_wire_record() -> None:

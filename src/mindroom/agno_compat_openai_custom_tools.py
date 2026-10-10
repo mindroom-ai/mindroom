@@ -12,19 +12,18 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
     from openai.types.responses import ResponseCustomToolCall
 
-# AGNO_COMPAT: Responses custom tool calls are dropped.
+CUSTOM_TOOL_CALL = "custom_tool_call"
+
+
+# AGNO_COMPAT: Responses custom tool call output items are not parsed.
 # Reason: Agno 3.0.9 sends custom tool definitions unchanged but parses only `function_call` output
-# items, stream and non-stream, and replays every call as `function_call`, so a freeform call such as
-# Codex's apply_patch never runs and cannot be replayed.
+# items, stream and non-stream, so a freeform call such as Codex's apply_patch never runs.
 # Upstream issue: Tracking gap; searching agno-agi/agno issues and PRs for custom_tool_call, freeform
 # tools, and apply_patch on October 9, 2026 found nothing.
 # Upstream PR: None identified.
-# Remove when: Agno parses `custom_tool_call` output items into tool calls and replays them as
-# `custom_tool_call` and `custom_tool_call_output` input items.
-# Coverage: tests/test_openai_custom_tools.py::test_end_to_end_apply_patch_edits_workspace_file;
-# tests/test_openai_custom_tools.py::test_reasoning_order_survives_custom_call.
-
-CUSTOM_TOOL_CALL = "custom_tool_call"
+# Remove when: Agno parses `custom_tool_call` output items into tool calls, in output order, for streamed
+# and non-streamed responses.
+# Coverage: tests/test_openai_custom_tools.py::test_end_to_end_apply_patch_edits_workspace_file.
 
 
 def _custom_tool_call(item: ResponseCustomToolCall) -> dict[str, Any]:
@@ -61,6 +60,16 @@ def record_streamed_custom_tool_call(model_response: ModelResponse, assistant_me
     assistant_message.tool_calls = [*(assistant_message.tool_calls or []), call]
 
 
+# AGNO_COMPAT: Responses custom tool calls are replayed as function calls.
+# Reason: Agno 3.0.9 formats every assistant tool call and result as `function_call` and
+# `function_call_output` input items, which the Responses API rejects for a custom tool.
+# Upstream issue: Tracking gap; searching agno-agi/agno issues and PRs for custom_tool_call replay on
+# October 9, 2026 found nothing.
+# Upstream PR: None identified.
+# Remove when: Agno replays calls to custom tools as `custom_tool_call` and `custom_tool_call_output`
+# input items, including results sent on a stored-response continuation.
+# Coverage: tests/test_openai_custom_tools.py::test_reasoning_order_survives_custom_call;
+# tests/test_openai_custom_tools.py::test_stored_continuation_sends_custom_output.
 def _custom_item(item: dict[str, Any]) -> dict[str, Any]:
     if item["type"] == "function_call_output":
         return {"type": "custom_tool_call_output", "call_id": item["call_id"], "output": item["output"]}

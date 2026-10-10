@@ -4217,6 +4217,42 @@ def test_apply_patch_shows_only_when_gated_like_the_file_edits(
     )
 
 
+@pytest.mark.parametrize(
+    ("patch_rule", "expected"),
+    [(False, {"edit_file", "write_file"}), (True, {"apply_patch", "edit_file", "write_file"})],
+    ids=["catch-all-script", "patch-aware-script"],
+)
+def test_script_decided_apply_patch_shows_only_with_its_own_rule(
+    tmp_path: Path,
+    *,
+    patch_rule: bool,
+    expected: set[str],
+) -> None:
+    """A script written for other tools may not understand patches, so apply_patch needs a rule of its own."""
+    script = tmp_path / "policy.py"
+    script.write_text(
+        "def check(tool_name, arguments, agent_name):\n    return tool_name in {'edit_file', 'write_file'}\n",
+    )
+    rules = [{"match": "*", "script": str(script)}]
+    if patch_rule:
+        rules.insert(0, {"match": "apply_patch", "script": str(script)})
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    config.tool_approval = ToolApprovalConfig.model_validate({"rules": rules})
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+
+    agent = create_agent("general", config, runtime_paths, execution_identity=None, supports_native_tool_approval=True)
+
+    names = {
+        name
+        for toolkit in agent.tools or []
+        if isinstance(toolkit, Toolkit)
+        for name in (*toolkit.functions, *toolkit.async_functions)
+    }
+    assert names & {"apply_patch", "edit_file", "write_file"} == expected
+
+
 def _config_with_workspace_skill(tmp_path: Path) -> Config:
     config = _test_config()
     config.agents["general"].knowledge_bases = ["docs"]

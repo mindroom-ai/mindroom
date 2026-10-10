@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.function import Function
@@ -187,17 +188,23 @@ def wire_tool_pairs(
             continue
         wire_function = _wire_function_for(dialect, tool)
         if wire_function is not None and wire_function.wire_name != tool.name and wire_function.wire_name in taken:
-            logger.warning(
-                "Tool dialect name collides with another tool; keeping the canonical name",
-                dialect=dialect.name,
-                function=tool.name,
-                wire_name=wire_function.wire_name,
-            )
+            _warn_name_collision(dialect.name, tool.name, wire_function.wire_name)
             wire_function = None
         presented.append(
             (tool, tool if wire_function is None else _wire_tool_dict(tool, wire_function, custom_tools=custom_tools)),
         )
     return presented
+
+
+@cache
+def _warn_name_collision(dialect: DialectName, function: str, wire_name: str) -> None:
+    """Warn once per collision, however many requests present the same tools."""
+    logger.warning(
+        "Tool dialect name collides with another tool; keeping the canonical name",
+        dialect=dialect,
+        function=function,
+        wire_name=wire_name,
+    )
 
 
 def wire_function_name(

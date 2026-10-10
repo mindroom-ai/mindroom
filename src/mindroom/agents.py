@@ -36,7 +36,11 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.tool_approval import (
+    POLICY_CONFIRMATION_APPROVAL_TYPE,
+    approval_script_rule_match,
+    tool_may_require_approval,
+)
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
 from mindroom.tool_dialects.translation import resolve_tool_dialect, wire_function_name
@@ -1297,11 +1301,17 @@ def _function_names(toolkit: Toolkit) -> set[str]:
     return {*toolkit.functions, *toolkit.async_functions}
 
 
-def _without_implied_exclusions(toolkit: Toolkit, removed: set[str], registered_tool_name: str) -> Toolkit | None:
+def _without_implied_exclusions(
+    toolkit: Toolkit,
+    removed: set[str],
+    registered_tool_name: str,
+    config: Config,
+) -> Toolkit | None:
     """Hide a function that does what another does, such as apply_patch, unless approval treats both alike.
 
     Approval rules are usually written for edit_file and write_file, so the model falls back to those whenever
-    apply_patch would be hidden less or gated differently than they are.
+    apply_patch would be hidden less or gated differently than they are, or a script written for other tools
+    would decide it.
     """
     metadata = TOOL_METADATA.get(registered_tool_name)
     present = _function_names(toolkit)
@@ -1314,7 +1324,14 @@ def _without_implied_exclusions(toolkit: Toolkit, removed: set[str], registered_
         name
         for key, names in (metadata.implied_exclusions or {} if metadata is not None else {}).items()
         for name in names
-        if name in present and (key in removed or (key in present and (key in gated) != (name in gated)))
+        if name in present
+        and (
+            key in removed
+            or (
+                key in present
+                and ((key in gated) != (name in gated) or approval_script_rule_match(config, name) not in (None, name))
+            )
+        )
     }
     if not hidden:
         return toolkit
@@ -1610,7 +1627,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         if toolkit:
             # A function hidden or gated by the channel filter or approval takes away what does the same, like
             # apply_patch, so an edit rule written for edit_file and write_file still gates every model's edits.
-            toolkit = _without_implied_exclusions(toolkit, built - _function_names(toolkit), tool_name)
+            toolkit = _without_implied_exclusions(toolkit, built - _function_names(toolkit), tool_name, config)
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
             toolkit = attach_computer_announcement(
