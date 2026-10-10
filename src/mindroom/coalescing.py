@@ -304,9 +304,9 @@ class CoalescingGate:
         """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
         return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
 
-    def follow_up_backlog_queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
-        """Return whether an active follow-up backlog still queues a run other than this requester's own messages."""
-        return is_active_follow_up_coalescing_key(key) and any(
+    def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
+        """Return whether a queue still holds a run other than this requester's own messages for this agent."""
+        return any(
             pending_event_run_identity(key, pending_event) != (requester_user_id, None)
             or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
@@ -1223,18 +1223,24 @@ class CoalescingGate:
 
     @staticmethod
     def _front_same_run_identity_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
-        """Cap a front run at its first change of run identity or addressing, so each turn runs as its own sender."""
+        """Cap a front run at its first change of run identity or addressing, so each turn runs as its own sender.
+
+        Uploads that mention nobody just before an addressing change stay with the message after them, their caption.
+        """
         front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
         addressing: bool | None = None
+        uploads_start: int | None = None
         for index, queued in enumerate(islice(gate.queue, count)):
             if pending_event_run_identity(key, queued.pending_event) != front_identity:
                 return index
             event_addressing = pending_event_addressing(queued.pending_event)
             if event_addressing is None:
+                uploads_start = index if uploads_start is None else uploads_start
                 continue
             if addressing is not None and event_addressing != addressing:
-                return index
+                return index if uploads_start is None else uploads_start
             addressing = event_addressing
+            uploads_start = None
         return count
 
     async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:

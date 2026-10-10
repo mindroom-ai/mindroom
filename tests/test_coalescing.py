@@ -1388,7 +1388,7 @@ async def test_active_follow_up_backlog_keeps_a_message_for_another_participant_
             replace(pending, event=replace(pending.event, for_another_participant=for_another_participant)),
         )
     # The message for someone else is another run, so a newer message of Alice's cannot supersede her earlier one.
-    assert gate.follow_up_backlog_queues_other_run(key, "@alice:localhost")
+    assert gate.queues_other_run(key, "@alice:localhost")
     await gate.drain_all()
 
     assert calls == [["$a1:localhost"], ["$a2:localhost"], ["$a3:localhost"]]
@@ -1438,6 +1438,67 @@ async def test_an_upload_without_its_own_mention_stays_with_a_caption_for_anothe
     await gate.drain_all()
 
     assert calls == expected
+
+
+@pytest.mark.asyncio
+async def test_an_upload_between_messages_for_different_participants_stays_with_the_caption_after_it() -> None:
+    """An upload that mentions nobody goes with the message after it, not with an earlier message for another participant."""
+    calls: list[list[str]] = []
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    for event, source_kind, for_another_participant in (
+        (_text_event("$ask:localhost", "@mindroom check X", 1_000_000), MESSAGE_SOURCE_KIND, False),
+        (_image_event("$img:localhost", 1_000_001), IMAGE_SOURCE_KIND, None),
+        (_text_event("$caption:localhost", "@bob look at this", 1_000_002), MESSAGE_SOURCE_KIND, True),
+    ):
+        pending = make_pending_event(
+            event,
+            room,
+            source_kind=source_kind,
+            requester_user_id="@alice:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        )
+        await _admit_ready(
+            gate,
+            key,
+            replace(pending, event=replace(pending.event, for_another_participant=for_another_participant)),
+        )
+    await gate.drain_all()
+
+    assert calls == [["$ask:localhost"], ["$img:localhost", "$caption:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_a_queued_message_for_another_participant_is_another_run_in_any_queue() -> None:
+    """Outside a busy conversation too, a queued message for someone else keeps a newer one from superseding this turn."""
+    gate = CoalescingGate(
+        dispatch_turn=AsyncMock(),
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    pending = make_pending_event(
+        _text_event("$later:localhost", "@bob what do you think?", 1_000_000),
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id="@user:localhost",
+    )
+    await _admit_ready(gate, key, pending)
+    assert not gate.queues_other_run(key, "@user:localhost")
+
+    gate.queued_pending_events(key)[0].event = replace(pending.event, for_another_participant=True)
+    assert gate.queues_other_run(key, "@user:localhost")
+    await gate.drain_all()
 
 
 @pytest.mark.asyncio
