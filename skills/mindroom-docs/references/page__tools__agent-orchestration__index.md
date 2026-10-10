@@ -181,16 +181,15 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
 Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
-Cleanup exceptions reported to the job runtime are retained as failures.
+A job whose cleanup fails ends as failed.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
-Non-MCP constructor settings are part of the accepted tool identity, stored as a digest: changing those authored settings cancels the tool's still-running jobs and blocks access to saved results until the settings match again.
+Changing a tool's authored settings, other than for MCP tools, cancels its still-running jobs and blocks access to their saved results until the settings match again.
 Include/exclude filters remain checked per function.
 Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and result delivery.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
-The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
-Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
+`job(action="list")` rediscovers handles after compaction, later turns, and a restart.
 For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.

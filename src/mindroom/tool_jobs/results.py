@@ -138,7 +138,7 @@ def _decode_result_payload(envelope: EncodedResultPayload) -> ToolResultPayload:
 
 
 async def read_result_payload(runtime: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:
-    """Read a ready job's full result from its payload file; an outcome the runtime authored itself has only its summary."""
+    """Read a ready job's full result from its saved payload; an outcome the runtime authored itself has only its summary."""
     if job.has_result_payload:
         return await asyncio.to_thread(_decode_result_payload, await runtime.read_payload(job))
     if job.summary_truncated:
