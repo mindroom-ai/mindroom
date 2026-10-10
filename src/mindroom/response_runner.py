@@ -1067,7 +1067,6 @@ class _InboxResponseOwnership:
     shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
     room_id: str
-    retry_on_finish: Callable[[], bool] | None = None
     drain_intent: RuntimeShutdownIntent | None = None
     proof_task: asyncio.Task[bool] | None = None
 
@@ -1144,11 +1143,11 @@ class ResponseRunner:
         on_failure: Callable[[], None] | None = None,
         on_terminal: Callable[[], None] | None = None,
         source_event_ids: tuple[str, ...] = (),
-        retry_on_finish: Callable[[], bool] | None = None,
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it.
 
-        Its sources go back to the journal when it finishes, unless ``retry_on_finish`` says another owner retries them.
+        Its sources go back to the journal when it finishes, unless a deferred
+        claim of them waits for what blocks it, which retries them then.
         """
         if self._process_shutdown_started:
             response.close()
@@ -1164,7 +1163,6 @@ class ResponseRunner:
             on_failure=on_failure,
             shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
-            retry_on_finish=retry_on_finish,
             room_id=room_id,
         )
         if on_terminal is not None:
@@ -1215,7 +1213,8 @@ class ResponseRunner:
         if (
             ownership is not None
             and ownership.source_event_ids
-            and (ownership.retry_on_finish is None or ownership.retry_on_finish())
+            # A deferred claim is retried by what blocks it once that resolves, not here at once in a loop.
+            and not self.deps.replies.waits_to_claim(ownership.source_event_ids)
         ):
             self.deps.retry_approval_sources(ownership.room_id, tuple(ownership.source_event_ids))
         if task.cancelled():

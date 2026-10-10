@@ -53,7 +53,6 @@ class _TrackInboxResponse(Protocol):
         room_id: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
         source_event_ids: tuple[str, ...] = (),
-        retry_on_finish: Callable[[], bool] | None = None,
     ) -> asyncio.Task[None]: ...
 
 
@@ -369,7 +368,5 @@ class EditRegenerator:
             # The edit stays pending until a span settles it, so a restart regenerates again.
             recovery_proof_ready=lambda: True,
             source_event_ids=request.sources.pending_event_ids,
-            # A deferred claim is retried by what blocks it once that resolves, not at once in a loop.
-            retry_on_finish=lambda: not handoff.is_set(),
         )
         return True

@@ -1149,6 +1149,7 @@ async def test_detached_inbox_response_owns_source_until_task_finishes() -> None
     """Journal replay must not reclaim a source while its response task is alive."""
     retry_sources = MagicMock()
     runner = ResponseRunner(deps=MagicMock(retry_approval_sources=retry_sources))
+    runner.deps.replies.waits_to_claim.return_value = False
     response_started = asyncio.Event()
     release_response = asyncio.Event()
 
@@ -1175,10 +1176,11 @@ async def test_detached_inbox_response_owns_source_until_task_finishes() -> None
 
 
 @pytest.mark.asyncio
-async def test_an_inbox_response_another_owner_retries_does_not_retry_its_sources_as_it_ends() -> None:
+async def test_an_inbox_response_whose_claim_waits_does_not_retry_its_sources_as_it_ends() -> None:
     """A deferred claim's wake retries its sources; the task's end does not retry them at once in a loop."""
     retry_sources = MagicMock()
     runner = ResponseRunner(deps=MagicMock(retry_approval_sources=retry_sources))
+    runner.deps.replies.waits_to_claim.return_value = True
 
     async def deferred_response() -> None:
         return None
@@ -1189,12 +1191,12 @@ async def test_an_inbox_response_another_owner_retries_does_not_retry_its_source
         recovery_proof_ready=lambda: True,
         source_event_ids=("$edit",),
         room_id=_target().room_id,
-        retry_on_finish=lambda: False,
     )
     await response_task
     await asyncio.sleep(0)
 
     retry_sources.assert_not_called()
+    runner.deps.replies.waits_to_claim.assert_called_once_with(frozenset({"$edit"}))
 
 
 def _attempt_runner() -> ResponseAttemptRunner:

@@ -57,7 +57,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 
     from mindroom.cancellation import CancelSource
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
@@ -275,19 +275,24 @@ class ReplyRuntime:
         """Run what committed reply transitions left for after their commit.
 
         Span cancels run last: the acknowledgement that applies a Stop can run
-        in the span's own task, whose next await the cancel interrupts.
+        in the span's own task, whose next await the cancel interrupts. The
+        in-memory effects run even when an awaited one fails, so a failed read
+        cannot keep a stopped span running or a conversation held.
         """
-        for effect in effects:
-            if isinstance(effect, TurnCompleted):
-                await self.complete_turn(effect.record)
-            elif isinstance(effect, WakeApproval):
-                await self._wake_fenced_approval(effect.approval_id)
-            elif isinstance(effect, ApprovalEnded):
-                self.claim_may_proceed(effect.reply_id)
-                self.approval_ended(effect)
-        for effect in effects:
-            if isinstance(effect, rl.CancelSpan):
-                self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
+        try:
+            for effect in effects:
+                if isinstance(effect, TurnCompleted):
+                    await self.complete_turn(effect.record)
+                elif isinstance(effect, WakeApproval):
+                    await self._wake_fenced_approval(effect.approval_id)
+        finally:
+            for effect in effects:
+                if isinstance(effect, ApprovalEnded):
+                    self.claim_may_proceed(effect.reply_id)
+                    self.approval_ended(effect)
+            for effect in effects:
+                if isinstance(effect, rl.CancelSpan):
+                    self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
 
     async def _span_tool_calls(self, span_ids: tuple[str, ...]) -> tuple[ToolTraceEntry, ...]:
         """Return the tool calls these spans recorded, in the order they started."""
@@ -346,7 +351,9 @@ class ReplyRuntime:
         The wait registers first and then rechecks, so a resolution that landed
         in between still retries them. A retry claims again and may wait again.
         """
-        self._waiting_claims.setdefault(reply_id, []).append((room_id, sources))
+        waiting = self._waiting_claims.setdefault(reply_id, [])
+        if (room_id, sources) not in waiting:
+            waiting.append((room_id, sources))
         reply = await self.store.replies.load(reply_id)
         if reply is None or not rl.claim_blocked(
             reply,
@@ -354,6 +361,13 @@ class ReplyRuntime:
         ):
             # A note still owed and not yet enqueued wakes it when its row resolves.
             self.claim_may_proceed(reply_id)
+
+    def waits_to_claim(self, sources: Iterable[str]) -> bool:
+        """Return whether a deferred claim of any of these sources waits for what blocks it, which retries them."""
+        wanted = frozenset(sources)
+        return any(
+            wanted.intersection(waiting) for claims in self._waiting_claims.values() for _room, waiting in claims
+        )
 
     def claim_may_proceed(self, reply_id: str) -> None:
         """Retry the claims that waited on this reply."""

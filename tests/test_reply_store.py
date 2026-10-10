@@ -29,6 +29,7 @@ from mindroom.event_journal.replies import (
     Decide,
     PreparedReplyRow,
     ReplyRowRequest,
+    WakeApproval,
 )
 from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
@@ -931,6 +932,42 @@ class _CancelSpy(SpanRegistry):
         assert cancel_source is None
         self.cancelled.append(span_id)
         return False
+
+
+async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(journal_store: EventJournalStore) -> None:
+    """A failed read while waking the fenced approval cannot leave the stopped span running or the hold in place."""
+    principal = journal_store.principal("agent@alice")
+    cancelled: list[tuple[str, str | None]] = []
+    ended: list[ApprovalEnded] = []
+
+    class _Spans(SpanRegistry):
+        def cancel(self, span_id: str, *, cancel_source: TaskCancelSource | None) -> bool:
+            cancelled.append((span_id, cancel_source))
+            return True
+
+    runtime = reply_scope.ReplyRuntime(
+        store=principal,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=ended.append,
+        spans=_Spans(),
+    )
+    with (
+        patch.object(
+            PrincipalStore,
+            "approval_continuation",
+            AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        ),
+        pytest.raises(RuntimeError, match="journal unavailable"),
+    ):
+        await runtime.run_effects(
+            (WakeApproval("approval-1"), ApprovalEnded("approval-2", "reply-2"), rl.CancelSpan("span-1", by_stop=True)),
+        )
+    assert cancelled == [("span-1", "user_stop")]
+    assert [end.approval_id for end in ended] == ["approval-2"]
 
 
 @pytest.mark.parametrize("ended_by", ["departure", "deletion"])
