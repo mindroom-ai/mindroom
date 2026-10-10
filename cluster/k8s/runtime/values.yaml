@@ -95,6 +95,15 @@ scriptGateway:
   enabled: false
   port: 8767
 
+# Optional native credential-injecting egress broker served by the primary on its own port to dedicated Kubernetes workers.
+# Requires workers.backend=kubernetes and cannot be combined with workers.kubernetes.agentVault; see "Egress Broker" in the README.
+egressBroker:
+  enabled: false
+  # Listener port on the primary and the egress broker Service; must differ from runtime.apiPort and scriptGateway.port.
+  port: 8768
+  # Lifetime of the per-call worker tokens; empty keeps the MindRoom default.
+  tokenTtlSeconds: ""
+
 config:
   # configMap keeps the existing chart-managed or externally managed ConfigMap behavior.
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.

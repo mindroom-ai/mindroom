@@ -626,6 +626,28 @@ matchLabels:
 {{- printf "%s-script-gateway" (include "mindroom-runtime.fullname" . | trunc 48 | trimSuffix "-") -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.egressBrokerName" -}}
+{{- printf "%s-egress-broker" (include "mindroom-runtime.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressBrokerHost" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "mindroom-runtime.egressBrokerName" .) .Release.Namespace -}}
+{{- end -}}
+
+{{- /* Whether Squid fronts the broker, so workers keep Squid as their first hop instead of reaching the broker directly. */ -}}
+{{- define "mindroom-runtime.egressBrokerChainMode" -}}
+{{- if and .Values.egressBroker.enabled .Values.approvedEgress.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{- /* The worker-facing first hop: Squid in the approved-egress chain, else the broker Service itself. */ -}}
+{{- define "mindroom-runtime.egressBrokerWorkerUrl" -}}
+{{- if include "mindroom-runtime.egressBrokerChainMode" . -}}
+{{- include "mindroom-runtime.egressProxyUrl" . -}}
+{{- else -}}
+{{- printf "http://%s:%v" (include "mindroom-runtime.egressBrokerHost" .) .Values.egressBroker.port -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerPodLabels" -}}
 mindroom.ai/component: worker
 app.kubernetes.io/managed-by: mindroom

@@ -420,6 +420,17 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- if .Values.egressBroker.enabled -}}
+{{- if ne .Values.workers.backend "kubernetes" -}}
+{{- fail "egressBroker.enabled requires workers.backend=kubernetes" -}}
+{{- end -}}
+{{- if .Values.workers.kubernetes.agentVault.enabled -}}
+{{- fail "egressBroker and workers.kubernetes.agentVault cannot both be enabled: enter secrets on the egress page first, then disable agentVault in the upgrade that enables egressBroker" -}}
+{{- end -}}
+{{- if or (eq (int .Values.egressBroker.port) (int .Values.runtime.apiPort)) (eq (int .Values.egressBroker.port) (int .Values.scriptGateway.port)) -}}
+{{- fail "egressBroker.port must differ from runtime.apiPort and scriptGateway.port" -}}
+{{- end -}}
+{{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
 {{- if not (has $agentVault.jobNaming (list "fixed" "contentHash")) -}}
 {{- fail "workers.kubernetes.agentVault.jobNaming must be fixed or contentHash" -}}

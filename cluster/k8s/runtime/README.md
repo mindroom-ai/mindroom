@@ -21,6 +21,7 @@ Use this chart when MindRoom should run inside an existing platform.
 - [Control-Plane NetworkPolicy](#control-plane-networkpolicy)
 - [Worker Egress Proxy](#worker-egress-proxy)
 - [Background Script Gateway](#background-script-gateway)
+- [Egress Broker](#egress-broker)
 - [Matrix Managed Account Authentication](#matrix-managed-account-authentication)
 - [Existing Platform Example](#existing-platform-example)
 - [Notes](#notes)
@@ -816,6 +817,38 @@ The isolation attestation relies on the chart's worker egress NetworkPolicy, so 
 Keep `egressProxy.networkPolicy.extraEgress` and the egress proxy allowlist from opening the control-plane API port or the main runtime Service to workers.
 The Service is separate from the main runtime Service so `service.type` never exposes the gateway port outside the cluster.
 See [Background Python Scripts](../../../docs/tools/background-scripts.md#worker-and-network-requirements) for the script tool, its gateway contract, and run lifecycle.
+
+## Egress Broker
+
+The egress broker lets agents call authenticated HTTP APIs from Kubernetes workers without the worker ever holding the credential.
+The primary runs the broker on its own port, workers send their traffic through it, and it injects the stored credential for the matching service.
+Set `egressBroker.enabled` to have the primary serve that listener:
+
+```yaml
+workers:
+  backend: kubernetes
+
+egressBroker:
+  enabled: true
+  port: 8768
+  # Optional lifetime of the per-call worker tokens, in seconds.
+  tokenTtlSeconds: ""
+```
+
+The primary container then exposes an `egress-broker` port and gets `MINDROOM_EGRESS_BROKER_PORT`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, and `MINDROOM_EGRESS_BROKER_URL`, plus `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` when `egressBroker.tokenTtlSeconds` is set.
+The URL points workers at a `<fullname>-egress-broker` ClusterIP Service for that port.
+The Service is separate from the main runtime Service so `service.type` never exposes the broker port outside the cluster.
+Workers need no changes: each call carries its own token and CA certificate.
+When `networkPolicy.create` is true, a `<fullname>-egress-broker` NetworkPolicy admits workers to that port on the control-plane pod.
+When the chart's worker egress NetworkPolicy exists (`egressProxy.enabled` with `egressProxy.networkPolicy.create=true`), a `<fullname>-egress-broker-workers` NetworkPolicy in the worker namespace adds egress from workers to the broker port on the control-plane pod.
+Without that policy workers already have unrestricted egress, so the chart adds no worker rule.
+
+`egressBroker.enabled` requires `workers.backend=kubernetes`, and `egressBroker.port` must differ from `runtime.apiPort` and `scriptGateway.port`.
+It cannot be combined with `workers.kubernetes.agentVault`.
+To migrate, enter secrets on the egress page first, then disable `workers.kubernetes.agentVault` in the same upgrade that enables `egressBroker`.
+The broker connects to the internet directly from the primary pod.
+If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
+The broker shares the primary's lifecycle, so a primary restart interrupts brokered connections that are in flight.
 
 ## Matrix Managed Account Authentication
 
