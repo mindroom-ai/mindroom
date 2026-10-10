@@ -120,6 +120,39 @@ The status API returns whether a secret is configured and when it was last updat
 
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
 
+## Agent tool
+
+Add the `egress_credentials` tool to an agent so it can tell a user which keys are missing when a brokered request fails with `credential_not_configured`.
+It replaces `agent_vault_access` for the native broker.
+
+```yaml
+agents:
+  code:
+    tools:
+      - shell
+      - egress_credentials
+```
+
+Its one function, `list_egress_credentials`, takes no arguments and returns JSON:
+
+```json
+{
+  "tool": "egress_credentials",
+  "services": [
+    {"name": "github", "display_name": "GitHub", "configured": true},
+    {"name": "openai", "display_name": "openai", "configured": false}
+  ],
+  "manage_url": "https://mindroom.example/connections/egress",
+  "note": "..."
+}
+```
+
+- `configured` reflects the calling agent's own secret scope, so each requester sees only their own keys when the agent uses `user` or `user_agent` scope. An agent with no worker scope reads the global store.
+- `display_name` falls back to the service name when the service sets none.
+- `manage_url` is the personal egress page when trusted upstream auth is enabled and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
+- The tool never returns secret values or update timestamps, and its note tells the agent not to ask users to paste a key into the chat.
+- The tool always runs in the primary runtime. When it is built without a worker target, it returns an empty `services` list and a note saying a worker-scoped agent is required.
+
 ## Deployment
 
 ### Docker workers
@@ -236,6 +269,7 @@ Verify with `curl -v -x $MINDROOM_EGRESS_BROKER_URL http://example.com` from ins
 
 The service is matched but no secret is set for that worker's scope.
 Set the secret through the dashboard or Connections portal; the error response includes a `manage_url` field pointing to the right UI.
+Agents with the [`egress_credentials` tool](#agent-tool) can look up which services are set and relay the link to the user.
 
 **407 authentication errors:**
 

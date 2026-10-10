@@ -7692,6 +7692,31 @@
       "config_fields": [],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "See which API keys this agent can use through the egress broker and where to add them",
+      "display_name": "Egress Credentials",
+      "docs_url": null,
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "list_egress_credentials"
+      ],
+      "helper_text": null,
+      "icon": "KeyRound",
+      "icon_color": "text-amber-600",
+      "name": "egress_credentials",
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
