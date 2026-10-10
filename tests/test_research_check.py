@@ -300,12 +300,51 @@ async def test_request_lists_tool_calls_redacted_and_clipped(harness: _Harness) 
     assert "web_search" in tools["text"]
     assert "query=coffee utrecht" in tools["text"]
     assert secret not in tools["text"]
-    assert "x" * 400 not in tools["text"]
-    assert "tool_28" in tools["text"]
-    assert "tool_29" not in tools["text"]
-    assert "11 more" in tools["text"]
+    assert "x" * 200 not in tools["text"]
+    assert "tool_39" in tools["text"]
+    assert "more" not in tools["text"]
     assert request.body is not None
     assert json.loads(request.body)["guidance"] == "Be strict."
+
+
+@pytest.mark.asyncio
+async def test_many_long_tool_calls_still_fit_one_request(harness: _Harness) -> None:
+    """A tool-heavy reply is still judged; the tool list is shortened to fit instead of skipping the check."""
+    trace = tuple(
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="web_fetch",
+            args_preview=f"url=https://example.com/{index}/" + "a" * 1000,
+            result_preview="r" * 1000,
+        )
+        for index in range(30)
+    )
+
+    await research_check.check_research(harness.context(tool_trace=trace, response_text="word " * 300))
+
+    [request] = harness.requests
+    tools = _conversation(request)[1]["text"]
+    assert "example.com/0/" in tools
+    assert tools.endswith("more")
+
+
+@pytest.mark.asyncio
+async def test_replies_to_other_agents_are_not_checked(harness: _Harness) -> None:
+    """Only a person's request earns a follow-up; an agent asking another agent does not."""
+    envelope = _envelope(
+        origin=message_origin(
+            sender_id="@mindroom_helper:localhost",
+            requester_id="@mindroom_helper:localhost",
+            sender_entity_name="helper",
+            requester_entity_name="helper",
+            source_kind="message",
+        ),
+    )
+
+    await research_check.check_research(harness.context(envelope=envelope))
+
+    assert harness.bound == []
+    assert harness.sent == []
 
 
 @pytest.mark.asyncio

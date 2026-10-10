@@ -85,11 +85,11 @@ plugins:
 | `instructions` | string | `""` | Extra guidance for the decision, such as which kinds of claims matter to you |
 | `agents` | list of strings | all agents and teams | Agents or teams whose replies are checked |
 
-- Only replies to messages people send are checked, and each gets at most one follow-up; the verification reply is not checked again.
+- Only replies to people are checked, including their scheduled tasks, and each gets at most one follow-up; replies to other agents, plugins, and automations, and the verification reply itself, are not checked.
 - The check sees only the current reply's tool calls, so a reply that relies on research from an earlier message can still get a follow-up.
 - Each checked reply costs one judgment request; use `agents` to limit which agents are checked.
 - An agent without search or browsing tools answers the follow-up by saying which claims remain unverified.
-- A reply gets no follow-up when the backend fails, times out, or has no credential, when the message and reply together exceed roughly 14,000 characters, or when either contains a credential, which is never sent to the backend.
+- A reply gets no follow-up when the backend fails, times out, or has no credential, when the message and reply are too long for one judgment request, which can happen past about 8,000 characters, or when either contains a credential, which is never sent to the backend; a long tool-call list is shortened instead.
 - Invalid settings, or an `llm` judgment `model` that is not a configured alias, make every check fail with `Hook execution failed` in the logs for plugin `research_check`.
 
 ## Configure plugins

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.config.judgment import JudgmentConfig, LLMJudgmentConfig
-from mindroom.hooks import EVENT_MESSAGE_AFTER_RESPONSE, AfterResponseContext, hook
+from mindroom.hooks import EVENT_MESSAGE_AFTER_RESPONSE, AfterResponseContext, SenderKind, hook
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.redaction import redact_sensitive_text
@@ -17,8 +17,9 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.events import ToolTraceEntry
 
-_MAX_TOOL_ENTRIES = 30
-_MAX_PREVIEW_CHARS = 300
+_MAX_PREVIEW_CHARS = 150
+# Leaves room in the judgment request for the person's message and a long reply.
+_MAX_TOOL_CHARS = 6_000
 _CHECKED_RESPONSE_KINDS = ("ai", "team")
 
 _RESEARCH_CHECK_QUESTION = JudgmentQuestion(
@@ -76,9 +77,15 @@ def _research_check_messages(
     reply: str,
 ) -> tuple[JudgmentMessage, ...]:
     """Show the judge the request, every lookup made for the reply, and the reply itself."""
-    lines = [_tool_line(entry) for entry in tool_trace[:_MAX_TOOL_ENTRIES]]
-    if len(tool_trace) > _MAX_TOOL_ENTRIES:
-        lines.append(f"- and {len(tool_trace) - _MAX_TOOL_ENTRIES} more")
+    lines: list[str] = []
+    budget = _MAX_TOOL_CHARS
+    for index, entry in enumerate(tool_trace):
+        line = _tool_line(entry)
+        budget -= len(line) + 1
+        if budget < 0:
+            lines.append(f"- and {len(tool_trace) - index} more")
+            break
+        lines.append(line)
     tools = "\n".join(["Tool calls made for this reply:", *lines]) if lines else "Tool calls made for this reply: none"
     return (
         JudgmentMessage("user", body),
@@ -93,7 +100,11 @@ async def check_research(ctx: AfterResponseContext) -> None:
     result = ctx.result
     envelope = result.envelope
     # Hook-sourced turns include this plugin's own follow-ups, so each person's turn is checked at most once.
-    if result.response_kind not in _CHECKED_RESPONSE_KINDS or envelope.hook_source is not None:
+    if (
+        result.response_kind not in _CHECKED_RESPONSE_KINDS
+        or envelope.hook_source is not None
+        or envelope.origin.requester_kind != SenderKind.USER
+    ):
         return
     settings = ResearchCheckSettings.model_validate(ctx.settings)
     if settings.agents is not None and envelope.agent_name not in settings.agents:
