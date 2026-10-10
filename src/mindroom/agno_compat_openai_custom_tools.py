@@ -75,7 +75,7 @@ def _custom_item(item: dict[str, Any]) -> dict[str, Any]:
         return {"type": "custom_tool_call_output", "call_id": item["call_id"], "output": item["output"]}
     try:
         arguments = json.loads(item.get("arguments") or "{}")
-    except json.JSONDecodeError:
+    except ValueError:
         arguments = {}
     patch_input = arguments.get("input") if isinstance(arguments, dict) else None
     # Agno rewrites foreign item IDs to function-call IDs, so the replayed item omits its ID.

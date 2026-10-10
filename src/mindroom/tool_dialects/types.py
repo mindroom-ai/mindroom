@@ -108,7 +108,7 @@ def shell_command_text(args: object) -> str:
     if isinstance(args, str) and args.lstrip().startswith("["):
         try:
             args = json.loads(args)
-        except json.JSONDecodeError:
+        except ValueError:
             return args
     if isinstance(args, list):
         if len(args) == 1 and isinstance(args[0], str):

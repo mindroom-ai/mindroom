@@ -232,9 +232,10 @@ def _translate_call(call: dict[str, Any], wire_function: WireFunction) -> dict[s
         arguments = json.loads(raw_arguments)
         if not isinstance(arguments, dict):
             msg = f"{name} arguments must be a JSON object"
-            raise DialectArgumentError(msg)  # noqa: TRY301
+            raise DialectArgumentError(msg)
         canonical_arguments = _with_output_path(arguments, wire_function.to_canonical(arguments))
-    except (json.JSONDecodeError, DialectArgumentError) as exc:
+    except (ValueError, OverflowError) as exc:
+        # DialectArgumentError is a ValueError, like a JSON integer longer than Python converts.
         reason = f"Invalid JSON arguments for {name}: {exc}" if isinstance(exc, json.JSONDecodeError) else str(exc)
         return _ToolCallError(call=call, name=name, message=f"Error: {reason}")
     return {
@@ -290,11 +291,12 @@ def _wire_call(mapped: Mapping[str, WireFunction], call: dict[str, Any]) -> dict
         return call
     try:
         arguments = json.loads(function.get("arguments") or "{}")
-    except json.JSONDecodeError:
+        if not isinstance(arguments, dict):
+            return call
+        wire_arguments = json.dumps(_with_output_path(arguments, wire_function.to_wire(arguments)), ensure_ascii=False)
+    except (ValueError, OverflowError):
+        # Stored arguments a model sent, such as an infinite timeout, may not render; the call stays as stored.
         return call
-    if not isinstance(arguments, dict):
-        return call
-    wire_arguments = json.dumps(_with_output_path(arguments, wire_function.to_wire(arguments)), ensure_ascii=False)
     return {**call, "function": {**function, "name": wire_function.wire_name, "arguments": wire_arguments}}
 
 

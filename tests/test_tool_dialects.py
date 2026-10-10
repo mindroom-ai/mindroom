@@ -233,6 +233,26 @@ def test_untranslatable_call_returns_tool_call_error() -> None:
     assert errors[1].message.startswith("Error: Invalid JSON arguments for Run")
 
 
+def test_numbers_python_cannot_use_never_fail_the_reply() -> None:
+    """A 5000-digit integer is a tool error, and a stored infinite timeout renders as stored instead of raising."""
+    functions = {"run_shell_command": _function("run_shell_command", "shell")}
+    huge = _call("h", "Run", {}) | {"function": {"name": "Run", "arguments": '{"cmd": "ls", "n": ' + "9" * 5000 + "}"}}
+
+    translated, errors = canonical_tool_calls(_TOY, [huge], functions)
+
+    assert translated == [huge]
+    assert [error.name for error in errors] == ["Run"]
+
+    timed = replace(
+        _TOY.functions[0],
+        to_wire=lambda arguments: {"cmd": arguments["args"], "ms": int(arguments["timeout"] * 1000)},
+    )
+    call = _call("t", "run_shell_command", {"args": "ls", "timeout": float("inf")})
+    [rendered] = wire_messages(replace(_TOY, functions=(timed,)), [_assistant(call)], _PRESENTED)
+
+    assert rendered.tool_calls == [call]
+
+
 def _assistant(*calls: dict[str, Any]) -> Message:
     return Message(role="assistant", tool_calls=list(calls))
 

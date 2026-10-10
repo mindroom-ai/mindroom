@@ -1617,12 +1617,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             registered_tool_name=tool_name,
         )
         if toolkit:
-            # A function hidden or gated by the channel filter or approval takes away what does the same, like
-            # apply_patch, so an edit rule written for edit_file and write_file still gates every model's edits.
+            # A function the channel filter or approval pruning removed takes away what does the same, like
+            # apply_patch; build_agent_toolkit already hid what approval may gate.
             toolkit = without_implied_exclusions(
                 toolkit,
                 removed=built - _function_names(toolkit),
-                may_require_approval=partial(tool_may_require_approval, config),
+                may_require_approval=lambda _name: False,
                 registered_tool_name=tool_name,
             )
         if toolkit:

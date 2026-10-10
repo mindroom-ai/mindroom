@@ -13,6 +13,7 @@ from agno.tools.function import Function
 from openai import AsyncOpenAI
 
 from mindroom.agents import set_toolkit_owner
+from mindroom.agno_compat_openai_custom_tools import replay_custom_tool_items
 from mindroom.codex_model import CodexResponses
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.openai_models import MindRoomOpenAIResponses
@@ -285,3 +286,12 @@ def test_freeform_apply_patch_only_on_openai_responses_endpoints(base_url: str |
     [definition] = model._format_tools([patch_function])
 
     assert (definition["type"] == "custom") is freeform
+
+
+def test_replayed_custom_call_with_unconvertible_arguments_still_replays() -> None:
+    """A stored call whose JSON holds an integer Python will not convert replays without failing the request."""
+    item = {"type": "function_call", "call_id": "c", "name": "apply_patch", "arguments": '{"n": ' + "9" * 5000 + "}"}
+
+    [replayed] = replay_custom_tool_items([item], [{"type": "custom", "name": "apply_patch"}], [])
+
+    assert replayed == {"type": "custom_tool_call", "call_id": "c", "name": "apply_patch", "input": ""}
