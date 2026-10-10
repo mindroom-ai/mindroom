@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from weakref import ref
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Mapping
 
 
 MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
@@ -147,16 +147,6 @@ class ToolValidationInfo:
     unavailable_due_to_plugin_load_error: bool = False
 
 
-def with_implied_exclusions(
-    names: Iterable[str],
-    implied_exclusions: Mapping[str, tuple[str, ...]] | None,
-) -> list[str]:
-    """Return *names* plus every function that *implied_exclusions* removes along with one of them."""
-    listed = list(names)
-    implied = (function for name in listed for function in (implied_exclusions or {}).get(name, ()))
-    return list(dict.fromkeys([*listed, *implied]))
-
-
 @dataclass
 class ToolMetadata:
     """Complete metadata for a tool.
@@ -193,7 +183,7 @@ class ToolMetadata:
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
-    # Functions that exclude_tools also removes when it removes the key, such as another way to edit files.
+    # Functions hidden when their key is excluded or when either may need approval, such as apply_patch for edit_file.
     implied_exclusions: dict[str, tuple[str, ...]] | None = None
     # SDK functions that accept, but never use, an injected Agent or Team.
     worker_inert_agent_functions: tuple[str, ...] = ()

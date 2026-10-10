@@ -919,7 +919,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     )
     # Every consumer, including the MCP gateway and script grants, decides approval per function, so a function
     # that does what a differently gated one does would let calls around the rules written for it.
-    return without_implied_exclusions(
+    return _without_implied_exclusions(
         toolkit,
         removed=set(),
         may_require_approval=partial(tool_may_require_approval, config),
@@ -1305,7 +1305,7 @@ def _function_names(toolkit: Toolkit) -> set[str]:
     return {*toolkit.functions, *toolkit.async_functions}
 
 
-def without_implied_exclusions(
+def _without_implied_exclusions(
     toolkit: Toolkit,
     *,
     removed: set[str],
@@ -1619,7 +1619,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         if toolkit:
             # A function hidden or gated by the channel filter or approval takes away what does the same, like
             # apply_patch, so an edit rule written for edit_file and write_file still gates every model's edits.
-            toolkit = without_implied_exclusions(
+            toolkit = _without_implied_exclusions(
                 toolkit,
                 removed=built - _function_names(toolkit),
                 may_require_approval=partial(tool_may_require_approval, config),
@@ -2231,5 +2231,4 @@ __all__ = [
     "resolve_runtime_worker_tools",
     "set_toolkit_owner",
     "show_tool_calls_for_agent",
-    "without_implied_exclusions",
 ]

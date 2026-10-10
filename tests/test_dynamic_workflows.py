@@ -2534,7 +2534,7 @@ def test_participant_model_presents_tools_in_its_dialect(tmp_path: Path) -> None
     ]
 
 
-def test_participant_drops_an_apply_patch_gated_unlike_the_edit_tools(tmp_path: Path) -> None:
+def test_participant_hides_apply_patch_when_it_may_need_approval(tmp_path: Path) -> None:
     """A rule gating only apply_patch hides it, as for configured agents, instead of refusing the workflow."""
     context = _make_context(tmp_path)
     config = bind_runtime_paths(

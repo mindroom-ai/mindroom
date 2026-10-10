@@ -1250,8 +1250,8 @@ def test_patch_only_allowlist_follows_the_edit_approval_rule(tmp_path: Path, *, 
     assert ("apply_patch" in {*toolkit.functions, *toolkit.async_functions}) is not gate_edits
 
 
-def test_shared_toolkit_builder_drops_apply_patch_gated_unlike_the_edit_tools(tmp_path: Path) -> None:
-    """Every consumer of the shared builder, such as the MCP gateway, gets apply_patch only when approval agrees."""
+def test_shared_toolkit_builder_hides_apply_patch_when_a_file_edit_may_need_approval(tmp_path: Path) -> None:
+    """Every consumer of the shared builder, such as the MCP gateway, loses apply_patch when an edit tool is gated."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _test_config()
     config.agents["general"].tools = ["coding"]

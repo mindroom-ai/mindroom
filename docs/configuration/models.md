@@ -65,7 +65,7 @@ Blank `display_name` or `icon` values count as unset.
 
 ## Tool Dialect
 
-Claude and OpenAI models are trained inside their vendors' coding agents, so MindRoom shows each model the shell and file-editing tools in the shape it knows: `claude` follows Claude Code, `codex` follows the Codex CLI, and `mindroom` keeps MindRoom's own tools.
+Claude and OpenAI models are trained inside their vendors' coding agents, so a model can see the shell and file-editing tools in the shape of the coding agent it knows: `claude` follows Claude Code, `codex` follows the Codex CLI, and `mindroom` keeps MindRoom's own tools.
 With `auto`, Claude models (on `anthropic`, `vertexai_claude`, `bedrock_claude`, or OpenRouter `anthropic/` IDs) use `claude`, and every other model uses `mindroom`.
 GPT models keep `mindroom` under `auto` because on graded coding tasks `codex` solved no more tasks and used more tokens; set `tool_dialect: codex` to give a GPT model the Codex CLI's tools anyway.
 Set `tool_dialect: claude` for a Claude model whose provider does not reveal the family, such as one behind an OpenAI-compatible endpoint.
