@@ -213,9 +213,9 @@ class EgressService(BaseModel):
     oauth_on_shared_workers: bool = Field(
         default=False,
         description=(
-            "Use a requester's own connected account (GitHub, Atlassian) on shared and unscoped workers too. "
-            "Every user of such an agent shares one sandbox, so any of them can act with another user's connected "
-            "account until that user's proxy token expires; presets never set this"
+            "Use a requester's own connected account (GitHub, Atlassian) in shared sandboxes too: shared and "
+            "unscoped agents, and any agent on the static runner. Every user of such a sandbox can act with "
+            "another user's connected account until that user's proxy token expires; presets never set this"
         ),
     )
 

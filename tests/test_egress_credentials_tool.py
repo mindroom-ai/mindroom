@@ -55,10 +55,11 @@ _SERVICES: dict[str, object] = {
 
 
 def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
+    """Return a runtime on the Docker worker backend unless `env` names another, so `user_agent` workers are private."""
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env={"MINDROOM_NAMESPACE": "", **env},
+        process_env={"MINDROOM_NAMESPACE": "", "MINDROOM_WORKER_BACKEND": "docker", **env},
     )
 
 
@@ -395,6 +396,28 @@ def test_github_account_is_not_offered_where_requesters_share_a_worker(
         "can_connect_account": False,
         "provider": None,
     }
+
+
+def test_github_account_is_not_offered_on_the_static_runner_without_the_opt_in(tmp_path: Path) -> None:
+    """Every call shares the static runner's process, so a `user_agent` agent gets no GitHub account there either."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_WORKER_BACKEND="static_runner")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    _configure_github_client(manager)
+    _connect_github(manager, "@alice:example.org")
+    opted_in = {**_PRESET_SERVICES, "github": {"preset": "github", "oauth_on_shared_workers": True}}
+
+    refused = _list(_github_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
+    allowed = _list(_github_tool(runtime_paths), _context(runtime_paths, opted_in))
+
+    assert _entry(refused, "github") == {
+        "name": "github",
+        "display_name": "GitHub",
+        "configured": False,
+        "active_source": None,
+        "can_connect_account": False,
+        "provider": None,
+    }
+    assert _entry(allowed, "github")["active_source"] == "oauth"
 
 
 def test_github_account_is_per_requester_on_a_shared_agent_with_the_opt_in(tmp_path: Path) -> None:

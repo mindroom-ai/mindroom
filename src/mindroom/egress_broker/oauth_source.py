@@ -3,7 +3,7 @@
 Tokens come only from `mindroom.oauth.credential_lifecycle`, which refreshes a token near expiry under the
 same serialized transaction the tools sharing that connection use. Credential scope follows each provider's own
 policy, so a requester-scoped provider such as GitHub uses the requester from the verified proxy token. Such a
-requester's own account is used only on a worker that belongs to that requester; see `shared_worker_oauth`.
+requester's own account is used only in a sandbox that belongs to that requester; see `shared_worker_oauth`.
 Logs carry the service, the provider id, and error types, never tokens or connect links.
 """
 
@@ -31,6 +31,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
     oauth_provider_service_account_configured,
 )
+from mindroom.workers.runtime import primary_worker_backend_is_dedicated
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -137,7 +138,13 @@ def resolve_oauth_token(
     provider = _registered_provider(service, provider_id, config, runtime_paths)
     if provider is None:
         return Missing()
-    if shared_worker_oauth(provider, worker_target, opted_in=_oauth_on_shared_workers(config, service)) == "refused":
+    access = shared_worker_oauth(
+        provider,
+        worker_target,
+        opted_in=_oauth_on_shared_workers(config, service),
+        runtime_paths=runtime_paths,
+    )
+    if access == "refused":
         # Connecting an account would not change that, so there is no link either.
         return Missing()
     context = _credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
@@ -171,7 +178,12 @@ def oauth_status(
     provider = _registered_provider(service, provider_id, config, runtime_paths)
     if provider is None:
         return None
-    access = shared_worker_oauth(provider, worker_target, opted_in=_oauth_on_shared_workers(config, service))
+    access = shared_worker_oauth(
+        provider,
+        worker_target,
+        opted_in=_oauth_on_shared_workers(config, service),
+        runtime_paths=runtime_paths,
+    )
     if access == "refused":
         return shared_worker_unavailable_status(provider, runtime_paths)
     context = _credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
@@ -200,20 +212,27 @@ def shared_worker_oauth(
     worker_target: ResolvedWorkerTarget | None,
     *,
     opted_in: bool,
+    runtime_paths: RuntimePaths,
 ) -> SharedWorkerOAuth | None:
-    """Return whether the broker uses a requester's own account on a worker that several requesters share.
+    """Return whether the broker uses a requester's own account in a sandbox that several requesters share.
 
-    A requester-scoped provider (GitHub, Atlassian) supplies the calling requester's own token. On a `shared`
-    worker, or one without a worker scope (a None target is the global store such agents read), every requester's
-    commands run in one sandbox, so another user's later command can read an earlier caller's proxy token, for
-    example from a background process's environment, and act with that caller's account until the token expires.
+    A requester-scoped provider (GitHub, Atlassian) supplies the calling requester's own token. Its sandbox belongs
+    to that requester only when the worker scope is `user` or `user_agent` and the worker backend is dedicated
+    (Docker or Kubernetes). Every other sandbox is shared: a `shared` worker, one without a worker scope (a None
+    target is the global store such agents read), and any scope on the static runner, where all calls run in one
+    process. There another user's later command can read an earlier caller's proxy token, for example from a
+    background process's environment, and act with that caller's account until the token expires.
     Such accounts are "refused" there unless the service sets `oauth_on_shared_workers`, which makes them
-    "allowed". None means the rule does not apply: the provider follows the worker scope, or the worker belongs to
+    "allowed". None means the rule does not apply: the provider follows the worker scope, or the sandbox belongs to
     one requester. Injection, placeholders, the status APIs, and the agent tool all decide through this.
     """
     if not provider.requester_scoped_credentials:
         return None
-    if worker_target is not None and worker_target.worker_scope in _REQUESTER_WORKER_SCOPES:
+    if (
+        worker_target is not None
+        and worker_target.worker_scope in _REQUESTER_WORKER_SCOPES
+        and primary_worker_backend_is_dedicated(runtime_paths)
+    ):
         return None
     return "allowed" if opted_in else "refused"
 
@@ -228,7 +247,7 @@ def shared_worker_unavailable_status(provider: OAuthProvider, runtime_paths: Run
         can_connect=False,
         reset_required=False,
         service_account=oauth_provider_service_account_configured(provider, runtime_paths),
-        unavailable_reason="shared_worker",
+        unavailable_reason="shared_sandbox",
     )
 
 

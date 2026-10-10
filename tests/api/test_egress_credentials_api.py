@@ -52,6 +52,8 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
         **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
+        # A dedicated backend, where a personal agent's worker belongs to one requester.
+        "MINDROOM_WORKER_BACKEND": "docker",
     }
     paths = _runtime_paths(tmp_path, env)
     payload = {
@@ -644,13 +646,46 @@ def test_requester_scoped_provider_on_a_shared_agent_is_unavailable_without_the_
             "can_connect": False,
             "reset_required": False,
             "service_account": False,
-            "unavailable_reason": "shared_worker",
+            "unavailable_reason": "shared_sandbox",
             "shared_worker_opt_in": False,
         }
         assert row["active_source"] is None
         assert row["configured"] is False
     # Agent-scoped providers keep their shared connection on the same agent.
     assert _egress_row(portal, "bob", "shared_dev", "drive")["oauth"]["unavailable_reason"] is None
+
+
+def _use_worker_backend(portal: dict[str, Any], backend: str) -> None:
+    paths = replace(portal["paths"], process_env={**portal["paths"].process_env, "MINDROOM_WORKER_BACKEND": backend})
+    portal["paths"] = paths
+    main.initialize_api_app(main.app, paths)
+    _publish_config(main.app, paths, portal["payload"])
+    _use_runtime_auth_settings(main.app)
+
+
+def test_requester_scoped_provider_on_a_personal_agent_is_unavailable_on_the_static_runner(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """The static runner serves every user's calls from one process, so a personal agent shares its sandbox there."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "bob", "personal", "gh", "github")
+    assert _egress_row(portal, "bob", "personal", "gh")["oauth"]["connected"] is True
+
+    _use_worker_backend(portal, "static_runner")
+
+    row = _egress_row(portal, "bob", "personal", "gh")
+    assert row["oauth"]["unavailable_reason"] == "shared_sandbox"
+    assert (row["oauth"]["connected"], row["oauth"]["can_connect"]) == (False, False)
+    assert (row["active_source"], row["configured"]) == (None, False)
+    # Agent-scoped providers are not requester-scoped, so the static runner leaves them alone.
+    assert _egress_row(portal, "bob", "personal", "drive")["oauth"]["unavailable_reason"] is None
+
+    _opt_in_to_shared_workers(portal)
+
+    opted_in = _egress_row(portal, "bob", "personal", "gh")
+    assert (opted_in["oauth"]["connected"], opted_in["oauth"]["unavailable_reason"]) == (True, None)
+    assert opted_in["oauth"]["shared_worker_opt_in"] is True
+    assert opted_in["active_source"] == "oauth"
 
 
 def test_requester_scoped_provider_connects_the_requester(oauth_egress_portal: dict[str, Any]) -> None:

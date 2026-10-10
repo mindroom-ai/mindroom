@@ -128,13 +128,13 @@ async def _personal_oauth_status(
     The token refresh is skipped so a listing never waits on the provider; an unknown provider has no status, and
     any failure to read one provider's state shows that service as not connectable instead of failing the listing.
     Requester-scoped connections (GitHub and Atlassian) belong to the requester, so every user of the agent manages
-    their own, except where the broker refuses them on a shared worker (`shared_worker_oauth`).
+    their own, except where the broker refuses them in a shared sandbox (`shared_worker_oauth`).
     """
     provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service_name)
     if provider is None:
         return None
     opted_in = config.egress_broker.services[service_name].oauth_on_shared_workers
-    access = shared_worker_oauth(provider, target, opted_in=opted_in)
+    access = shared_worker_oauth(provider, target, opted_in=opted_in, runtime_paths=runtime_paths)
     if access == "refused":
         return shared_worker_unavailable_status(provider, runtime_paths)
     try:

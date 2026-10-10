@@ -106,7 +106,12 @@ async def _admin_oauth_status(
     if provider is None:
         return None
     worker_target = worker_target_for_credentials_target(target)
-    access = shared_worker_oauth(provider, worker_target, opted_in=service.oauth_on_shared_workers)
+    access = shared_worker_oauth(
+        provider,
+        worker_target,
+        opted_in=service.oauth_on_shared_workers,
+        runtime_paths=target.runtime_paths,
+    )
     if access == "refused":
         return shared_worker_unavailable_status(provider, target.runtime_paths)
     try:

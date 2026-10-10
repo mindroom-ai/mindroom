@@ -777,13 +777,13 @@ describe("connected accounts", () => {
     expect(screen.queryByRole("button", { name: /API key/ })).toBeNull();
   });
 
-  it("explains that personal accounts are not used on a shared agent", () => {
+  it("explains that personal accounts are not used in a shared sandbox", () => {
     render(
       <EgressServiceRows
         agentName="shared_dev"
         services={[
           withAccount(
-            { can_connect: false, unavailable_reason: "shared_worker" },
+            { can_connect: false, unavailable_reason: "shared_sandbox" },
             { is_shared: true },
           ),
         ]}
@@ -793,7 +793,7 @@ describe("connected accounts", () => {
     const github = row("GitHub");
     expect(
       within(github).getByText(
-        "Personal accounts are not used on shared agents; add an API key or ask an administrator",
+        "Personal accounts are not used in a shared sandbox; add an API key or ask an administrator",
       ),
     ).toBeVisible();
     expect(

@@ -234,10 +234,10 @@ function EgressServiceRow({
               Uses a shared service account
             </span>
           )}
-          {oauth?.unavailable_reason === "shared_worker" && (
+          {oauth?.unavailable_reason === "shared_sandbox" && (
             <span className="text-xs text-muted-foreground">
-              Personal accounts are not used on shared agents; add an API key or
-              ask an administrator
+              Personal accounts are not used in a shared sandbox; add an API key
+              or ask an administrator
             </span>
           )}
           {oauth?.shared_worker_opt_in && (

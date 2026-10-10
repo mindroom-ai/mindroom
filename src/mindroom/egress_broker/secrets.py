@@ -271,8 +271,8 @@ class OAuthStatus:
     `connected` means the broker would inject a personal access token. A configured service account
     (`service_account`) is not a token the broker can inject, so it never makes a scope connected by itself
     and its provider is never connectable. `unavailable_reason` says why the broker never uses this provider's
-    accounts in the scope (`shared_worker`: a requester's own account on a worker that several requesters share).
-    `shared_worker_opt_in` marks such a worker where the service allows it anyway, so every user of the agent can
+    accounts in the scope (`shared_sandbox`: a requester's own account in a sandbox that several requesters share).
+    `shared_worker_opt_in` marks such a sandbox where the service allows it anyway, so every user of the agent can
     act with the connected account.
     """
 
@@ -283,7 +283,7 @@ class OAuthStatus:
     can_connect: bool
     reset_required: bool
     service_account: bool = False
-    unavailable_reason: Literal["shared_worker"] | None = None
+    unavailable_reason: Literal["shared_sandbox"] | None = None
     shared_worker_opt_in: bool = False
 
 

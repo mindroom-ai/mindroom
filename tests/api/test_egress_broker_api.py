@@ -511,7 +511,7 @@ def test_requester_scoped_provider_is_unavailable_on_the_dashboard_scopes_withou
     """The panel's scopes are shared or unscoped workers, where the broker never uses a GitHub-style account."""
     for scope in (None, "test_agent"):
         gh = _service(oauth_broker_client, "gh", scope)
-        assert gh["oauth"]["unavailable_reason"] == "shared_worker"
+        assert gh["oauth"]["unavailable_reason"] == "shared_sandbox"
         assert (gh["oauth"]["connected"], gh["oauth"]["can_connect"]) == (False, False)
         assert gh["active_source"] is None
         assert _service(oauth_broker_client, "drive", scope)["oauth"]["unavailable_reason"] is None
@@ -628,7 +628,7 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
     assert drive["oauth"]["connected"] is False
     assert drive["oauth"]["can_connect"] is False
     assert drive["oauth"]["unavailable_reason"] is None
-    assert _service(oauth_broker_client, "gh")["oauth"]["unavailable_reason"] == "shared_worker"
+    assert _service(oauth_broker_client, "gh")["oauth"]["unavailable_reason"] == "shared_sandbox"
     assert _service(oauth_broker_client, "github")["oauth"] is None
 
 

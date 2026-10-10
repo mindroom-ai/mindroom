@@ -67,12 +67,24 @@ _DEMO = OAuthProvider(
 
 @pytest.fixture
 def runtime_paths(tmp_path: Path) -> RuntimePaths:
-    """Return a runtime whose storage is under `tmp_path` with a public URL for connect links."""
+    """Return a runtime on the Docker worker backend, so `user` and `user_agent` workers are private sandboxes.
+
+    Its storage is under `tmp_path` and it has a public URL for connect links.
+    """
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env={"MINDROOM_NAMESPACE": "", "MINDROOM_PUBLIC_URL": PUBLIC_URL},
+        process_env={
+            "MINDROOM_NAMESPACE": "",
+            "MINDROOM_PUBLIC_URL": PUBLIC_URL,
+            "MINDROOM_WORKER_BACKEND": "docker",
+        },
     )
+
+
+def _on_backend(runtime_paths: RuntimePaths, backend: str) -> RuntimePaths:
+    """Return the same runtime and storage with `backend` as its worker backend."""
+    return replace(runtime_paths, process_env={**runtime_paths.process_env, "MINDROOM_WORKER_BACKEND": backend})
 
 
 @pytest.fixture
@@ -129,7 +141,9 @@ def _tool_target(requester_id: str | None, scope: WorkerScope | None = "user_age
 
 def _broker_target(requester_id: str | None, scope: WorkerScope | None = "user_agent") -> ResolvedWorkerTarget:
     """Return the target the broker rebuilds from the proxy token minted for that call."""
-    claims = WorkerClaims.from_worker_target(_tool_target(requester_id, scope))
+    tool_target = _tool_target(requester_id, scope)
+    # An unscoped call's token names its routed worker; its tool target has no worker key.
+    claims = WorkerClaims.from_worker_target(replace(tool_target, worker_key=tool_target.worker_key or "unscoped"))
     assert claims is not None
     return claims.to_worker_target()
 
@@ -257,11 +271,7 @@ def test_requester_scoped_provider_is_unavailable_on_workers_requesters_share(
         _oauth_claims={"email": "alice@example.org"},
         _oauth_claims_verified=True,
     )
-    # An unscoped call's token names its routed worker; its tool target has no worker key.
-    tool_target = _tool_target("@alice:example.org", scope)
-    claims = WorkerClaims.from_worker_target(replace(tool_target, worker_key=tool_target.worker_key or "unscoped"))
-    assert claims is not None
-    alice = claims.to_worker_target()
+    alice = _broker_target("@alice:example.org", scope)
 
     result = _resolve(config, runtime_paths, manager, alice)
     status = _status(config, runtime_paths, manager, alice)
@@ -274,8 +284,91 @@ def test_requester_scoped_provider_is_unavailable_on_workers_requesters_share(
         account_label=None,
         can_connect=False,
         reset_required=False,
-        unavailable_reason="shared_worker",
+        unavailable_reason="shared_sandbox",
     )
+
+
+@pytest.mark.parametrize("scope", ["user", "user_agent"])
+def test_requester_scoped_provider_is_unavailable_on_the_static_runner(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    scope: WorkerScope,
+) -> None:
+    """The static runner serves every call from one process, so a `user` or `user_agent` call shares its sandbox.
+
+    The account is refused there exactly as on a shared worker: no token, no connect link, and the same reason.
+    """
+    _connect(manager, _github_store("@alice:example.org"), "alice-access")
+    static = _on_backend(runtime_paths, "static_runner")
+    alice = _broker_target("@alice:example.org", scope)
+
+    result = _resolve(config, static, manager, alice)
+    status = _status(config, static, manager, alice)
+
+    assert result == Missing(None)
+    assert status is not None
+    assert (status.connected, status.can_connect, status.unavailable_reason) == (False, False, "shared_sandbox")
+    assert status.shared_worker_opt_in is False
+
+
+def test_unset_worker_backend_is_the_static_runner(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """A runtime without `MINDROOM_WORKER_BACKEND` runs on the static runner, so personal accounts are refused."""
+    _connect(manager, _github_store("@alice:example.org"), "alice-access")
+    env = {key: value for key, value in runtime_paths.process_env.items() if key != "MINDROOM_WORKER_BACKEND"}
+
+    result = _resolve(config, replace(runtime_paths, process_env=env), manager, _broker_target("@alice:example.org"))
+
+    assert result == Missing(None)
+
+
+@pytest.mark.parametrize("backend", ["docker", "kubernetes"])
+@pytest.mark.parametrize("scope", ["user", "user_agent"])
+def test_requester_scoped_provider_is_used_on_a_dedicated_backend(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    backend: str,
+    scope: WorkerScope,
+) -> None:
+    """A Docker or Kubernetes `user` or `user_agent` worker belongs to one requester, so their account is used."""
+    _connect(manager, _github_store("@alice:example.org"), "alice-access")
+    dedicated = _on_backend(runtime_paths, backend)
+    alice = _broker_target("@alice:example.org", scope)
+
+    result = _resolve(config, dedicated, manager, alice)
+    status = _status(config, dedicated, manager, alice)
+
+    assert result == Token("alice-access")
+    assert status is not None
+    assert (status.connected, status.unavailable_reason, status.shared_worker_opt_in) == (True, None, False)
+
+
+@pytest.mark.parametrize("backend", ["static_runner", "docker", "kubernetes"])
+@pytest.mark.parametrize("scope", ["user_agent", "shared", None])
+def test_opt_in_uses_the_requesters_account_on_every_backend(
+    opted_in_config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    backend: str,
+    scope: WorkerScope | None,
+) -> None:
+    """`oauth_on_shared_workers` makes the account usable wherever the sandbox is shared, and changes nothing else."""
+    _connect(manager, _github_store("@alice:example.org"), "alice-access")
+    target = _broker_target("@alice:example.org", scope)
+    runtime = _on_backend(runtime_paths, backend)
+
+    result = _resolve(opted_in_config, runtime, manager, target)
+    status = _status(opted_in_config, runtime, manager, target)
+
+    private = backend != "static_runner" and scope == "user_agent"
+    assert result == Token("alice-access")
+    assert status is not None
+    assert (status.connected, status.unavailable_reason, status.shared_worker_opt_in) == (True, None, not private)
 
 
 def test_status_without_a_worker_target_treats_it_as_unscoped(
@@ -296,7 +389,7 @@ def test_status_without_a_worker_target_treats_it_as_unscoped(
     )
 
     assert status is not None
-    assert (status.connected, status.can_connect, status.unavailable_reason) == (False, False, "shared_worker")
+    assert (status.connected, status.can_connect, status.unavailable_reason) == (False, False, "shared_sandbox")
 
 
 def test_opt_in_uses_the_callers_account_on_a_shared_worker(

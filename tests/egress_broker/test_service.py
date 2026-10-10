@@ -723,11 +723,13 @@ def _connect_github(
     )
 
 
-def _oauth_runtime(tmp_runtime_paths: Callable[..., RuntimePaths]) -> RuntimePaths:
+def _oauth_runtime(tmp_runtime_paths: Callable[..., RuntimePaths], backend: str = "docker") -> RuntimePaths:
+    """Return a runtime on `backend`: personal accounts need a dedicated one (the default) to count as private."""
     return tmp_runtime_paths(
         **_broker_env(_free_port()),
         MINDROOM_PUBLIC_URL=_PUBLIC_URL,
         MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
+        MINDROOM_WORKER_BACKEND=backend,
     )
 
 
@@ -831,6 +833,50 @@ async def test_requester_scoped_oauth_on_a_shared_agent_injects_the_callers_toke
     assert alice_env["GH_TOKEN"] == _PLACEHOLDER
     assert alice_response.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
     assert bob_response.json()["headers"]["authorization"] == ["Bearer bob-oauth"]
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_requester_scoped_oauth_is_not_used_on_the_static_runner_without_the_opt_in(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """Every call shares the static runner's process, so even a `user_agent` call gets no GitHub account there."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths, backend="static_runner")
+    config = _config(github=_GITHUB_OAUTH)
+    _connect_github(manager, "@alice:example.org", "alice-oauth")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert "GH_TOKEN" not in env
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "github",
+        "manage_url": f"{_PUBLIC_URL}/connections/egress",
+    }
+    assert tls_upstream.hits == []
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_requester_scoped_oauth_is_used_on_the_static_runner_with_the_opt_in(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """With `oauth_on_shared_workers`, a `user_agent` call on the static runner gets the requester's own token."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths, backend="static_runner")
+    config = _config(github={**_GITHUB_OAUTH, "oauth_on_shared_workers": True})
+    _connect_github(manager, "@alice:example.org", "alice-oauth")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert env["GH_TOKEN"] == _PLACEHOLDER
+    assert response.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
 
 
 @pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
