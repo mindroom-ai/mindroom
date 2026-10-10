@@ -1,18 +1,15 @@
-import type { PROVIDERS } from '@/lib/providers';
+import type { PROVIDERS } from "@/lib/providers";
 
 export type ProviderType = keyof typeof PROVIDERS;
-export type MemoryBackend = 'mem0' | 'file' | 'none';
-export type MemorySearchMode = 'keyword' | 'semantic';
-export type WorkerScope = 'shared' | 'user' | 'user_agent';
-export type PrivateWorkerScope = Exclude<WorkerScope, 'shared'>;
+export type MemoryBackend = "mem0" | "file" | "none";
+export type MemorySearchMode = "keyword" | "semantic";
+export type WorkerScope = "shared" | "user" | "user_agent";
+export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
-  | 'private.per'
-  | 'agent.worker_scope'
-  | 'defaults.worker_scope'
-  | 'unscoped';
+  "private.per" | "agent.worker_scope" | "defaults.worker_scope" | "unscoped";
 export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
-export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = 'memory';
-export const SHARED_CONTEXT_FILE_PLACEHOLDER = 'SOUL.md';
+export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
+export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
 
 export interface ModelPricing {
   input?: number; // USD per million uncached input tokens (required by the backend)
@@ -32,7 +29,7 @@ export interface ModelConfig {
   id: string;
   display_name?: string | null;
   icon?: string | null;
-  api?: 'responses' | 'chat_completions' | null;
+  api?: "responses" | "chat_completions" | null;
   context_window?: number | null;
   stream_idle_timeout_seconds?: number | null;
   host?: string; // For ollama
@@ -102,7 +99,7 @@ export interface KnowledgeGitConfig {
 }
 
 export interface KnowledgeBaseConfig {
-  mode?: 'semantic' | 'files';
+  mode?: "semantic" | "files";
   description?: string;
   path: string;
   watch: boolean;
@@ -129,9 +126,9 @@ export interface AgentPrivateConfig {
   knowledge?: AgentPrivateKnowledgeConfig | null;
 }
 
-export type LearningMode = 'always' | 'agentic';
+export type LearningMode = "always" | "agentic";
 
-export type ThreadMode = 'thread' | 'room';
+export type ThreadMode = "thread" | "room";
 
 export interface ResponderAccessConfig {
   current_room_members?: boolean;
@@ -150,30 +147,34 @@ export interface CompactionConfig {
   fallback_model?: string | null;
 }
 
-const DEFAULT_INHERITED_TOOLS = ['scheduler'] as const;
+const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
 
 // Every authored compaction field except the model names, which carry their own
 // clear semantics. Keep in sync with CompactionOverrideConfig in the backend:
 // authoring any of these marks the override as authored, which the backend
 // resolves to enabled compaction.
 const COMPACTION_NON_MODEL_FIELDS: readonly (keyof CompactionConfig)[] = [
-  'enabled',
-  'threshold_tokens',
-  'threshold_percent',
-  'replay_window_tokens',
-  'reserve_tokens',
-  'timeout_seconds',
+  "enabled",
+  "threshold_tokens",
+  "threshold_percent",
+  "replay_window_tokens",
+  "reserve_tokens",
+  "timeout_seconds",
 ];
 
-function hasAuthoredNonModelCompactionField(compaction: CompactionConfig): boolean {
-  return COMPACTION_NON_MODEL_FIELDS.some(field => compaction[field] !== undefined);
+function hasAuthoredNonModelCompactionField(
+  compaction: CompactionConfig,
+): boolean {
+  return COMPACTION_NON_MODEL_FIELDS.some(
+    (field) => compaction[field] !== undefined,
+  );
 }
 
 function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
   const modelFields = [compaction.model, compaction.fallback_model];
   return (
-    modelFields.some(value => value === null) &&
-    modelFields.every(value => value === null || value === undefined) &&
+    modelFields.some((value) => value === null) &&
+    modelFields.every((value) => value === null || value === undefined) &&
     !hasAuthoredNonModelCompactionField(compaction)
   );
 }
@@ -187,7 +188,7 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
 }
 
 function resolveAuthoredCompactionEnabled(
-  compaction: CompactionConfig | null | undefined
+  compaction: CompactionConfig | null | undefined,
 ): boolean {
   if (compaction === null) {
     return false;
@@ -203,7 +204,7 @@ function resolveAuthoredCompactionEnabled(
 
 export function resolveEffectiveCompactionEnabled(
   compaction: CompactionConfig | null | undefined,
-  defaultCompaction: CompactionConfig | null | undefined
+  defaultCompaction: CompactionConfig | null | undefined,
 ): boolean {
   const defaultEnabled = resolveAuthoredCompactionEnabled(defaultCompaction);
   if (compaction == null) {
@@ -212,14 +213,17 @@ export function resolveEffectiveCompactionEnabled(
   if (compaction.enabled !== undefined) {
     return compaction.enabled;
   }
-  if (isEmptyCompactionOverride(compaction) || isPureCompactionModelClear(compaction)) {
+  if (
+    isEmptyCompactionOverride(compaction) ||
+    isPureCompactionModelClear(compaction)
+  ) {
     return defaultEnabled;
   }
   return true;
 }
 
 export function resolveEffectiveDefaultTools(
-  defaults: Config['defaults'] | null | undefined
+  defaults: Config["defaults"] | null | undefined,
 ): string[] {
   const defaultTools = defaults?.tools;
   if (defaultTools !== undefined) {
@@ -269,7 +273,7 @@ export interface Team {
   agents: string[]; // List of agent IDs
   rooms: string[];
   access?: ResponderAccessConfig;
-  mode: 'coordinate' | 'collaborate';
+  mode: "coordinate" | "collaborate";
   model?: string | null; // Optional team-specific model; explicit null is invalid at runtime
   compaction?: CompactionConfig | null; // Per-team required-compaction overrides
   num_history_runs?: number | null; // Number of prior scoped runs to include as team history
@@ -278,7 +282,7 @@ export interface Team {
   max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
 }
 
-export type TeamConfig = Omit<Team, 'id' | 'rooms'> & {
+export type TeamConfig = Omit<Team, "id" | "rooms"> & {
   rooms?: string[];
 };
 
@@ -293,7 +297,7 @@ export interface Room {
 export interface RoomConfig {
   display_name?: string;
   description?: string;
-  join_policy?: 'invite' | 'knock' | 'public';
+  join_policy?: "invite" | "knock" | "public";
   listed?: boolean;
   encrypted?: boolean;
   invite_users?: string[];
@@ -301,7 +305,7 @@ export interface RoomConfig {
 }
 
 export interface RoomDefaultsConfig {
-  join_policy?: 'invite' | 'knock' | 'public';
+  join_policy?: "invite" | "knock" | "public";
   listed?: boolean;
   encrypted?: boolean;
   invite_users?: string[];
@@ -309,7 +313,7 @@ export interface RoomDefaultsConfig {
 }
 
 export interface VoiceSTTConfig {
-  provider: 'openai' | 'openai_compatible';
+  provider: "openai" | "openai_compatible";
   model: string;
   api_key?: string;
   host?: string;
@@ -334,7 +338,7 @@ export interface Config {
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   models: Record<string, ModelConfig>;
-  agents: Record<string, Omit<Agent, 'id'>>;
+  agents: Record<string, Omit<Agent, "id">>;
   defaults?: {
     markdown: boolean;
     learning?: boolean;
@@ -345,7 +349,7 @@ export interface Config {
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
     tools?: string[];
     enable_streaming?: boolean;
-    large_message_strategy?: 'sidecar' | 'split'; // Oversized message delivery strategy (defaults to sidecar)
+    large_message_strategy?: "sidecar" | "split"; // Oversized message delivery strategy (defaults to sidecar)
     show_stop_button?: boolean;
     num_history_runs?: number | null;
     num_history_messages?: number | null;
@@ -379,7 +383,7 @@ export interface AgentPolicy {
 }
 
 function normalizePrivateKnowledgeConfig(
-  knowledge: AgentPrivateKnowledgeConfig | null | undefined
+  knowledge: AgentPrivateKnowledgeConfig | null | undefined,
 ): AgentPrivateKnowledgeConfig | null | undefined {
   if (knowledge == null) {
     return knowledge;
@@ -389,7 +393,10 @@ function normalizePrivateKnowledgeConfig(
   if (knowledge.enabled === true) {
     return {
       ...knowledge,
-      path: trimmedPath && trimmedPath.length > 0 ? trimmedPath : DEFAULT_PRIVATE_KNOWLEDGE_PATH,
+      path:
+        trimmedPath && trimmedPath.length > 0
+          ? trimmedPath
+          : DEFAULT_PRIVATE_KNOWLEDGE_PATH,
     };
   }
 
@@ -400,7 +407,7 @@ function normalizePrivateKnowledgeConfig(
 }
 
 function normalizePrivateConfig(
-  privateConfig: AgentPrivateConfig | null | undefined
+  privateConfig: AgentPrivateConfig | null | undefined,
 ): AgentPrivateConfig | null | undefined {
   if (privateConfig == null) {
     return privateConfig;
@@ -408,28 +415,39 @@ function normalizePrivateConfig(
 
   return {
     ...privateConfig,
-    per: privateConfig.per ?? 'user',
+    per: privateConfig.per ?? "user",
     knowledge: normalizePrivateKnowledgeConfig(privateConfig.knowledge),
   };
 }
 
 function normalizeCompactionConfig(
-  compaction: CompactionConfig | null | undefined
+  compaction: CompactionConfig | null | undefined,
 ): CompactionConfig | null | undefined {
   if (compaction == null) {
     return compaction;
   }
 
-  const normalizeModelName = (modelName: string | null | undefined): string | null | undefined =>
-    modelName === null ? null : modelName?.trim() ? modelName.trim() : undefined;
-  const hasExplicitNullClear = Object.values(compaction).some(value => value === null);
+  const normalizeModelName = (
+    modelName: string | null | undefined,
+  ): string | null | undefined =>
+    modelName === null
+      ? null
+      : modelName?.trim()
+        ? modelName.trim()
+        : undefined;
+  const hasExplicitNullClear = Object.values(compaction).some(
+    (value) => value === null,
+  );
   const normalizedCompaction: CompactionConfig = {
     ...compaction,
     model: normalizeModelName(compaction.model),
     fallback_model: normalizeModelName(compaction.fallback_model),
   };
 
-  if (Object.values(normalizedCompaction).every(value => value == null) && !hasExplicitNullClear) {
+  if (
+    Object.values(normalizedCompaction).every((value) => value == null) &&
+    !hasExplicitNullClear
+  ) {
     return undefined;
   }
 
@@ -443,34 +461,39 @@ function normalizeCompactionConfig(
   return normalizedCompaction;
 }
 
-function normalizeCompactionUpdates<T extends { compaction?: CompactionConfig | null }>(
-  entity: T,
-  updates: Partial<T>
-): Partial<T> {
+function normalizeCompactionUpdates<
+  T extends { compaction?: CompactionConfig | null },
+>(entity: T, updates: Partial<T>): Partial<T> {
   const normalizedUpdates: Partial<T> = { ...updates };
-  const nextCompaction = 'compaction' in updates ? updates.compaction : entity.compaction;
+  const nextCompaction =
+    "compaction" in updates ? updates.compaction : entity.compaction;
 
-  if ('compaction' in updates || nextCompaction != null) {
+  if ("compaction" in updates || nextCompaction != null) {
     normalizedUpdates.compaction = normalizeCompactionConfig(
-      nextCompaction
-    ) as Partial<T>['compaction'];
+      nextCompaction,
+    ) as Partial<T>["compaction"];
   }
 
   return normalizedUpdates;
 }
 
-export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
+export function getDefaultPrivateConfig(
+  agent: Pick<Agent, "private">,
+): AgentPrivateConfig {
   if (agent.private != null) {
     return agent.private;
   }
   return {
-    per: 'user',
+    per: "user",
   };
 }
 
-export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Partial<Agent> {
+export function normalizeAgentUpdates(
+  agent: Agent,
+  updates: Partial<Agent>,
+): Partial<Agent> {
   const normalizedUpdates = normalizeCompactionUpdates(agent, updates);
-  const nextPrivate = 'private' in updates ? updates.private : agent.private;
+  const nextPrivate = "private" in updates ? updates.private : agent.private;
 
   if (nextPrivate != null) {
     normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
@@ -480,6 +503,9 @@ export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Pa
   return normalizedUpdates;
 }
 
-export function normalizeTeamUpdates(team: Team, updates: Partial<Team>): Partial<Team> {
+export function normalizeTeamUpdates(
+  team: Team,
+  updates: Partial<Team>,
+): Partial<Team> {
   return normalizeCompactionUpdates(team, updates);
 }

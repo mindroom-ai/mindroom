@@ -6216,6 +6216,7 @@ expose = [
     "ToolRuntimeContext",
     "DetachedRequesterContext",
     "detached_requester_context",
+    "current_budget_monitor",
     "get_detached_requester_context",
     "ToolRuntimeModelBinding",
     "ToolRuntimeHookBindings",
