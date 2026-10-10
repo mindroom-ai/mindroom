@@ -7240,6 +7240,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.computers"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.matrix_openid",

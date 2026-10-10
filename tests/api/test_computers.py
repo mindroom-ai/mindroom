@@ -387,6 +387,39 @@ def test_openid_subject_server_and_verifier_failures(
     assert "openid-secret" not in caplog.text
 
 
+def test_session_creation_binds_openid_to_the_request_origin(gateway: Gateway) -> None:
+    """A homeserver that binds tokens only accepts them for the origin this gateway is served from."""
+    client, peer, _ = gateway
+    peer.advertise_audience = True
+    peer.expected_audience = "https://elsewhere.example.org"
+    response = create(client)
+    assert response.status_code == 401
+    assert "openid-secret" not in response.text
+    peer.expected_audience = "http://testserver"
+    assert create(client).status_code == 200
+    assert peer.userinfo_audiences == ["http://testserver", "http://testserver"]
+
+
+def test_session_creation_binds_openid_to_the_configured_public_url(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MINDROOM_PUBLIC_URL wins over the request URL, and an unusable one refuses the session."""
+    client, _, app = gateway
+    verifier = AsyncMock(return_value="@alice:example.org")
+    monkeypatch.setattr(computers, "verify_matrix_openid", verifier)
+    state = config_lifecycle.require_api_state(app)
+    snapshot = state.snapshot
+    for public_url, expected in (("https://mindroom.example.org/some/path", 200), ("mindroom.example.org", 503)):
+        paths = replace(
+            snapshot.runtime_paths,
+            process_env={**snapshot.runtime_paths.process_env, "MINDROOM_PUBLIC_URL": public_url},
+        )
+        state.snapshot = replace(snapshot, runtime_paths=paths)
+        assert create(client).status_code == expected
+    assert [call.kwargs for call in verifier.await_args_list] == [{"audience": "https://mindroom.example.org"}]
+
+
 def test_changed_config_conflicts_with_existing_session(gateway: Gateway) -> None:
     """An existing bearer cannot survive an API configuration generation change."""
     client, _, app = gateway

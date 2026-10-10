@@ -3,6 +3,7 @@
 import ipaddress
 import json
 from contextlib import suppress
+from time import monotonic
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -12,6 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
 from mindroom.requester_identity import runtime_matrix_domain
+
+_AUDIENCE_FEATURE = "io.mindroom.openid_audience"
+_AUDIENCE_PARAM = "io.mindroom.audience"
+_CAPABILITY_TTL_SECONDS = 600.0
+# Homeserver URL to (expiry on the monotonic clock, whether it binds OpenID tokens to an audience).
+_audience_support: dict[str, tuple[float, bool]] = {}
 
 
 class MatrixOpenIDToken(BaseModel):
@@ -72,15 +79,50 @@ def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...
     return tuple(origins)
 
 
-async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
-    """Verify only at the configured homeserver with no redirects or URL logging."""
+async def _homeserver_binds_audience(client: aiohttp.ClientSession, homeserver: str) -> bool:
+    """Read whether the homeserver advertises audience-bound OpenID tokens, caching each answer for 10 minutes.
+
+    A failed or malformed answer is not cached and counts as unsupported, so the next verification retries.
+    """
+    cached = _audience_support.get(homeserver)
+    if cached is not None and monotonic() < cached[0]:
+        return cached[1]
+    try:
+        async with client.get(homeserver + "/_matrix/client/versions", allow_redirects=False) as response:
+            if response.status != 200:
+                return False
+            body = await collect_bounded_bytes(response.content.iter_chunked(4096), max_bytes=65536)
+            payload = json.loads(body)
+    except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError, ValueError, UnicodeError):
+        return False
+    features = payload.get("unstable_features") if isinstance(payload, dict) else None
+    if not isinstance(features, dict):
+        return False
+    supported = features.get(_AUDIENCE_FEATURE) is True
+    _audience_support[homeserver] = (monotonic() + _CAPABILITY_TTL_SECONDS, supported)
+    return supported
+
+
+async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths, *, audience: str) -> str:
+    """Verify only at the configured homeserver with no redirects or URL logging.
+
+    When the homeserver binds tokens to an audience, `audience` must be the origin the token was requested for.
+    Other homeservers cannot bind tokens, so `audience` is not sent and the token is accepted as before.
+    """
     domain = runtime_matrix_domain(paths)
     if token.matrix_server_name != domain:
         raise MatrixOpenIDError(401, "OpenID server does not match the configured Matrix server.")
-    url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/federation/v1/openid/userinfo"
+    homeserver = runtime_matrix_homeserver(paths).rstrip("/")
+    params = {"access_token": token.access_token}
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as client:  # noqa: SIM117 - own the client until response cleanup completes
-            async with client.get(url, params={"access_token": token.access_token}, allow_redirects=False) as response:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as client:
+            if await _homeserver_binds_audience(client, homeserver):
+                params[_AUDIENCE_PARAM] = audience
+            async with client.get(
+                homeserver + "/_matrix/federation/v1/openid/userinfo",
+                params=params,
+                allow_redirects=False,
+            ) as response:
                 if response.status >= 500 or response.status == 429:
                     raise MatrixOpenIDError(503, "Matrix OpenID verifier is unavailable.")
                 if response.status != 200:

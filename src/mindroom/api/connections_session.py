@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_connections_user
-from mindroom.api.connection_agents import CONNECTIONS_HEADERS, require_connections_same_origin
+from mindroom.api.connection_agents import (
+    CONNECTIONS_HEADERS,
+    connections_public_origin,
+    require_connections_same_origin,
+)
 from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE, CONNECTIONS_SESSION_SECONDS
 from mindroom.constants import RuntimePaths
 from mindroom.matrix_openid import (
@@ -86,7 +90,11 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     if body.client_origin not in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV):
         raise HTTPException(403, "Connections sign-in is not allowed from this client", headers=CONNECTIONS_HEADERS)
     try:
-        matrix_user_id = await verify_matrix_openid(body.openid_token, paths)
+        matrix_user_id = await verify_matrix_openid(
+            body.openid_token,
+            paths,
+            audience=connections_public_origin(request, paths),
+        )
     except MatrixOpenIDError as error:
         raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
     token = config_lifecycle.app_state(request.app).connections_sessions.create(matrix_user_id)

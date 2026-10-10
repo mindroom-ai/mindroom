@@ -16,6 +16,7 @@ from nio.exceptions import ProtocolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
+from mindroom.api.auth import public_origin
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
@@ -216,8 +217,11 @@ async def create_session(payload: _CreateSession, request: Request) -> dict[str,
     """Exchange configured-homeserver OpenID for a requester-bound computer viewer."""
     runtime = _runtime(request)
     config, paths = config_lifecycle.read_app_committed_runtime_config(request.app)
+    audience = public_origin(paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url))
+    if audience is None:
+        raise ComputerError(503, "Computer gateway has no valid public origin.")
     try:
-        requester_id = await verify_matrix_openid(payload.openid_token, paths)
+        requester_id = await verify_matrix_openid(payload.openid_token, paths, audience=audience)
     except MatrixOpenIDError as error:
         raise ComputerError(error.status_code, error.detail) from None
     target = await _authorized_target(runtime, requester_id, payload.room_id, payload.agent_user_id)

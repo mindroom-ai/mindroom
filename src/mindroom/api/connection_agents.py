@@ -26,15 +26,19 @@ if TYPE_CHECKING:
 CONNECTIONS_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 
 
-def require_connections_same_origin(request: Request, runtime_paths: RuntimePaths) -> None:
-    """Reject Connections mutations that are cross-origin or not served over an HTTPS public origin."""
-    public_url = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
-    expected = public_origin(public_url)
+def connections_public_origin(request: Request, runtime_paths: RuntimePaths) -> str:
+    """Return the HTTPS origin this portal is served from, or refuse when there is none."""
+    expected = public_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url))
     if expected is None or not expected.startswith("https://"):
         raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
+    return expected
+
+
+def require_connections_same_origin(request: Request, runtime_paths: RuntimePaths) -> None:
+    """Reject Connections mutations that are cross-origin or not served over an HTTPS public origin."""
     require_same_origin(
         request,
-        expected,
+        connections_public_origin(request, runtime_paths),
         detail="Connection changes require a same-origin request",
         headers=CONNECTIONS_HEADERS,
     )

@@ -107,6 +107,12 @@ Each entry must be a scheme and host with an optional port, with no path or wild
 One invalid entry disables the whole list.
 The Connections portal's [Matrix sign-in](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules, and Chat uses the same runtime origin for both.
 
+Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
+When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), the token must be bound to the runtime's public origin, which is the origin of `MINDROOM_PUBLIC_URL` or, when that is unset, of the request URL.
+Set `MINDROOM_PUBLIC_URL` when a proxy terminates TLS, so this origin matches the one Chat requests.
+Other homeservers cannot bind tokens, so a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
+On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
+
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](../authorization.md#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.
 Each requester can hold up to eight concurrent viewer sessions, and a runtime up to 256; closing a viewer frees its slot.

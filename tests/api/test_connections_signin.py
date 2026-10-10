@@ -44,8 +44,8 @@ CHAT_ORIGIN = "https://chat.example.org"
 def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API in API-key mode with a fake Matrix OpenID verifier for users alice and bob."""
 
-    async def verify(token: Any, _paths: Any) -> str:  # noqa: ANN401
-        if token.access_token in {"alice", "bob"}:
+    async def verify(token: Any, _paths: Any, *, audience: str) -> str:  # noqa: ANN401
+        if token.access_token in {"alice", "bob"} and audience == PORTAL_ORIGIN:
             return f"@{token.access_token}:example.org"
         raise MatrixOpenIDError(401, "Matrix OpenID verification failed.")
 
@@ -143,6 +143,7 @@ def test_sign_in_sets_portal_session_cookie(signin: dict[str, Any]) -> None:
     assert config_lifecycle.app_state(main.app).connections_sessions.resolve(token) == "@alice:example.org"
     assert signin["verifier"].await_args.args[0].access_token == "alice"  # noqa: S105
     assert signin["verifier"].await_args.args[1] == signin["paths"]
+    assert signin["verifier"].await_args.kwargs == {"audience": PORTAL_ORIGIN}
 
 
 def test_sign_in_rejects_client_origin_not_allowlisted(signin: dict[str, Any]) -> None:

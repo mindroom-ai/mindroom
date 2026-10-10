@@ -33,7 +33,7 @@ async def test_openid_rejects_untrusted_server_before_network(tmp_path: Path) ->
         expires_in=30,
     )
     with pytest.raises(MatrixOpenIDError) as error:
-        await verify_matrix_openid(token, paths)
+        await verify_matrix_openid(token, paths, audience="https://mindroom.example.org")
     assert error.value.status_code == 401
 
 

@@ -52,6 +52,7 @@ import mindroom.handled_turns as handled_turns_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
+import mindroom.matrix_openid as matrix_openid_module
 import mindroom.scheduling as scheduling_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
@@ -2908,6 +2909,12 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _forget_openid_audience_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a homeserver's cached audience capability from leaking between tests that reuse a port."""
+    monkeypatch.setattr(matrix_openid_module, "_audience_support", {})
 
 
 @pytest.fixture(autouse=True)
