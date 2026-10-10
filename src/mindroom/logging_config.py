@@ -72,6 +72,18 @@ class _NioValidationFilter(logging.Filter):
         return True
 
 
+class _AgnoLevelFilter(logging.Filter):
+    """Drop records below the level MindRoom resolved for one Agno logger."""
+
+    def __init__(self, level: str) -> None:
+        super().__init__()
+        self.levelno = logging.getLevelNamesMapping()[level]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Keep only records at or above the resolved level."""
+        return record.levelno >= self.levelno
+
+
 class _RedactingExceptionFormatter:
     """Render exceptions normally, then redact credential-bearing text."""
 
@@ -350,22 +362,26 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
-    _route_agno_loggers_to_root()
+    _route_agno_loggers_to_root(loggers)
     return renderer_name
 
 
-def _route_agno_loggers_to_root() -> None:
+def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
     """Send Agno records through the configured handlers, so they share their format, level, and stream."""
     # AGNO_COMPAT: Agno library loggers bypass the host's logging configuration.
     # Reason: Importing agno.utils.log gives the agno, agno-team, and agno-workflow loggers their own
     # stdout handler at INFO with propagation disabled, so their records ignore the configured level,
     # skip the JSON renderer and redaction, and leave the knowledge refresh child as plain stderr lines.
+    # Agno also resets these loggers to INFO or DEBUG on every Agent, Team, and Workflow run, and
+    # propagated records skip the root level, so a logger filter enforces the resolved level instead.
     # Upstream issue: https://github.com/agno-agi/agno/issues/4097, closed after Agno 2.0 added
     # `configure_agno_logging`, which swaps module globals but leaves the default handlers on the
     # loggers that modules imported directly.
     # Upstream PR: none identified.
-    # Remove when: Agno's library loggers propagate to the host's handlers without installing their own.
+    # Remove when: Agno's library loggers propagate to the host's handlers without installing their own
+    # handlers or resetting their levels on each run.
     # Coverage: tests/test_logging_config.py::test_agno_records_follow_configured_format_and_level;
+    # tests/test_logging_config.py::test_agno_records_keep_the_resolved_level_after_agno_resets_it;
     # tests/test_logging_config.py::test_subprocess_logging_matches_parent_format_and_level.
     from agno.utils import log as agno_log  # noqa: PLC0415 - keeps agno out of the config layer's imports.
 
@@ -373,6 +389,12 @@ def _route_agno_loggers_to_root() -> None:
         for handler in list(agno_logger.handlers):
             agno_logger.removeHandler(handler)
         agno_logger.propagate = True
+        for log_filter in list(agno_logger.filters):
+            if isinstance(log_filter, _AgnoLevelFilter):
+                agno_logger.removeFilter(log_filter)
+        # No Agno logger name has a parent below the root, so only an exact override or the root level applies.
+        level = cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
+        agno_logger.addFilter(_AgnoLevelFilter(level))
 
 
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
