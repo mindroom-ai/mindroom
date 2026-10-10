@@ -257,6 +257,10 @@ class EgressService(BaseModel):
         service.model_fields_set.difference_update(set(preset) - set(authored))
         return cls._require_rules(service)
 
+    def authored_model_dump(self) -> dict[str, object]:
+        """Serialize the service as authored: a preset stays `{preset: github}`, so later preset updates still apply."""
+        return self.model_dump(mode="json", exclude_unset=True)
+
     @classmethod
     def _require_rules(cls, service: EgressService) -> EgressService:
         """Reject a service that resolves to no rules; the error path carries the service name."""
@@ -292,6 +296,24 @@ class EgressService(BaseModel):
         return value
 
 
+_SERVICE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def validate_egress_service_name(name: str) -> None:
+    """Raise ValueError unless `name` is a valid egress service name, for config and user services alike.
+
+    A name starts with `[a-z0-9]`, so no service's secret can take a reserved `egress__*` store name.
+    """
+    if not _SERVICE_NAME_PATTERN.fullmatch(name):
+        msg = f"service name '{name}' must match ^[a-z0-9][a-z0-9_-]{{0,62}}$"
+        raise ValueError(msg)
+    # Secrets are stored as `egress_<name>`; OAuth suffixes there would read as OAuth services.
+    credential_service = f"egress_{name}"
+    if is_oauth_token_service(credential_service) or is_oauth_client_config_service(credential_service):
+        msg = f"service name '{name}' must not end in '_oauth' or '_oauth_client' (reserved for OAuth)"
+        raise ValueError(msg)
+
+
 class EgressBrokerConfig(BaseModel):
     """Top-level egress broker configuration."""
 
@@ -310,14 +332,6 @@ class EgressBrokerConfig(BaseModel):
     @classmethod
     def validate_service_names(cls, value: dict[str, EgressService]) -> dict[str, EgressService]:
         """Validate service names."""
-        pattern = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
         for name in value:
-            if not pattern.match(name):
-                msg = f"service name '{name}' must match ^[a-z0-9][a-z0-9_-]{{0,62}}$"
-                raise ValueError(msg)
-            # Secrets are stored as `egress_<name>`; OAuth suffixes there would read as OAuth services.
-            credential_service = f"egress_{name}"
-            if is_oauth_token_service(credential_service) or is_oauth_client_config_service(credential_service):
-                msg = f"service name '{name}' must not end in '_oauth' or '_oauth_client' (reserved for OAuth)"
-                raise ValueError(msg)
+            validate_egress_service_name(name)
         return value

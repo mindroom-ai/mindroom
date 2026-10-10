@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 
@@ -25,9 +25,12 @@ __all__ = [
     "SecretResult",
     "SecretStatus",
     "SecretUnavailable",
+    "delete_egress_document",
     "delete_secret",
     "egress_credential_service",
+    "load_egress_document",
     "load_secret",
+    "save_egress_document",
     "save_secret",
     "secret_status",
     "service_status",
@@ -39,6 +42,72 @@ _MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
 def egress_credential_service(name: str) -> str:
     """Return the credential service name for an egress service."""
     return f"egress_{name}"
+
+
+def load_egress_document(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    credential_service: str,
+) -> dict[str, Any] | None:
+    """Load one egress credential document from the primary-only store of a worker target or the global store.
+
+    `target=None` is the global (unscoped) store. Requester-scoped targets (user, user_agent) never fall back to
+    shared or global documents. Worker stores are never read: workers can write them.
+    """
+    # For global (unscoped) documents, load directly from the base manager
+    if target is None:
+        return manager.load_credentials(credential_service)
+
+    # For requester-scoped targets, disable shared fallback
+    allowed_shared = frozenset() if target.worker_scope in ("user", "user_agent") else None
+
+    return load_scoped_credentials(
+        credential_service,
+        credentials_manager=manager,
+        worker_target=target,
+        primary_built_tool=True,
+        allowed_shared_services=allowed_shared,
+    )
+
+
+def save_egress_document(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    credential_service: str,
+    document: dict[str, Any],
+) -> None:
+    """Save one egress credential document to the store `load_egress_document` reads for the same target."""
+    # For global (unscoped) documents, save directly to the base manager
+    if target is None:
+        manager.save_credentials(credential_service, document)
+        return
+
+    save_scoped_credentials(
+        credential_service,
+        document,
+        credentials_manager=manager,
+        worker_target=target,
+        primary_built_tool=True,
+    )
+
+
+def delete_egress_document(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    credential_service: str,
+) -> None:
+    """Delete one egress credential document from the store `load_egress_document` reads for the same target."""
+    # For global (unscoped) documents, delete directly from the base manager
+    if target is None:
+        manager.delete_credentials(credential_service)
+        return
+
+    delete_scoped_credentials(
+        credential_service,
+        credentials_manager=manager,
+        worker_target=target,
+        primary_built_tool=True,
+    )
 
 
 def load_secret(
@@ -57,30 +126,10 @@ def load_secret(
     Requester-scoped targets (user, user_agent) do not fall back to shared/global.
 
     """
-    service = egress_credential_service(name)
-
-    # For global (unscoped) secrets, load directly from the base manager
-    if target is None:
-        credentials = manager.load_credentials(service)
-        if credentials is None:
-            return None
-        return credentials.get("secret")  # type: ignore[return-value]
-
-    # For requester-scoped targets, disable shared fallback
-    allowed_shared = frozenset() if target.worker_scope in ("user", "user_agent") else None
-
-    credentials = load_scoped_credentials(
-        service,
-        credentials_manager=manager,
-        worker_target=target,
-        primary_built_tool=True,
-        allowed_shared_services=allowed_shared,
-    )
-
+    credentials = load_egress_document(manager, target, egress_credential_service(name))
     if credentials is None:
         return None
-
-    return credentials.get("secret")  # type: ignore[return-value]
+    return credentials.get("secret")
 
 
 def save_secret(
@@ -117,26 +166,12 @@ def save_secret(
         msg = f"Secret size exceeds maximum of 16 KiB ({len(secret.encode('utf-8'))} bytes)"
         raise ValueError(msg)
 
-    service = egress_credential_service(name)
-
     # Build credential document with secret and timestamp
     credentials = {
         "secret": secret,
         "_updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
-
-    # For global (unscoped) secrets, save directly to the base manager
-    if target is None:
-        manager.save_credentials(service, credentials)
-        return
-
-    save_scoped_credentials(
-        service,
-        credentials,
-        credentials_manager=manager,
-        worker_target=target,
-        primary_built_tool=True,
-    )
+    save_egress_document(manager, target, egress_credential_service(name), credentials)
 
 
 def delete_secret(
@@ -152,19 +187,7 @@ def delete_secret(
         name: Service name
 
     """
-    service = egress_credential_service(name)
-
-    # For global (unscoped) secrets, delete directly from the base manager
-    if target is None:
-        manager.delete_credentials(service)
-        return
-
-    delete_scoped_credentials(
-        service,
-        credentials_manager=manager,
-        worker_target=target,
-        primary_built_tool=True,
-    )
+    delete_egress_document(manager, target, egress_credential_service(name))
 
 
 @dataclass(frozen=True)
@@ -191,35 +214,12 @@ def secret_status(
     Never returns the secret value.
 
     """
-    service = egress_credential_service(name)
-
-    # For global (unscoped) secrets, check the base manager directly
-    if target is None:
-        credentials = manager.load_credentials(service)
-        if credentials is None:
-            return SecretStatus(configured=False, updated_at=None)
-        return SecretStatus(
-            configured=True,
-            updated_at=credentials.get("_updated_at"),  # type: ignore[arg-type]
-        )
-
-    # For requester-scoped targets, disable shared fallback
-    allowed_shared = frozenset() if target.worker_scope in ("user", "user_agent") else None
-
-    credentials = load_scoped_credentials(
-        service,
-        credentials_manager=manager,
-        worker_target=target,
-        primary_built_tool=True,
-        allowed_shared_services=allowed_shared,
-    )
-
+    credentials = load_egress_document(manager, target, egress_credential_service(name))
     if credentials is None:
         return SecretStatus(configured=False, updated_at=None)
-
     return SecretStatus(
         configured=True,
-        updated_at=credentials.get("_updated_at"),  # type: ignore[arg-type]
+        updated_at=credentials.get("_updated_at"),
     )
 
 

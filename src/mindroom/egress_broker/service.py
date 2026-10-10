@@ -37,6 +37,7 @@ from mindroom.egress_broker.secrets import (
     service_status,
 )
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
+from mindroom.egress_broker.user_services import effective_config
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -190,8 +191,13 @@ class _LastGoodConfig:
     Before any good read the broker has no rules: nothing is injected.
     """
 
-    def __init__(self, config_provider: Callable[[], Config | None]) -> None:
+    def __init__(
+        self,
+        config_provider: Callable[[], Config | None],
+        credentials_manager: CredentialsManager,
+    ) -> None:
         self._config_provider = config_provider
+        self._credentials_manager = credentials_manager
         self._config: Config | None = None
 
     def current(self) -> Config | None:
@@ -203,9 +209,15 @@ class _LastGoodConfig:
             self._config = config
         return self._config
 
-    def egress(self) -> EgressBrokerConfig:
+    def egress(self, claims: WorkerClaims) -> EgressBrokerConfig:
+        """Return the rules for one requester: the config's services plus their scope's own services.
+
+        Reads the scope's store on a cache miss, so the broker calls it in a thread.
+        """
         config = self.current()
-        return config.egress_broker if config is not None else EgressBrokerConfig()
+        if config is None:
+            return EgressBrokerConfig()
+        return effective_config(config.egress_broker, self._credentials_manager, claims.to_worker_target())
 
 
 async def _resolve_secret(
@@ -219,14 +231,19 @@ async def _resolve_secret(
 ) -> SecretResult:
     """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token.
 
-    The key is read on the loop's default executor; the OAuth lookup, which may refresh, runs on `oauth_executor`.
+    The service, a config service or one of the scope's own, comes from the requester's effective config. The key
+    and that config are read on the loop's default executor; the OAuth lookup, which may refresh, runs on
+    `oauth_executor`.
     """
     target = claims.to_worker_target()
     if key := await asyncio.to_thread(load_secret, credentials_manager, target, name):
         return Secret(key)
     current = config.current()
-    egress_service = current.egress_broker.services.get(name) if current is not None else None
-    if current is None or egress_service is None or egress_service.oauth_provider is None:
+    if current is None:
+        return SecretMissing()
+    egress = await asyncio.to_thread(effective_config, current.egress_broker, credentials_manager, target)
+    egress_service = egress.services.get(name)
+    if egress_service is None or egress_service.oauth_provider is None:
         return SecretMissing()
     provider_id = egress_service.oauth_provider
     lookup = functools.partial(
@@ -297,7 +314,7 @@ class _BrokerService:
         self._audit = audit = AuditLog(state_dir / "requests.sqlite3")
         credentials_manager = self._credentials_manager
         link = manage_url(self._runtime_paths)
-        config = _LastGoodConfig(self._config_provider)
+        config = _LastGoodConfig(self._config_provider, credentials_manager)
         self._oauth_executor = oauth_executor = ThreadPoolExecutor(
             max_workers=_OAUTH_LOOKUP_WORKERS,
             thread_name_prefix="mindroom-egress-oauth",
@@ -417,8 +434,8 @@ def execution_env_for_worker(
 
     Empty when the broker is not running, there is no config, or the target has no worker identity to sign.
     Placeholders come only from services with a secret in the target's scope, a stored key or a usable OAuth
-    connection, checked in the stores the broker injects from. `call_env` is the env the call already carries;
-    overlaying the result on it keeps its Git config entries.
+    connection, checked in the stores the broker injects from. The services are the config's plus the scope's own.
+    `call_env` is the env the call already carries; overlaying the result on it keeps its Git config entries.
     """
     runtime = _active.runtime
     if runtime is None or config is None or worker_target is None:
@@ -428,8 +445,14 @@ def execution_env_for_worker(
         return {}
     # Check status for the target the broker will rebuild from the token, so both agree on the scope.
     scope_target = claims.to_worker_target()
+    try:
+        services = effective_config(config.egress_broker, runtime.credentials_manager, scope_target).services
+    except Exception as exc:
+        # The broker answers this scope's requests with 502 meanwhile; the call still gets the proxy env.
+        logger.warning("egress_broker_user_services_failed", error_type=type(exc).__name__)
+        services = config.egress_broker.services
     placeholder_env: dict[str, str] = {}
-    for name, egress_service in config.egress_broker.services.items():
+    for name, egress_service in services.items():
         if not egress_service.placeholder_env:
             continue
         read_oauth_status = functools.partial(

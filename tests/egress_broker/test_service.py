@@ -18,6 +18,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from structlog.testing import capture_logs
 
+from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
@@ -34,6 +35,7 @@ from mindroom.egress_broker.service import (
     serve_egress_broker,
 )
 from mindroom.egress_broker.tokens import TokenSigner
+from mindroom.egress_broker.user_services import delete_user_service, save_user_service
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
@@ -50,7 +52,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.config.egress_broker import EgressService
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.worker_computer.browser_proxy import BrowserEgress
@@ -1075,3 +1076,97 @@ async def test_shared_agent_scoped_provider_refusal_has_no_connect_link(
     assert private.status_code == 403
     assert private.json()["provider"] == drive.id
     assert "connect_token=" in private.json()["connect_url"]
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream")
+@pytest.mark.asyncio
+async def test_user_service_injects_its_owners_key_and_leaves_other_requesters_alone(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """Alice's own service intercepts its host for her workers only, with her key and her placeholders.
+
+    Bob holds a key under the same name but has no such service, so his CONNECT to the host stays a blind tunnel
+    and his worker gets no placeholder.
+    """
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
+    config = _config()
+    alice, bob = _target(), _target("@bob:example.org")
+    mine = EgressService.model_validate(_GITHUB)
+    save_user_service(manager, alice, "mine", mine, config_services=config.egress_broker.services)
+    save_secret(manager, alice, "mine", "alice-key")
+    save_secret(manager, bob, "mine", "bob-key")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=alice)
+        bob_env = execution_env_for_worker(runtime_paths, config=config, worker_target=bob)
+        alice_response = await _get_through(alice_env, tls_upstream.url("/echo"), tmp_path / "runner")
+        bob_response = await _get_through(bob_env, tls_upstream.url("/echo"), tmp_path / "runner")
+        audit = active_audit_log()
+        assert audit is not None
+        records = await audit_records(audit, 2)
+    assert alice_env["GH_TOKEN"] == _PLACEHOLDER
+    assert "GH_TOKEN" not in bob_env
+    assert alice_response.json()["headers"]["authorization"] == ["Bearer alice-key"]
+    assert bob_response.status_code == 200
+    assert "authorization" not in bob_response.json()["headers"]
+    assert sorted((record.requester_id, record.kind, record.service) for record in records) == [
+        ("@alice:example.org", "request", "mine"),
+        ("@bob:example.org", "tunnel", None),
+    ]
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream")
+@pytest.mark.asyncio
+async def test_user_service_edits_apply_to_the_running_broker(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """Saving a service starts injection and deleting it stops it, from the next request on and without a restart."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
+    config = _config()
+    target = _target()
+    save_secret(manager, target, "mine", "alice-key")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        before = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+        mine = EgressService.model_validate(_GITHUB)
+        save_user_service(manager, target, "mine", mine, config_services=config.egress_broker.services)
+        saved = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+        assert delete_user_service(manager, target, "mine")
+        deleted = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert "authorization" not in before.json()["headers"]
+    assert saved.json()["headers"]["authorization"] == ["Bearer alice-key"]
+    assert "authorization" not in deleted.json()["headers"]
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_user_service_uses_only_its_scopes_oauth_connection(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """A user service naming an OAuth provider injects its owner's connected account and nobody else's."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    alice, bob = _target(), _target("@bob:example.org")
+    mine = EgressService.model_validate(_GITHUB_OAUTH)
+    for target in (alice, bob):
+        save_user_service(manager, target, "mine", mine, config_services=config.egress_broker.services)
+    _connect_github(manager, "@alice:example.org", "alice-oauth")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=alice)
+        bob_env = execution_env_for_worker(runtime_paths, config=config, worker_target=bob)
+        alice_response = await _get_through(alice_env, tls_upstream.url("/echo"), tmp_path / "runner")
+        bob_response = await _get_through(bob_env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert alice_env["GH_TOKEN"] == _PLACEHOLDER
+    assert alice_response.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+    assert "GH_TOKEN" not in bob_env
+    assert bob_response.status_code == 403
+    assert (bob_response.json()["error"], bob_response.json()["provider"]) == ("credential_not_configured", "github")
+    assert tls_upstream.hits == ["/echo"]

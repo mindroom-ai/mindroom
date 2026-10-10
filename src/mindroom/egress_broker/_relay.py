@@ -248,15 +248,18 @@ class Relay:
     """Per-request work both listener paths share: reading rules, dialing, streaming, answering, and auditing."""
 
     audit: AuditLog
-    config_provider: Callable[[], EgressBrokerConfig]
+    config_provider: Callable[[WorkerClaims], EgressBrokerConfig]
     dial_policy: DialPolicy
     max_body_bytes: int
     idle_timeout: float
 
     async def read_config(self, client: Peer, entry: AuditEntry) -> EgressBrokerConfig | None:
-        """Return the current rules; when the provider fails, answer 502, audit, and return None."""
+        """Return the rules for the entry's requester; when the provider fails, answer 502, audit, and return None.
+
+        The provider runs in a thread: it may read the requester scope's own services from the credential store.
+        """
         try:
-            return self.config_provider()
+            return await asyncio.to_thread(self.config_provider, entry.claims)
         except Exception as exc:
             logger.warning("egress_broker_config_unavailable", error_type=type(exc).__name__)
             await self.reject(client, entry, 502, {"error": "broker_error"})

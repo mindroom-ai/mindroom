@@ -10,12 +10,14 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools import egress_credentials as egress_credentials_module
 from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 from mindroom.egress_broker.secrets import save_secret
+from mindroom.egress_broker.user_services import save_user_service
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import _oauth_credential_database_path
@@ -225,6 +227,40 @@ def test_reports_configured_status_per_requester_scope(tmp_path: Path) -> None:
         },
     ]
     assert _statuses(bob) == {"github": False, "openai": False}
+
+
+def test_lists_the_scopes_own_services_next_to_config_services(tmp_path: Path) -> None:
+    """A service the user defined in this agent's scope is listed with its status; other requesters never see it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    context = _context(runtime_paths)
+    mine = EgressService.model_validate(
+        {"display_name": "Mine", "rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]},
+    )
+    save_user_service(manager, _target(), "mine", mine, config_services=context.config.egress_broker.services)
+    save_secret(manager, _target(), "mine", _SECRET)
+
+    alice = _list(EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target()), context)
+    bob = _list(EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target("@bob:example.org")), context)
+
+    assert _entry(alice, "mine") == {"name": "mine", "display_name": "Mine", "configured": True, "active_source": "key"}
+    assert _statuses(alice) == {"github": False, "openai": False, "mine": True}
+    assert _statuses(bob) == {"github": False, "openai": False}
+
+
+def test_user_services_are_listed_without_config_services(tmp_path: Path) -> None:
+    """With no operator services, the scope's own services are still listed instead of the no-services note."""
+    runtime_paths = _runtime_paths(tmp_path)
+    mine = EgressService.model_validate({"rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]})
+    save_user_service(get_runtime_credentials_manager(runtime_paths), _target(), "mine", mine, config_services={})
+
+    payload = _list(
+        EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target()),
+        _context(runtime_paths, services={}),
+    )
+
+    assert _statuses(payload) == {"mine": False}
+    assert "No egress services" not in str(payload["note"])
 
 
 def test_unscoped_target_reads_the_global_store(tmp_path: Path) -> None:

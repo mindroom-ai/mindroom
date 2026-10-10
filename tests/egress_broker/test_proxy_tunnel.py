@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.egress_broker.audit import AuditLog
     from mindroom.egress_broker.proxy import EgressBroker
+    from mindroom.egress_broker.tokens import WorkerClaims
     from tests.egress_broker.conftest import BrokerFactory, RawResponse, Upstream, UpstreamCA
 
     RawProxy = Callable[[int, bytes], Awaitable[RawResponse]]
@@ -501,7 +502,7 @@ async def test_config_provider_failure_gets_502_and_listener_survives(
 ) -> None:
     """A failing rule provider fails the request with 502 broker_error and an audit row, not the listener."""
 
-    def failing_provider() -> EgressBrokerConfig:
+    def failing_provider(_claims: WorkerClaims) -> EgressBrokerConfig:
         msg = "config unavailable"
         raise RuntimeError(msg)
 

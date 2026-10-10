@@ -252,6 +252,8 @@ def shared_worker_unavailable_status(provider: OAuthProvider, runtime_paths: Run
 
 
 def _oauth_on_shared_workers(config: Config, service: str) -> bool:
+    # Config services alone can opt in. User services never set the flag, and the effective config ignores a user
+    # service named like a config service, so the config's services answer for every service a requester can use.
     egress_service = config.egress_broker.services.get(service)
     return egress_service is not None and egress_service.oauth_on_shared_workers
 

@@ -11,6 +11,7 @@ import socket
 import ssl
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -26,7 +27,13 @@ from mindroom.egress_broker.ca import materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.mitm import _verifying_context
 from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect, SecretUnavailable
-from tests.egress_broker.conftest import audit_records, connect_request, proxy_authorization, read_raw_response
+from tests.egress_broker.conftest import (
+    DEFAULT_CLAIMS,
+    audit_records,
+    connect_request,
+    proxy_authorization,
+    read_raw_response,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -35,6 +42,7 @@ if TYPE_CHECKING:
     import httpx
 
     from mindroom.egress_broker.audit import AuditLog
+    from mindroom.egress_broker.tokens import WorkerClaims
     from tests.egress_broker.conftest import BrokerFactory, Upstream, UpstreamCA
 
     ProxyClient = Callable[..., httpx.AsyncClient]
@@ -794,7 +802,7 @@ async def test_open_tunnel_follows_config_changes(
 ) -> None:
     """Rules are read per request, so a config change applies to tunnels that are already open."""
     configs = [_config()]
-    await broker(config_provider=lambda: configs[-1], secrets={"svc": SECRET})
+    await broker(config_provider=lambda _claims: configs[-1], secrets={"svc": SECRET})
     client = proxy_client(broker.token())
 
     first = await client.get(tls_upstream.url("/echo"))
@@ -805,6 +813,35 @@ async def test_open_tunnel_follows_config_changes(
     assert second.status_code == 403
     assert second.json() == {"error": "host_not_allowed", "services": ["svc"]}
     assert tls_upstream.hits == ["/echo"]
+
+
+@pytest.mark.asyncio
+async def test_rules_come_from_the_requesters_own_config(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    upstream_ca: UpstreamCA,
+) -> None:
+    """The broker reads rules for each requester's verified claims: only Alice's config intercepts the host."""
+    alice = DEFAULT_CLAIMS
+    bob = replace(DEFAULT_CLAIMS, worker_key="worker-bob-code", requester_id="@bob:example.org")
+    seen: list[str | None] = []
+
+    def per_requester(claims: WorkerClaims) -> EgressBrokerConfig:
+        seen.append(claims.requester_id)
+        return _config() if claims == alice else EgressBrokerConfig()
+
+    await broker(config_provider=per_requester, secrets={"svc": SECRET})
+    alice_response = await proxy_client(broker.token(alice)).get(tls_upstream.url("/echo"))
+    # Bob's CONNECT is a blind tunnel, so his client sees the upstream's own certificate.
+    bob_client = proxy_client(broker.token(bob), verify=upstream_ca.client_context())
+    bob_response = await bob_client.get(tls_upstream.url("/echo"))
+
+    assert alice_response.json()["headers"]["authorization"] == [f"Bearer {SECRET}"]
+    assert bob_response.status_code == 200
+    assert "authorization" not in bob_response.json()["headers"]
+    # Alice's CONNECT and her request each read her config; Bob's CONNECT reads his.
+    assert seen == [alice.requester_id, alice.requester_id, bob.requester_id]
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import service_status
 from mindroom.egress_broker.service import manage_url
+from mindroom.egress_broker.user_services import effective_config
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -73,10 +74,11 @@ class EgressCredentialsTools(Toolkit):
         if context is None:
             return self._payload([], link, _NO_CONFIG_NOTE)
         config = context.current_config
-        services = config.egress_broker.services
+        manager = get_runtime_credentials_manager(self._runtime_paths)
+        # The config's services plus the ones the user defined in this agent's scope, as the broker matches them.
+        services = effective_config(config.egress_broker, manager, self._worker_target).services
         if not services:
             return self._payload([], link, _NO_SERVICES_NOTE)
-        manager = get_runtime_credentials_manager(self._runtime_paths)
         entries = [self._entry(manager, config, name, service) for name, service in services.items()]
         return self._payload(entries, link, self._note(link))
 

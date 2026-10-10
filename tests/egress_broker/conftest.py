@@ -345,12 +345,13 @@ class BrokerFactory:
         manage_url: ManageUrl | None = None,
         max_body_bytes: int = 1 << 30,
         head_timeout: float = 30.0,
-        config_provider: Callable[[], EgressBrokerConfig] | None = None,
+        config_provider: Callable[[WorkerClaims], EgressBrokerConfig] | None = None,
     ) -> EgressBroker:
         """Start a broker on an ephemeral loopback port; `secrets` maps service names to secrets.
 
         `resolve_secret` replaces the `secrets` lookup, and `config_provider` replaces the fixed `config`,
-        when a test needs a callback that changes or fails. Both are plain functions; the broker awaits the lookup.
+        when a test needs a callback that changes, fails, or depends on the requester's claims. Both are plain
+        functions; the broker awaits the lookup.
         """
         current = config or EgressBrokerConfig()
         stored = dict(secrets or {})
@@ -365,7 +366,7 @@ class BrokerFactory:
         broker = EgressBroker(
             ca=self.ca,
             signer=self.signer,
-            config_provider=config_provider or (lambda: current),
+            config_provider=config_provider or (lambda _claims: current),
             resolve_secret=recording_lookup,
             audit=self.audit,
             dial_policy=dial_policy or DialPolicy(allow_loopback=True),
