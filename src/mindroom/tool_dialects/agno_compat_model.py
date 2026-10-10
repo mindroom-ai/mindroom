@@ -12,7 +12,13 @@ from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
 from mindroom.model_instance_checks import MINDROOM_OPENAI_RESPONSES_CLASS, isinstance_of_loaded
-from mindroom.tool_dialects.translation import canonical_tool_calls, wire_messages, wire_tool_pairs, wire_tools
+from mindroom.tool_dialects.translation import (
+    canonical_tool_calls,
+    presents,
+    wire_messages,
+    wire_tool_pairs,
+    wire_tools,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
@@ -68,6 +74,10 @@ def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
         messages: list[Message],
         functions: dict[str, Function] | None = None,
     ) -> list[FunctionCall]:
+        if functions is not None:
+            # A function the request hid, such as apply_patch beside the edit tools, cannot be called from habit.
+            offered = list(functions.values())
+            functions = {name: function for name, function in functions.items() if presents(dialect, function, offered)}
         if not dialect.functions or not assistant_message.tool_calls or functions is None:
             return get_function_calls_to_run(bound_model, assistant_message, messages, functions)
         translated, errors = canonical_tool_calls(dialect, assistant_message.tool_calls, functions)

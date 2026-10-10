@@ -1375,7 +1375,7 @@ def _shell_run_timeout_seconds(prepared: PreparedSandboxRunnerExecuteRequest) ->
         return 0.0
     try:
         return min(max(0.0, float(raw_timeout)), cap)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return float(default)
 
 

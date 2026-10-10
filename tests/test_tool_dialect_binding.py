@@ -18,6 +18,7 @@ from agno.tools.toolkit import Toolkit
 from openai import AsyncOpenAI
 
 from mindroom.agents import set_toolkit_owner
+from mindroom.config.models import ModelConfig
 from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
 from mindroom.tool_dialects.translation import resolve_tool_dialect
@@ -287,6 +288,42 @@ async def test_mixed_batch_translates_each_call_and_keeps_mcp_call() -> None:
         ("c3", "run_shell_command"),
     ]
     assert [item["call_id"] for item in provider.items(1, "function_call_output")] == ["c1", "c2", "c3"]
+
+
+@pytest.mark.parametrize("dialect_name", ["mindroom", "claude"])
+@pytest.mark.asyncio
+async def test_hidden_function_cannot_be_called(dialect_name: str) -> None:
+    """A model that calls apply_patch from habit, where the dialect hid it beside the edit tools, runs nothing."""
+    executions: list[str] = []
+
+    def edit_file(path: str) -> str:
+        """Edit a file."""
+        executions.append(f"edit {path}")
+        return "edited"
+
+    def write_file(path: str) -> str:
+        """Write a file."""
+        executions.append(f"write {path}")
+        return "written"
+
+    def apply_patch(input: str) -> str:  # noqa: A002 - the canonical argument name
+        """Apply a patch."""
+        executions.append(f"patch {input}")
+        return "patched"
+
+    provider = _Provider([_function_call("c1", "apply_patch", '{"input": "*** Begin Patch"}')])
+    dialect = resolve_tool_dialect(ModelConfig(provider="openai", id="gpt-6-astra", tool_dialect=dialect_name))
+
+    await _run(provider, [_toolkit("coding", edit_file, write_file, apply_patch)], dialect)
+
+    assert executions == []
+    assert provider.items(1, "function_call_output") == [
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": "Error: The requested tool does not exist or is not available.",
+        },
+    ]
 
 
 @pytest.mark.asyncio

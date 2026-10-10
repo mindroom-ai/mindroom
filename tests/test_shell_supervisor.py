@@ -1321,6 +1321,7 @@ def test_shell_run_timeout_seconds_parses_kwargs() -> None:
     assert helper(prepared("check_shell_command", {"timeout": 300})) == 0.0
     assert helper(prepared("check_shell_command", {"wait": 60})) == 60.0
     assert helper(prepared("check_shell_command", {"wait": 600})) == 60.0
+    assert helper(prepared("check_shell_command", {"wait": 10**400})) == 0.0
 
 
 def test_shell_subprocess_dispatch_context_injects_socket_and_budget(
@@ -1378,6 +1379,19 @@ async def test_negative_wait_polls_at_once() -> None:
         await _kill(socket_path, handle, force=True)
 
     assert status.startswith("Status: RUNNING")
+
+
+@pytest.mark.asyncio
+async def test_wait_too_large_for_a_float_is_a_request_error() -> None:
+    """A wait no float can hold is answered as an invalid request instead of dropping the connection."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        handle = _extract_handle(await _run(socket_path, ["bash", "-c", "sleep 30"], timeout=0))
+
+        status = await _check(socket_path, handle, wait=10**400)
+        await _kill(socket_path, handle, force=True)
+
+    assert status.startswith("Error: Invalid shell supervisor request")
 
 
 def test_check_wait_stays_inside_the_worker_proxy_budget() -> None:

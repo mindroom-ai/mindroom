@@ -260,7 +260,7 @@ async def _handle_connection(
             result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.")
         writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
         await writer.drain()
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OverflowError) as exc:
         with suppress(OSError):
             result = ShellRunResult(message=f"Error: Invalid shell supervisor request: {exc}")
             writer.write(json.dumps(asdict(result)).encode() + b"\n")
