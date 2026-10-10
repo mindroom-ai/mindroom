@@ -228,7 +228,7 @@ class _ApprovalCase:
             deps=replace(
                 self.gateway.deps,
                 terminal_turn_for=self.store.terminal_turn_record,
-                terminal_turn_committed=self.store.publish_committed_response,
+                terminal_turn_committed=self.store.publish_completed_turn,
             ),
         )
         self.runner = ResponseRunner(
@@ -303,7 +303,7 @@ async def _paused_case(  # noqa: PLR0915
             gateway.deps,
             outbox=principal,
             terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_committed_response,
+            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -608,7 +608,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
             gateway.deps,
             outbox=principal,
             terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_committed_response,
+            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     assert runner.deps.replies is not None

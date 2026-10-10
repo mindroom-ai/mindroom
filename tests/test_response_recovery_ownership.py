@@ -91,7 +91,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
         tmp_path,
         principal,
         terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=store.publish_committed_response,
+        terminal_turn_committed=store.publish_completed_turn,
         turn_handoff=TurnHandoff(lambda _turn: (SOURCE,), lambda ids: dispatcher.release_delivered_turn_sources(ids)),
     )
     gateway = replace(

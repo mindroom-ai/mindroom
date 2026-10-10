@@ -178,13 +178,18 @@ def alice(journal_store: EventJournalStore) -> PrincipalStore:
     return journal_store.principal("agent@alice")
 
 
+def _completed_turn(turn_id: str, event_id: str) -> TurnRecord:
+    """Return the terminal record a FINAL acknowledgement commits for one turn."""
+    return TurnRecord.create([turn_id], response_event_id=event_id)
+
+
 def _gateway(
     tmp_path: Path,
     outbox: MatrixDeliveryView | None = None,
     *,
     sending_device_id: str | None = "CURRENT-DEVICE",
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
-    terminal_turn_committed: Callable[[str, str, TurnRecord | None], Awaitable[None]] | None = None,
+    terminal_turn_committed: Callable[[TurnRecord], Awaitable[None]] | None = None,
     turn_handoff: TurnHandoff = ignore_final_delivery_handoff,
     large_message_strategy: _LargeMessageStrategy = "sidecar",
 ) -> DeliveryGateway:
@@ -2893,17 +2898,22 @@ class TestTurnDeliverySerialization:
         await self._enqueue(alice, DeliveryStage.FINAL)
         send_started = asyncio.Event()
         accept_final = asyncio.Event()
-        published: list[tuple[str, str]] = []
+        published: list[TurnRecord] = []
 
         async def send(_delivery: MatrixDelivery) -> str:
             send_started.set()
             await accept_final.wait()
             return "$final"
 
-        async def publish(turn_id: str, event_id: str, _committed: TurnRecord | None) -> None:
-            published.append((turn_id, event_id))
+        async def publish(committed: TurnRecord) -> None:
+            published.append(committed)
 
-        gateway = _gateway(tmp_path, alice, terminal_turn_committed=publish)
+        gateway = _gateway(
+            tmp_path,
+            alice,
+            terminal_turn_for=_completed_turn,
+            terminal_turn_committed=publish,
+        )
         delivery = gateway._response_delivery(send, handoff=None)
         final = asyncio.create_task(delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
         await send_started.wait()
@@ -2916,7 +2926,7 @@ class TestTurnDeliverySerialization:
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == "$final"
-        assert published == [("turn-1", "$final")]
+        assert [record.response_event_id for record in published] == ["$final"]
 
     async def test_process_shutdown_accepts_exact_completed_final(
         self,
@@ -2953,7 +2963,7 @@ class TestTurnDeliverySerialization:
             tmp_path,
             alice,
             terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_committed_response,
+            terminal_turn_committed=turn_store.publish_completed_turn,
             turn_handoff=handoff,
         )
         bot = _response_recovery_bot(journal_store, turn_store)
@@ -3033,16 +3043,16 @@ class TestTurnDeliverySerialization:
         publication_started = asyncio.Event()
         allow_publication = asyncio.Event()
 
-        async def publish_committed_response(turn_id: str, event_id: str, committed: TurnRecord | None) -> None:
+        async def publish_completed_turn(committed: TurnRecord) -> None:
             publication_started.set()
             await allow_publication.wait()
-            await turn_store.publish_committed_response(turn_id, event_id, committed)
+            await turn_store.publish_completed_turn(committed)
 
         gateway = _gateway(
             tmp_path,
             alice,
             terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=publish_committed_response,
+            terminal_turn_committed=publish_completed_turn,
             turn_handoff=handoff,
         )
         bot = _response_recovery_bot(journal_store, turn_store)
@@ -3146,7 +3156,7 @@ class TestTurnDeliverySerialization:
             tmp_path,
             alice,
             terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_committed_response,
+            terminal_turn_committed=turn_store.publish_completed_turn,
             turn_handoff=handoff,
         )
         bot = _response_recovery_bot(journal_store, turn_store)
@@ -3623,14 +3633,19 @@ class TestTurnDeliverySerialization:
         reentered: list[str | None] = []
         reentrant_delivery: MatrixDeliveryWorker | None = None
 
-        async def publish_committed(_turn_id: str, _event_id: str, _committed: TurnRecord | None) -> None:
+        async def publish_committed(_committed: TurnRecord) -> None:
             assert reentrant_delivery is not None
             reentered.append(await reentrant_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
 
         async def send(_delivery: MatrixDelivery) -> str:
             return "$answer"
 
-        gateway = _gateway(tmp_path, alice, terminal_turn_committed=publish_committed)
+        gateway = _gateway(
+            tmp_path,
+            alice,
+            terminal_turn_for=_completed_turn,
+            terminal_turn_committed=publish_committed,
+        )
         outer_delivery = gateway._response_delivery(send, handoff=None)
         reentrant_delivery = gateway._response_delivery(send, handoff=None)
 
@@ -3704,7 +3719,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
             tmp_path,
             alice,
             terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_committed_response,
+            terminal_turn_committed=turn_store.publish_completed_turn,
         )
         transaction_id = await alice.enqueue_matrix_delivery(
             delivery_id="$source",

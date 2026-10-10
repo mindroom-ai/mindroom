@@ -608,7 +608,7 @@ class DeliveryGatewayDeps:
     # wrote is re-asserted through the ledger's own write ordering. Skipping
     # that leaves the row open to a mutation that derived before the commit and
     # lands after it, which erases the event the answer is stored under.
-    terminal_turn_committed: Callable[[str, str, TurnRecord | None], Awaitable[None]] | None = None
+    terminal_turn_committed: Callable[[TurnRecord], Awaitable[None]] | None = None
     # Runs what committed reply transitions left for after their commit:
     # cancelling a span a Stop reached, waking an approval source.
     reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
@@ -952,17 +952,12 @@ class DeliveryGateway:
 
     async def _publish_terminal_turn(self, turn_id: str, event_id: str, committed: TerminalTurnWrite | None) -> None:
         """Publish the transaction's exact proof through the ledger's conflict owner."""
-        if self.deps.terminal_turn_committed is None:
+        del turn_id, event_id
+        if self.deps.terminal_turn_committed is None or committed is None:
             return
-        record = (
-            None
-            if committed is None
-            else TurnRecordCodec._from_ledger_record(
-                committed.index_event_ids[0],
-                json.loads(committed.record_json),
-            )
-        )
-        await self.deps.terminal_turn_committed(turn_id, event_id, record)
+        record = TurnRecordCodec._from_ledger_record(committed.index_event_ids[0], json.loads(committed.record_json))
+        if record is not None:
+            await self.deps.terminal_turn_committed(record)
 
     def _terminal_turn_write(self, delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite | None:
         """Turn the terminal record for one delivered answer into a journal row.
@@ -1699,34 +1694,23 @@ class DeliveryGateway:
             )
             request = replace(request, response_text=response_text, tool_trace=tool_trace)
         effective_thread_id = resolved_target.resolved_thread_id
-
-        if effective_thread_id is None:
-            content = format_message_with_mentions(
-                config,
-                self.deps.runtime_paths,
-                request.response_text,
-                thread_event_id=None,
-                reply_to_event_id=resolved_target.reply_to_event_id,
-                latest_thread_event_id=None,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-            )
-        else:
+        latest_thread_event_id = None
+        if effective_thread_id is not None:
             latest_thread_event_id = await self.deps.resolver.deps.conversation_reader.latest_thread_event_id(
                 room_id=resolved_target.room_id,
                 thread_id=effective_thread_id,
                 reply_to_event_id=resolved_target.reply_to_event_id,
             )
-            content = format_message_with_mentions(
-                config,
-                self.deps.runtime_paths,
-                request.response_text,
-                thread_event_id=effective_thread_id,
-                reply_to_event_id=resolved_target.reply_to_event_id,
-                latest_thread_event_id=latest_thread_event_id,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-            )
+        content = format_message_with_mentions(
+            config,
+            self.deps.runtime_paths,
+            request.response_text,
+            thread_event_id=effective_thread_id,
+            reply_to_event_id=resolved_target.reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+        )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
         failure_reason = "durable Matrix delivery was refused"

@@ -106,7 +106,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             gateway.deps,
             outbox=principal,
             terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_committed_response,
+            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)

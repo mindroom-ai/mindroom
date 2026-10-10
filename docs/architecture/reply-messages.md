@@ -187,7 +187,7 @@ Edits:
 - A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply's exit applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
 - When the stopped reply's terminal row is still unresolved, or the approval that holds it has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps what the Stop left: its cancelled note, or an approved answer that was already final.
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
-- An edit whose claim stays blocked by an unresolved row or by the approval it waits for is retried once the row resolves or the approval ends; if that wake is lost, the journal's scan for work without a live owner retries it within 30 seconds.
+- An edit whose claim stays blocked by an unresolved row or by the approval it waits for is retried once the row resolves or the approval ends; until then the journal's scan for work without a live owner also offers it again every 30 seconds, which covers a lost wake.
 - A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming or held reply, so the reply keeps what the Stop left, such as its partial answer with the cancelled note.
 
 Tool calls and the restart account:
@@ -201,8 +201,10 @@ Delivery and recovery:
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message.
 - An approval the upgrade cancels leaves its Matrix message as it was, which can still show that it waits for approval, and a click on its card does nothing.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits.
+- A 30-second recheck of the approvals holding a conversation that lands while a reply's pause is still committing can drop that approval's hold, so later messages are answered while it waits.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed (see [Lifetime](#lifetime)).
 - A note Matrix refused for good is not sent again (I15).
+- An interactive selection whose acknowledgement Matrix refuses for good stays unanswered without a note, as before durable replies: the acknowledgement is smaller than the question MindRoom already delivered, so only a room-wide refusal such as lost send permission can refuse it, and that would refuse the note too.
 
 Journal writes:
 

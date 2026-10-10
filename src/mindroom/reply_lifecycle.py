@@ -1038,12 +1038,7 @@ def stopped(  # noqa: PLR0911
     if write is None:
         # An exit that rendered nothing (a release, an error before delivery)
         # still ends the reply as stopped; the cancel note it owes follows.
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=_cancelled(_clear_current(reply, span.span_id), span.span_id, now_ns),
-            spans=(_end(span, SpanOutcome.CANCELLED),),
-            effects=_settle_sources(reply, span),
-        )
+        return replace(_ended_by_stop(reply, span, now_ns), effects=_settle_sources(reply, span))
     recompute = _check_revision(reply, write.prepared_revision)
     if recompute is not None:
         return recompute

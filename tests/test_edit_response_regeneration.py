@@ -2032,7 +2032,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             gateway.deps,
             outbox=principal,
             terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_committed_response,
+            terminal_turn_committed=turn_store.publish_completed_turn,
         ),
     )
 

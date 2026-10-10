@@ -330,7 +330,7 @@ class TurnStore:
         Pure by design. The in-memory map is not touched here, because this is
         called *before* the transaction and the transaction may lose the
         acknowledgement race. The caller that actually binds the row settles
-        both halves afterwards, through ``publish_committed_response``.
+        both halves afterwards, through ``publish_completed_turn``.
 
         Returns the domain record rather than the journal's write type, so this
         module stays on its own side of the store boundary; the delivery layer,
@@ -345,25 +345,6 @@ class TurnStore:
             completed=True,
         )
         return None if bound.anchor_event_id is None else bound
-
-    async def publish_committed_response(
-        self,
-        turn_id: str,
-        response_event_id: str,
-        committed: TurnRecord | None = None,
-    ) -> None:
-        """Re-assert an acknowledged record through the ledger's conflict ownership.
-
-        The acknowledgement transaction already persisted the response, but a
-        ledger mutation derived before it could still overwrite that row. Going
-        through the ledger waits for conflicting writes and derives from their
-        settled state, preserving both the response identity and intervening
-        facts. An unrelated turn does not need to wait for this reconciliation.
-        """
-        del turn_id, response_event_id
-        if committed is None:
-            return
-        await self.publish_completed_turn(committed)
 
     async def publish_completed_turn(self, committed: TurnRecord) -> None:
         """Re-assert a record a committed transaction completed, through the ledger's conflict ownership.
