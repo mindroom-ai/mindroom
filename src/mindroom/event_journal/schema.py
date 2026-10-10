@@ -92,6 +92,73 @@ OUTBOX_TABLE = """
 """
 
 
+REPLY_MESSAGES_TABLE = """
+    CREATE TABLE IF NOT EXISTS reply_messages (
+        -- One agent or team reply: the single owner of what it shows, which
+        -- span may change it, and the Stop facts that reach it. Presentations
+        -- are opaque JSON written by the reply layer.
+        principal_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT,
+        membership_epoch BIGINT NOT NULL,
+        -- Bound by the first acknowledged create, in any state.
+        event_id TEXT,
+        state TEXT NOT NULL CHECK (
+            state IN ('active', 'paused', 'waiting', 'completed', 'cancelled', 'failed', 'gone')),
+        current_span_id TEXT,
+        last_span_id TEXT NOT NULL,
+        presentation_json TEXT NOT NULL,
+        -- What the latest write, durable or direct, may have shown. Matrix
+        -- acknowledged it when confirmed_seq has reached reply_sequence.
+        possibly_shown_json TEXT,
+        confirmed_seq BIGINT,
+        -- Bumped by every transition that changes what a payload would hold.
+        revision BIGINT NOT NULL,
+        placeholder_only BOOLEAN NOT NULL,
+        stop_receipt_order BIGINT,
+        stop_applied_receipt_order BIGINT,
+        stop_button_event_id TEXT,
+        redaction_pending_json TEXT,
+        -- A durable write a transition decided without a payload; rendered
+        -- and enqueued by a follow-up under the reply's sending lock.
+        owed_write_json TEXT,
+        -- The last allocated value of the reply's one write sequence.
+        reply_sequence BIGINT NOT NULL,
+        -- Whose outstanding background work the reply waits for, as opaque
+        -- JSON; set when it first waits and kept after.
+        hold_key TEXT,
+        created_at_ns BIGINT NOT NULL,
+        updated_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, reply_id),
+        UNIQUE (principal_id, event_id)
+    )
+"""
+
+REPLY_SPANS_TABLE = """
+    CREATE TABLE IF NOT EXISTS reply_spans (
+        -- One claim on a reply by one executor, with a write-once outcome.
+        principal_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('turn', 'replay', 'approval_resume', 'regeneration', 'wake')),
+        -- The driving event: it keys the span's outbox rows, and spans of
+        -- one reply can share it.
+        delivery_id TEXT NOT NULL,
+        approval_id TEXT,
+        bot_generation TEXT NOT NULL,
+        base_sequence BIGINT NOT NULL,
+        rollback_json TEXT,
+        outcome TEXT CHECK (outcome IN (
+            'completed', 'paused', 'cancelled', 'failed',
+            'suppressed', 'restored', 'released', 'superseded', 'lost')),
+        claimed_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, span_id)
+    )
+"""
+
+
 _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS approval_grant_locks (
@@ -456,66 +523,8 @@ _TABLES = (
         runtime_generation TEXT NOT NULL
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS reply_messages (
-        -- One agent or team reply: the single owner of what it shows, which
-        -- span may change it, and the Stop facts that reach it. Presentations
-        -- are opaque JSON written by the reply layer.
-        principal_id TEXT NOT NULL,
-        reply_id TEXT NOT NULL,
-        entity_name TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        thread_id TEXT,
-        membership_epoch BIGINT NOT NULL,
-        -- Bound by the first acknowledged create, in any state.
-        event_id TEXT,
-        state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'completed', 'cancelled', 'failed', 'gone')),
-        current_span_id TEXT,
-        last_span_id TEXT NOT NULL,
-        presentation_json TEXT NOT NULL,
-        -- What the latest write, durable or direct, may have shown. Matrix
-        -- acknowledged it when confirmed_seq has reached reply_sequence.
-        possibly_shown_json TEXT,
-        confirmed_seq BIGINT,
-        -- Bumped by every transition that changes what a payload would hold.
-        revision BIGINT NOT NULL,
-        placeholder_only BOOLEAN NOT NULL,
-        stop_receipt_order BIGINT,
-        stop_applied_receipt_order BIGINT,
-        stop_button_event_id TEXT,
-        redaction_pending_json TEXT,
-        -- A durable write a transition decided without a payload; rendered
-        -- and enqueued by a follow-up under the reply's sending lock.
-        owed_write_json TEXT,
-        -- The last allocated value of the reply's one write sequence.
-        reply_sequence BIGINT NOT NULL,
-        created_at_ns BIGINT NOT NULL,
-        updated_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, reply_id),
-        UNIQUE (principal_id, event_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS reply_spans (
-        -- One claim on a reply by one executor, with a write-once outcome.
-        principal_id TEXT NOT NULL,
-        span_id TEXT NOT NULL,
-        reply_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('turn', 'replay', 'approval_resume', 'regeneration')),
-        -- The driving event: it keys the span's outbox rows, and spans of
-        -- one reply can share it.
-        delivery_id TEXT NOT NULL,
-        approval_id TEXT,
-        bot_generation TEXT NOT NULL,
-        base_sequence BIGINT NOT NULL,
-        rollback_json TEXT,
-        outcome TEXT CHECK (outcome IN (
-            'completed', 'paused', 'cancelled', 'failed',
-            'suppressed', 'restored', 'released', 'superseded', 'lost')),
-        claimed_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, span_id)
-    )
-    """,
+    REPLY_MESSAGES_TABLE,
+    REPLY_SPANS_TABLE,
     """
     CREATE TABLE IF NOT EXISTS reply_tool_calls (
         principal_id TEXT NOT NULL,
@@ -547,6 +556,16 @@ _TABLES = (
         principal_id TEXT NOT NULL,
         reply_id TEXT NOT NULL,
         span_id TEXT,
+        PRIMARY KEY (principal_id, reply_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reply_job_stops (
+        -- A Stop's cancellation of the background work a reply started or
+        -- waits for, until a job runtime applied it.
+        principal_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, reply_id)
     )
     """,
@@ -671,6 +690,12 @@ _INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS reply_messages_state ON reply_messages (principal_id, state, created_at_ns)
+    """,
+    """
+    -- At most one reply waits for one key's background work.
+    CREATE UNIQUE INDEX IF NOT EXISTS reply_messages_waiting
+    ON reply_messages (principal_id, hold_key)
+    WHERE state = 'waiting'
     """,
     """
     -- Every delivery recovery pass looks for debt; it must not read every

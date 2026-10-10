@@ -19,9 +19,17 @@ from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
+    upgrade_reply_waits,
 )
 from .offloading import ThreadOffload, settled
-from .schema import OUTBOX_TABLE, POSTGRES_DIALECT, render, schema_statements
+from .schema import (
+    OUTBOX_TABLE,
+    POSTGRES_DIALECT,
+    REPLY_MESSAGES_TABLE,
+    REPLY_SPANS_TABLE,
+    render,
+    schema_statements,
+)
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 # An arbitrary constant that only this schema setup uses, so the lock it
@@ -170,6 +178,18 @@ class PostgresBackend:
                 _PostgresTransaction(cursor),
                 outbox_columns,
                 outbox_table_ddl=OUTBOX_TABLE,
+                sqlite=False,
+            )
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'reply_messages'",
+            )
+            reply_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
+            upgrade_reply_waits(
+                _PostgresTransaction(cursor),
+                reply_columns,
+                reply_messages_ddl=REPLY_MESSAGES_TABLE,
+                reply_spans_ddl=REPLY_SPANS_TABLE,
                 sqlite=False,
             )
             cursor.execute(

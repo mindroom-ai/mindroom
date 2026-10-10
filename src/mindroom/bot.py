@@ -646,6 +646,7 @@ class AgentBot:
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
             hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
             approval_ended=lambda ended: self._approval_ended(ended),
+            settle_debt=self._settle_reply_debt_later,
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(

@@ -1652,7 +1652,13 @@ class DeliveryGateway:
             owed = reply.owed_write
             span = await self.deps.outbox.replies.span(owed.span_id)
             assert span is not None, "an owed write names a span of its reply"
-            shown = _with_note(_shown_before(reply, None), note_segment(owed.note, owed.text))
+            shown = _shown_before(reply, None)
+            # A write owed without a note shows the reply's answer without the note it waited with.
+            shown = (
+                with_trailing_note(shown, None)
+                if owed.note is None
+                else _with_note(shown, note_segment(owed.note, owed.text))
+            )
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
             rendered = render(shown, state=reply.state)

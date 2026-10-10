@@ -33,6 +33,8 @@ class ReplyState(StrEnum):
 
     ACTIVE = "active"
     PAUSED = "paused"
+    # Answered, while background work it left outstanding still runs; a wake continues it once that work is ready.
+    WAITING = "waiting"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -49,6 +51,8 @@ class SpanKind(StrEnum):
     REPLAY = "replay"
     APPROVAL_RESUME = "approval_resume"
     REGENERATION = "regeneration"
+    # Continues a waiting reply with the results of the background work it waits for.
+    WAKE = "wake"
 
 
 class SpanOutcome(StrEnum):
@@ -107,6 +111,7 @@ class NoteKind(StrEnum):
     DELIVERY_FAILED = "delivery_failed"
     APPROVAL_WAIT = "approval_wait"
     APPROVAL_FAILED = "approval_failed"
+    JOB_WAIT = "job_wait"
 
 
 # What a reply ended by a state the rules do not model shows; the error note has no text of its own.
@@ -165,7 +170,8 @@ class OwedWrite:
     """
 
     span_id: str
-    note: NoteKind
+    # ``None`` owes what the reply shows without its trailing note, as a waiting reply that stopped waiting does.
+    note: NoteKind | None
     # Text for notes whose wording is not fixed by their kind (errors).
     text: str | None = None
 
@@ -197,6 +203,8 @@ class Reply:
     redaction_pending: tuple[str, ...] = ()
     approval_id: str | None = None
     owed_write: OwedWrite | None = None
+    # Whose outstanding background work the reply waits for, set when it first waits and kept after: opaque JSON.
+    hold_key: str | None = None
 
     @property
     def terminal(self) -> bool:
@@ -250,7 +258,17 @@ class CancelSpan:
     by_stop: bool = False
 
 
-type Effect = SettleSources | FenceApproval | CancelSpan
+@dataclass(frozen=True, slots=True)
+class StopJobs:
+    """In the transaction: record that the background work this reply started or waits for must be cancelled.
+
+    The job runtime applies the record, whenever it can, and then deletes it.
+    """
+
+    reply_id: str
+
+
+type Effect = SettleSources | FenceApproval | CancelSpan | StopJobs
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,7 +363,9 @@ def _leaves_active(reply: Reply, new_state: ReplyState) -> Reply:
     """Queue the Stop button's redaction when the reply stops being active (I8).
 
     A span that waits in place for approval keeps running, so its reply keeps
-    the button through the wait (``pause(in_place)`` keeps it).
+    the button through the wait (``pause(in_place)`` keeps it); a reply that
+    waits for background work keeps it too, since a Stop cancels that work
+    (``wait`` keeps it).
     """
     if new_state is not ReplyState.ACTIVE and reply.stop_button_event_id:
         return replace(_with_redactions(reply, reply.stop_button_event_id), stop_button_event_id=None)
@@ -540,6 +560,8 @@ class ClaimRequest:
     approval_id: str | None = None
     # Set when an interactive selection created this span at its acknowledgement.
     interactive_span_id: str | None = None
+    # Set for wakes: the waiting reply whose background work became ready.
+    wake_reply_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +667,9 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
     def claimed(transition_reply: Reply, span: Span) -> Transition:
         return Transition(outcome=Outcome.APPLIED, reply=transition_reply, spans=(*changed, span), claimed=span)
 
+    if request.wake_reply_id is not None:
+        return _wake(request, reply, context.last_span, claimed)
+
     if request.approval_id is not None:
         if reply is None or reply.state is not ReplyState.PAUSED or reply.approval_id != request.approval_id:
             ended = _unmodeled_claim(
@@ -698,6 +723,9 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         # lock ended the reply between the source gate and this claim, or this
         # retry's: nothing runs for it, and that ending owns its sources.
         return _unchanged(Outcome.DUPLICATE, reply)
+    if reply.state is ReplyState.WAITING or (last is not None and last.kind is SpanKind.WAKE):
+        # A waiting reply already answered its turn; only its wake's own source continues it.
+        return _unchanged(Outcome.DUPLICATE, reply)
     if reply.state is not ReplyState.ACTIVE or reply.current_span_id is not None or last is None or not last.ended:
         return _unmodeled_claim(reply, last, reason="reply_not_reclaimable", now_ns=request.now_ns)
     if last.outcome is SpanOutcome.SUPERSEDED:
@@ -712,6 +740,31 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
     return _unmodeled_claim(reply, last, reason="last_span_not_reclaimable", now_ns=request.now_ns)
 
 
+def _wake(
+    request: ClaimRequest,
+    reply: Reply | None,
+    last: Span | None,
+    claimed: Callable[[Reply, Span], Transition],
+) -> Transition:
+    """Claim a wake of a waiting reply, or the retry of a wake an interruption or restart cut short.
+
+    A reply that stopped waiting meanwhile runs nothing for it: a newer reply
+    took its work over, a Stop cancelled it, or an edit regenerated the message.
+    """
+    if reply is None or reply.reply_id != request.wake_reply_id:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    retried = (
+        reply.state is ReplyState.ACTIVE
+        and last is not None
+        and last.kind is SpanKind.WAKE
+        and last.outcome in _SOURCES_PENDING_OUTCOMES
+    )
+    if reply.state is not ReplyState.WAITING and not retried:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    span = _new_span(request, reply, SpanKind.WAKE)
+    return claimed(_make_current(_set_state(reply, ReplyState.ACTIVE, request.now_ns), span, request.now_ns), span)
+
+
 def _regeneration(
     request: ClaimRequest,
     reply: Reply,
@@ -720,15 +773,16 @@ def _regeneration(
 ) -> Transition:
     """Claim a new edit's regeneration of an unheld reply nothing runs for.
 
-    The regenerator stops a running reply, or one an approval holds, before it
-    claims; a held reply's claim waits until its approval ended
-    (``claim_blocked``). A held reply without that Stop, or one that is gone,
-    regenerates nothing: the edit only changed the message. Only a finished
+    The regenerator stops a running reply, one an approval holds, or one that
+    waits for background work, before it claims; a held reply's claim waits
+    until its approval ended (``claim_blocked``). A held or waiting reply
+    without that Stop, or one that is gone, regenerates nothing: the edit only
+    changed the message. Only a finished
     answer is kept to restore; a regeneration that never answered passes its
     own on. An interrupted turn's own replay finds its turn answered once the
     regeneration answers it.
     """
-    if reply.state is ReplyState.GONE or reply.approval_id is not None:
+    if reply.state in {ReplyState.GONE, ReplyState.WAITING} or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)
     if last is not None and last.kind is SpanKind.REGENERATION and last.outcome in _SOURCES_PENDING_OUTCOMES:
         rollback = _kept_answer(reply, last)
@@ -991,6 +1045,63 @@ def finish(reply: Reply, span: Span, write: TerminalWrite, *, now_ns: int) -> Tr
     if expected is ReplyState.CANCELLED:
         return _terminal_row(reply, span, write, SpanOutcome.CANCELLED, now_ns, stop_applied=True)
     return _terminal_row(reply, span, write, SpanOutcome.COMPLETED, now_ns)
+
+
+def wait(
+    reply: Reply,
+    span: Span,
+    write: TerminalWrite,
+    *,
+    hold_key: str,
+    shown_by_create: bool = False,
+    now_ns: int,
+) -> Transition:
+    """End a span with its answer while background work it leaves outstanding runs: the reply waits for that work.
+
+    The span's sources settle answered and the reply keeps its Stop button,
+    which cancels the work. Its row is an edit, since a wake's finish or the
+    end of the wait writes the reply's terminal row; a reply whose create
+    showed the wait, as its first visible message, writes none. A reply an
+    approval holds never waits: its approval's settlement ends it.
+    """
+    stale = _stale_span(reply, span)
+    if stale is not None:
+        return stale
+    recompute = _check_revision(reply, write.prepared_revision)
+    if recompute is not None:
+        return recompute
+    if reply.unapplied_stop:
+        # As in ``finish``: the payload renders again, cancelled.
+        return _unchanged(Outcome.RECOMPUTE, reply)
+    if write.state is not ReplyState.WAITING or reply.approval_id is not None:
+        return _unmodeled(reply, span, reason="wait_rendered_another_state_or_held", now_ns=now_ns)
+    updated = _clear_current(confirm_progress(reply, write.confirms), span.span_id)
+    updated = _bump(updated, now_ns, state=ReplyState.WAITING, presentation=write.shown, hold_key=hold_key)
+    row = None
+    if not shown_by_create:
+        shown = write.shown if write.frozen_display is None else write.frozen_display
+        updated, row = _row(updated, span, WriteStage.EDIT, shown=shown)
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=updated,
+        spans=(_end(span, SpanOutcome.COMPLETED),),
+        effects=_settle_sources(reply, span),
+        row=row,
+    )
+
+
+def unhold(reply: Reply, *, now_ns: int) -> Transition:
+    """End a waiting reply with its answer: a newer reply took its work over, or no work is left for it.
+
+    It owes the write that shows its answer without the waiting note.
+    """
+    if reply.state is not ReplyState.WAITING:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    owed = OwedWrite(reply.last_span_id, None)
+    return Transition(
+        outcome=Outcome.APPLIED,
+        reply=_set_state(reply, ReplyState.COMPLETED, now_ns, owed_write=owed),
+    )
 
 
 def stopped(  # noqa: PLR0911
@@ -1365,8 +1476,8 @@ class StopFacts:
     span_live: bool
 
 
-def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> Transition:  # noqa: PLR0911
-    """Record a Stop on a reply.
+def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> Transition:
+    """Record a Stop on a reply, which also cancels the background work the reply started or waits for.
 
     ``span`` is the reply's current span if it has one, else its last span.
     """
@@ -1376,6 +1487,22 @@ def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> T
     if reply.terminal:
         # The frozen terminal row wins; the Stop is satisfied by it.
         return Transition(outcome=Outcome.APPLIED, reply=_stop_applied(recorded))
+    stopping = _stop_without_jobs(reply, recorded, span, facts, now_ns=now_ns)
+    return replace(stopping, effects=(StopJobs(reply.reply_id), *stopping.effects))
+
+
+def _stop_without_jobs(
+    reply: Reply,
+    recorded: Reply,
+    span: Span | None,
+    facts: StopFacts,
+    *,
+    now_ns: int,
+) -> Transition:
+    """Apply a Stop recorded on a reply that has not ended, apart from its background work."""
+    if reply.state is ReplyState.WAITING:
+        # Its answer stands, ended by the cancel note; no span runs for it.
+        return _ended_by_stop(recorded, None, now_ns)
     unended = span if span is not None and not span.ended else None
     live = unended if facts.span_live else None
     if (
@@ -1515,12 +1642,26 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     ``span`` is the reply's current span, or its last one when none runs.
     A reply an approval holds goes too, and the deletion cancels that
     approval, as a Stop would: its settlement expires the cards and settles
-    the sources it holds.
+    the sources it holds. A reply that waits for background work, or whose
+    wake runs, keeps the answer it already gave, and that work is cancelled.
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     live = span is not None and span.span_id == reply.current_span_id and not span.ended
     current = span if live else None
+    if reply.approval_id is None and (
+        reply.state is ReplyState.WAITING or (span is not None and span.kind is SpanKind.WAKE)
+    ):
+        # The reply already answered: that answer stands, and the background work it waits for is cancelled.
+        updated, spans = _end_running(reply, current, SpanOutcome.CANCELLED)
+        cancel = () if current is None else (CancelSpan(current.span_id),)
+        owed = OwedWrite(reply.last_span_id, None)
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=_set_state(_stop_applied(updated), ReplyState.COMPLETED, now_ns, owed_write=owed),
+            spans=spans,
+            effects=(*cancel, SettleSources(reply.last_span_id, answered=False), StopJobs(reply.reply_id)),
+        )
     if reply.approval_id is None:
         # A regeneration a restart or retry left waiting for its replay still holds the answer it would replace.
         waiting = span if not live and span is not None and span.outcome in _SOURCES_PENDING_OUTCOMES else None
@@ -1654,6 +1795,9 @@ def removed_entity(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
+    if reply.state is ReplyState.WAITING:
+        # Its answer stands; the note it still shows waits for the entity's bot, as other writes it owes do.
+        return unhold(reply, now_ns=now_ns)
     spans: tuple[Span, ...] = ()
     updated = reply
     if span.span_id == reply.current_span_id and not span.ended:
@@ -1689,12 +1833,12 @@ def redactions_done(reply: Reply, event_ids: tuple[str, ...], *, now_ns: int) ->
 def record_stop_button(reply: Reply, *, event_id: str, membership_current: bool, now_ns: int) -> Transition:
     """Record the Stop button reaction sent for a running reply, or queue it for removal (I8).
 
-    A reply runs while active, and while paused with the span that waits in
-    place still current. A reply shows one button: one it already recorded is
+    A reply runs while active, while it waits for background work, and while
+    paused with the span that waits in place still current. A reply shows one button: one it already recorded is
     queued for removal. A button the room was left before it landed stays,
     as everything owed to that room is dropped.
     """
-    running = reply.state is ReplyState.ACTIVE or (
+    running = reply.state in {ReplyState.ACTIVE, ReplyState.WAITING} or (
         reply.state is ReplyState.PAUSED and reply.current_span_id is not None
     )
     if not running:

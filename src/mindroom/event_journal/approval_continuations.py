@@ -384,6 +384,14 @@ def _from_rows(
         history_scope=HistoryScope.from_metadata(stored["history_scope"]),
         origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
         memory_prompt=cast("str | None", stored["memory_prompt"]),
+        # LEGACY_COMPAT: Approval continuations without the background-job flag.
+        # Legacy format: a stored continuation context without the requires_background_tool_jobs key.
+        # Last legacy release: v2026.10.229; replacement: the unreleased background tool jobs write the key in every
+        # continuation context.
+        # Handling: a missing key reads as false, which every continuation of those releases was, since none of them
+        # could start background work; disabled-mode startup leaves such an approval to its ordinary recovery.
+        # Coverage:
+        # tests/test_background_tool_jobs_config.py::test_disabled_startup_parks_only_explicitly_marked_approvals.
         requires_background_tool_jobs=stored.get("requires_background_tool_jobs", False) is True,
         memory_thread_history=tuple(
             ApprovalMemoryTurn(

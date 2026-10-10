@@ -120,6 +120,7 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
         owed_write=OwedWrite("span-1", rl.NoteKind.ERROR, "boom"),
         reply_sequence=4,
         revision=7,
+        hold_key='{"recipient":"agent"}',
     )
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply))
 
@@ -701,6 +702,7 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         complete_turn=AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
+        settle_debt=lambda _reply_id: None,
     )
     await principal.replies.record_tool_call(
         span_id=first.span_id,
@@ -744,6 +746,7 @@ async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier
         complete_turn=AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
+        settle_debt=lambda _reply_id: None,
     )
     lost_regeneration = replace(
         first,
@@ -1008,6 +1011,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         complete_turn=AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=ended.append,
+        settle_debt=lambda _reply_id: None,
         spans=_Spans(),
     )
     with (
@@ -1060,6 +1064,7 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         complete_turn=AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
+        settle_debt=lambda _reply_id: None,
     )
     runtime.spans.expect(span.span_id)
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -1087,6 +1092,7 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         complete_turn=AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
+        settle_debt=lambda _reply_id: None,
         spans=spans,
     )
     await _delete(principal, "$source")
@@ -1309,6 +1315,7 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         complete_turn=AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
+        settle_debt=lambda _reply_id: None,
     )
     await runtime.take_ownership()
     stored = await alice.approval_continuation("approval-1")
@@ -1392,6 +1399,7 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         complete_turn=AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=ended.append,
+        settle_debt=lambda _reply_id: None,
     )
     committing = asyncio.Event()
     finish = PrincipalStore.finish_approval_continuation
@@ -1840,3 +1848,119 @@ async def test_finished_replies_are_kept_as_long_as_the_ledger_keeps_their_turns
     """Nothing reaches a finished reply after its turn is forgotten, so both retentions agree."""
     ledger_default = inspect.signature(HandledTurnLedger._cleanup_old_events).parameters["max_age_days"].default
     assert ledger_default * 24 * 60 * 60 * 1_000_000_000 == reply_scope._FINISHED_REPLY_RETENTION_NS
+
+
+_KEY = '{"recipient":"agent","room_id":"!room"}'
+
+
+def _wait(*, hold_key: str = _KEY) -> Decide:
+    def decide(reply: rl.Reply, span: rl.Span) -> rl.Transition:
+        write = rl.TerminalWrite(shown="answer", prepared_revision=reply.revision, state=ReplyState.WAITING)
+        return rl.wait(reply, span, write, hold_key=hold_key, now_ns=50)
+
+    return decide
+
+
+async def _waiting(principal: PrincipalStore, *, source: str = "$source", reply_id: str = "reply-1") -> rl.Reply:
+    """Return a reply that answered ``source`` and waits for its key's background work."""
+    await admit(principal, source)
+    await principal.replies.write_generation("gen-1")
+    claim = (await principal.replies.claim(_request(f"span-{reply_id}", reply_id=reply_id, source=source))).transition
+    assert claim.reply is not None
+    assert claim.claimed is not None
+    waited = await principal.replies.decide(reply_id=reply_id, span_id=claim.claimed.span_id, decide=_wait())
+    assert waited.transition.reply is not None
+    assert waited.transition.reply.state is ReplyState.WAITING
+    return waited.transition.reply
+
+
+async def test_an_owed_write_without_a_note_round_trips(journal_store: EventJournalStore) -> None:
+    """The write a reply owes once it stops waiting carries no note."""
+    principal = journal_store.principal(PRINCIPAL)
+    transition = _first_claim()
+    assert transition.reply is not None
+    owed = replace(transition.reply, owed_write=OwedWrite("span-1", None))
+    await _apply(journal_store, replace(transition, reply=owed))
+    loaded = await principal.replies.load("reply-1")
+    assert loaded is not None
+    assert loaded.owed_write == OwedWrite("span-1", None)
+
+
+async def test_a_newer_waiting_reply_takes_the_work_over(journal_store: EventJournalStore) -> None:
+    """At most one reply waits for a key's work: the newer one ends the older one, which keeps its answer."""
+    principal = journal_store.principal(PRINCIPAL)
+    await _waiting(principal)
+    other_key = await _waiting(principal, source="$elsewhere", reply_id="reply-3")
+    assert other_key.hold_key == _KEY
+    # The second wait above took reply-1 over too; a reply on another key is left alone.
+    first = await principal.replies.load("reply-1")
+    assert first is not None
+    assert first.state is ReplyState.COMPLETED
+    assert first.owed_write == OwedWrite("span-reply-1", None)
+
+    await admit(principal, "$later")
+    claim = (await principal.replies.claim(_request("span-reply-2", reply_id="reply-2", source="$later"))).transition
+    assert claim.claimed is not None
+    elsewhere = await principal.replies.decide(
+        reply_id="reply-2",
+        span_id=claim.claimed.span_id,
+        decide=_wait(hold_key='{"recipient":"other"}'),
+    )
+    assert elsewhere.post_commit == ()
+    taken = await principal.replies.load("reply-3")
+    assert taken is not None
+    assert taken.state is ReplyState.WAITING
+    assert [reply.reply_id for reply in await principal.replies.waiting()] == ["reply-2", "reply-3"]
+
+
+async def test_taking_work_over_owes_the_older_replys_end(journal_store: EventJournalStore) -> None:
+    """The older reply's final write is due after the takeover commits."""
+    principal = journal_store.principal(PRINCIPAL)
+    await _waiting(principal)
+    await admit(principal, "$later")
+    claim = (await principal.replies.claim(_request("span-reply-2", reply_id="reply-2", source="$later"))).transition
+    assert claim.claimed is not None
+    taken = await principal.replies.decide(reply_id="reply-2", span_id=claim.claimed.span_id, decide=_wait())
+    assert taken.post_commit == (replies.ReplyDebtDue("reply-1"),)
+
+
+async def test_a_wake_claims_the_waiting_reply_it_names(journal_store: EventJournalStore) -> None:
+    """A wake's sources are its own; the claim finds the reply by the wake's name for it."""
+    principal = journal_store.principal(PRINCIPAL)
+    await _waiting(principal)
+    wake = replace(
+        _request("span-wake", reply_id="unused", source="job-wake:reply-1:1"),
+        wake_reply_id="reply-1",
+    )
+    claim = (await principal.replies.claim(wake)).transition
+    assert claim.claimed is not None
+    assert claim.claimed.kind is SpanKind.WAKE
+    assert claim.claimed.reply_id == "reply-1"
+    woken = await principal.replies.load("reply-1")
+    assert woken is not None
+    assert woken.state is ReplyState.ACTIVE
+    assert woken.current_span_id == "span-wake"
+
+
+async def test_a_stop_records_its_job_cancellation_until_a_runtime_applies_it(journal_store: EventJournalStore) -> None:
+    """A Stop of an unfinished reply records that its work must be cancelled; retention drops what was never applied."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply = await _waiting(principal)
+    stopped = await _apply(
+        journal_store,
+        rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=60),
+    )
+    assert stopped.transition.reply is not None
+    assert stopped.transition.reply.state is ReplyState.CANCELLED
+    assert await principal.replies.job_stops() == ("reply-1",)
+    await principal.replies.forget_job_stop("reply-1")
+    assert await principal.replies.job_stops() == ()
+
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=stopped.transition.reply))
+    await journal_store.backend.write(
+        lambda tx: reply_messages.record_job_stop(tx, PRINCIPAL, "reply-1", now_ns=60),
+    )
+    flushed = replace(stopped.transition.reply, owed_write=None)
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=flushed))
+    assert await principal.replies.forget_finished(before_ns=10**18, limit=10) == 1
+    assert await principal.replies.job_stops() == ()

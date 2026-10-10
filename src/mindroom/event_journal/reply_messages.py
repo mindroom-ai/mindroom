@@ -42,7 +42,8 @@ _REPLY_COLUMNS = f"""
     event_id, state, current_span_id, last_span_id, presentation_json,
     possibly_shown_json, confirmed_seq, revision,
     placeholder_only, stop_receipt_order, stop_applied_receipt_order, stop_button_event_id,
-    redaction_pending_json, owed_write_json, reply_sequence, {_HELD_BY} AS approval_id, created_at_ns, updated_at_ns
+    redaction_pending_json, owed_write_json, reply_sequence, {_HELD_BY} AS approval_id, hold_key,
+    created_at_ns, updated_at_ns
 """
 
 
@@ -64,7 +65,7 @@ def _owed_json(owed: OwedWrite | None) -> str | None:
     if owed is None:
         return None
     return json.dumps(
-        {"span_id": owed.span_id, "note": owed.note, "text": owed.text},
+        {"span_id": owed.span_id, "note": None if owed.note is None else owed.note.value, "text": owed.text},
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -79,9 +80,10 @@ def _owed(stored: object) -> OwedWrite | None:
         raise TypeError(msg)
     data = cast("dict[str, object]", raw)
     text = data.get("text")
+    note = data.get("note")
     return OwedWrite(
         span_id=str(data["span_id"]),
-        note=NoteKind(str(data["note"])),
+        note=None if note is None else NoteKind(str(note)),
         text=text if isinstance(text, str) else None,
     )
 
@@ -115,6 +117,7 @@ def _reply(row: Row) -> Reply:
         redaction_pending=_ids(row["redaction_pending_json"]),
         approval_id=cast("str | None", row["approval_id"]),
         owed_write=_owed(row["owed_write_json"]),
+        hold_key=cast("str | None", row["hold_key"]),
     )
 
 
@@ -201,7 +204,7 @@ def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, no
         f"""
         SELECT {_REPLY_COLUMNS} FROM reply_messages
         WHERE principal_id = ? AND room_id = ?
-          AND (state IN ('active', 'paused') OR redaction_pending_json IS NOT NULL OR owed_write_json IS NOT NULL)
+          AND (state IN ('active', 'paused', 'waiting') OR redaction_pending_json IS NOT NULL OR owed_write_json IS NOT NULL)
         ORDER BY created_at_ns, reply_id
         """,  # noqa: S608 - a fixed column list
         (principal_id, room_id),
@@ -307,6 +310,11 @@ def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: i
     reply_ids = tuple(str(row["reply_id"]) for row in rows)
     if reply_ids:
         placeholders = ", ".join("?" for _ in reply_ids)
+        # A Stop's cancellation of background work no runtime applied in that time goes with its reply.
+        transaction.execute(
+            f"DELETE FROM reply_job_stops WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
+            (principal_id, *reply_ids),
+        )
         for table in ("reply_span_sources", "reply_tool_calls"):
             transaction.execute(
                 f"""
@@ -355,7 +363,7 @@ def open_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
     rows = transaction.fetchall(
         f"""
         SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages
-        WHERE state IN ('active', 'paused')
+        WHERE state IN ('active', 'paused', 'waiting')
         ORDER BY principal_id, created_at_ns, reply_id
         """,  # noqa: S608 - a fixed column list
     )
@@ -375,6 +383,43 @@ def with_pending_work(transaction: Transaction, principal_id: str) -> tuple[Repl
     return tuple(_reply(row) for row in rows)
 
 
+def waiting_on(transaction: Transaction, principal_id: str, hold_key: str) -> str | None:
+    """Return the reply that waits for one key's background work, if one does."""
+    row = transaction.fetchone(
+        "SELECT reply_id FROM reply_messages WHERE principal_id = ? AND state = 'waiting' AND hold_key = ?",
+        (principal_id, hold_key),
+    )
+    return None if row is None else str(row["reply_id"])
+
+
+def record_job_stop(transaction: Transaction, principal_id: str, reply_id: str, *, now_ns: int) -> None:
+    """Record, in a Stop's transaction, that the background work of a reply must be cancelled."""
+    transaction.execute(
+        """
+        INSERT INTO reply_job_stops (principal_id, reply_id, created_at_ns) VALUES (?, ?, ?)
+        ON CONFLICT (principal_id, reply_id) DO NOTHING
+        """,
+        (principal_id, reply_id, now_ns),
+    )
+
+
+def job_stops(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
+    """Return the replies whose background work a Stop cancelled and no job runtime applied yet, oldest first."""
+    rows = transaction.fetchall(
+        "SELECT reply_id FROM reply_job_stops WHERE principal_id = ? ORDER BY created_at_ns, reply_id",
+        (principal_id,),
+    )
+    return tuple(str(row["reply_id"]) for row in rows)
+
+
+def forget_job_stop(transaction: Transaction, principal_id: str, reply_id: str) -> None:
+    """Delete a reply's job cancellation once a job runtime applied it."""
+    transaction.execute(
+        "DELETE FROM reply_job_stops WHERE principal_id = ? AND reply_id = ?",
+        (principal_id, reply_id),
+    )
+
+
 def for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> Reply | None:
     """Return the most recently created reply a span of which answers any of these sources."""
     reply_id = reply_spans.newest_reply_id_for_sources(transaction, principal_id, event_ids)
@@ -390,8 +435,8 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             current_span_id, last_span_id, presentation_json, possibly_shown_json,
             confirmed_seq, revision, placeholder_only, stop_receipt_order,
             stop_applied_receipt_order, stop_button_event_id, redaction_pending_json,
-            owed_write_json, reply_sequence, created_at_ns, updated_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            owed_write_json, reply_sequence, hold_key, created_at_ns, updated_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
             membership_epoch = excluded.membership_epoch,
             event_id = excluded.event_id,
@@ -409,6 +454,7 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             redaction_pending_json = excluded.redaction_pending_json,
             owed_write_json = excluded.owed_write_json,
             reply_sequence = excluded.reply_sequence,
+            hold_key = excluded.hold_key,
             updated_at_ns = excluded.updated_at_ns
         """,
         (
@@ -433,6 +479,7 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             _ids_json(reply.redaction_pending),
             _owed_json(reply.owed_write),
             reply.reply_sequence,
+            reply.hold_key,
             reply.created_at_ns,
             reply.updated_at_ns,
         ),
@@ -464,7 +511,7 @@ def has_unresolved_create(transaction: Transaction, principal_id: str, room_id: 
         """
         SELECT 1 AS present FROM reply_messages AS reply
         WHERE reply.principal_id = ? AND reply.room_id = ? AND reply.event_id IS NULL
-          AND reply.state IN ('active', 'paused')
+          AND reply.state IN ('active', 'paused', 'waiting')
           AND EXISTS (
             SELECT 1 FROM matrix_delivery_outbox AS row
             WHERE row.principal_id = reply.principal_id AND row.reply_id = reply.reply_id

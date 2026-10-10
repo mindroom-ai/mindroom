@@ -21,6 +21,7 @@ from mindroom.reply_lifecycle import (
     Reply,
     SettleSources,
     Span,
+    StopJobs,
     Transition,
 )
 
@@ -65,8 +66,15 @@ class ApprovalEnded:
     reply_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReplyDebtDue:
+    """After commit: another reply's transition ended this reply, which owes Matrix the write that shows it."""
+
+    reply_id: str
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted | ReplyDebtDue
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -115,8 +123,8 @@ def apply(transaction: Transaction, principal_id: str, transition: Transition) -
             reply_id=None if transition.reply is None else transition.reply.reply_id,
             reason=transition.unmodeled,
         )
+    post_commit = list(_take_over(transaction, principal_id, transition))
     reply_messages.persist(transaction, principal_id, transition)
-    post_commit: list[PostCommitEffect] = []
     for effect in transition.effects:
         _run(transaction, principal_id, transition, effect, post_commit)
     if transition.reply is not None:
@@ -124,6 +132,23 @@ def apply(transaction: Transaction, principal_id: str, transition: Transition) -
         if held != transition.reply.approval_id:
             transition = replace(transition, reply=replace(transition.reply, approval_id=held))
     return AppliedTransition(transition=transition, post_commit=tuple(post_commit))
+
+
+def _take_over(transaction: Transaction, principal_id: str, transition: Transition) -> tuple[PostCommitEffect, ...]:
+    """End the reply that waits for the same work as one that starts waiting now, before the newer one is saved.
+
+    At most one reply waits for a key's work, so the newer reply takes it over and the older one keeps its answer.
+    """
+    reply = transition.reply
+    if not transition.applied or reply is None or reply.state is not rl.ReplyState.WAITING or reply.hold_key is None:
+        return ()
+    waiting = reply_messages.waiting_on(transaction, principal_id, reply.hold_key)
+    if waiting is None or waiting == reply.reply_id:
+        return ()
+    older = reply_messages.lock(transaction, principal_id, waiting)
+    assert older is not None, "the reply waiting on a key exists"
+    taken = apply(transaction, principal_id, rl.unhold(older, now_ns=reply.updated_at_ns))
+    return (*taken.post_commit, ReplyDebtDue(waiting))
 
 
 def _run(
@@ -160,6 +185,8 @@ def _run(
             post_commit.append(WakeApproval(approval_id))
         case CancelSpan():
             post_commit.append(effect)
+        case StopJobs(reply_id=reply_id):
+            reply_messages.record_job_stop(transaction, principal_id, reply_id, now_ns=time.time_ns())
         case _:
             msg = f"Reply effect {effect!r} has no transactional owner yet"
             raise NotImplementedError(msg)
@@ -339,8 +366,9 @@ def claim(
 ) -> AppliedTransition:
     """Find the reply a span continues and claim it, in one transaction.
 
-    The reply is the one a selection's acknowledgement span belongs to, else
-    the one bound to ``existing_event_id``, else the one owning the sources.
+    The reply is the waiting reply a wake names, else the one a selection's
+    acknowledgement span belongs to, else the one bound to
+    ``existing_event_id``, else the one owning the sources.
     """
     interactive = (
         None
@@ -348,7 +376,9 @@ def claim(
         else reply_spans.load(transaction, principal_id, request.interactive_span_id)
     )
     reply: Reply | None = None
-    if interactive is not None:
+    if request.wake_reply_id is not None:
+        reply = reply_messages.lock(transaction, principal_id, request.wake_reply_id)
+    if reply is None and interactive is not None:
         reply = reply_messages.lock(transaction, principal_id, interactive.reply_id)
     if reply is None and existing_event_id is not None:
         found = reply_messages.for_event(transaction, principal_id, existing_event_id)
@@ -983,6 +1013,22 @@ class ReplyStore:
         """Return replies owing a redaction or a note not yet enqueued."""
         return await self._backend.read(
             lambda transaction: reply_messages.with_pending_work(transaction, self._principal_id),
+        )
+
+    async def waiting(self) -> tuple[Reply, ...]:
+        """Return the replies that wait for background work, oldest first."""
+        return await self._backend.read(
+            lambda transaction: reply_messages.in_states(transaction, self._principal_id, (rl.ReplyState.WAITING,)),
+        )
+
+    async def job_stops(self) -> tuple[str, ...]:
+        """Return the replies whose background work a Stop cancelled and no job runtime applied yet."""
+        return await self._backend.read(lambda transaction: reply_messages.job_stops(transaction, self._principal_id))
+
+    async def forget_job_stop(self, reply_id: str) -> None:
+        """Delete a reply's job cancellation once a job runtime applied it."""
+        await self._backend.write(
+            lambda transaction: reply_messages.forget_job_stop(transaction, self._principal_id, reply_id),
         )
 
     async def has_unresolved_rows(self, reply_id: str) -> bool:

@@ -30,16 +30,17 @@ Every fact about an AI reply has one owner and one writer; other stores hold onl
 | Journal | Whether each event is pending or settled: the work queue of one Matrix identity. |
 | Agent history (Agno session runs) | The conversation the model sees, with each run's sources and the event that shows its answer; a regeneration prunes the run it replaces once it claims the reply. |
 | Outbox (`matrix_delivery_outbox`) | Transport for every Matrix write: key, room, thread, membership epoch, transaction id, frozen payload, continuation segments, edit target, attempt, device, acknowledgement, permanent failure, fence, and for a reply row its owner (`reply_id`, `span_id`, `reply_sequence`), with no reply meaning. |
+| Reply job stops (`reply_job_stops`) | A Stop's cancellation of the background work a reply started or waits for, until the job runtime applied it. |
 | Approval run (`approval_continuations`, calls, cards, grants) | Consent and the Agno payload: the approval id, the span whose pause created it (`span_id`), the span that claims it (`claim_span_id`), generation, calls and decisions, publication lease, `waiting`, `ready`, or `failing`, failure text, and the run snapshot. Its room, thread, event, entity, held sources, and visibility are read from that paused span and its reply, and the hold on that reply is read from it. |
 
 ## Records
 
 A reply (`reply_messages`) is one visible message in one room, with its event id once Matrix created it.
-Its state is `active`, `paused` (waiting for an approval decision), or terminal: `completed`, `cancelled`, `failed`, or `gone` (removed from the room, or never shown).
-It holds the canonical presentation, the possibly-shown presentation of its latest write with that write's sequence (a final transform's reshaped display, when one reshaped the answer), the confirmed sequence Matrix acknowledged, the Stop it recorded and whether it was applied, the Stop button's event id, redactions it still owes, and a note it owes but has not enqueued.
+Its state is `active`, `paused` (waiting for an approval decision), `waiting` (answered, while background work it left outstanding runs), or terminal: `completed`, `cancelled`, `failed`, or `gone` (removed from the room, or never shown).
+It holds the hold key that names whose background work it waits for, set when it first waits and kept after, the canonical presentation, the possibly-shown presentation of its latest write with that write's sequence (a final transform's reshaped display, when one reshaped the answer), the confirmed sequence Matrix acknowledged, the Stop it recorded and whether it was applied, the Stop button's event id, redactions it still owes, and a note it owes but has not enqueued.
 The approval that holds it is read with it from the continuations and never written to it.
 
-A span (`reply_spans`, `reply_span_sources`) is one execution that writes a reply: `turn`, `replay`, `regeneration`, or `approval_resume`.
+A span (`reply_spans`, `reply_span_sources`) is one execution that writes a reply: `turn`, `replay`, `regeneration`, `approval_resume`, or `wake`.
 It records its delivery id, the journal sources it answers, the bot generation that claimed it, the reply's write sequence at claim, a rollback snapshot for regenerations, and its outcome once it ends: `completed`, `cancelled`, `failed`, `paused`, `released`, `superseded`, `lost`, `suppressed`, or `restored` (a regeneration that put the old answer back).
 At most one span is current per reply.
 
@@ -70,6 +71,7 @@ A claim runs under the conversation lock after the turn's first source gate and 
 - A last span ended `released` or `lost`: a `replay`, or the same regeneration re-run.
 - A last span ended `superseded`: a span of the same kind.
 - Unresolved durable writes, an owed note, or an approval that still holds a reply after its Stop or end: `deferred`; their resolution, or the approval's end, retries the sources.
+- A wake names its waiting reply: a `wake` span continues it, as does the retry of a wake that ended `released` or `lost`; a reply that stopped waiting runs nothing for it, and only its wake continues a waiting reply.
 
 The edit regenerator decides which edits reach a claim: only an edit of the latest message of its conversation, with no later message from someone other than an agent, whose reply showed something and is not `gone`.
 It records a Stop on that reply first when a span still runs for it or an approval holds it, and its claim then waits for the conversation lock that span holds and for the approval the Stop fenced to end.
@@ -91,7 +93,9 @@ A Stop on an event commits on the reply it names; the turn ledger does not hold 
 A current span this instance runs is cancelled through the `SpanRegistry`; a span nobody runs ends at once with the cancel note owed.
 A Stop on an event whose create is still unacknowledged waits in `pending_reply_stops` and applies when the create is acknowledged.
 A Stop after the terminal row is satisfied by it.
-The Stop button belongs to the reply: it is recorded when sent and redacted when the reply leaves `active`, except while a span waits in place for an approval.
+The Stop button belongs to the reply: it is recorded when sent and redacted when the reply leaves `active`, except while a span waits in place for an approval or the reply waits for background work.
+A Stop of a reply that has not ended also records, in its commit, that the background work the reply started or waits for must be cancelled; the job runtime cancels that work and deletes the record.
+A Stop of a waiting reply ends it `cancelled` with the cancel note.
 
 ## Approvals
 
@@ -112,6 +116,17 @@ A message waiting behind a hold rechecks every 30 seconds that its approval stil
 Its finish, release, or discard applies the reply rule while the continuation still exists and deletes the continuation in the same transaction.
 A release hands the run's sources back to replay, unless a Stop is recorded: the reply then ends cancelled instead of replaying what the user stopped.
 A restart leaves a reply an approval holds to approval recovery, including a span approved in place that an older instance ran.
+
+## Background work
+
+A span whose response boundary leaves background work outstanding, with nothing ready, ends with its answer through `wait`: its sources settle answered, and the reply becomes `waiting` with the key whose work it waits for.
+The wait's row is an edit that shows the answer with the waiting note, or the reply's create shows it when it is the first visible message; the reply's terminal row comes from a wake's finish or from the end of the wait.
+A reply an approval holds never waits: its span finishes, and the key's next reply takes the work.
+At most one reply waits for a key: a newer reply that starts waiting on it ends the older one, in the same commit and before the newer one is saved.
+A wait that ends, because a newer reply took the work over, no work is left, or the entity was removed, ends the reply `completed` through `unhold`, owing the write that shows its answer without the waiting note.
+A wake is a journal source the job runtime admits for a waiting reply whose work is ready; its span continues the reply below what it showed, carries the turn's logical sources, and ends like any span, waiting again or finishing.
+A wake an interruption or restart cut short keeps its source pending, so the journal retries it, and the retry continues as a replay does, told which calls it already made.
+A waiting reply does not hold its conversation: later messages are answered as usual.
 
 ## Interrupted responses
 
@@ -139,7 +154,8 @@ A replay that a newer message from the same requester supersedes settles its sou
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
 Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit, which records the reply and the span it cancelled; the bot then cancels exactly that span and redacts what the reply showed, and wakes the approval that held the reply, which it fenced; a written answer is kept, including the finished answer an edit was regenerating before the regeneration showed anything.
-An entity removed from the configuration has no bot: its open replies end `failed` without Matrix writes, and their sources settle unanswered; a reply an approval holds is left to that approval, whose discard ends it, or whose owner settles it on coming back.
+Deleting every message a waiting reply answers, or the one its running wake continues, ends the reply `completed` with its answer kept and cancels its background work.
+An entity removed from the configuration has no bot: its open replies end without Matrix writes, a waiting one `completed` and the others `failed` with their sources settled unanswered; a reply an approval holds is left to that approval, whose discard ends it, or whose owner settles it on coming back.
 A removed entity's reply keeps the notes and redactions it still owes Matrix, which its bot delivers if the entity comes back.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.
 
@@ -164,6 +180,8 @@ The behavior below follows from deliberate decisions; a change that would restor
 
 - A restart continues an interrupted reply in place below what it showed, and a retried regeneration rewrites the same message; neither starts a second message, given an upgrade that runs while no reply is in flight.
 - An approval pauses and holds its reply and its conversation: later messages to that agent in that conversation wait, as behind a running reply, until the approval ends; no approval holds the room's event lane.
+- A reply that waits for background work does not hold its conversation, and a newer reply that reaches its boundary with that work outstanding takes it over.
+- A reply an approval holds never waits for background work; the key's next reply takes the work it leaves outstanding.
 - Deleting the message a reply answers while an approval holds it cancels that approval, as a Stop would, and removes the reply.
 - An edit regenerates only the reply to the latest message of its conversation, and only when that reply showed something and it is not `gone`; any other edit changes no reply.
 - An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.
@@ -218,10 +236,10 @@ Journal writes:
 - I2. Durable writes of a reply are sent in sequence by its one sending owner; an attempted write is resolved before a later one is sent.
 - I3. A terminal reply's state and answer change only by a regeneration claim, a failed terminal write, a completed redaction, a late create bound for redaction, or the note it owes.
 - I4. A recorded Stop is eventually applied, unless a terminal row was enqueued before it.
-- I5. Every non-terminal reply has a durable path to progress: pending span sources, an approval continuation, or `owner_lost`.
+- I5. Every non-terminal reply has a durable path to progress: pending span sources, an approval continuation, its wait, which the job runtime wakes or ends, or `owner_lost`.
 - I6. A span's sources settle with its terminal transition, except spans that hand them to a continuation, a retry, or a replay.
 - I7. Every reply write is recorded before it is sent.
-- I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place.
+- I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place or the reply waits for background work.
 - I-S1. Every reply fact in the ownership table is read from reply records or a cache of them; no other store writes it.
 - I-S2. A reply settles its journal sources only through `SettleSources`, which marks the turn they index answered in the same transaction when the reply answered them, including a finished approval's paused span; deleted sources, sources that became terminal without an answer, and those of a removed entity or of an approval whose owner is gone settle unanswered.
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
@@ -235,6 +253,6 @@ Journal writes:
 - I16. A reply waiting to replay its original source has not had its turn recorded answered, which would suppress that replay.
 - I17. No source is answered twice, one turn has one reply, and a reply writes only for its current span or, for a note it owes, its last.
 
-`tests/test_reply_lifecycle_fuzz.py` checks I1, I7, I9, I10, I13, I15, I16, I17, and that a paused reply is held, over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, and dropped replays.
+`tests/test_reply_lifecycle_fuzz.py` checks I1, I7, I9, I10, I13, I15, I16, I17, that a paused reply is held, and that a waiting reply answered and runs nothing, over random interleavings of claims, writes, acknowledgements, Stops, restarts, regenerations, approval decisions, resumes and recoveries, deletions, departures, entity removal, retention, supersessions, dropped replays, waits, wakes, takeovers, and job cancellations, also from a reply that starts out waiting.
 It keeps continuations as rows the hold is derived from, regenerates a running or held reply by stopping it first as the edit regenerator does, defers claims through the shared blocking predicate, and ends every run by draining every owner.
 The unit tests cover stale and retired spans and the remaining rules.

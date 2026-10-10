@@ -27,9 +27,17 @@ from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
+    upgrade_reply_waits,
 )
 from .offloading import ThreadOffload, settled
-from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
+from .schema import (
+    OUTBOX_TABLE,
+    REPLY_MESSAGES_TABLE,
+    REPLY_SPANS_TABLE,
+    SQLITE_DIALECT,
+    render,
+    schema_statements,
+)
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 if TYPE_CHECKING:
@@ -200,6 +208,14 @@ class SqliteBackend:
                 _SqliteTransaction(connection),
                 outbox_columns,
                 outbox_table_ddl=OUTBOX_TABLE,
+                sqlite=True,
+            )
+            reply_columns = frozenset(str(row[1]) for row in connection.execute("PRAGMA table_info(reply_messages)"))
+            upgrade_reply_waits(
+                _SqliteTransaction(connection),
+                reply_columns,
+                reply_messages_ddl=REPLY_MESSAGES_TABLE,
+                reply_spans_ddl=REPLY_SPANS_TABLE,
                 sqlite=True,
             )
             continuation_columns = frozenset(

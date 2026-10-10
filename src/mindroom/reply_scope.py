@@ -27,6 +27,7 @@ from mindroom.event_journal.replies import (
     ApprovalEnded,
     Decide,
     ReplyCreation,
+    ReplyDebtDue,
     TurnCompleted,
     WakeApproval,
 )
@@ -262,6 +263,8 @@ class ReplyRuntime:
     hold_conversation: Callable[[ApprovalContinuation], None]
     # Releases the conversation the ended approval held, and settles what its reply owes.
     approval_ended: Callable[[ApprovalEnded], None]
+    # Delivers what a reply another reply's transition ended owes Matrix.
+    settle_debt: Callable[[str], None]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -290,6 +293,8 @@ class ReplyRuntime:
                 if isinstance(effect, ApprovalEnded):
                     self.claim_may_proceed(effect.reply_id)
                     self.approval_ended(effect)
+                elif isinstance(effect, ReplyDebtDue):
+                    self.settle_debt(effect.reply_id)
             for effect in effects:
                 if isinstance(effect, rl.CancelSpan):
                     self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
@@ -466,6 +471,7 @@ class ReplyRuntime:
         driving_edit_id: str | None = None,
         existing_event_id: str | None = None,
         interactive_span_id: str | None = None,
+        wake_reply_id: str | None = None,
     ) -> SpanHandle | ClaimRefused:
         """Claim the reply one span answers, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
@@ -477,6 +483,7 @@ class ReplyRuntime:
             empty=empty,
             driving_edit_id=driving_edit_id,
             interactive_span_id=interactive_span_id,
+            wake_reply_id=wake_reply_id,
         )
         # The claim may continue the span a selection's acknowledgement created instead of opening its own.
         candidates = (request.span_id,) if interactive_span_id is None else (request.span_id, interactive_span_id)
@@ -541,6 +548,7 @@ class ReplyRuntime:
         empty: Presentation,
         driving_edit_id: str | None = None,
         interactive_span_id: str | None = None,
+        wake_reply_id: str | None = None,
     ) -> rl.ClaimRequest:
         return rl.ClaimRequest(
             span_id=_new_id(),
@@ -556,6 +564,7 @@ class ReplyRuntime:
             empty_presentation=encode_presentation(empty),
             driving_edit_id=driving_edit_id,
             interactive_span_id=interactive_span_id,
+            wake_reply_id=wake_reply_id,
         )
 
     async def claim_approval_resume(
@@ -667,7 +676,16 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=replace(empty, segments=()))
     if span.kind is rl.SpanKind.APPROVAL_RESUME:
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=continued_by(canonical, span.span_id))
-    # A replay continues below what the stopped attempt may have shown: its work, then the restart note.
+    if (
+        span.kind is rl.SpanKind.WAKE
+        and shown.trailing_note is not None
+        and shown.trailing_note.note is NoteKind.JOB_WAIT
+    ):
+        # The reply's latest write is its wait: the wake answers below what it showed, without the waiting note.
+        base = replace(shown, trailing_note=None, placeholder=empty.placeholder, show_tool_calls=empty.show_tool_calls)
+        return SpanHandle(runtime=runtime, span=span, reply=reply, base=base)
+    # A replay, or a wake an interruption cut short, continues below what the stopped attempt may have shown: its
+    # work, then the restart note.
     restarted = after_restart(shown)
     work = restarted.segments[0] if restarted.segments else None
     base = restarted if work is not None else replace(empty, segments=())
@@ -827,11 +845,14 @@ def terminal_write(
     *,
     state: rl.ReplyState,
     frozen_display: Presentation | None = None,
+    hold_key: str | None = None,
 ) -> ReplyWrite:
-    """Return the span's terminal row for one reply state, as finish, stopped, or a delivery failure decides it.
+    """Return the span's terminal row for one reply state, as finish, stopped, wait, or a delivery failure decides it.
 
     ``ACTIVE`` is the note an interruption shows before delivery started: an
-    edit that keeps the reply's sources pending.
+    edit that keeps the reply's sources pending. ``WAITING`` is the answer of a
+    span that leaves background work outstanding, an edit that keeps the reply
+    open for that work, whose ``hold_key`` it names.
     """
     write = rl.TerminalWrite(
         shown=encode_presentation(shown),
@@ -845,6 +866,9 @@ def terminal_write(
         now_ns = time.time_ns()
         if write.state is rl.ReplyState.COMPLETED:
             return rl.finish(reply, span, write, now_ns=now_ns)
+        if write.state is rl.ReplyState.WAITING:
+            assert hold_key is not None, "a waiting reply names the work it waits for"
+            return rl.wait(reply, span, write, hold_key=hold_key, now_ns=now_ns)
         if write.state is rl.ReplyState.CANCELLED:
             return rl.stopped(reply, span, write, now_ns=now_ns)
         return rl.fail(reply, span, write, now_ns=now_ns)
@@ -852,7 +876,7 @@ def terminal_write(
     return ReplyWrite(
         span=handle.span,
         handle=handle,
-        stage=rl.WriteStage.EDIT if state is rl.ReplyState.ACTIVE else rl.WriteStage.FINAL,
+        stage=rl.WriteStage.EDIT if state in {rl.ReplyState.ACTIVE, rl.ReplyState.WAITING} else rl.WriteStage.FINAL,
         shown=shown,
         # A note is not a placeholder: a later suppression must not redact it.
         placeholder_only=render_body(shown)[0] == shown.placeholder,
