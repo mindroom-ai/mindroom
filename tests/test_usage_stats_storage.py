@@ -324,6 +324,28 @@ def test_reader_since_skips_sessions_without_recent_usage(tmp_path: Path) -> Non
     assert len([row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]) == 2
 
 
+def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_path: Path) -> None:
+    """One corrupt usage row must not hide the rest of the store from a dated read."""
+    database = tmp_path / "code.db"
+    _create_database(
+        database,
+        runs=[{**_run(), "run_id": "recent", "created_at": datetime(2026, 10, 2, tzinfo=UTC).timestamp()}],
+    )
+    source = _source(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (?, ?, ?)",
+            ("session-1", "broken", "{not json"),
+        )
+
+    rows = list(iter_usage_storage_rows(source, since=datetime(2026, 9, 30, tzinfo=UTC).timestamp()))
+
+    (row,) = rows
+    assert isinstance(row, UsageSessionRow)
+    assert [run.run_id for run in row.runs] == ["recent"]
+    assert row.runs_available is False
+
+
 def test_reader_uses_run_table_timestamp_when_dict_payload_omits_it(tmp_path: Path) -> None:
     """Agno's fallback timestamp remains available even when run_data omits it."""
     storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")

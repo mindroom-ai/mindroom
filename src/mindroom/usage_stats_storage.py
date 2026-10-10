@@ -60,6 +60,10 @@ _REQUIRED_COLUMNS = frozenset(
     {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
 )
 _USAGE_REQUIRED_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
+# Malformed snapshots stay in a dated read, so the reader reports them instead of SQLite failing the whole store.
+_USAGE_SINCE_CONDITION = (
+    "CASE WHEN json_valid(usage_data) THEN json_extract(usage_data, '$.created_at') >= ? ELSE 1 END"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,7 +503,7 @@ def iter_usage_storage_rows(
                 # A dated read visits only sessions with a usage snapshot in range.
                 query += (
                     f" WHERE session_id IN (SELECT session_id FROM {quote_identifier(usage_table)} "  # noqa: S608
-                    "WHERE json_extract(usage_data, '$.created_at') >= ?)"
+                    f"WHERE {_USAGE_SINCE_CONDITION})"
                 )
                 parameters = (since,)
             for row in connection.execute(query, parameters):
@@ -611,7 +615,7 @@ def _read_runs(
     )
     parameters: tuple[object, ...] = (session_id,)
     if since is not None:
-        query += " AND json_extract(usage_data, '$.created_at') >= ?"
+        query += f" AND {_USAGE_SINCE_CONDITION}"
         parameters = (session_id, since)
     runs: list[UsageRunNode] = []
     runs_available = True
