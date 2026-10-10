@@ -16,7 +16,7 @@ from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 from mindroom.turn_origin import TurnIntent
 
@@ -148,7 +148,7 @@ class _QueuedMessageState:
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
-    human_signal: HumanMessageSignal = field(default_factory=HumanMessageSignal)
+    turn_signal: QueuedTurnSignal = field(default_factory=QueuedTurnSignal)
 
     def __post_init__(self) -> None:
         self._idle_event.set()
@@ -181,14 +181,14 @@ class _QueuedMessageState:
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
         self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
         self._event.set()
-        self.human_signal.notify()
+        self.turn_signal.notify()
         return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
             return
         del self._pending_messages[source_event_id]
-        self.human_signal.settle()
+        self.turn_signal.settle()
         if self.pending_human_messages == 0:
             self._event.clear()
 
@@ -197,7 +197,7 @@ class _QueuedMessageState:
         if notice.human:
             self.consume_waiting_human_message(notice.source_event_id)
         else:
-            self.human_signal.settle()
+            self.turn_signal.settle()
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -446,7 +446,7 @@ class ResponseLifecycleCoordinator:
             return _TurnNotice(source_event_id, human=True)
         # Any queued turn ends the running reply's waits inside its model run, so the reply finishes and its message
         # holds the outstanding work while this turn runs.
-        queued_signal.human_signal.notify()
+        queued_signal.turn_signal.notify()
         return _TurnNotice(source_event_id, human=False)
 
     def _consume_queued_human_notice(
@@ -565,7 +565,7 @@ class ResponseLifecycleCoordinator:
                 notice = None
                 queued_signal.mid_turn_gate = mid_turn_gate
                 with (
-                    human_message_signal_context(queued_signal.human_signal),
+                    queued_turn_signal_context(queued_signal.turn_signal),
                     queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context,
                 ):
                     try:

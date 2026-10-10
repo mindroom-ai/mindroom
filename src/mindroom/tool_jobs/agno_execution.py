@@ -1,4 +1,4 @@
-"""One accepted owner around Agno's already-approved application FunctionCall."""
+"""One accepted owner around Agno's application FunctionCall, which also asks for the approval of a job-gated call."""
 
 from __future__ import annotations
 
@@ -509,7 +509,7 @@ def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
 
 
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
-    """Wrap one approved SDK executor with admission and exact consumption."""
+    """Wrap one SDK executor with admission, a job-gated call's approval, and exact consumption."""
 
     async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: PLR0911 - Keep admission and cleanup together.
         context = get_tool_runtime_context()

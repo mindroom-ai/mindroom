@@ -22,7 +22,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.shell_execution import discard_background_record
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
@@ -215,8 +215,8 @@ async def test_shell_rejects_extra_wait_before_side_effect(tmp_path: Path, shell
 async def test_human_followup_keeps_shell_under_native_wait(tmp_path: Path, shell_runtime: _ShellRuntime) -> None:
     """A human signal cannot wrap an excluded process in a second background handle."""
     actor, model, runtime, owner, _ = shell_runtime
-    signal = HumanMessageSignal()
-    with human_message_signal_context(signal):
+    signal = QueuedTurnSignal()
+    with queued_turn_signal_context(signal):
         pending = asyncio.create_task(
             _invoke(
                 actor,

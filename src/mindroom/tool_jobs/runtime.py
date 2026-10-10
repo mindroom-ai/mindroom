@@ -22,9 +22,9 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import (
     JobControl,
-    current_human_message_signal,
-    human_message_signal_context,
+    current_queued_turn_signal,
     job_control_context,
+    queued_turn_signal_context,
 )
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
@@ -277,8 +277,8 @@ class ToolJobRuntime:
         # Whether a Stop recorded for the reply that owns a job still waits to be applied to it.
         self._stopped = stopped
         self._entries: dict[str, _Entry] = {}
-        # Per-turn lookups read these instead of scanning every entry; `_add_entry` and `_remove_entry` keep them.
-        # Sources are keyed by a job's recipient and the turn that started it.
+        # Conversation lookups read this instead of scanning every entry; `_add_entry` and `_remove_entry` keep it.
+        # Jobs are keyed by their recipient, room, thread, and requester.
         self._by_conversation = _EntryIndex[tuple[str, str | None, str | None, str | None]]()
         self._lock = asyncio.Lock()
         self._closed = False
@@ -491,7 +491,7 @@ class ToolJobRuntime:
             try:
                 with (
                     # Human follow-ups release replies, never the background work they wait for.
-                    human_message_signal_context(None),
+                    queued_turn_signal_context(None),
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     without_tool_call_recording(),
                     job_control_context(entry.control),
@@ -572,9 +572,9 @@ class ToolJobRuntime:
                 entry.notify_changed()
 
             # Only the waiting reply's own conversation releases it, when its agent answers a newer message there.
-            human_signal = current_human_message_signal()
-            if human_signal is not None:
-                human_signal.subscribe(notify_human)
+            turn_signal = current_queued_turn_signal()
+            if turn_signal is not None:
+                turn_signal.subscribe(notify_human)
         try:
             while True:
                 async with self._lock:
@@ -592,8 +592,8 @@ class ToolJobRuntime:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(changed.wait(), remaining)
         finally:
-            if human_signal is not None:
-                human_signal.unsubscribe(notify_human)
+            if turn_signal is not None:
+                turn_signal.unsubscribe(notify_human)
             if not retained:
                 await self.release_wait(job_id, claim)
 

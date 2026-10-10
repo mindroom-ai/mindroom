@@ -42,7 +42,7 @@ from mindroom.response_turn import (
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.consumption import set_consumption_storage
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
@@ -113,7 +113,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     storage_file = str(tmp_path / "restart.db")
 
     def storage_factory() -> SqliteDb:
@@ -151,7 +151,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     restored = None
     final_storage = None
     try:
-        with tool_runtime_context(context), human_message_signal_context(signal):
+        with tool_runtime_context(context), queued_turn_signal_context(signal):
             original_task = asyncio.create_task(start_original())
             await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()

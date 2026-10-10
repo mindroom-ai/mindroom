@@ -26,7 +26,7 @@ from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import end_tool_call_approval
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -169,11 +169,11 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
     )
     install_tool_job_execution(model, depth=1)
     actor = Agent(id="leader", model=model, tools=[assembled_function(slow_child_tool)], telemetry=False)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     task = None
     try:
         async with execution_resources():
-            with tool_runtime_context(context), human_message_signal_context(signal):
+            with tool_runtime_context(context), queued_turn_signal_context(signal):
                 task = asyncio.create_task(actor.arun("Work", session_id=context.session_id, metadata={}))
                 await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                 signal.notify()

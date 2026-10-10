@@ -31,7 +31,7 @@ from mindroom.response_turn import (
 )
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
@@ -211,7 +211,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     storage_file = str(tmp_path / "turns.db")
 
     def storage_factory() -> SqliteDb:
@@ -241,7 +241,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     first_pending = None
     second_pending = None
     try:
-        with tool_runtime_context(context), human_message_signal_context(signal):
+        with tool_runtime_context(context), queued_turn_signal_context(signal):
             first_pending = asyncio.create_task(run_turn("Start the report"))
             await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()
@@ -263,7 +263,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
                 ModelResponse(content="The retained report was retrieved."),
             ],
         )
-        with tool_runtime_context(context), human_message_signal_context(signal):
+        with tool_runtime_context(context), queued_turn_signal_context(signal):
             second_pending = asyncio.create_task(run_turn("Check the earlier report"))
             await asyncio.wait_for(model.list_observed.wait(), JOB_TEST_TIMEOUT)
             assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"

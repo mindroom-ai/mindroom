@@ -12,7 +12,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.tool_jobs import runtime as runtime_module
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context, job_checkpoint
+from mindroom.tool_jobs.control import QueuedTurnSignal, job_checkpoint, queued_turn_signal_context
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
 from tests.tool_job_helpers import (
@@ -722,7 +722,7 @@ async def test_failed_admission_leaves_no_execution(
 async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: Path) -> None:
     """A human follow-up releases only the waiter while one execution crosses later checkpoints."""
     runtime = await tool_job_runtime(tmp_path)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     running, proceed, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
     calls = 0
 
@@ -746,7 +746,7 @@ async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: 
             operation=operation,
         )
         await running.wait()
-        with human_message_signal_context(signal):
+        with queued_turn_signal_context(signal):
             waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
         await asyncio.sleep(0)
         signal.notify()
@@ -1463,7 +1463,7 @@ async def test_invalid_wait_budget_cannot_claim_result(tmp_path: Path, budget: o
 async def test_repeated_human_followups_release_each_wait_until_their_reply_starts(tmp_path: Path) -> None:
     """A prior follow-up cannot permanently detach later turns from the same job."""
     runtime = await tool_job_runtime(tmp_path)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     finish = asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -1481,7 +1481,7 @@ async def test_repeated_human_followups_release_each_wait_until_their_reply_star
             operation=operation,
         )
         for _ in range(2):
-            with human_message_signal_context(signal):
+            with queued_turn_signal_context(signal):
                 waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(waiter), 0.02)

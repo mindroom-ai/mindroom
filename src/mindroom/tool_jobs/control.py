@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class HumanMessageSignal:
+class QueuedTurnSignal:
     """Release a reply's waits inside its model run while newer messages or turns wait for its conversation.
 
     Releasing such a wait never stops the work: the reply finishes its run, and its message holds what is still
@@ -63,17 +63,17 @@ class JobControl:
             raise asyncio.CancelledError
 
 
-_human_signal: ContextVar[HumanMessageSignal | None] = ContextVar("job_human_signal", default=None)
+_human_signal: ContextVar[QueuedTurnSignal | None] = ContextVar("job_human_signal", default=None)
 _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
 
 
-def current_human_message_signal() -> HumanMessageSignal | None:
+def current_queued_turn_signal() -> QueuedTurnSignal | None:
     """Return the signal of the reply this task belongs to; background work has none."""
     return _human_signal.get()
 
 
 @contextmanager
-def human_message_signal_context(signal: HumanMessageSignal | None) -> Iterator[None]:
+def queued_turn_signal_context(signal: QueuedTurnSignal | None) -> Iterator[None]:
     """Bind the human signal of one response lifecycle, or clear it for background work."""
     token = _human_signal.set(signal)
     try:

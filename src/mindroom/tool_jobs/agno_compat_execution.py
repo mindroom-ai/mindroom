@@ -101,7 +101,7 @@ def _wrap_tool_schemas(
     return format_tools
 
 
-# AGNO_COMPAT: Bind after the SDK driver has admitted approvals and external calls.
+# AGNO_COMPAT: Bind after the SDK driver has admitted paused approvals and external calls.
 # Reason: Agno exposes no public hook around the complete approved call executor.
 # Upstream issue: No matching public accepted-operation extension point identified.
 # Upstream PR: None identified.

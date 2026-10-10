@@ -38,7 +38,7 @@ from mindroom.tool_jobs.consumption import (
     consumption_context,
     set_consumption_storage,
 )
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import (
@@ -295,7 +295,7 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     model = DelegationModel(
         id="test",
         responses=[ModelResponse(tool_calls=[_call("slow_tool", "exact-call")]), ModelResponse(content="done")],
@@ -304,7 +304,7 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
     agent = Agent(id="leader", model=model, tools=[assembled_function(slow_tool)])
     try:
         async with execution_resources():
-            with tool_runtime_context(context), human_message_signal_context(signal):
+            with tool_runtime_context(context), queued_turn_signal_context(signal):
                 parent = asyncio.create_task(agent.arun("start", session_id=context.session_id))
                 await asyncio.wait_for(started.wait(), 30)
                 signal.notify()
@@ -469,7 +469,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     toolkit = ConnectionTools()
     bind_toolkit_authority(toolkit, authored_name="connection")
     model = DelegationModel(
@@ -491,7 +491,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(
         return await agent.arun("start", session_id=context.session_id)
 
     try:
-        with tool_runtime_context(context), human_message_signal_context(signal):
+        with tool_runtime_context(context), queued_turn_signal_context(signal):
             parent = asyncio.create_task(parent_run())
             await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()
@@ -530,7 +530,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     model = DelegationModel(
         id="test",
         responses=[ModelResponse(tool_calls=[_call("generated", "generator-call")]), ModelResponse(content="done")],
@@ -543,7 +543,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
         return await agent.arun("start", session_id=context.session_id)
 
     try:
-        with tool_runtime_context(context), human_message_signal_context(signal):
+        with tool_runtime_context(context), queued_turn_signal_context(signal):
             parent = asyncio.create_task(parent_run())
             await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
             signal.notify()
@@ -724,7 +724,7 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     model = DelegationModel(
         id="test",
         responses=[ModelResponse(tool_calls=[_call("slow_tool", "sync-call")]), ModelResponse(content="done")],
@@ -741,7 +741,7 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
         return await agent.arun("start", session_id=context.session_id)
 
     try:
-        with tool_runtime_context(context), human_message_signal_context(signal):
+        with tool_runtime_context(context), queued_turn_signal_context(signal):
             parent = asyncio.create_task(parent_run())
             assert await asyncio.to_thread(started.wait, JOB_TEST_TIMEOUT)
             signal.notify()
@@ -982,7 +982,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
     function = assembled_function(change_state)
@@ -992,7 +992,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
     call = FunctionCall(function=function, call_id="state-call")
     try:
         async with execution_resources():
-            with tool_runtime_context(context), human_message_signal_context(signal):
+            with tool_runtime_context(context), queued_turn_signal_context(signal):
                 parent = asyncio.create_task(model.arun_function_call(call))
                 await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                 signal.notify()

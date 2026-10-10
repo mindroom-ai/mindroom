@@ -40,11 +40,11 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import (
-    HumanMessageSignal,
     JobControl,
-    human_message_signal_context,
+    QueuedTurnSignal,
     job_control_context,
     job_owns_execution,
+    queued_turn_signal_context,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -342,7 +342,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     release = asyncio.Event()
     completed = asyncio.Event()
     children = []
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
     side_effects = []
     child_storages = []
     child_responses = ([ModelResponse(tool_calls=[_call("write_report", "write-once")])] if approval else []) + [
@@ -458,7 +458,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     membership_turn_id="$native-reader",
                 ),
             ),
-            human_message_signal_context(signal),
+            queued_turn_signal_context(signal),
         ):
             current_parent = parent(
                 _call(
@@ -553,7 +553,7 @@ async def test_human_followup_does_not_stop_next_provider_invocation(
     fallback_config = FallbackConfig(on_error=[fallback_model]) if fallback else None
     install_tool_job_execution(primary, fallback_config)
     model = fallback_model if fallback else primary
-    signal = HumanMessageSignal()
+    signal = QueuedTurnSignal()
 
     async def invoke() -> str:
         called.set()
@@ -565,7 +565,7 @@ async def test_human_followup_does_not_stop_next_provider_invocation(
                 await events.aclose()
         return str((await model.ainvoke()).content)
 
-    with human_message_signal_context(signal):
+    with queued_turn_signal_context(signal):
         first = asyncio.create_task(invoke())
         await entered.wait()
         signal.notify()
