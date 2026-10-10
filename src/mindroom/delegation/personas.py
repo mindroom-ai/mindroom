@@ -222,10 +222,13 @@ def load_profile(workspace_root: Path | None, name: str) -> _PersonaProfile:
 
 def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaProfile]) -> str:
     """Render profiles for the `run_subagent` description, bounded to 2,000 characters."""
+    # Each entry stays on one line, so a description or parse error cannot add entries of its own.
     lines = [
-        f"- {entry.name}: {entry.description}"
-        if isinstance(entry, _PersonaProfile)
-        else f"- {entry.name} (invalid: {entry.reason})"
+        " ".join(
+            f"- {entry.name}: {entry.description}".split()
+            if isinstance(entry, _PersonaProfile)
+            else f"- {entry.name} (invalid: {entry.reason})".split(),
+        )
         for entry in entries
     ]
     listing = "\n".join(lines)
