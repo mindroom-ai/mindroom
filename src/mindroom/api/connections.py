@@ -129,7 +129,10 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
     providers = load_oauth_providers_for_snapshot(snapshot)
     metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, user.config, tolerate_plugin_load_errors=True)
     memberships = config_lifecycle.app_state(request.app).agent_reply_memberships
-    agents = [_agent_connections(name, user, providers, metadata, memberships) for name in user.visible_agent_names]
+    agents = [
+        await _agent_connections(request, name, user, providers, metadata, memberships)
+        for name in user.visible_agent_names
+    ]
     return _Connections(
         runtime_paths=snapshot.runtime_paths,
         user=user,
@@ -138,7 +141,8 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
     )
 
 
-def _agent_connections(
+async def _agent_connections(
+    request: Request,
     agent_name: str,
     user: ConnectionUserContext,
     providers: dict[str, OAuthProvider],
@@ -185,7 +189,8 @@ def _agent_connections(
 
     # Egress rows follow the personal egress API's eligibility rule: only agents the user may use.
     egress_services = (
-        egress_services_for_agent(
+        await egress_services_for_agent(
+            request,
             agent_name,
             user.owner.requester_id,
             config,
@@ -294,14 +299,13 @@ async def status(agent_name: str, provider_id: str, request: Request, context: _
             "Connection status is unavailable",
             headers=CONNECTIONS_HEADERS,
         ) from exc
-    # Shared service accounts are runtime configuration, never a personal account.
-    personal = not result.has_service_account_config
+    view = oauth.personal_connection_view(result, can_manage=service.can_manage)
     return ConnectionStatus(
         provider=provider_id,
-        connected=result.connected and (personal or not service.can_manage),
-        can_connect=result.has_client_config and personal and service.can_manage,
-        reset_required=result.reset_required,
-        account_label=result.email if personal and service.can_manage else None,
+        connected=view.connected,
+        can_connect=view.can_connect,
+        reset_required=view.reset_required,
+        account_label=view.account_label,
     )
 
 

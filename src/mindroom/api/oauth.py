@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from html import escape
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import WorkerScope
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
@@ -936,8 +937,41 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     return await connection_status(request, context)
 
 
-async def connection_status(request: Request, context: OAuthCredentialContext) -> OAuthStatusResponse:
-    """Load connection state after the caller has authorized the credential target."""
+@dataclass(frozen=True)
+class _PersonalConnectionView:
+    """What one viewer may see and do with a provider's connection."""
+
+    connected: bool
+    can_connect: bool
+    reset_required: bool
+    account_label: str | None
+
+
+def personal_connection_view(result: OAuthStatusResponse, *, can_manage: bool) -> _PersonalConnectionView:
+    """Mask a provider status for a viewer; the Connections portal and the egress pages share this view.
+
+    Shared service accounts are runtime configuration, never a personal account: managers see no connection to
+    manage and users see the service as connected. Only managers may connect and see the account.
+    """
+    personal = not result.has_service_account_config
+    return _PersonalConnectionView(
+        connected=result.connected and (personal or not can_manage),
+        can_connect=result.has_client_config and personal and can_manage,
+        reset_required=result.reset_required,
+        account_label=result.email if personal and can_manage else None,
+    )
+
+
+async def connection_status(
+    request: Request,
+    context: OAuthCredentialContext,
+    *,
+    refresh: bool = True,
+) -> OAuthStatusResponse:
+    """Load connection state after the caller has authorized the credential target.
+
+    `refresh=False` skips the token refresh, so a listing never waits on the provider's token endpoint.
+    """
     provider, runtime_paths = context.provider, context.runtime_paths
     credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context)
     credentials = credential_status.credentials or {}
@@ -954,7 +988,7 @@ async def connection_status(request: Request, context: OAuthCredentialContext) -
     )
     has_client_config = client_config_resolution is not None
     credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
-    if credentials_usable and has_client_config and not has_service_account_config:
+    if refresh and credentials_usable and has_client_config and not has_service_account_config:
         try:
             refreshed_credentials = await refresh_oauth_credentials(context)
         except OAuthProviderError as exc:
@@ -994,6 +1028,27 @@ async def connection_status(request: Request, context: OAuthCredentialContext) -
         hosted_domain=oauth_verified_claim(credentials, "hd"),
         capabilities=list(provider.status_capabilities),
     )
+
+
+async def agent_connection_status(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    config: Config,
+    refresh: bool = True,
+) -> OAuthStatusResponse:
+    """Load connection state for an agent's worker target after the caller has authorized that agent."""
+    context = resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        credentials_manager,
+        worker_target,
+        config=config,
+    )
+    return await connection_status(request, context, refresh=refresh)
 
 
 @router.post("/{provider_id}/disconnect")

@@ -2,33 +2,52 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from mindroom.api import oauth
 from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     worker_target_for_credentials_target,
 )
-from mindroom.egress_broker.secrets import delete_secret, save_secret, secret_status
+from mindroom.api.egress_credentials import (
+    EgressOAuthStatus,
+    egress_oauth_provider,
+    egress_oauth_status,
+    egress_service_status,
+    source_status_fields,
+    unavailable_egress_oauth_status,
+)
+from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
+from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
+    from mindroom.egress_broker.secrets import OAuthStatus
 
 router = APIRouter(prefix="/api/egress-broker", tags=["egress-broker"])
 
 
 class ServiceStatus(BaseModel):
-    """Status of one egress service."""
+    """Status of one egress service.
+
+    `configured` is true when either secret source is available and `updated_at` is the API key's timestamp, both
+    kept for older clients. `active_source` says which source the broker uses: an explicit key wins over OAuth.
+    """
 
     name: str
     display_name: str | None
     description: str
     configured: bool
     updated_at: str | None
+    active_source: Literal["key", "oauth"] | None
+    key_configured: bool
+    key_updated_at: str | None
+    oauth: EgressOAuthStatus | None
 
 
 class ServicesResponse(BaseModel):
@@ -67,7 +86,27 @@ class AuditLogsResponse(BaseModel):
     records: list[AuditRecordResponse]
 
 
-def _load_service_statuses_for_target(
+async def _admin_oauth_status(
+    request: Request,
+    provider_id: str,
+    agent_name: str | None,
+) -> OAuthStatus | None:
+    """Load a provider's connection state for the selected scope with the dashboard's own OAuth status route."""
+    from mindroom.api import config_lifecycle  # noqa: PLC0415
+
+    provider = load_oauth_providers_for_snapshot(config_lifecycle.bind_current_request_snapshot(request)).get(
+        provider_id,
+    )
+    if provider is None:
+        return None
+    try:
+        result = await oauth.status(provider_id, request, agent_name=agent_name)
+    except HTTPException:
+        return unavailable_egress_oauth_status(provider)
+    return egress_oauth_status(result, can_manage=True)
+
+
+async def _load_service_statuses_for_target(
     request: Request,
     target: RequestCredentialsTarget,
 ) -> list[ServiceStatus]:
@@ -82,14 +121,18 @@ def _load_service_statuses_for_target(
 
     services: list[ServiceStatus] = []
     for name, service_config in config.egress_broker.services.items():
-        status = secret_status(target.base_manager, worker_target, name)
+        oauth_part = (
+            await _admin_oauth_status(request, service_config.oauth_provider, target.agent_name)
+            if service_config.oauth_provider is not None
+            else None
+        )
+        status = egress_service_status(target.base_manager, worker_target, service_config, name, oauth_part)
         services.append(
             ServiceStatus(
                 name=name,
                 display_name=service_config.display_name,
                 description=service_config.description,
-                configured=status.configured,
-                updated_at=status.updated_at,
+                **source_status_fields(status),
             ),
         )
 
@@ -97,7 +140,7 @@ def _load_service_statuses_for_target(
 
 
 @router.get("/services", response_model=ServicesResponse)
-def get_services(
+async def get_services(
     request: Request,
     agent_name: Annotated[str | None, Query()] = None,
 ) -> ServicesResponse:
@@ -111,7 +154,7 @@ def get_services(
         service_names=(),  # egress services are not in the normal service list
     )
 
-    services = _load_service_statuses_for_target(request, target)
+    services = await _load_service_statuses_for_target(request, target)
     return ServicesResponse(services=services)
 
 
@@ -167,6 +210,32 @@ def delete_service_secret(
 
     worker_target = worker_target_for_credentials_target(target)
     delete_secret(target.base_manager, worker_target, name)
+
+
+@router.post("/services/{name}/connect")
+async def connect_service_account(
+    request: Request,
+    name: str,
+    agent_name: Annotated[str | None, Query()] = None,
+) -> oauth.OAuthConnectResponse:
+    """Start the OAuth flow of a service's provider for the selected scope.
+
+    Raises 404 if the service is not configured or has no usable OAuth provider, 409 if a service account
+    replaces personal accounts for that provider.
+    """
+    provider = egress_oauth_provider(request, name)
+    return await oauth.connect(provider.id, request, agent_name=agent_name)
+
+
+@router.post("/services/{name}/disconnect")
+async def disconnect_service_account(
+    request: Request,
+    name: str,
+    agent_name: Annotated[str | None, Query()] = None,
+) -> dict[str, str]:
+    """Reset the OAuth connection of a service's provider for the selected scope."""
+    provider = egress_oauth_provider(request, name)
+    return await oauth.disconnect(provider.id, request, agent_name=agent_name)
 
 
 @router.get("/logs", response_model=AuditLogsResponse)
