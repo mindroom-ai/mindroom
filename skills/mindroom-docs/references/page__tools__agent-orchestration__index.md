@@ -118,6 +118,7 @@ Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset o
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
 It sees exactly the authored prompt, with no role, instructions, date, memories, or tool guidance added, plus the task and the schemas of its tools.
+Once [compaction](https://docs.mindroom.chat/configuration/history/) summarizes older turns of a child started without `minimal=True`, that summary follows the authored prompt, so follow-ups still know the earlier work.
 [Minimal subagents](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) describes what an authored subagent started with `minimal=True` needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent whose `tools` include `delegate` can author further copies only within those tools, a copy without `tools` inherits them except `delegate` at the maximum depth, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
