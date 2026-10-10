@@ -79,6 +79,51 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
     assert not allowed()
 
 
+@pytest.mark.parametrize("changed", ["agent", "default"])
+def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str) -> None:
+    """A tool built under one file access must not run, or keep running, under another."""
+    entry = ToolConfigEntry(name="calculator")
+    config = Config(
+        agents={"lead": AgentConfig(display_name="Lead", tools=[entry], file_access=None)},
+        defaults=DefaultsConfig(file_access="unrestricted"),
+    )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    toolkit = build_agent_toolkit(
+        entry.name,
+        agent_name="lead",
+        config=config,
+        runtime_paths=paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
+        execution_identity=_OWNER,
+        session_id=_OWNER.session_id,
+    )
+    assert toolkit is not None
+    bind_toolkit_authority(toolkit, authored_name=entry.name)
+    function = toolkit.get_functions()["add"]
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
+    authority = function_authority(function)
+
+    def allowed() -> bool:
+        return locally_allowed(
+            config,
+            _OWNER,
+            tool_name=function.name,
+            toolkit_name=function.owning_toolkit,
+            origin={},
+            depth=0,
+            authority=authority,
+        )
+
+    assert allowed()
+    if changed == "agent":
+        config.agents["lead"].file_access = "workspace"
+    else:
+        config.defaults.file_access = "workspace"
+    assert not allowed()
+
+
 def test_constructor_identity_is_a_digest_with_separate_function_filters() -> None:
     """Secrets do not survive in access evidence; order and function filters do not change identity."""
     options = {"token": "synthetic-constructor-secret", "nested": {"endpoint": "example.test"}}

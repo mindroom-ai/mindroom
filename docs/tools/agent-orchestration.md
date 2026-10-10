@@ -199,7 +199,7 @@ Large supported results use the same configured automatic file-saving policy as 
 Redirecting a stored result does not rerun the original tool or change its saved output.
 A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
 Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
-Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
+Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
 Remote service availability alone does not revoke access to a saved result.
 
 A managed tool call that needs approval asks for it from its job, so a pending approval never blocks the conversation.

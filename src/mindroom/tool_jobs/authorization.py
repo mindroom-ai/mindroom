@@ -38,13 +38,13 @@ def bind_toolkit_authority(toolkit: Toolkit, *, authored_name: str) -> None:
 
 
 def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
-    """Freeze the actor execution scope without constructing tools."""
+    """Freeze the actor's execution scope and file access without constructing tools."""
     policy = resolve_agent_policy_from_data(
         agent_name,
         config.agents[agent_name],
         default_worker_scope=config.defaults.worker_scope,
     )
-    return {"scope": policy.effective_execution_scope}
+    return {"scope": policy.effective_execution_scope, "file_access": config.resolve_entity(agent_name).file_access}
 
 
 def function_authority(function: Function) -> dict[str, Any]:
@@ -82,8 +82,9 @@ def locally_allowed(
     """Check current authored ownership and filters without remote availability probes."""
     if owner.agent_name not in config.agents:
         return False
-    # The execution scope recorded when the toolkit was built must still be the actor's current scope.
-    if "scope" not in authority or authority["scope"] != authority_snapshot(config, owner.agent_name)["scope"]:
+    # The execution scope and file access recorded when the toolkit was built must still be the actor's current ones.
+    current = authority_snapshot(config, owner.agent_name)
+    if any(key not in authority or authority[key] != value for key, value in current.items()):
         return False
     construction = authority.get("construction")
     if not isinstance(construction, dict):
