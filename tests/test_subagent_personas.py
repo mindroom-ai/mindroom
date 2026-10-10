@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 import pytest
@@ -63,13 +65,7 @@ def test_inline_persona_keeps_prompt_bytes() -> None:
     prompt = "Use {braces} and {{x}}\n"
     persona = inline_persona(prompt, ["file"])
     assert persona == SubagentPersona(source_kind="inline", source_name="", system_prompt=prompt, tools=("file",))
-    assert SubagentPersona.from_dict(persona.to_dict()) == persona
-
-
-def test_prompt_digest_matches_sha256_of_prompt_bytes() -> None:
-    """The audit digest is the SHA-256 of the exact UTF-8 prompt."""
-    persona = inline_persona("abc", None)
-    assert persona.prompt_sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    assert SubagentPersona.from_dict(json.loads(json.dumps(asdict(persona)))) == persona
 
 
 @pytest.mark.parametrize(

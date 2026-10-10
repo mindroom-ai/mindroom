@@ -46,8 +46,7 @@ from mindroom.delegation.lifecycle import (
 )
 from mindroom.delegation.personas import (
     caller_toolkit_names,
-    missing_persona_tool,
-    no_longer_available,
+    follow_up_refusal,
     resolve_persona_request,
 )
 from mindroom.delegation.recovery import interrupt_child, read_child_run, resolve_subagent
@@ -684,20 +683,15 @@ async def _resolve_follow_up_target(
     if previous_child.subagent_id != subagent_id:
         msg = "Subagent ID no longer matches its retained requirement"
         raise RuntimeError(msg)
-    if retained is None and previous_child.persona is not None:
-        missing = missing_persona_tool(
-            previous_child.persona.tools,
-            caller_toolkit_names(caller_identity.agent_name, _current_config(config), delegation_depth=depth),
-        )
-        if missing is not None:
-            return no_longer_available(missing)
-    return _DelegationTarget(
-        previous_child.child_agent_name,
-        task,
-        previous_child,
-        previous_child.agent_mode,
+    refusal = retained is None and follow_up_refusal(
         previous_child.persona,
+        caller_identity.agent_name,
+        _current_config(config),
+        delegation_depth=depth,
     )
+    if refusal:
+        return refusal
+    return _DelegationTarget(previous_child.child_agent_name, task, previous_child)
 
 
 def _resolve_fresh_target(
@@ -720,7 +714,7 @@ def _resolve_fresh_target(
         return "Cannot delegate: task must be a string and agent_name must be a string or null."
     if retained is not None:
         # A resumed call never rereads a profile the worker could have changed.
-        return _DelegationTarget(child_name, task, None, retained.agent_mode, retained.persona, model)
+        return _DelegationTarget(child_name, task, model=model)
     workspace = (
         resolve_agent_runtime(
             caller_identity.agent_name,

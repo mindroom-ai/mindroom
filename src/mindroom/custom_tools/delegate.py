@@ -18,9 +18,8 @@ from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn
 from mindroom.delegation.personas import (
     caller_toolkit_names,
+    follow_up_refusal,
     list_profiles,
-    missing_persona_tool,
-    no_longer_available,
     render_profile_listing,
     resolve_persona_request,
 )
@@ -41,6 +40,7 @@ if TYPE_CHECKING:
     from agno.run import RunContext
     from agno.tools.function import FunctionCall
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, SubagentPersona
@@ -250,7 +250,7 @@ class DelegateTools(Toolkit):
             target,
             task,
             model=request.model,
-            minimal=request.agent_mode == "minimal",
+            agent_mode=request.agent_mode,
             persona=request.persona,
         )
 
@@ -322,13 +322,11 @@ class DelegateTools(Toolkit):
         task: str,
         *,
         model: str | None = None,
-        minimal: bool = False,
+        agent_mode: AgentMode = "standard",
         persona: SubagentPersona | None = None,
         continuation: DelegationChild | None = None,
     ) -> str:
         """Run one direct child using the shared preparation and settlement owner."""
-        if continuation is not None:
-            minimal = continuation.agent_mode == "minimal"
         config = authorize_delegation(
             self._agent_name,
             agent_name,
@@ -342,13 +340,14 @@ class DelegateTools(Toolkit):
         )
         if isinstance(config, str):
             return config
-        if continuation is not None and continuation.persona is not None:
-            missing = missing_persona_tool(
-                continuation.persona.tools,
-                caller_toolkit_names(self._agent_name, config, delegation_depth=self._delegation_depth),
-            )
-            if missing is not None:
-                return no_longer_available(missing)
+        refusal = continuation is not None and follow_up_refusal(
+            continuation.persona,
+            self._agent_name,
+            config,
+            delegation_depth=self._delegation_depth,
+        )
+        if refusal:
+            return refusal
         owner = self._caller_identity()
         provenance = _DIRECT_DELEGATION_PROVENANCE.get()
         parent = provenance[-1] if provenance else None
@@ -361,7 +360,7 @@ class DelegateTools(Toolkit):
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
             model=model,
-            agent_mode="minimal" if minimal else "standard",
+            agent_mode=agent_mode,
             previous=continuation,
             parent_tool_call_id=(parent.tool_call_id or "") if parent is not None else "",
             persona=persona,

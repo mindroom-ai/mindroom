@@ -761,7 +761,7 @@ def _persona_record(persona: SubagentPersona | None) -> dict[str, object] | None
     """Describe an authored child's persona; the digest identifies the exact prompt the child received."""
     if persona is None:
         return None
-    return {**persona.to_dict(), "system_prompt_sha256": persona.prompt_sha256}
+    return {**asdict(persona), "system_prompt_sha256": hashlib.sha256(persona.system_prompt.encode()).hexdigest()}
 
 
 def _write_transcript(

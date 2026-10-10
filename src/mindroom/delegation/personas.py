@@ -144,45 +144,29 @@ def _parse_profile(name: str, content: str) -> _PersonaProfile:
     )
 
 
-def _profile_bytes(directory_fd: int, name: str) -> bytes:
-    """Read one profile file below its pinned directory, letting FileNotFoundError mean absent."""
+def _read_profile(  # noqa: PLR0911 - each refusal is its own reason
+    directory_fd: int,
+    name: str,
+) -> tuple[_PersonaProfile | _InvalidPersonaProfile | None, int]:
+    """Read one profile below its pinned directory with the bytes read; None when the file is absent."""
+    if not _PROFILE_NAME.fullmatch(name):
+        return _InvalidPersonaProfile(name=name, reason=_NAME_RULE), 0
     try:
-        return read_regular_file_within_root(
+        data = read_regular_file_within_root(
             directory_fd,
             f"{name}{_PROFILE_SUFFIX}",
             max_bytes=_MAX_PROFILE_FILE_BYTES,
         )
     except FileNotFoundError:
-        raise
-    except ValueError as exc:
-        msg = "the file exceeds 64 KiB or is not a regular file"
-        raise PersonaError(msg) from exc
-    except OSError as exc:
-        msg = "the file cannot be read as a regular file"
-        raise PersonaError(msg) from exc
-
-
-def _decoded_profile(name: str, data: bytes) -> _PersonaProfile:
-    try:
-        text = data.decode()
-    except UnicodeDecodeError as exc:
-        msg = "the file is not UTF-8 text"
-        raise PersonaError(msg) from exc
-    return _parse_profile(name, text)
-
-
-def _read_profile(directory_fd: int, name: str) -> tuple[_PersonaProfile | _InvalidPersonaProfile | None, int]:
-    """Read one profile below its pinned directory with the bytes read; None when the file is absent."""
-    if not _PROFILE_NAME.fullmatch(name):
-        return _InvalidPersonaProfile(name=name, reason=_NAME_RULE), 0
-    try:
-        data = _profile_bytes(directory_fd, name)
-    except FileNotFoundError:
         return None, 0
-    except PersonaError as exc:
-        return _InvalidPersonaProfile(name=name, reason=str(exc)), 0
+    except ValueError:
+        return _InvalidPersonaProfile(name=name, reason="the file exceeds 64 KiB or is not a regular file"), 0
+    except OSError:
+        return _InvalidPersonaProfile(name=name, reason="the file cannot be read as a regular file"), 0
     try:
-        return _decoded_profile(name, data), len(data)
+        return _parse_profile(name, data.decode()), len(data)
+    except UnicodeDecodeError:
+        return _InvalidPersonaProfile(name=name, reason="the file is not UTF-8 text"), len(data)
     except PersonaError as exc:
         return _InvalidPersonaProfile(name=name, reason=str(exc)), len(data)
 
@@ -213,8 +197,11 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
     return entries
 
 
-def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
+def load_profile(workspace_root: Path | None, name: str) -> _PersonaProfile:
     """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
+    if workspace_root is None:
+        msg = "Cannot delegate: subagent profiles need an agent workspace."
+        raise PersonaError(msg)
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
         raise PersonaError(msg)
@@ -285,11 +272,6 @@ def persona_allows(entries: tuple[str, ...], toolkit: str, function: str) -> boo
     return toolkit in entries or f"{toolkit}.{function}" in entries
 
 
-def _within_cap(entry: str, cap: tuple[str, ...] | None) -> bool:
-    toolkit, separator, function = entry.partition(".")
-    return cap is None or toolkit in cap or (bool(separator) and persona_allows(cap, toolkit, function))
-
-
 def missing_persona_tool(
     tools: tuple[str, ...] | None,
     available_toolkits: Sequence[str],
@@ -303,7 +285,7 @@ def missing_persona_tool(
         known = toolkit in available and (
             not separator or (bool(function) and (declared is None or function in declared))
         )
-        if not known or not _within_cap(entry, cap):
+        if not known or (cap is not None and entry not in cap and toolkit not in cap):
             return entry
     return None
 
@@ -333,9 +315,21 @@ def require_built_persona_tools(tools: tuple[str, ...], built: Mapping[str, Coll
             raise PersonaError(msg)
 
 
-def no_longer_available(entry: str) -> str:
-    """Explain why a follow-up cannot run after the caller lost a tool its subagent names."""
-    return f"Subagent tool '{entry}' is no longer available to you; start a new subagent."
+def follow_up_refusal(
+    persona: SubagentPersona | None,
+    agent_name: str,
+    config: Config,
+    *,
+    delegation_depth: int,
+) -> str | None:
+    """Refuse a follow-up once the caller lost a tool its subagent names."""
+    if persona is None or persona.tools is None:
+        return None
+    available = caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth)
+    missing = missing_persona_tool(persona.tools, available)
+    return (
+        None if missing is None else f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
+    )
 
 
 def self_only_refusal(agent_name: str) -> str:
@@ -389,31 +383,23 @@ def resolve_persona_request(  # noqa: PLR0911
         return "Cannot delegate: pass either profile or system_prompt and tools, not both."
     try:
         if profile is None:
-            request = PersonaRequest(
-                persona=_capped_persona(inline_persona(system_prompt, tools), available_toolkits(), cap),
-                model=model,
-                agent_mode=mode,
-            )
+            persona = inline_persona(system_prompt, tools)
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
-        elif workspace_root is None:
-            return "Cannot delegate: subagent profiles need an agent workspace."
         else:
             loaded = load_profile(workspace_root, profile)
-            request = PersonaRequest(
-                persona=_capped_persona(loaded.persona, available_toolkits(), cap),
-                model=model or loaded.model,
-                agent_mode="minimal" if minimal else loaded.mode or "standard",
-            )
-        require_minimal_shell(request.persona, request.agent_mode)
+            persona, model = loaded.persona, model or loaded.model
+            mode = "minimal" if minimal else loaded.mode or "standard"
+        persona = _capped_persona(persona, available_toolkits(), cap)
+        require_minimal_shell(persona, mode)
     except PersonaError as exc:
         return str(exc)
-    return request
+    return PersonaRequest(persona=persona, model=model, agent_mode=mode)
 
 
-def require_minimal_shell(persona: SubagentPersona | None, mode: AgentMode) -> None:
+def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
     """Refuse a minimal persona whose tool list drops shell, which minimal mode runs through."""
-    tools = persona.tools if persona is not None else None
+    tools = persona.tools
     if mode != "minimal" or tools is None:
         return
     if "shell" in tools or all(f"shell.{name}" in tools for name in SHELL_OPERATION_NAMES):

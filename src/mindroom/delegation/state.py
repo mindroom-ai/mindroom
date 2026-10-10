@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
@@ -29,23 +28,9 @@ class SubagentPersona:
     system_prompt: str
     tools: tuple[str, ...] | None = None
 
-    @property
-    def prompt_sha256(self) -> str:
-        """Digest of the exact prompt bytes, for audit records."""
-        return hashlib.sha256(self.system_prompt.encode()).hexdigest()
-
-    def to_dict(self) -> dict[str, object]:
-        """Return a JSON-compatible snapshot."""
-        return {
-            "source_kind": self.source_kind,
-            "source_name": self.source_name,
-            "system_prompt": self.system_prompt,
-            "tools": None if self.tools is None else list(self.tools),
-        }
-
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> SubagentPersona:
-        """Read a snapshot written by ``to_dict``."""
+        """Read a snapshot that ``asdict`` wrote into delegation state or a session record."""
         source_kind, source_name, system_prompt, tools = (
             data["source_kind"],
             data["source_name"],

@@ -876,10 +876,10 @@ def _participant_request(
                 context.runtime_paths,
                 execution_identity=build_execution_identity_from_runtime_context(context),
             ).workspace
-            if workspace is None:
-                msg = "Cannot delegate: subagent profiles need an agent workspace."
-                raise DynamicWorkflowError(msg)
-            profile = load_profile(workspace.root, _required_participant_text(participant, "profile"))
+            profile = load_profile(
+                workspace.root if workspace is not None else None,
+                _required_participant_text(participant, "profile"),
+            )
             persona = replace(profile.persona, source_kind="workflow", source_name=source_name)
             raw_model, mode = profile.model, profile.mode or "standard"
         else:

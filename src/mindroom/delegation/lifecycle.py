@@ -390,7 +390,7 @@ def prepare_child_turn(
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the model and persona of the child it continues; callers pass its mode.
+    A follow-up keeps the model, mode, and persona of the child it continues.
     """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
@@ -429,6 +429,6 @@ def prepare_child_turn(
         previous_delegation_id=previous.delegation_id if previous is not None else None,
         parent_requirement_id=parent_requirement_id,
         storage_bindings=freeze_delegation_storage(config, (caller_name, agent_name)),
-        agent_mode=agent_mode,
+        agent_mode=previous.agent_mode if previous is not None else agent_mode,
         persona=previous.persona if previous is not None else persona,
     )
