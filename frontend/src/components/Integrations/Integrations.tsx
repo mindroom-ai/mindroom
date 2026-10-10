@@ -69,6 +69,25 @@ const oauthProviderDisplayName = (
   providerTool?.display_name.replace(/\s+Tool$/, "") ??
   titleFromProviderId(providerId);
 
+// Several tools can share one provider connection, so no single tool's settings can stand for its card.
+const providersSharedByTools = (tools: ToolInfo[]) => {
+  const toolNames = new Set(tools.map((tool) => tool.name));
+  const toolCounts = new Map<string, number>();
+  for (const tool of tools) {
+    if (tool.auth_provider) {
+      toolCounts.set(
+        tool.auth_provider,
+        (toolCounts.get(tool.auth_provider) ?? 0) + 1,
+      );
+    }
+  }
+  return new Set(
+    [...toolCounts]
+      .filter(([providerId, count]) => count > 1 && !toolNames.has(providerId))
+      .map(([providerId]) => providerId),
+  );
+};
+
 const oauthRedirectPlaceholderOrigin = () =>
   new URL(API_BASE_URL || window.location.origin, window.location.origin)
     .origin;
@@ -240,15 +259,18 @@ export function Integrations() {
       const backendToolsByName = new Map<string, ToolInfo>(
         backendTools.map((tool) => [tool.name, tool]),
       );
+      const sharedProviderIds = providersSharedByTools(backendTools);
+      const findProviderTool = (providerId: string) =>
+        sharedProviderIds.has(providerId)
+          ? undefined
+          : backendTools.find((tool) => tool.auth_provider === providerId);
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
         const config = provider.getConfig(scope);
         const providerTool =
           backendToolsByName.get(config.integration.id) ??
-          backendTools.find(
-            (tool) => tool.auth_provider === config.integration.id,
-          );
+          findProviderTool(config.integration.id);
         if (
           hidesSharedOnlyIntegrations &&
           SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)
@@ -309,9 +331,7 @@ export function Integrations() {
           ),
       );
       for (const providerId of dynamicOAuthProviderIds) {
-        const providerTool = backendTools.find(
-          (tool) => tool.auth_provider === providerId,
-        );
+        const providerTool = findProviderTool(providerId);
         const providerDisplayName = oauthProviderDisplayName(
           providerId,
           providerTool,
@@ -377,7 +397,11 @@ export function Integrations() {
         .filter(
           (tool) =>
             !providerIds.has(tool.name) &&
-            !(tool.auth_provider && providerIds.has(tool.auth_provider)),
+            !(
+              tool.auth_provider &&
+              providerIds.has(tool.auth_provider) &&
+              !sharedProviderIds.has(tool.auth_provider)
+            ),
         )
         .filter(
           (tool) =>
@@ -793,7 +817,8 @@ export function Integrations() {
 
       if (
         integration.status === "connected" ||
-        integration.status === "available"
+        integration.status === "available" ||
+        authProvider?.status === "connected"
       ) {
         // Auth provider is connected
         if (tool.config_fields && tool.config_fields.length > 0) {

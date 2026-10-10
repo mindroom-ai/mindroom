@@ -133,7 +133,7 @@ def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None
             "PIP_CACHE_DIR": str(prepared.paths.cache_dir / "pip"),
             "UV_CACHE_DIR": str(prepared.paths.cache_dir / "uv"),
             "PYTHONPYCACHEPREFIX": str(prepared.paths.cache_dir / "pycache"),
-            "TMPDIR": str(prepared.paths.tmp_dir),
+            "TMPDIR": str(sandbox_exec.worker_tmp_dir(prepared.paths)),
             "VIRTUAL_ENV": str(prepared.paths.venv_dir),
         }
         for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES:

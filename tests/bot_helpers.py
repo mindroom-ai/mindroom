@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 
 import nio
 
@@ -290,6 +290,8 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
     stored_records: dict[str, TurnRecord] = {}
     tracker.get_turn_record.return_value = None
+    # Records written through the tracker read back unless a test pins the read.
+    tracker.get_turn_record.side_effect = lambda event_id: stored_records.get(event_id, DEFAULT)
     tracker.has_responded.return_value = False
 
     async def update_handled_turn(
@@ -334,6 +336,16 @@ def _room_send_response(event_id: str) -> MagicMock:
     response = MagicMock(spec=nio.RoomSendResponse, event_id=event_id)
     response.__class__ = nio.RoomSendResponse
     return response
+
+
+def unique_room_send_responses(client: MagicMock, *, prefix: str = "$sent") -> None:
+    """Answer every send with its own event ID, as a homeserver does.
+
+    A reply is bound to the event it created, so two replies cannot share one;
+    a fixed mocked response would make every send look like the same event.
+    """
+    counter = iter(range(1, 1_000_000))
+    client.room_send.side_effect = lambda *_args, **_kwargs: _room_send_response(f"{prefix}{next(counter)}")
 
 
 def _matrix_room(
@@ -391,10 +403,9 @@ def _agent_response_handled_turn(
     agent_name: str,
     room_id: str,
     event_id: str,
-    response_event_id: str,
+    response_event_id: str | None = None,
     thread_id: str | None = None,
     requester_id: str | None = None,
-    correlation_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
 ) -> TurnRecord:
     """Return the handled-turn state persisted for one direct agent response."""
@@ -403,7 +414,6 @@ def _agent_response_handled_turn(
             [event_id],
             response_event_id=response_event_id,
             requester_id=requester_id,
-            correlation_id=correlation_id,
             source_event_prompts=source_event_prompts,
         ),
         response_owner=agent_name,
@@ -425,7 +435,6 @@ def _response_request(
     prompt: str = "Hello",
     model_prompt: str | None = None,
     existing_event_id: str | None = None,
-    existing_event_is_placeholder: bool = False,
     user_id: str | None = "@user:localhost",
     media: MediaInputs | None = None,
     attachment_ids: Sequence[str] | None = None,
@@ -453,7 +462,6 @@ def _response_request(
         prompt=prompt,
         model_prompt=model_prompt,
         existing_event_id=existing_event_id,
-        existing_event_is_placeholder=existing_event_is_placeholder,
         user_id=user_id,
         media=media,
         attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
@@ -587,6 +595,7 @@ def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
         discovered_hooks=tuple(callbacks),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
         plugin_order=0,
     )

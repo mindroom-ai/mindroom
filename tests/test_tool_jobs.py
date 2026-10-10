@@ -530,8 +530,8 @@ async def test_result_expiry_deletes_only_old_consumed_jobs_with_finished_source
 
 
 @pytest.mark.asyncio
-async def test_source_and_conversation_lookups_follow_admission_recovery_and_expiry(tmp_path: Path) -> None:
-    """Per-turn lookups find exactly one source's or conversation's jobs in admission order, and forget expired ones."""
+async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_path: Path) -> None:
+    """The held lookup finds exactly one conversation's unconsumed jobs in admission order, and forgets expired ones."""
     owner = job_owner()
     jobs = {
         "a": (owner, "$turn"),
@@ -545,15 +545,9 @@ async def test_source_and_conversation_lookups_follow_admission_recovery_and_exp
     async def completed() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved")
 
-    async def lookups(runtime: ToolJobRuntime) -> tuple[list[str], list[str]]:
-        by_source = await runtime.source_jobs(
-            "$turn",
-            **source,
-            session_id="parent-session",
-            requester_id="@alice:test",
-        )
-        by_conversation = await runtime.held_jobs(**source, requester_id="@alice:test")
-        return [job.job_id for job in by_source], [job.job_id for job, _readable in by_conversation]
+    async def lookups(runtime: ToolJobRuntime) -> list[str]:
+        held = await runtime.held_jobs(**source, requester_id="@alice:test")
+        return [job.job_id for job, _readable in held]
 
     runtime = await tool_job_runtime(tmp_path)
     try:
@@ -570,7 +564,7 @@ async def test_source_and_conversation_lookups_follow_admission_recovery_and_exp
             )
             waited = await runtime.wait(job_id, owner=source_owner, depth=0)
             await runtime.release_wait(job_id, waited.claim)
-        assert await lookups(runtime) == (["a", "b"], ["a", "b", "c", "unsourced"])
+        assert await lookups(runtime) == ["a", "b", "c", "unsourced"]
         waited = await runtime.wait("a", owner=owner, depth=0)
         await runtime.acknowledge_wait("a", waited.claim)
         backdate_job(runtime, "a", datetime.now(UTC) - timedelta(days=31))
@@ -587,14 +581,14 @@ async def test_source_and_conversation_lookups_follow_admission_recovery_and_exp
             return True
 
         await runtime.expire_consumed(before=datetime.now(UTC) - timedelta(days=30), source_finished=source_finished)
-        assert await lookups(runtime) == (["b"], ["b", "c", "unsourced"])
+        assert await lookups(runtime) == ["b", "c", "unsourced"]
         assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation)] == ["b", "c", "unsourced"]
     finally:
         await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
-        assert await lookups(restored) == (["b"], ["b", "c", "unsourced"])
+        assert await lookups(restored) == ["b", "c", "unsourced"]
     finally:
         await restored.shutdown()
 

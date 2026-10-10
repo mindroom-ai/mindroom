@@ -72,47 +72,11 @@ __all__ = [
     "canonicalize_turn_record",
     "merge_edit_facts",
     "resolve_turn_record",
-    "with_user_stop",
 ]
-
-_TURN_RECORD_SCHEMA_VERSION = 1
-
-
-def with_user_stop(
-    turn_record: TurnRecord,
-    response_event_id: str,
-    stop_receipt_order: int,
-    *,
-    delivery_settled: bool = False,
-) -> TurnRecord:
-    """Return the monotonic durable state for one admitted STOP callback."""
-    if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
-        msg = "User-stop receipt order must be positive"
-        raise ValueError(msg)
-    return canonicalize_turn_record(
-        turn_record,
-        response_event_id=response_event_id,
-        completed=True,
-        user_stop_receipt_order=max(
-            stop_receipt_order,
-            turn_record.user_stop_receipt_order or stop_receipt_order,
-        ),
-        user_stop_settled_receipt_order=max(
-            turn_record.user_stop_settled_receipt_order or 0,
-            stop_receipt_order if delivery_settled else 0,
-        )
-        or None,
-        timestamp=0.0,
-    )
 
 
 class TurnRecordCodec:
     """Encode the canonical record into its two intentional physical projections."""
-
-    @staticmethod
-    def schema_version() -> int:
-        """Return the persisted schema version emitted by this codec."""
-        return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
     def _to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901, PLR0912
@@ -121,7 +85,6 @@ class TurnRecordCodec:
             "anchor_event_id": record.anchor_event_id,
             "source_event_ids": list(record.source_event_ids),
             "redacted_source_event_ids": list(record.redacted_source_event_ids),
-            "pending_redaction_cleanup_event_ids": list(record.pending_redaction_cleanup_event_ids),
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
@@ -149,12 +112,6 @@ class TurnRecordCodec:
             payload["suppressed_source_event_revisions"] = {
                 event_id: list(revision) for event_id, revision in record.suppressed_source_event_revisions.items()
             }
-        if record.latest_edit_receipt_order is not None:
-            payload["latest_edit_receipt_order"] = record.latest_edit_receipt_order
-        if record.user_stop_receipt_order is not None:
-            payload["user_stop_receipt_order"] = record.user_stop_receipt_order
-        if record.user_stop_settled_receipt_order is not None:
-            payload["user_stop_settled_receipt_order"] = record.user_stop_settled_receipt_order
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata._to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -163,8 +120,6 @@ class TurnRecordCodec:
             payload["response_owner"] = record.response_owner
         if record.requester_id is not None:
             payload["requester_id"] = record.requester_id
-        if record.correlation_id is not None:
-            payload["correlation_id"] = record.correlation_id
         if record.command_execution_started:
             payload["command_execution_started"] = True
         if record.command_result_text is not None:
@@ -195,7 +150,23 @@ class TurnRecordCodec:
         raw_source_event_ids = record.get("source_event_ids")
         raw_discovery_event_ids = record.get("discovery_event_ids", [])
         raw_redacted_source_event_ids = record.get("redacted_source_event_ids", [])
-        raw_pending_redaction_cleanup_event_ids = record.get("pending_redaction_cleanup_event_ids", [])
+        # LEGACY_COMPAT: Ledger records carrying redaction cleanup obligations.
+        # Legacy format: A stored record with pending_redaction_cleanup_event_ids, and revision replay
+        # entries with cleanup_pending, naming session cleanup still owed for its tombstoned sources.
+        # Last legacy release: v2026.10.145; replacement: the next release derives session cleanup at
+        # each response from the history's own event ids against the journal and ledger tombstones.
+        # Handling: Both keys are ignored on read and dropped on the next write; every owed event is
+        # also a ledger tombstone, so the next response of each affected history finds and removes it.
+        # Coverage: tests/test_handled_turns.py::test_stored_cleanup_obligations_are_ignored_on_read.
+        # LEGACY_COMPAT: Turn records carrying Stop, edit order, and correlation state.
+        # Legacy format: A stored record with user_stop_receipt_order, user_stop_settled_receipt_order,
+        # latest_edit_receipt_order, or correlation_id.
+        # Last legacy release: v2026.10.227; replacement: the unreleased durable reply messages own Stop and edit
+        # state in reply_messages and reply_spans.
+        # Handling: The keys are ignored on read and dropped on the next write; an edit of an answer that has no
+        # reply record regenerates nothing.
+        # Coverage: tests/test_handled_turns.py::test_stored_stop_and_edit_order_keys_are_ignored_on_read,
+        # tests/test_edit_regenerator.py::test_edit_without_previous_response_event_is_skipped.
         anchor_event_id = record.get("anchor_event_id")
         completed = record.get("completed")
         timestamp = record.get("timestamp")
@@ -204,7 +175,6 @@ class TurnRecordCodec:
             not isinstance(raw_source_event_ids, list)
             or not isinstance(raw_discovery_event_ids, list)
             or not isinstance(raw_redacted_source_event_ids, list)
-            or not isinstance(raw_pending_redaction_cleanup_event_ids, list)
             or not isinstance(anchor_event_id, str)
             or not anchor_event_id
             or not isinstance(completed, bool)
@@ -220,9 +190,6 @@ class TurnRecordCodec:
             source_event_ids,
             discovery_event_ids=canonical_source_event_ids(raw_discovery_event_ids),
             redacted_source_event_ids=canonical_source_event_ids(raw_redacted_source_event_ids),
-            pending_redaction_cleanup_event_ids=canonical_source_event_ids(
-                raw_pending_redaction_cleanup_event_ids,
-            ),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -234,16 +201,10 @@ class TurnRecordCodec:
             suppressed_source_event_revisions=_mapping_or_none(
                 record.get("suppressed_source_event_revisions"),
             ),
-            latest_edit_receipt_order=_positive_int_or_none(record.get("latest_edit_receipt_order")),
-            user_stop_receipt_order=_positive_int_or_none(record.get("user_stop_receipt_order")),
-            user_stop_settled_receipt_order=_positive_int_or_none(
-                record.get("user_stop_settled_receipt_order"),
-            ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
             prepared_voice_sources=_mapping_or_none(record.get("prepared_voice_sources")),
             response_owner=canonical_optional_string(record.get("response_owner")),
             requester_id=canonical_optional_string(record.get("requester_id")),
-            correlation_id=canonical_optional_string(record.get("correlation_id")),
             command_execution_started=record.get("command_execution_started") is True,
             command_result_text=canonical_optional_string(record.get("command_result_text")),
             command_result_extra_content=freeze_command_result_content(record.get("command_result_extra_content")),
@@ -256,86 +217,24 @@ class TurnRecordCodec:
         return restore_legacy_revision_replay(turn_record, record)
 
     @staticmethod
-    def to_run_metadata(record: TurnRecord) -> dict[str, object]:  # noqa: C901
-        """Project one record into the recoverable subset stored with an Agno run."""
+    def to_run_metadata(record: TurnRecord) -> dict[str, object]:
+        """Project the record's sources, prompts, and revisions that history and request logs read from an Agno run."""
         if not record.source_event_ids:
             return {}
         metadata: dict[str, object] = {
-            constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
             constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(record.source_event_ids),
         }
         if record.discovery_event_ids:
             metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] = list(record.discovery_event_ids)
-        if record.redacted_source_event_ids:
-            metadata[constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY] = list(
-                record.redacted_source_event_ids,
-            )
         if record.source_event_prompts is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(record.source_event_prompts)
         if record.source_event_revisions is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY] = {
                 event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
             }
-        if record.source_event_metadata is not None:
-            metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
-                event_id: source_metadata._to_record()
-                for event_id, source_metadata in record.source_event_metadata.items()
-            }
-        if record.response_owner is not None:
-            metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = record.response_owner
         if record.requester_id is not None:
             metadata["requester_id"] = record.requester_id
-        if record.history_scope is not None:
-            metadata[constants.MATRIX_HISTORY_SCOPE_METADATA_KEY] = record.history_scope.to_metadata()
-        if record.conversation_target is not None:
-            metadata[constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY] = record.conversation_target.to_metadata()
         return metadata
-
-    @staticmethod
-    def from_run_metadata(metadata: Mapping[str, object]) -> TurnRecord | None:
-        """Parse current Agno metadata, using response linkage as terminal-delivery evidence."""
-        if metadata.get(constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY) != TurnRecordCodec.schema_version():
-            return None
-        anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
-        if not isinstance(anchor_event_id, str) or not anchor_event_id:
-            return None
-        raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        raw_discovery_event_ids = metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
-        raw_redacted_source_event_ids = metadata.get(
-            constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY,
-        )
-        source_event_ids = (
-            canonical_source_event_ids(raw_source_event_ids)
-            if isinstance(raw_source_event_ids, list)
-            else (anchor_event_id,)
-        ) or (anchor_event_id,)
-        response_event_id = canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
-        return TurnRecord.create(
-            source_event_ids,
-            discovery_event_ids=(
-                canonical_source_event_ids(raw_discovery_event_ids) if isinstance(raw_discovery_event_ids, list) else ()
-            ),
-            redacted_source_event_ids=(
-                canonical_source_event_ids(raw_redacted_source_event_ids)
-                if isinstance(raw_redacted_source_event_ids, list)
-                else ()
-            ),
-            anchor_event_id=anchor_event_id,
-            response_event_id=response_event_id,
-            completed=response_event_id is not None,
-            source_event_prompts=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)),
-            source_event_revisions=_mapping_or_none(
-                metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY),
-            ),
-            source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
-            response_owner=canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
-            requester_id=canonical_optional_string(metadata.get("requester_id")),
-            correlation_id=canonical_optional_string(metadata.get("correlation_id")),
-            history_scope=HistoryScope.from_metadata(metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY)),
-            conversation_target=MessageTarget.from_metadata(
-                metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
-            ),
-        )
 
 
 @dataclass(frozen=True)
@@ -354,7 +253,6 @@ class _LedgerState:
 
     responses: dict[str, TurnRecord] = field(default_factory=dict)
     conversation_responses: dict[str, dict[str, TurnRecord]] = field(default_factory=dict)
-    cleanup_responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     # Reserve conflicting identities briefly; cleanup holds this mutex while
     # draining active writes. Unrelated updates may await persistence together.
@@ -424,7 +322,7 @@ class HandledTurnLedger:
 
     def _publish_responses(self, indexes: _ResponseIndexes) -> None:
         """Install a detached map and its indexes with the state lock held."""
-        self._state.responses, self._state.conversation_responses, self._state.cleanup_responses = indexes
+        self._state.responses, self._state.conversation_responses = indexes
 
     def _set_response(self, event_id: str, record: TurnRecord | None) -> None:
         """Publish or restore one alias and its read indexes with the state lock held.
@@ -449,10 +347,6 @@ class HandledTurnLedger:
             self._responses[event_id] = record
             if session is not None:
                 self._state.conversation_responses.setdefault(session, {})[event_id] = record
-        if record is not None and record.pending_redaction_cleanup_event_ids:
-            self._state.cleanup_responses[event_id] = record
-        else:
-            self._state.cleanup_responses.pop(event_id, None)
 
     async def load(self) -> None:
         """Read every stored record into memory, once per process.
@@ -748,18 +642,6 @@ class HandledTurnLedger:
                         return self._responses.get(source_event_id)
             await asyncio.shield(pending_write)
 
-    def pending_redaction_cleanup_event_ids(self) -> tuple[str, ...]:
-        """Return every durable redaction cleanup intent still awaiting completion."""
-        with self._state.lock:
-            self._require_loaded()
-            return canonical_source_event_ids(
-                tuple(
-                    event_id
-                    for record in self._state.cleanup_responses.values()
-                    for event_id in record.pending_redaction_cleanup_event_ids
-                ),
-            )
-
     def all_turn_records(self) -> tuple[TurnRecord, ...]:
         """Return each retained owner once without publishing provenance aliases."""
         with self._state.lock:
@@ -843,19 +725,16 @@ class HandledTurnLedger:
         )
 
 
-type _ResponseIndexes = tuple[dict[str, TurnRecord], dict[str, dict[str, TurnRecord]], dict[str, TurnRecord]]
+type _ResponseIndexes = tuple[dict[str, TurnRecord], dict[str, dict[str, TurnRecord]]]
 
 
 def _index_responses(responses: dict[str, TurnRecord]) -> _ResponseIndexes:
     """Build detached lookup maps before publishing them to synchronous readers."""
     conversations: dict[str, dict[str, TurnRecord]] = {}
-    cleanup: dict[str, TurnRecord] = {}
     for event_id, record in responses.items():
         if record.conversation_target is not None:
             conversations.setdefault(record.conversation_target.session_id, {})[event_id] = record
-        if record.pending_redaction_cleanup_event_ids:
-            cleanup[event_id] = record
-    return responses, conversations, cleanup
+    return responses, conversations
 
 
 def _decode_response_indexes(stored: Sequence[tuple[str, str, str]]) -> _ResponseIndexes:
@@ -965,13 +844,12 @@ def _project_redaction_alias(
         turn_record,
         source_event_ids=retained_source_event_ids,
         anchor_event_id=anchor_event_id,
+        # An explicit empty source map keeps per-source replay ownership fail-closed after projection.
         source_event_metadata=(
             {}
             if turn_record.is_coalesced and turn_record.source_event_metadata is None
             else turn_record.source_event_metadata
         ),
-        # Turn-level requester context remains required for owed redaction cleanup; an explicit
-        # empty source map keeps per-source replay ownership fail-closed after projection.
         requester_id=turn_record.requester_id,
     )
 
@@ -1005,32 +883,12 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
             if newer.command_result_text is not None
             else older.command_result_extra_content
         ),
-        latest_edit_receipt_order=max(
-            newer.latest_edit_receipt_order or 0,
-            older.latest_edit_receipt_order or 0,
-        )
-        or None,
-        user_stop_receipt_order=max(
-            newer.user_stop_receipt_order or 0,
-            older.user_stop_receipt_order or 0,
-        )
-        or None,
-        user_stop_settled_receipt_order=max(
-            newer.user_stop_settled_receipt_order or 0,
-            older.user_stop_settled_receipt_order or 0,
-        )
-        or None,
     )
 
 
 def _bool_or_none(value: object) -> bool | None:
     """Return a strict boolean or None."""
     return value if isinstance(value, bool) else None
-
-
-def _positive_int_or_none(value: object) -> int | None:
-    """Return one positive non-boolean integer or None."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
@@ -1060,22 +918,27 @@ def _response_group_requires_retention(
     group: _ResponseGroup,
     unsettled_source_event_ids: frozenset[str],
 ) -> bool:
-    """Return whether one group still owns unfinished durable work."""
+    """Return whether one group still owns unfinished durable work or redaction evidence.
+
+    A conversation's ledger tombstones are what history cleanup derives from when the
+    journal no longer has them, and nothing tracks which histories still hold an event,
+    so they are kept for good; their number grows only with redactions.
+    """
     return (
         not unsettled_source_event_ids.isdisjoint(group.records)
-        or any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
         or any(
-            not unsettled_source_event_ids.isdisjoint(record.revision_replay or {})
-            or any(value.cleanup_pending for value in (record.revision_replay or {}).values())
+            record.conversation_target is not None
+            and (
+                bool(record.redacted_source_event_ids)
+                or any(revision.redacted for revision in (record.revision_replay or {}).values())
+            )
             for record in group.records.values()
+        )
+        or any(
+            not unsettled_source_event_ids.isdisjoint(record.revision_replay or {}) for record in group.records.values()
         )
         or any(
             not record.completed and record.replay_source_event_ids and not _is_prepared_voice_checkpoint_only(record)
-            for record in group.records.values()
-        )
-        or any(
-            record.user_stop_receipt_order is not None
-            and (record.user_stop_settled_receipt_order or 0) < record.user_stop_receipt_order
             for record in group.records.values()
         )
     )

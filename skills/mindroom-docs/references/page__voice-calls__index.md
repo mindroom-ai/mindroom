@@ -153,7 +153,7 @@ models:
     id: claude-opus-5-5
   call_fast:
     provider: anthropic
-    id: claude-haiku-4-5
+    id: claude-haiku-5-5
 
 agents:
   assistant:
@@ -241,10 +241,51 @@ Tools that need confirmation, user input, external execution, or [`tool_approval
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart, or a configuration reload that restarts the call agent, also drops it from the call.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
+
+## Calling an agent about a thread
+
+In MindRoom Chat, start the call from a thread's header, or from the agent's profile while a thread is open.
+When the agent picks up, it receives a snapshot of that conversation, plus the thread title when the thread has one.
+The snapshot is the newest part of the thread that fits the call budget (about 6,000 tokens), with a note when older messages were left out.
+Each message is cut to 2,000 characters.
+Starting a call from a room's main timeline gives the agent the newest unthreaded messages of that room instead.
+
+The snapshot is taken once, when the agent joins; messages sent during the call are not added.
+It works with all three call profiles; with `live`, the voice model skips it when the agent's prompt leaves too little room, but the delegated agent always gets it.
+
+The agent gets the snapshot only when you are a member of the room the call came from, the agent's `access` admits you there, and the agent has joined it.
+Otherwise, or when reading the conversation takes longer than 5 seconds, the call starts without it.
+
+When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
+The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, so later replies in the thread know what was said.
+Calls shorter than 10 seconds, calls in which the caller said nothing, calls that started without a conversation snapshot, and calls cut off by a MindRoom restart post nothing.
+The transcript holds only what was said; tool use is left out.
+Before posting, the agent checks the caller's access to the origin room again, and posts nothing if the caller lost that access during the call.
+If the agent's media connection drops and it rejoins the same call, each part of the call posts its own message.
+
+An agent with the `matrix_message` tool is also told how to start longer work during a call.
+It sends a self-contained task to the thread or room the call came from, and names itself or another agent as `recipient`, so the work runs there while you keep talking.
+A call without an origin makes it ask you which room to use.
+
+Other Matrix clients ask for a conversation snapshot with the `origin` field of the call room's `io.mindroom.agent_call` state event:
+
+```json
+{
+  "version": 1,
+  "agent_user_id": "@mindroom_assistant:example.org",
+  "creator_user_id": "@alice:example.org",
+  "ephemeral": false,
+  "origin": { "room_id": "!abc:example.org", "thread_id": "$root" }
+}
+```
+
+`thread_id` is `null` when the call starts from the room's main timeline, and `origin` may be left out entirely.
+The agent uses `origin` only when the caller sent the event with an empty state key and `version: 1`, with `creator_user_id` and `agent_user_id` naming the caller and this agent, `thread_id` is the thread's root event, and `room_id` is not the call room.
+Write `origin` before each call, because the agent reads it when it joins.
 
 ## Transcripts and memory
 

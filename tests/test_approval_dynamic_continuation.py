@@ -25,14 +25,14 @@ from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.sleep import SleepTools
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.message_target import MessageTarget
-from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
+    PausedAnswer,
     PausedAttempt,
     ResponsePausedForApproval,
     ResumedAttempt,
@@ -43,10 +43,10 @@ from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StructuredStreamChunk,
     ToolTraceEntry,
-    serialize_tool_trace,
 )
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths, make_turn_context, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
 
@@ -298,17 +298,13 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
     finally:
         close_agent_runtime_state_dbs(actor, shared_scope_storage=storage)
         storage.close()
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-example",
         run_id=paused.run_id,
         session_id=identity.session_id,
-        entity_kind="agent",
-        entity_name="general",
         room_id=identity.room_id,
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(
             ApprovalCall(
@@ -346,10 +342,12 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
         )
     trace: list[ToolTraceEntry] = []
     run_ids: list[str] = []
+    paused_answer = PausedAnswer()
 
     async def resume() -> CompletedApprovalRun | PausedAttempt:
         return await execution.continue_run(
             continuation,
+            paused_answer=paused_answer,
             execution_identity=identity,
             tool_dispatch=dispatch,
             decisions={call.tool_call_id: True for call in continuation.calls},
@@ -398,8 +396,6 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
             run_id=result.run_id,
             runtime_model_name=result.runtime_model_name,
             continuation_count=result.continuation_count,
-            response_text=result.response_text,
-            response_tool_trace=serialize_tool_trace(result.tool_trace, include_internal=True),
             calls=(
                 ApprovalCall(
                     "sleeper",
@@ -411,6 +407,7 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
                 ),
             ),
         )
+        paused_answer = PausedAnswer(text=result.response_text, tool_trace=result.tool_trace)
         result = await resume()
     if outcome == "pause_limit":
         assert isinstance(result, CompletedApprovalRun)
@@ -458,18 +455,13 @@ async def test_approval_settlement_preserves_tool_boundary(
         resolved_thread_id="$thread",
         session_id="session",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-boundary",
         run_id="run-saved",
         session_id="session",
-        entity_kind="agent",
-        entity_name="general",
         room_id=identity.room_id,
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
         state="claimed",
         show_tool_calls=show_tool_calls,
     )
@@ -538,18 +530,12 @@ async def test_approval_settlement_uses_typed_status(
         resolved_thread_id="$thread",
         session_id="session",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-status",
         run_id="run-saved",
         session_id="session",
-        entity_kind="agent",
-        entity_name="general",
         room_id="!room:example.org",
-        thread_id="$thread",
         requester_id="@user:example.org",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
         state="claimed",
     )
 
@@ -694,17 +680,13 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         storage.close()
     saved = CollectedStreamPresentation(show_tool_calls=True, response_text="Adding first.")
     saved.start_tool((paused.tools or [])[0])
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-progress",
         run_id=paused.run_id,
         session_id=identity.session_id,
-        entity_kind="agent",
-        entity_name="general",
         room_id=identity.room_id,
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(
             ApprovalCall(
@@ -717,8 +699,6 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
             ),
         ),
         request_body="Add, then keep going.",
-        response_text=saved.response_text,
-        response_tool_trace=serialize_tool_trace(saved.tool_trace, include_internal=True),
         show_tool_calls=True,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
@@ -730,6 +710,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
 
     result = await execution.continue_run(
         continuation,
+        paused_answer=PausedAnswer(text=saved.response_text, tool_trace=tuple(saved.tool_trace)),
         execution_identity=identity,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         decisions={"approved": True},
@@ -772,18 +753,12 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         resolved_thread_id="$thread",
         session_id="session",
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approval-fresh-pause",
         run_id="run-saved",
         session_id="session",
-        entity_kind="agent",
-        entity_name="general",
         room_id="!room:example.org",
-        thread_id="$thread",
         requester_id="@user:example.org",
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
         state="claimed",
         show_tool_calls=True,
     )

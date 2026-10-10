@@ -29,7 +29,12 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, ResponseTurnContext
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAnswer,
+    ResponsePausedForApproval,
+    ResponseTurnContext,
+)
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
@@ -40,10 +45,9 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import ReplyBoundaryReport, _JobJoin, reply_boundary_report
+from mindroom.tool_jobs.completion import _JobJoin, join_conversation_jobs
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.held_replies import _WAITING_NOTICE
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
@@ -52,7 +56,7 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
-from tests.conftest import make_turn_context
+from tests.conftest import make_turn_context, message_origin
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.tool_job_helpers import (
@@ -101,7 +105,6 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     started, release = asyncio.Event(), asyncio.Event()
-    report = ReplyBoundaryReport()
     executions = 0
 
     async def slow_tool() -> str:
@@ -161,7 +164,7 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
     )
     pending = None
     try:
-        with tool_runtime_context(context), reply_boundary_report(report):
+        with tool_runtime_context(context):
             paused = await actor.arun(
                 "Start the approved work",
                 session_id=context.session_id,
@@ -181,6 +184,7 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
                 room_id=owner.room_id,
                 thread_id=owner.resolved_thread_id,
                 requester_id=owner.requester_id,
+                origin=message_origin(sender_id=owner.requester_id),
                 response_event_id="$response",
                 sources=ResponseSources(("$source",), ("$source",)),
                 calls=approval_calls,
@@ -227,6 +231,7 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
                         continuation,
                         paused,
                         paused.requirements,
+                        paused_answer=PausedAnswer(),
                         config=config,
                         runtime_paths=paths,
                         execution_identity=owner,
@@ -291,9 +296,10 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
             jobs = await runtime.list_jobs(owner=owner, depth=0)
             assert len(jobs) == 1
             assert (await lookup(runtime, jobs[0].job_id, owner=owner, depth=0)).status == "running"
-            assert report.boundary is not None
-            assert report.boundary.notice == _WAITING_NOTICE
-            assert report.boundary.key.participants == ("leader",)
+            outstanding = await join_conversation_jobs(set(), joins=0)
+            assert outstanding.holds
+            assert outstanding.key is not None
+            assert outstanding.key.participants == ("leader",)
             release.set()
             ready = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
             await runtime.release_wait(jobs[0].job_id, ready.claim)

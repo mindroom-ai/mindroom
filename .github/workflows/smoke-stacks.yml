@@ -36,6 +36,10 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # Pull Synapse from mirror.gcr.io; anonymous Docker Hub pulls fail on shared runners.
+      SYNAPSE_IMAGE: mirror.gcr.io/matrixdotorg/synapse:latest
+      INSTANCE_SYNAPSE_IMAGE: mirror.gcr.io/matrixdotorg/synapse:latest
 
     steps:
       - name: Checkout mindroom

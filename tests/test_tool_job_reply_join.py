@@ -6,10 +6,8 @@ import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.visible_body import visible_body_from_content
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -19,32 +17,20 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.streaming import StreamingPresentation
 from mindroom.tool_jobs.completion import (
     _JOB_JOIN_LIMIT,
-    HeldContinuation,
-    ReplyBoundaryReport,
+    HoldKey,
     _JobJoin,
     completion_prompt,
     delegated_child_context,
     join_approval_jobs,
     join_conversation_jobs,
-    reply_boundary_report,
-)
-from mindroom.tool_jobs.held_replies import (
-    _APPROVAL_NOTICE,
-    _WAITING_NOTICE,
-    HeldReply,
-    HoldKey,
-    held_edit,
-    released_edit,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
-from tests.response_runner_helpers import _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx, _streaming_adapter
 
 if TYPE_CHECKING:
@@ -56,7 +42,6 @@ if TYPE_CHECKING:
 
 import pytest
 
-from tests.response_runner_helpers import _bot
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     completed_delegation_job,
@@ -311,7 +296,6 @@ async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     continued: list[str] = []
-    report = ReplyBoundaryReport()
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "done")
@@ -330,16 +314,16 @@ async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
 
     try:
         await leave_ready_result()
-        with tool_runtime_context(context), reply_boundary_report(report):
+        with tool_runtime_context(context):
             await join_approval_jobs(
                 "completed run",
                 is_complete=lambda _response: True,
                 continue_response=continue_response,
             )
         assert len(continued) == _JOB_JOIN_LIMIT
-        # Past the limit the message holds nothing; the next reply in the conversation takes the work.
-        assert report.boundary is not None
-        assert report.boundary.notice is None
+        with tool_runtime_context(context):
+            # Past the limit the message holds nothing; the next reply in the conversation takes the work.
+            assert not (await join_conversation_jobs(set(), joins=_JOB_JOIN_LIMIT)).holds
     finally:
         await runtime.shutdown()
 
@@ -381,7 +365,6 @@ async def test_boundary_records_outstanding_work_for_the_message_to_hold(tmp_pat
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
     finish = asyncio.Event()
-    report = ReplyBoundaryReport()
 
     async def operation() -> BackgroundOutcome:
         await finish.wait()
@@ -389,12 +372,11 @@ async def test_boundary_records_outstanding_work_for_the_message_to_hold(tmp_pat
 
     try:
         await start_job(runtime, "work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-        with tool_runtime_context(context), reply_boundary_report(report):
-            assert await join_conversation_jobs(set(), joins=0) == _JobJoin(holds=True)
-        assert report.boundary is not None
-        assert report.boundary.notice == _WAITING_NOTICE
-        assert report.boundary.joins == 0
-        assert report.boundary.key == HoldKey(
+        with tool_runtime_context(context):
+            outstanding = await join_conversation_jobs(set(), joins=0)
+        assert outstanding.holds
+        assert outstanding.prompt is None
+        assert outstanding.key == HoldKey(
             recipient=owner.recipient,
             room_id=owner.room_id,
             thread_id=owner.resolved_thread_id,
@@ -424,7 +406,6 @@ async def test_boundary_holds_only_its_participants_work(tmp_path: Path, reply: 
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
     finish = asyncio.Event()
-    report = ReplyBoundaryReport()
 
     async def operation() -> BackgroundOutcome:
         await finish.wait()
@@ -432,46 +413,17 @@ async def test_boundary_holds_only_its_participants_work(tmp_path: Path, reply: 
 
     try:
         await start_job(runtime, "member", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-        with tool_runtime_context(context), reply_boundary_report(report):
+        with tool_runtime_context(context):
             if reply == "delegated_child":
                 with delegated_child_context():
                     assert await join_conversation_jobs(set(), joins=0) == _JobJoin()
-                assert report.boundary is None
                 return
             joined = await join_conversation_jobs(set(), joins=0, agent_names=("worker",) if reply == "team" else None)
-        assert joined == _JobJoin(holds=reply == "team")
-        assert report.boundary is not None
-        assert report.boundary.key.participants == (("lead", "worker") if reply == "team" else ("lead",))
+        assert joined.holds is (reply == "team")
+        assert joined.key is not None
+        assert joined.key.participants == (("lead", "worker") if reply == "team" else ("lead",))
     finally:
         finish.set()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_boundary_names_a_job_awaiting_approval(tmp_path: Path) -> None:
-    """A held message says when its work waits for approval cards."""
-    owner = completed_delegation_job().owner
-    runtime = await tool_job_runtime(tmp_path)
-    context = _job_context(tmp_path, owner)
-    pin_background_tool_jobs(context.config, context.runtime_paths)
-    register_background_runtime(context.runtime_paths, runtime)
-    decided = asyncio.Event()
-    report = ReplyBoundaryReport()
-
-    async def approval() -> BackgroundOutcome:
-        await runtime.set_awaiting_approval("approval", awaiting=True)
-        await decided.wait()
-        return BackgroundOutcome("completed", "approved and done")
-
-    try:
-        await start_job(runtime, "approval", tool_name="delegate", depth=0, adapter={}, owner=owner, operation=approval)
-        await wait_for_status(runtime, "approval", "awaiting_approval")
-        with tool_runtime_context(context), reply_boundary_report(report):
-            assert await join_conversation_jobs(set(), joins=0) == _JobJoin(holds=True)
-        assert report.boundary is not None
-        assert report.boundary.notice == _APPROVAL_NOTICE
-    finally:
-        decided.set()
         await runtime.shutdown()
 
 
@@ -484,7 +436,6 @@ async def test_boundary_does_not_hold_revoked_work(tmp_path: Path) -> None:
     context = _job_context(tmp_path, owner)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
-    report = ReplyBoundaryReport()
 
     async def operation() -> BackgroundOutcome:
         await asyncio.Event().wait()
@@ -494,101 +445,7 @@ async def test_boundary_does_not_hold_revoked_work(tmp_path: Path) -> None:
         await start_job(runtime, "revoked", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         allowed = False
         await runtime.cancel_revoked(denied=lambda _job: True)
-        with tool_runtime_context(context), reply_boundary_report(report):
-            assert await join_conversation_jobs(set(), joins=0) == _JobJoin()
-        assert report.boundary is not None
-        assert report.boundary.notice is None
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_turn_continuing_a_held_message_retrieves_its_work_once(tmp_path: Path, *, streaming: bool) -> None:
-    """A continuation asks once for the ready work it was woken for; the message's own text stays with the stream."""
-    owner = completed_delegation_job().owner
-    runtime = await tool_job_runtime(tmp_path)
-    context = _job_context(tmp_path, owner)
-    pin_background_tool_jobs(context.config, context.runtime_paths)
-    register_background_runtime(context.runtime_paths, runtime)
-    prompts: list[str] = []
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "done")
-
-    async def attempt(_run: TurnRunState, state: DynamicContinuationRunState) -> CompletedAttempt:
-        prompts.append(state.active_prompt)
-        return CompletedAttempt(response_text="The report is done.", replayable_text="The report is done.")
-
-    async def stream_attempt(run: TurnRunState, state: DynamicContinuationRunState) -> AsyncIterator[AttemptResolved]:
-        yield AttemptResolved(await attempt(run, state))
-
-    ctx = replace(_ctx(), held_continuation=HeldContinuation(attempted_job_ids=frozenset({"work"}), joins=3))
-    try:
-        await start_job(runtime, "work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-        await wait_for_status(runtime, "work", "completed")
         with tool_runtime_context(context):
-            if streaming:
-                chunks = [
-                    chunk
-                    async for chunk in stream_response_turn(
-                        ctx,
-                        _streaming_adapter(_AdapterLog(), stream_attempt),
-                        TurnSinks(),
-                        continuation=_continuation("Retrieve the work"),
-                    )
-                ]
-                assert chunks == ["notice:The report is done."]
-            else:
-                answer = await run_blocking_response_turn(
-                    ctx,
-                    _blocking_adapter(_AdapterLog(), attempt),
-                    TurnSinks(),
-                    continuation=_continuation("Retrieve the work"),
-                )
-                assert answer == "The report is done."
-        # The ready work is asked for once; its unread outcome is not asked for again within the turn.
-        assert prompts == ["Retrieve the work"]
+            assert not (await join_conversation_jobs(set(), joins=0)).holds
     finally:
         await runtime.shutdown()
-
-
-def test_held_message_edits_show_and_drop_the_waiting_notice(tmp_path: Path) -> None:
-    """A held message shows its reply with the notice while it waits, and without it once it holds nothing."""
-    bot = _bot(tmp_path)
-    hold = HeldReply(
-        key=HoldKey("general", "!room:localhost", "$thread", "@user:localhost", False, ("general",)),
-        target=_target(thread_id="$thread"),
-        source_kind=MESSAGE_SOURCE_KIND,
-        message_event_id="$response",
-        presentation=StreamingPresentation("Ping @general"),
-        extra_content={"io.mindroom.ai_run": {"run_id": "run"}},
-        notice=_WAITING_NOTICE,
-        stop_button_event_id=None,
-        joins=0,
-    )
-    held = held_edit(hold)
-    assert held.event_id == "$response"
-    assert held.new_text == f"Ping @general\n\n{_WAITING_NOTICE}"
-    assert held.extra_content == {
-        "io.mindroom.ai_run": {"run_id": "run"},
-        "io.mindroom.stream_status": "streaming",
-        "io.mindroom.warmup_suffix": _WAITING_NOTICE,
-    }
-    content = format_message_with_mentions(
-        bot.config,
-        bot.runtime_paths,
-        held.new_text,
-        extra_content=held.extra_content,
-    )
-    recovered = visible_body_from_content(
-        content,
-        "",
-        sender_id=bot.matrix_id.full_id,
-        trusted_sender_ids={bot.matrix_id.full_id},
-    )
-    # Recovery reads the published body without the notice, with its resolved mention.
-    assert recovered == content["body"].removesuffix(f"\n\n{_WAITING_NOTICE}")
-    released = released_edit(hold)
-    assert released.new_text == "Ping @general"
-    assert released.extra_content == {"io.mindroom.ai_run": {"run_id": "run"}, "io.mindroom.stream_status": "completed"}

@@ -19,15 +19,20 @@ CompactionEstimateKind = Literal[
 ]
 
 
+def estimate_char_tokens(char_count: int) -> int:
+    """Estimate the tokens of ``char_count`` characters using chars / 4."""
+    return char_count // 4
+
+
 def estimate_text_tokens(value: str | list[str] | None) -> int:
     """Estimate token count using chars / 4."""
     if value is None:
         return 0
     if isinstance(value, str):
-        return len(value) // 4
+        return estimate_char_tokens(len(value))
     if isinstance(value, list):
-        return sum(len(stable_serialize(part)) for part in value) // 4
-    return len(stable_serialize(value)) // 4
+        return estimate_char_tokens(sum(len(stable_serialize(part)) for part in value))
+    return estimate_char_tokens(len(stable_serialize(value)))
 
 
 @lru_cache(maxsize=16)

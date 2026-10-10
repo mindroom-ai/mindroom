@@ -12,6 +12,7 @@ import io
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -2699,11 +2700,50 @@ def test_worker_subprocess_env_preserves_parent_path(
 
     assert env["PATH"] == f"{paths.venv_dir}/bin:/usr/local/bin:/usr/bin:/bin"
     # Temp files go to the worker's disk-backed state mount, not the small /tmp tmpfs.
-    assert env["TMPDIR"] == str(paths.cache_dir / "tmp")
-    assert Path(env["TMPDIR"]).is_relative_to(paths.root)
+    assert Path(env["TMPDIR"]).resolve() == paths.cache_dir / "tmp"
     assert "GOOGLE_CLOUD_PROJECT" not in env
     assert "GOOGLE_CLOUD_LOCATION" not in env
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
+
+
+def test_worker_subprocess_env_tmpdir_holds_unix_sockets_for_a_long_worker_root(tmp_path: Path) -> None:
+    """Chromium binds its SingletonSocket under TMPDIR, which a long worker root would push past 107 bytes."""
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / ("worker" * 20))
+    paths.tmp_dir.mkdir(parents=True)
+
+    tmpdir = Path(sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"])
+    socket_dir = tmpdir / "org.chromium.Chromium.Ab12Cd"
+    socket_dir.mkdir()
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(socket_dir / "SingletonSocket"))
+
+    assert tmpdir.resolve() == paths.tmp_dir
+    assert (paths.tmp_dir / "org.chromium.Chromium.Ab12Cd" / "SingletonSocket").is_socket()
+
+
+@pytest.mark.parametrize("squatter", ["link_elsewhere", "directory", "other_owner"])
+def test_worker_subprocess_env_keeps_the_worker_tmpdir_when_its_link_name_is_not_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    squatter: str,
+) -> None:
+    """A link name that another user owns, or that leads anywhere else, is never handed to subprocesses."""
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
+    paths.tmp_dir.mkdir(parents=True)
+    link = Path(sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"])
+    assert link.is_symlink()
+    if squatter == "other_owner":
+        owner = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    else:
+        link.unlink()
+        if squatter == "directory":
+            link.mkdir()
+        else:
+            (tmp_path / "elsewhere").mkdir()
+            link.symlink_to(tmp_path / "elsewhere")
+
+    assert sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"] == str(paths.tmp_dir)
 
 
 def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6214,7 +6254,8 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
     assert execution_env["PIP_CACHE_DIR"] == str(worker_paths.cache_dir / "pip")
     assert execution_env["UV_CACHE_DIR"] == str(worker_paths.cache_dir / "uv")
     assert execution_env["PYTHONPYCACHEPREFIX"] == str(worker_paths.cache_dir / "pycache")
-    assert execution_env["TMPDIR"] == str(worker_paths.cache_dir / "tmp")
+    assert execution_env["TMPDIR"] == sandbox_exec_module.worker_subprocess_env(worker_paths)["TMPDIR"]
+    assert Path(execution_env["TMPDIR"]).resolve() == worker_paths.cache_dir / "tmp"
     assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
 
 

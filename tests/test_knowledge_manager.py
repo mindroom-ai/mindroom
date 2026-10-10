@@ -93,6 +93,7 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
     _Client,
     _Collection,
@@ -7850,8 +7851,10 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     scheduler.schedule_refresh.assert_called_once()
 
 
-def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
+def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Private index, lock, and refresh-cooldown registries should be pruned."""
+    # Hundreds of private identities each fsync their records; disk flush latency on a busy host is not under test.
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -9949,6 +9952,38 @@ def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
     replaces the Git failure it was called to sanitise.
     """
     assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
+
+
+def test_redacting_basic_secrets_scrubs_a_secret_that_contains_another_whole() -> None:
+    """Decoded Basic credentials are scrubbed wherever else they appear, the longest first."""
+    entries = [("alice", "hunter2"), ("bob", "hunter2-extra"), ("carol", "plain")]
+    headers = [
+        f"Authorization: Basic {base64.b64encode(f'{user}:{password}'.encode()).decode()}" for user, password in entries
+    ]
+    text = "\n".join([*headers, "echo hunter2-extra and hunter2 and alice:plain and carol:plain"])
+
+    assert redact_credentials_in_text(text).splitlines() == [
+        *["Authorization: Basic ***"] * len(entries),
+        "echo *** and *** and alice:*** and ***",
+    ]
+
+
+@pytest.mark.parametrize("lead", ["", "-", "1.", "+x9-"])
+def test_redacting_a_url_finds_its_scheme_after_other_scheme_characters(lead: str) -> None:
+    """A URL starts at the first letter of the scheme-character run that ends at ``://``."""
+    text = f"fatal: {lead}https://user:token@example.com/repo.git failed"
+
+    assert redact_credentials_in_text(text) == f"fatal: {lead}https://***@example.com/repo.git failed"
+
+
+def test_redacting_a_long_run_of_scheme_characters_stays_within_a_cpu_budget() -> None:
+    """A stored Git error is re-redacted on every knowledge API read, so a long non-URL run must not stall the loop."""
+    text = "remote: " + "A" * 100_000
+
+    with cpu_budget(0.5):
+        redacted = redact_credentials_in_text(text)
+
+    assert redacted == text
 
 
 @pytest.mark.asyncio

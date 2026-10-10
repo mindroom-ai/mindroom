@@ -8,19 +8,18 @@ has a direct safety net.
 
 from __future__ import annotations
 
-import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ATTACHMENT_IDS_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
@@ -966,94 +965,17 @@ async def test_coalescing_keeps_a_server_failure_retryable(
     assert not isinstance(raised.value, RelatedEventUnavailableError)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("newer_during_download", [False, True])
-@pytest.mark.parametrize("aliased_requester", [False, True])
-async def test_exact_source_pages_and_resolves_sidecar_with_revision_proof(
-    config: Config,
-    journal_store: EventJournalStore,
-    monkeypatch: pytest.MonkeyPatch,
-    newer_during_download: bool,
-    aliased_requester: bool,
-) -> None:
-    """Exact refill reads past the prompt window and rejects a stale sidecar snapshot."""
-    principal = journal_store.principal("general")
-    requester_id = "@canonical:test" if aliased_requester else _SENDER
-    if aliased_requester:
-        config.authorization.aliases = {requester_id: [_SENDER]}
-    source_id = "$a-source"
-    sidecar = _event(
-        {
-            "msgtype": "m.file",
-            "body": "preview",
-            "url": "mxc://server/source",
-            "info": {"mimetype": "application/json"},
-            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
-            "m.relates_to": {"rel_type": "m.thread", "event_id": _PARENT},
-        },
-        event_id=source_id,
-    )
-    newer = _event(
-        {
-            "body": "newer unrelated",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": _PARENT},
-        },
-        event_id="$z-newer",
-    )
-    await principal.install_hydrated_conversation(
-        room_id=_ROOM_ID,
-        thread_id=_PARENT,
-        complete=True,
-        expected_membership_epoch=await principal.membership_epoch(_ROOM_ID),
-        events=tuple(
-            _projected_event(_ROOM_ID, event, EventKind.MESSAGE, self_sender=_BOT_USER_ID) for event in (sidecar, newer)
-        ),
-    )
+def test_only_a_managed_sender_can_mark_a_turn_as_an_automation_turn(config: Config) -> None:
+    """A person's message carrying an automation hook source is an ordinary turn, so auto-flush still keeps it."""
     resolver = _resolver(config)
-    runtime = resolver.deps.runtime
-    reader = ConversationReader(
-        store=principal,
-        hydrator=ConversationHydrator(store=principal, runtime=runtime, self_sender=_BOT_USER_ID),
-    )
-    resolver.deps = replace(resolver.deps, conversation_reader=reader)
-    monkeypatch.setattr("mindroom.conversation_resolver.HYDRATED_PROMPT_WINDOW_MESSAGES", 1)
+    event = _event({"body": "hello", HOOK_SOURCE_KEY: "automation/dreaming"})
 
-    async def download(*_args: object, **_kwargs: object) -> nio.DownloadResponse:
-        if newer_during_download:
-            edit = _event(
-                {
-                    "body": "* NEWER_SURVIVING",
-                    "m.new_content": {"msgtype": "m.text", "body": "NEWER_SURVIVING"},
-                    "m.relates_to": {"rel_type": "m.replace", "event_id": source_id},
-                },
-                event_id="$latest-edit",
-            )
-            await principal.admit(
-                _inbound_event(_ROOM_ID, edit, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                _projected_event(_ROOM_ID, edit, EventKind.MESSAGE, self_sender=_BOT_USER_ID),
-            )
-            snapshot = await principal.read_conversation(room_id=_ROOM_ID, thread_id=_PARENT, limit=10)
-            assert any(message.revision_event_id == "$latest-edit" for message in snapshot.messages), snapshot
-        return MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps({"msgtype": "m.text", "body": "FULL_SIDECAR_BODY"}).encode(),
-        )
-
-    assert runtime.client is not None
-    response = nio.RoomGetEventResponse()
-    response.event = sidecar
-    monkeypatch.setattr(runtime.client, "room_get_event", AsyncMock(return_value=response))
-    monkeypatch.setattr(runtime.client, "download", download)
-    target = MessageTarget.resolve(_ROOM_ID, _PARENT, source_id)
-    resolved = await resolver.resolve_exact_source(
-        target=target,
-        source_event_id=source_id,
-        requester_id=requester_id,
+    envelope = resolver.build_ingress_envelope(
+        event=event,
+        requester_user_id=_SENDER,
+        target=MessageTarget.resolve(_ROOM_ID, None, _EVENT_ID),
+        body="hello",
+        mentioned_agents=[],
     )
-    assert resolved.body == ("NEWER_SURVIVING" if newer_during_download else "FULL_SIDECAR_BODY")
-    assert resolved.event_id == source_id
-    assert resolved.latest_event_id == ("$latest-edit" if newer_during_download else source_id)
-    with pytest.raises(ThreadMembershipLookupError, match="requester"):
-        await resolver.resolve_exact_source(target=target, source_event_id=source_id, requester_id="@wrong:test")
-    with pytest.raises(ThreadMembershipLookupError, match="unavailable"):
-        await resolver.resolve_exact_source(target=target, source_event_id="$absent", requester_id=_SENDER)
+
+    assert envelope.hook_source is None

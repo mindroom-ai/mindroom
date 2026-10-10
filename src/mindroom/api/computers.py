@@ -33,7 +33,11 @@ if TYPE_CHECKING:
     from mindroom.worker_computer.protocol import ComputerStatus
     from mindroom.workers.models import WorkerHandle
 
-_STREAM_RECHECK_SECONDS = 25.0
+# Busy runtimes can take several seconds to finish one authorization/manager/status
+# check. Starting checks every 15 seconds and allowing each 15 seconds keeps an
+# overdue check revoking the viewer within 30 seconds of the previous check start.
+_STREAM_RECHECK_SECONDS = 15.0
+_STREAM_RECHECK_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -223,6 +227,9 @@ async def create_session(payload: _CreateSession, request: Request) -> dict[str,
         session.generation = status["generation"]
         await _authorize(request, target)
         store.get(session.session_id)
+        if await request.is_disconnected():
+            # Starting a cold worker can outlast the viewer's request; its slot must not outlive it.
+            raise ComputerError(409, "Computer viewer left before the session was ready.")  # noqa: TRY301 - revoke below
     except BaseException:
         store.close(session.session_id)
         raise
@@ -320,13 +327,25 @@ async def _maintain(websocket: WebSocket, session: ComputerSession, stream: asyn
     while not stream.is_set():
         started = asyncio.get_running_loop().time()
         try:
-            # A 25-second start cadence plus at most five seconds for the entire
-            # authorization/manager/status check bounds completed touches to 30s.
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(_STREAM_RECHECK_TIMEOUT_SECONDS):
                 await _checked_status(websocket, session)
         except TimeoutError:
+            logger.warning(
+                "Computer stream recheck timed out",
+                requester_id=session.target.requester_id,
+                agent_user_id=session.target.agent_user_id,
+            )
             _store(websocket.app).close(session.session_id)
             return
+        except ComputerError as error:
+            logger.info(
+                "Computer stream recheck closed the viewer",
+                requester_id=session.target.requester_id,
+                agent_user_id=session.target.agent_user_id,
+                status_code=error.status_code,
+                detail=error.detail,
+            )
+            raise
         interval = max(0, _STREAM_RECHECK_SECONDS - (asyncio.get_running_loop().time() - started))
         timeout = min(interval, max(0, session.expires_at - _store(websocket.app).clock()))
         try:
@@ -350,7 +369,7 @@ def _stream_session(websocket: WebSocket, session_id: str) -> ComputerSession:
 @router.websocket("/sessions/{session_id}/stream")
 async def stream(websocket: WebSocket, session_id: str) -> None:
     """Consume a subprotocol ticket; only backend headers carry worker credentials."""
-    tasks: list[asyncio.Task[None]] = []
+    tasks: list[asyncio.Task[object]] = []
     session: ComputerSession | None = None
     stream_closed = asyncio.Event()
     accepted = False
@@ -366,11 +385,19 @@ async def stream(websocket: WebSocket, session_id: str) -> None:
             await websocket.accept(subprotocol="binary", headers=[(b"cache-control", b"no-store")])
             accepted = True
             tasks = [
-                asyncio.create_task(_upstream(websocket, upstream)),
-                asyncio.create_task(_downstream(websocket, upstream)),
-                asyncio.create_task(_maintain(websocket, session, stream_closed)),
+                asyncio.create_task(_upstream(websocket, upstream), name="viewer"),
+                asyncio.create_task(_downstream(websocket, upstream), name="worker"),
+                asyncio.create_task(_maintain(websocket, session, stream_closed), name="recheck"),
+                # Revocation must not wait for a periodic check that is still running.
+                asyncio.create_task(stream_closed.wait(), name="closed"),
             ]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            logger.info(
+                "Computer stream ended",
+                requester_id=session.target.requester_id,
+                agent_user_id=session.target.agent_user_id,
+                ended_by=sorted(task.get_name() for task in done),
+            )
             for task in done:
                 task.result()
     except ComputerError as error:

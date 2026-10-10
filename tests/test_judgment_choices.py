@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.state import ChoiceQuestion, JudgmentMessage, build_judgment_request
+from mindroom.judgment.typesafe import _PINNED_MODEL, SYSTEM_ONE
 
 if TYPE_CHECKING:
     from mindroom.judgment.answers import ChoiceDecision, JudgmentResult
@@ -52,16 +53,16 @@ async def _judge(answer: dict) -> JudgmentResult[ChoiceDecision]:
             200,
             content=json.dumps(
                 {
-                    "model": PINNED_MODEL,
+                    "model": _PINNED_MODEL,
                     "answers": {"responder": answer},
                     "usage": {"input_tokens": 42, "output_tokens": 1},
                 },
             ).encode(),
         )
 
-    return await SystemOneClient(
+    return await JudgmentClient(
         api_key="synthetic",
-        model=PINNED_MODEL,
+        wire=SYSTEM_ONE,
         transport=httpx.MockTransport(respond),
     ).judge_choice(_request(), owner="router", allow_network=True)
 

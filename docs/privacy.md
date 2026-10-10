@@ -47,7 +47,7 @@ To provide messaging features, MindRoom and your selected homeserver process dat
 - app configuration and local preferences stored on your device
 - diagnostic information you choose to share with support
 
-If you use MindRoom's hosted control plane, it also processes account profile and status data, subscription and payment records, hosted instance records, usage metrics, audit events, and marketing or analytics consent choices.
+If you use MindRoom's hosted control plane, it also processes account profile and status data, subscription and payment records, hosted instance records, audit events, and marketing or analytics consent choices.
 These records support service operation, billing, security, fraud prevention, compliance, and the preferences you select.
 Hosted account and instance data is stored with Supabase, and payment processing is handled by Stripe.
 
@@ -106,9 +106,9 @@ When a paired local installation uses MindRoom's desktop OAuth client, the provi
 The local MindRoom process performs the token exchange with Google and stores the resulting tokens; the provisioning service does not receive the Google authorization code, tokens, or Google API data.
 Control of the OAuth app registration lets the project maintainers manage or disable the client, but it does not by itself reveal a user's OAuth tokens or Google data to them.
 
-Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Docs document contents, Calendar data, Sheets spreadsheet values, and Tasks task lists and tasks.
+Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Docs document contents, Calendar data, Sheets spreadsheet values, Tasks task lists and tasks, and Google Cloud data such as BigQuery table schemas and query results.
 
-The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, editing a document, managing a calendar event, reading and updating a spreadsheet, or creating and completing a task.
+The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, editing a document, managing a calendar event, reading and updating a spreadsheet, creating and completing a task, or running a read-only BigQuery query.
 
 Google connections follow the selected agent's saved effective execution scope.
 MindRoom uses `private.per` first, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope:
@@ -141,7 +141,7 @@ Retention depends on the system component:
 - runtime sessions, credentials, workspaces, files, and persistent volumes are retained until the installation operator removes them or applies its own retention policy, except where component-specific cleanup applies
 - attachment metadata and eligible managed `incoming_media/` files older than 30 days are pruned opportunistically during new attachment registration
 - the hosted control plane schedules hard deletion of soft-deleted application accounts after a 7-day grace period
-- hosted non-critical audit logs are scheduled for deletion after 90 days and usage metrics after 365 days; selected security and deletion audit events are excluded from that ordinary cleanup
+- hosted non-critical audit logs are scheduled for deletion after 90 days; selected security and deletion audit events are excluded from that ordinary cleanup
 - support emails and diagnostics may be retained for support and security purposes
 
 Registering a local or workspace file as an attachment retains a copy of its bytes in managed `incoming_media/` storage, subject to the same cleanup.

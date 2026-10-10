@@ -44,7 +44,7 @@ models:
 
   anthropic:
     provider: "anthropic"
-    id: "claude-haiku-4-5"
+    id: "claude-haiku-5-5"
 
   ollama:
     provider: "ollama"
@@ -102,6 +102,7 @@ memory:
   llm: null  # Optional LLM for memory operations (provider + config dict)
   file:
     max_entrypoint_lines: 200  # Max lines preloaded from MEMORY.md
+    max_entrypoint_tokens: 50000  # Max estimated tokens (characters / 4) preloaded from MEMORY.md
   auto_flush:
     enabled: false  # Background file-memory auto-flush (see memory consolidation plan)
     flush_interval_seconds: 1800
@@ -474,6 +475,7 @@ Below is a representative selection:
 - **slack** - Slack messaging (requires bot token)
 - **discord** - Discord messaging (requires bot token)
 - **matrix_message** - Send messages to other Matrix rooms
+- **thread_move** - Move the current Matrix thread into another room with `move_thread`
 - **thread_summary** - Write or update a one-line Matrix thread summary with `set_thread_summary`
 - **thread_model** - Show, switch, or reset the model override for the current Matrix thread (applies from the next message)
 

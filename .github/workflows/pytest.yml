@@ -44,6 +44,14 @@ jobs:
         with:
           tool: just@1.58.0
 
+      # Content-bundle init scripts must also run with BusyBox applets; those tests fail in CI without it.
+      - name: Install BusyBox for content-bundle script tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends busybox
+
+      # The root-squash cases run the init in an unprivileged user namespace, which Ubuntu's AppArmor blocks by default.
+      - name: Allow unprivileged user namespaces for content-bundle script tests
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Run full suite on Python 3.13
         if: matrix.python-version == '3.13'
         run: |

@@ -1441,7 +1441,6 @@ class TestRoutingRegression:
             config=test_config,
             runtime_paths=runtime_paths,
             rooms=[test_room_id],
-            team_mode="coordinate",
         )
         bot.orchestrator = SimpleNamespace(
             agent_bots={

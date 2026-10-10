@@ -230,7 +230,7 @@ def test_sonnet_presets_use_current_generation() -> None:
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id == "anthropic/claude-sonnet-5.5"
     assert model_defaults.SAAS_MODEL_PRESETS["sonnet"].id == "anthropic/claude-sonnet-5.5"
     assert bedrock_alternatives["sonnet"].id == "anthropic.claude-sonnet-5-5"
-    assert bedrock_alternatives["haiku"].id == "anthropic.claude-haiku-4-5"
+    assert bedrock_alternatives["haiku"].id == "anthropic.claude-haiku-5-5"
     assert "claude-sonnet-5" not in {
         model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id,
@@ -276,12 +276,12 @@ def test_openai_presets_use_current_models() -> None:
         "extra_kwargs": {"reasoning_effort": "low"},
     }
     assert openai_alternatives == {
-        "openai_sol": model_defaults.ModelPreset("openai", "gpt-6-sol", 1_050_000),
+        "openai_sol": model_defaults.ModelPreset("openai", "gpt-6.1-sol", 1_050_000),
         "openai_luna": model_defaults.ModelPreset("openai", "gpt-6-luna", 1_050_000),
     }
     assert model_defaults.SAAS_MODEL_PRESETS["sol"] == model_defaults.ModelPreset(
         "openrouter",
-        "openai/gpt-6-sol",
+        "openai/gpt-6.1-sol",
         1_050_000,
     )
     assert model_defaults.SAAS_MODEL_PRESETS["luna"] == model_defaults.ModelPreset(
@@ -289,7 +289,11 @@ def test_openai_presets_use_current_models() -> None:
         "openai/gpt-6-luna",
         1_050_000,
     )
-    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6-luna",
+    )
 
 
 def test_glm_presets_use_current_generation() -> None:

@@ -7,7 +7,7 @@ icon: lucide/monitor
 Worker Computer gives an agent a visible, persistent Chromium browser inside its dedicated worker, and lets the user watch it, take control, and hand it back from MindRoom Chat's Computer panel.
 Use it when a user wants to see what the agent is doing in a browser, step in for logins or CAPTCHAs, or preview a web app the agent is building.
 The browser shares the worker's files with the agent's shell and file tools.
-Agents with the [`chat_ui`](chat-ui.md) toolkit can open the panel for the user; see [Control the browser, then show it](chat-ui.md#control-the-browser-then-show-it) for that call.
+Agents with the [`chat_ui`](chat-ui.md) toolkit can open the panel for the user; see [Show the worker browser](chat-ui.md#show-the-worker-browser) for that call.
 
 ## Requirements and opt-in
 
@@ -100,6 +100,9 @@ Chat shows the Computer action when this origin is set and the room has a joined
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
+For the bundled MindRoom Chat iOS app, explicitly add `"capacitor://localhost"` alongside the trusted HTTPS web origins, for example `["https://chat.mindroom.chat", "capacitor://localhost"]`.
+Other custom-scheme origins and opaque `"null"` origins are refused.
+The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
 Each entry must be a scheme and host with an optional port, with no path or wildcard, and HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
 
@@ -127,9 +130,9 @@ Expose only this gateway; the worker's display has no public listener.
 
 ## Watch, take control, and resume
 
-<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/63868e17-6824-4073-8904-e1b7abc4b173#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/cc079b2f-6dbf-4509-9fdc-4ec21da85d7a#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%" poster="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-light="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-dark="https://github.com/user-attachments/assets/19244c17-be66-410f-b2cf-b8e3edb4b228">
+  <source src="https://github.com/user-attachments/assets/6aa0e537-bd5e-462d-89e2-6592cd9e3be9" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/00f08e39-3b52-4556-860b-3b5b0b2d7287" type="video/mp4">
 </video>
 
 - **Watch** shows the browser without input rights.
@@ -140,6 +143,9 @@ Expose only this gateway; the worker's display has no public listener.
 - **Close** disconnects this viewer and releases its control; the browser and files stay for later work.
 - **Stop** closes the browser and display and ends the session.
   **Start computer** creates a fresh session; profiles and files remain.
+
+The room header in MindRoom Chat shows a Computer button once the agent has shown its computer in that conversation.
+Before that, and on phones, open it from the room's More menu with **Show Computer**.
 
 Changing room, thread, account, or selected agent closes the old viewer.
 On desktop the panel sits beside the conversation and closes the Members drawer; on mobile it fills the screen and has a close button.

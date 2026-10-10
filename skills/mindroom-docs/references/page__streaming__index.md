@@ -3,9 +3,9 @@
 MindRoom streams agent responses to Matrix by progressively editing a single message, so users see text appear as the model generates it.
 This page covers when streaming is used, how to tune or disable it, how streamed messages show tool calls, completion, cancellation, and errors, and how oversized responses are delivered.
 
-<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b5772e74-de93-4559-8f4f-b045add92caa#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ec8dc609-e4b5-4db4-b806-d8c93fee52a0#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-light="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-dark="https://github.com/user-attachments/assets/54a96fc9-91dc-48a7-985c-7d4e41ad9be8">
+  <source src="https://github.com/user-attachments/assets/571db927-105b-4907-9c83-ed4f9ef1fc4a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/c913ed8a-4afb-43be-8d90-cdd2aa4158a9" type="video/mp4">
 </video>
 
 
@@ -102,7 +102,8 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
-The agent is told which visible tool calls already finished so it does not repeat side effects; calls hidden by `show_tool_calls: false` cannot be passed on, so it is only warned that they may have run.
+The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
+Nothing blocks a repeated call, so a model can still occasionally run one again.
 
 ## Large Messages
 

@@ -153,6 +153,7 @@ def _plugin(*callbacks: object) -> object:
             "entry_config": PluginEntryConfig(path="test-plugin"),
             "plugin_order": 0,
             "discovered_hooks": tuple(callbacks),
+            "discovered_automations": (),
         },
     )()
 

@@ -7,9 +7,9 @@ icon: lucide/mic
 This page covers Matrix voice messages sent to agents and teams: speech-to-text (STT) setup, transcript cleanup, what appears in the room, and what happens without STT.
 For live spoken conversations in Matrix calls, see [Voice Calls](voice-calls.md).
 
-<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/8abba58e-790f-4c80-a57d-62ab683ea18c#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7bf1bb2f-31c7-4ef4-ac07-4ec1b22b2da1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%" poster="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-light="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-dark="https://github.com/user-attachments/assets/9ec1837a-3566-4b0c-8274-7af7c30b988c">
+  <source src="https://github.com/user-attachments/assets/823df173-50ae-4304-b652-36a61bfbc911" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f048c8cc-3384-41e2-be59-000d3ab22099" type="video/mp4">
 </video>
 
 With voice enabled, MindRoom transcribes each voice message, cleans up the transcript, and handles it like a text message prefixed with `🎤`.

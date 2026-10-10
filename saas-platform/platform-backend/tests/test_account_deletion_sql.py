@@ -23,6 +23,8 @@ BASELINE = MIGRATIONS_DIR / "000_consolidated_complete_schema.sql"
 ACCOUNT_DELETION = MIGRATIONS_DIR / "005_account_deletion.sql"
 ONE_INSTANCE = MIGRATIONS_DIR / "007_one_instance_per_subscription.sql"
 ACTIVE_ADMIN = MIGRATIONS_DIR / "008_require_active_admin.sql"
+DROP_SUBSCRIPTION_LIMITS = MIGRATIONS_DIR / "009_drop_subscription_limits.sql"
+DROP_USAGE_METRICS = MIGRATIONS_DIR / "010_drop_usage_metrics.sql"
 
 SUPABASE_STANDINS = """
 DO $$ BEGIN
@@ -267,3 +269,36 @@ def test_only_active_admins_pass_is_admin(postgres: Postgres, upgrade: bool) -> 
     result = postgres.run(database, ADMIN_STATUSES)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_009_drops_the_subscription_limit_columns_and_keeps_the_rows(postgres: Postgres) -> None:
+    postgres.create_database("limits")
+    assert postgres.apply("limits", BASELINE).returncode == 0
+    old_schema = f"""
+        ALTER TABLE subscriptions  -- The schema before migration 009.
+            ADD COLUMN max_agents INTEGER DEFAULT 1,
+            ADD COLUMN max_messages_per_day INTEGER DEFAULT 100;
+        INSERT INTO auth.users (id, email) VALUES ('{ACCOUNT_A}', 'a@example.com');
+        INSERT INTO subscriptions (account_id, tier, status) VALUES ('{ACCOUNT_A}', 'hobby', 'active');
+    """
+    assert postgres.run("limits", old_schema).returncode == 0
+
+    assert postgres.apply("limits", DROP_SUBSCRIPTION_LIMITS).returncode == 0
+
+    limit_columns = (
+        "SELECT count(*) FROM information_schema.columns WHERE table_name = 'subscriptions' "
+        "AND column_name IN ('max_agents', 'max_messages_per_day')"
+    )
+    assert postgres.value("limits", limit_columns) == "0"
+    assert postgres.value("limits", f"SELECT tier FROM subscriptions WHERE account_id = '{ACCOUNT_A}'") == "hobby"
+
+
+def test_010_drops_the_usage_metrics_table(postgres: Postgres) -> None:
+    postgres.create_database("usage")
+    assert postgres.apply("usage", BASELINE).returncode == 0
+    old_table = "CREATE TABLE usage_metrics (id UUID PRIMARY KEY, subscription_id UUID REFERENCES subscriptions(id));"
+    assert postgres.run("usage", old_table).returncode == 0  # The schema before migration 010.
+
+    assert postgres.apply("usage", DROP_USAGE_METRICS).returncode == 0
+
+    assert postgres.value("usage", "SELECT to_regclass('usage_metrics') IS NULL") == "t"

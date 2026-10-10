@@ -724,7 +724,7 @@ with sync_playwright() as playwright:
                     "python",
                     "-c",
                     WORKER_CONTEXT_PATH_SCRIPT,
-                    worker_config["agents"]["writer"]["context_files"][0],
+                    fixture.config.agents["writer"].context_files[0],
                 )
                 history_output = await fixture.shell(["cat", history_path])
                 context_output = await fixture.shell(["cat", context_path])

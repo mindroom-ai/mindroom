@@ -5,8 +5,8 @@
 > A malicious plugin has full access to your credentials, Matrix sessions, file system, and network.
 > Only install plugins you trust and have reviewed.
 
-Plugins extend MindRoom with custom tools, [hooks](https://docs.mindroom.chat/hooks/), OAuth providers, and skills without changing MindRoom itself.
-Use one to add an integration MindRoom does not ship, react to or transform events, or connect an additional Google or Atlassian account.
+Plugins extend MindRoom with custom tools, [hooks](https://docs.mindroom.chat/hooks/), [automations](#automations), OAuth providers, and skills without changing MindRoom itself.
+Use one to add an integration MindRoom does not ship, react to or transform events, run agent maintenance on a schedule, or connect an additional Google or Atlassian account.
 A plugin is a directory with a `mindroom.plugin.json` manifest, loaded from the paths listed under `plugins:` in `config.yaml`.
 
 ## Installing plugins
@@ -89,7 +89,7 @@ plugins:
 | --- | --- | --- | --- |
 | `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
 | `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
-| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks and OAuth module; masked as secret in the dashboard |
+| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module; masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
 Each hook override supports:
@@ -186,8 +186,8 @@ Validate a plugin against the installed MindRoom version before deployment:
 mindroom plugins check ./my-plugin
 ```
 
-The check strictly validates the manifest, imports declared modules, validates tool, hook, and OAuth registrations, and verifies that declared skill directories exist.
-It prints the discovered tools, hooks, and skill directories, and exits nonzero on failure.
+The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
+It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 
 ## Plugin structure
@@ -197,13 +197,13 @@ my-plugin/
 ├── mindroom.plugin.json   # Required manifest
 ├── tools.py               # Tool factories (optional)
 ├── oauth.py               # OAuth providers (optional)
-├── hooks.py               # Event hooks (optional)
+├── hooks.py               # Event hooks and automations (optional)
 └── skills/                # Skill directories (optional)
     └── my-skill/
         └── SKILL.md
 ```
 
-Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, OAuth providers, and skills.
+Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, and skills.
 
 ## Manifest format
 
@@ -222,7 +222,7 @@ Only the manifest `name` is required; a plugin may provide any combination of to
 | `name` | string | **yes** | Plugin identifier using only lowercase ASCII letters, digits, `-`, and `_`; must be unique among configured plugins |
 | `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
-| `hooks_module` | string | no | Relative path to the module with `@hook` functions; when omitted, `tools_module` is scanned for hooks |
+| `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 
 Every declared module file and skill directory must exist.
@@ -603,6 +603,105 @@ When a workspace tool needs a login, it returns its own chat authorization link.
 Workspace tools never fall back to the default Google client or a global service account, and like the built-in Google tools they always run in the primary runtime.
 Functions are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `send_email` does not match `secondary_send_email`.
 
+### Google Cloud tools
+
+A plugin tool that calls Google Cloud client libraries, such as `google-cloud-storage`, can reuse the built-in read-only **Google Cloud** connection instead of defining its own OAuth provider.
+See [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/#providers) for the connection's scope, client setup, service-account option, and account restrictions.
+
+Subclass `GoogleCloudToolkit`, set `_oauth_provider` and `_oauth_tool_name`, and pass the managed constructor values through:
+
+```python
+import json
+
+from mindroom.custom_tools.google_service import GoogleCloudToolkit
+from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+
+
+class CloudStorageBrowserTools(GoogleCloudToolkit):
+    _oauth_provider = google_cloud_oauth_provider()
+    _oauth_tool_name = "cloud_storage_browser"
+
+    def __init__(self, *, project, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs):
+        self.project = project
+        super().__init__(
+            name="cloud_storage_browser",
+            tools=[self.list_buckets],
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            **kwargs,
+        )
+
+    def list_buckets(self) -> str:
+        """List the Cloud Storage buckets in the configured project."""
+        from google.api_core.exceptions import GoogleAPIError
+        from google.cloud import storage
+
+        try:
+            client = self._google_cloud_client(
+                "storage",
+                lambda creds: storage.Client(project=self.project, credentials=creds),
+            )
+            return json.dumps({"buckets": [bucket.name for bucket in client.list_buckets()]})
+        except GoogleAPIError as exc:
+            return self._google_cloud_error_result("Cloud Storage", "list_buckets", exc)
+```
+
+Register the tool in the same module with an OAuth setup, the Google Cloud provider, the primary runtime, and the four managed init args that the constructor receives:
+
+```python
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
+from mindroom.tool_system.registration import register_tool_with_metadata
+
+
+@register_tool_with_metadata(
+    name="cloud_storage_browser",
+    display_name="Cloud Storage Browser",
+    description="List Google Cloud Storage buckets",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.REQUIRES_CONFIG,
+    file_access=ToolFileAccess.NONE,
+    setup_type=SetupType.OAUTH,
+    auth_provider="google_cloud",
+    requires_primary_runtime=True,
+    config_fields=[ConfigField(name="project", label="Project", type="text", required=True)],
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
+    ),
+    dependencies=[
+        "google-cloud-storage",
+        "google-api-python-client",
+        "google-auth-httplib2",
+        "google-auth-oauthlib",
+    ],
+)
+def cloud_storage_browser_tools() -> type[CloudStorageBrowserTools]:
+    return CloudStorageBrowserTools
+```
+
+The base class provides three helpers:
+
+| Method | What it does |
+| --- | --- |
+| `self._google_cloud_credentials()` | Returns credentials for the requester's connection or the configured service account; when the account is not connected, the tool call returns the standard connect prompt instead |
+| `self._google_cloud_client(name, factory)` | Returns a client built by `factory(credentials)` and reuses it only for the same requester's current connection |
+| `self._google_cloud_error_result(service_name, operation, exc)` | Returns a JSON error that exposes only the HTTP status, and turns an HTTP 401 into a reconnect prompt |
+
+The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client`, `google-auth-httplib2`, and `google-auth-oauthlib`.
+MindRoom installs them only as extras of its built-in Google tools, so a clean install without them fails to load the tool; see [Dependencies](#dependencies).
+Build clients only from the credentials the helpers return, without copies such as `with_quota_project`, and call them from the tool function itself rather than background threads or transfer managers; otherwise an expired or revoked connection returns a generic error instead of a connect prompt.
+
 ### Additional Atlassian connections
 
 Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
@@ -658,3 +757,104 @@ See [Skills](https://docs.mindroom.chat/skills/) for the `SKILL.md` format, prec
 
 Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, tool-call gating, reactions, schedules, and custom events.
 See [Hooks](https://docs.mindroom.chat/hooks/) for the `@hook` decorator, events, execution modes, timeouts and errors, the hook context and Matrix helpers, and testing.
+
+## Automations
+
+An automation is a check a plugin runs on each agent's cron schedule; when the check finds work, the agent answers a visible prompt, and code steps decide what happens after each answer.
+Use one for recurring agent maintenance whose trigger or follow-up needs code, such as the built-in [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) and [`dreaming`](https://docs.mindroom.chat/scheduling/#dreaming), which use this same API.
+Operators enable it per agent under [`automations:`](https://docs.mindroom.chat/scheduling/#automations).
+
+### Minimal example
+
+`mindroom.plugin.json`:
+
+```json
+{"name": "weekly-digest", "hooks_module": "hooks.py"}
+```
+
+`hooks.py`:
+
+```python
+from datetime import UTC, datetime
+from functools import partial
+
+from mindroom.automations import Ask, AutomationContext, Done, automation
+from mindroom.path_confinement import read_regular_file_within_root
+
+
+# Only agents with file memory have a workspace for the digest.
+@automation("weekly_digest", requires_file_memory=True)
+def check(ctx: AutomationContext) -> Ask | None:
+    if ctx.workspace is None or not ctx.workspace.is_dir():
+        return None
+    target = ctx.options.get("target", "digest.md")
+    # A stamp only this run asks for tells its result apart from last week's file.
+    stamp = f"Digest {datetime.now(UTC):%Y-%m-%d %H:%M}"
+    prompt = f"Summarize this week's threads into `{target}`, and end the file with the line `{stamp}`."
+    return Ask(prompt, new_thread=True, then=partial(after_run, ctx, target, stamp))
+
+
+def after_run(ctx: AutomationContext, target: str, stamp: str, config, thread_id: str, timed_out: bool) -> Done:
+    # The run ending says nothing about success: check the result before claiming it.
+    try:
+        written = read_regular_file_within_root(ctx.workspace, target).decode()
+    except (OSError, ValueError):
+        written = ""
+    if stamp not in written:
+        return Done(f"⚠️ The digest run ended without writing `{target}`.")
+    return Done(f"Digest written to `{target}`.", resolve=(thread_id,))
+```
+
+`config.yaml`:
+
+```yaml
+plugins:
+  - path: plugins/weekly-digest
+agents:
+  mind:
+    display_name: Mind
+    memory_backend: file   # gives the agent a workspace
+    tools: [file]          # the agent writes the digest
+    automations:
+      - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
+```
+
+### The check and its steps
+
+- `@automation(name, requires_file_memory=False)` marks a synchronous check; the name starts with a lowercase letter and continues with lowercase letters, digits, and `_`, must not be `prompt_curation` or `dreaming`, and must be unique across loaded plugins, or the later registration is ignored with a warning.
+  Set `requires_file_memory=True` when the automation maintains file memory, so it never runs for an agent without the file backend.
+- The check returns `None` when there is nothing to do, which posts nothing and calls no model, or an `Ask(text, new_thread=..., then=...)` that the agent answers.
+- `then(config, thread_id, timed_out)` runs after that answer and returns the next `Ask` or a `Done(notice, resolve=..., on_loop=...)` that posts `notice` in the thread, marks the listed threads resolved, and runs `on_loop` on the event loop.
+  Bind anything a step needs from the check with `functools.partial`.
+- `timed_out` is true when no answer ended within an hour of the prompt being posted; `False` only means the answer ended, which includes a failed run, so check the result before reporting success.
+- The check's `Ask` and every later `Ask` with `new_thread=True` get their own thread and session, even for an agent with `thread_mode: room`; a later `Ask` with `new_thread=False` follows up in the current thread.
+
+`AutomationContext` fields:
+
+| Field | Description |
+| --- | --- |
+| `agent_name` | The agent the automation runs for |
+| `config` | The config when the automation fired; steps receive the current one |
+| `runtime_paths` | Storage and config paths of this MindRoom runtime |
+| `entry` | The agent's entry for this automation |
+| `options` | The entry's `options`, set per agent, read-only |
+| `settings` | The plugin's `settings`, set once per plugin, read-only |
+| `workspace` | The agent's workspace root, which may not exist yet; `None` for an agent without `memory_backend: file`, which has no workspace |
+| `state_dir` | The agent's automation state directory in MindRoom storage, outside the workspace; name your files after your automation and create the directory when you first write |
+
+### What MindRoom guarantees
+
+The rules for [scheduling](https://docs.mindroom.chat/scheduling/#automations) and [memory auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) apply to plugin automations as they do to the built-ins.
+For plugin code, MindRoom also guarantees:
+
+- Checks and steps run off the event loop, so ordinary replies and other agents are not held back by them.
+- The one-hour limit applies to the agent's answer, not to a check or step that hangs.
+- `OSError` and `ValueError` from a check or step post a warning in the room and end the chain; other exceptions are logged.
+- `automation_threads(runtime_paths)` from `mindroom.automations` returns the threads automations started, so an automation that reads exported conversations can skip them.
+- A chain finishes with the code that started it; after a plugin reload, the next fire uses the new code on the same schedule, but resources the old module kept, such as tasks in module-level variables, may already be cancelled.
+
+### Helpers the built-ins use
+
+Agent workspaces can contain files worker code wrote, so read and write them without following links: `read_regular_file_within_root`, `write_file_within_root`, and `open_directory_within_root` from `mindroom.path_confinement` do that.
+To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths))` with `refresh_agent_memory_search` from `mindroom.memory`.
+[`prompt_curation.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/prompt_curation.py) and [`dreaming.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/dreaming.py) are complete examples: a single prompt with a re-check, and a proposal reviewed in a second thread before code applies it.

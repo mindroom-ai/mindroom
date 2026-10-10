@@ -85,7 +85,7 @@ import scripts.testing.fuzz_live_matrix as live_fuzz
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.turn_record import RevisionReplay
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from scripts.testing.fuzz_live_matrix import (
@@ -2328,6 +2328,8 @@ def test_sustained_stream_capacity_config_uses_managed_sender_and_synthetic_resp
         }
         assert config["agents"]["general"]["model"] == "synthetic"
         assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
+        # The managed sender is an agent, so every workload root counts toward the consecutive agent-reply limit.
+        assert config["defaults"]["max_consecutive_agent_replies"] > 200
         assert config["models"]["synthetic"]["extra_kwargs"] == {
             "seed": 1,
             "min_response_chars": 4800,
@@ -4741,8 +4743,6 @@ def test_startup_maintenance_wait_uses_only_current_process_generation(tmp_path:
     phases = {
         "startup_maintenance.rooms_and_memberships",
         "startup_maintenance.runtime_support",
-        "startup_maintenance.stale_stream_recovery.initial",
-        "startup_maintenance.stale_stream_recovery.joined_room_delta",
     }
     assert phases == live_fuzz._STARTUP_MAINTENANCE_PHASES
 
@@ -4779,7 +4779,7 @@ def test_startup_maintenance_wait_rejects_failed_current_phase(tmp_path: Path) -
 
     log_path = tmp_path / "mindroom.log"
     log_path.write_text(
-        "startup_phase_finished phase=startup_maintenance.stale_stream_recovery.initial status=failed\n",
+        "startup_phase_finished phase=startup_maintenance.runtime_support status=failed\n",
         encoding="utf-8",
     )
     stack = object.__new__(ManagedTuwunelStack)
@@ -5363,6 +5363,43 @@ def _threaded_reply_event(
 
 
 @pytest.mark.asyncio
+async def test_reply_to_a_redacted_threaded_parent_keeps_the_thread_the_parent_had() -> None:
+    """Redaction strips a parent's thread relation, so the audit uses the relation it had before."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    try:
+        oracle.expect("op:1", "$source")
+        parent = _agent_reply_event("$root", "$parent", "Thinking...")
+        oracle._ingest_event(parent)
+        redacted_parent = {**parent, "content": {}, "unsigned": {"redacted_because": {"event_id": "$redaction"}}}
+        source = {
+            "event_id": "$source",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 50,
+            "content": {"body": "plain reply", "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}}},
+        }
+        reply = _threaded_reply_event(
+            sender="@agent:example",
+            event_id="$reply",
+            thread_root="$root",
+            in_reply_to="$source",
+            body="LIVE-FUZZ call=1 END call=1",
+        )
+        events = {"$parent": redacted_parent, "$source": source, "$reply": reply}
+
+        assert auditor._canonical_agent_replies(events)["$source"] == {"$reply"}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_final_state_auditor_flags_incomplete_final_bodies() -> None:
     """An interrupted terminal note must fail the completed-stream audit."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -5482,6 +5519,21 @@ async def test_final_state_auditor_enforces_redaction_and_reaction_semantics() -
 
         with pytest.raises(AssertionError, match="missing from /messages"):
             auditor._assert_sent_events_canonical({}, records, set())
+
+        # A homeserver may redact an edit along with the message it edits, and only then.
+        edit_content = {
+            "body": "* edited",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "edited", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$gone"},
+        }
+        edit = _SentRecord("$edit", "!room:example", "m.room.message", content=edit_content)
+        edit_shell = {"event_id": "$edit", "type": "m.room.message", "content": {}, "_audit_room_id": "!room:example"}
+        auditor._assert_sent_events_canonical({**events, "$edit": edit_shell}, [*records, edit], {"$gone"})
+        kept_edit = {**edit_shell, "content": dict(edit_content)}
+        auditor._assert_sent_events_canonical({**events, "$edit": kept_edit}, [*records, edit], {"$gone"})
+        with pytest.raises(AssertionError, match="content diverged"):
+            auditor._assert_sent_events_canonical({**events, "$edit": edit_shell}, [*records, edit], set())
     finally:
         await client.close()
 
@@ -5701,6 +5753,11 @@ async def test_final_state_auditor_rejects_reply_outside_source_thread(
 def test_body_call_id_parses_only_canonical_prefixes() -> None:
     """Call IDs come only from exact stub-format bodies."""
     assert _body_call_id("LIVE-FUZZ call=17 segment-000 END call=17") == 17
+    # A reply continued in place after a restart belongs to its newest attempt's call.
+    continued = (
+        f"LIVE-FUZZ call=172\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nLIVE-FUZZ call=175 segment-000 END call=175"
+    )
+    assert _body_call_id(continued) == 175
     assert _body_call_id("[Response interrupted by service restart]") is None
     assert _body_call_id("LIVE-FUZZ call=x END") is None
 
@@ -6014,7 +6071,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         await admit_room_event(journal.principal("agent@alice"), "!room:example", "$edit")
         await store.mark_source_redacted("$edit", room_id="!room:example")
         # Runtime exact-event invalidation establishes the expectation independently of the harness.
-        assert store.is_revision_redacted("$edit")
+        assert store._is_revision_redacted("$edit")
     finally:
         await journal.close()
 
@@ -6024,7 +6081,6 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
     assert "$edit" not in (records["$root"].revision_replay or {})
     assert not records["$edit"].completed
     assert records["$edit"].redacted_source_event_ids == ("$edit",)
-    assert not records["$edit"].pending_redaction_cleanup_event_ids
     runner._pending_source_tombstones.add("$edit")
     monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
     await runner._wait_for_pending_mutation_effects(deadline_seconds=0.01, batch_index=29)
@@ -6043,14 +6099,10 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         (None, None, "wrong_source", (False, False)),
         (None, None, "registered", (False, False)),
         (None, None, "clean", (True, False)),
-        (None, "clean", "pending", (True, True)),
         (None, "clean", "registered", (True, True)),
-        ("clean", None, "pending", (True, True)),
         ("clean", None, "registered", (True, True)),
-        ("clean", "clean", "pending", (True, True)),
         ("clean", "clean", "clean", (True, False)),
         ("clean", None, "wrong_source", (True, False)),
-        ("pending", "clean", "clean", (True, True)),
         ("registered", None, None, (False, False)),
     ],
 )
@@ -6061,7 +6113,7 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
     context_revision: str | None,
     expected: tuple[bool, bool],
 ) -> None:
-    """Exact deletion evidence cannot hide another response owner's unreconciled cleanup."""
+    """Exact deletion evidence cannot hide another response owner that has yet to reconcile the tombstone."""
     records = {}
     for owner, state in (("$root", root_revision), ("$context", context_revision)):
         replay = (
@@ -6070,7 +6122,6 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
                     "$wrong" if state == "wrong_source" else "$root",
                     100,
                     redacted=state != "registered",
-                    cleanup_pending=state == "pending",
                 ),
             }
             if state is not None
@@ -6088,7 +6139,6 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
             source_event_ids=("$edit",),
             completed=physical == "registered",
             redacted_source_event_ids=() if physical == "registered" else ("$edit",),
-            pending_redaction_cleanup_event_ids=("$edit",) if physical == "pending" else (),
         )
     ledger = tmp_path / "event_journal.db"
     _write_ledger(ledger, records)
@@ -6098,7 +6148,7 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["no_response", "redacted", "missing", "incomplete"])
-@pytest.mark.parametrize("attempt", ["none", "clean", "contaminated", "pending"])
+@pytest.mark.parametrize("attempt", ["none", "clean", "contaminated"])
 @pytest.mark.parametrize("dedicated", [False, True])
 async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     tmp_path: Path,
@@ -6113,7 +6163,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     root_record = TurnRecord.create(
         source_event_ids=("$root",),
         response_event_id="$root-reply",
-        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True)},
     )
     _write_ledger(ledger, {"$root": root_record})
     operation = LiveOperation(
@@ -6144,17 +6194,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
         "$root-reply": _agent_reply_event("$root", "$root-reply", _short_body_for(1)),
     }
     records = {
-        "$root": replace(
-            root_record,
-            revision_replay={
-                "$edit": RevisionReplay(
-                    "$root",
-                    100,
-                    redacted=True,
-                    cleanup_pending=attempt == "pending" or (outcome == "redacted" and attempt == "none"),
-                ),
-            },
-        ),
+        "$root": root_record,
     }
     observed = {1: frozenset({_source_marker("root:0", ORIGINAL_REVISION)})}
     if outcome != "redacted":
@@ -6188,9 +6228,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     failure = {"missing": "supersession proof", "incomplete": "incomplete"}.get(outcome)
     if dedicated and failure is None:
         failure = "has no completed response"
-    failure = failure or {"pending": "pending or missing tombstone cleanup", "contaminated": "redacted history"}.get(
-        attempt,
-    )
+    failure = failure or {"contaminated": "redacted history"}.get(attempt)
     if failure is not None:
         with pytest.raises(AssertionError, match=failure):
             await runner._audit_final_state()
@@ -6220,7 +6258,6 @@ async def test_cleanup_admission_rejects_inexact_incomplete_owner_tombstone(
                 "$wrong" if provenance == "wrong_source" else "$root",
                 100,
                 redacted=provenance != "not_redacted",
-                cleanup_pending=True,
             ),
         },
     )
@@ -6256,7 +6293,7 @@ async def test_cleanup_admission_reads_incomplete_owner_edit_tombstone(
         source_event_ids=("$root",),
         completed=False,
         response_event_id="$inflight",
-        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True)},
     )
     _write_ledger(ledger, {"$root": incomplete})
     monkeypatch.setattr(
@@ -6729,6 +6766,111 @@ def test_strict_ledger_read_rejects_incomplete_record(tmp_path: Path) -> None:
         live_fuzz.read_ledger_records(ledger_path, strict=True)
 
 
+def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) -> None:
+    """An AI turn's answer, and the edits it consumed, come from the reply records that own them."""
+    ledger_path = tmp_path / "event_journal.db"
+    _write_ledger(
+        ledger_path,
+        {
+            "$root": TurnRecord.create(
+                source_event_ids=("$root",),
+                completed=True,
+                source_event_revisions={"$root": (200, "$b")},
+                revision_replay={
+                    "$a": RevisionReplay("$root", 100, redacted=True),
+                    "$b": RevisionReplay("$root", 200),
+                    "$c": RevisionReplay("$root", 300),
+                },
+            ),
+            "$unanswered": TurnRecord.create(source_event_ids=("$unanswered",), completed=True),
+        },
+    )
+    with closing(sqlite3.connect(ledger_path)) as database:
+        database.executemany(
+            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
+            "state, last_span_id, presentation_json, revision, placeholder_only, reply_sequence, created_at_ns, "
+            "updated_at_ns) VALUES ('p', ?, 'general', '!room', 0, ?, ?, ?, '{}', 1, ?, 1, 1, 1)",
+            [("answer", "$reply", "completed", "regenerated", False), ("stopped", "$stopped", "gone", "early", True)],
+        )
+        database.executemany(
+            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
+            "base_sequence, outcome, claimed_at_ns) VALUES ('p', ?, ?, ?, ?, 'g', 0, ?, ?)",
+            [
+                ("turn", "answer", "turn", "$root", "completed", 1),
+                ("regenerated", "answer", "regeneration", "$a", "completed", 2),
+                ("early", "stopped", "turn", "$unanswered", "cancelled", 3),
+            ],
+        )
+        database.executemany(
+            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+            "VALUES ('p', ?, ?, 'logical', 0)",
+            [("turn", "$root"), ("regenerated", "$root"), ("early", "$unanswered")],
+        )
+        database.commit()
+
+    records = live_fuzz.read_ledger_records(ledger_path, strict=True)
+
+    assert records["$root"].response_event_id == "$reply"
+    assert {edit: revision.response_event_id for edit, revision in records["$root"].revision_replay.items()} == {
+        "$a": "$reply",
+        "$b": "$reply",
+        "$c": None,
+    }
+    assert records["$unanswered"].response_event_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note", [INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE])
+async def test_supersession_proof_reads_the_interrupted_reply_of_an_unanswered_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    note: str,
+) -> None:
+    """Only reply records name an unanswered turn's interrupted reply; a superseded replay ends it interrupted."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = FinalStateAuditor(
+        client,
+        ExactReplyOracle(client, "@agent:example"),
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=tmp_path / "event_journal.db",
+    )
+    monkeypatch.setattr(auditor, "_supersession_source_pair", lambda *_args, **_kwargs: "$root")
+    monkeypatch.setattr(auditor, "_completed_supersession_anchor", lambda *_args, **_kwargs: ("$newer", "$anchor"))
+    interrupted = _agent_reply_event("$source", "$reply", f"partial\n\n{note}")
+    interrupted["content"]["io.mindroom.stream_status"] = "error"
+    snapshot = live_fuzz._SupersessionSnapshot(
+        records={"$source": TurnRecord.create(source_event_ids=("$source",), completed=False)},
+        sources={
+            "$source": live_fuzz._SettledJournalSource(
+                "$source",
+                "!room:example",
+                "$root",
+                "@user:example",
+                1,
+                "settled",
+                "message",
+            ),
+        },
+        pending_deliveries=(),
+    )
+    try:
+        proof = auditor._prove_supersession(
+            "$source",
+            "$newer",
+            snapshot,
+            {"$reply": interrupted},
+            {"$source": {"$reply"}},
+            {},
+            sent_records={},
+        )
+    finally:
+        await client.close()
+
+    assert proof is not None
+    assert proof.interrupted_response_event_id == "$reply"
+
+
 @pytest.mark.asyncio
 async def test_final_audit_reuses_one_ledger_snapshot(
     tmp_path: Path,
@@ -6769,7 +6911,7 @@ async def test_final_audit_reuses_one_ledger_snapshot(
 
 
 def test_strict_ledger_read_accepts_durable_redaction_tombstone(tmp_path: Path) -> None:
-    """A durable tombstone settles replay while session cleanup awaits a response."""
+    """A durable tombstone settles replay; history cleanup happens when a response next reads it."""
     ledger_path = tmp_path / "event_journal.db"
     tombstone = TurnRecord.create(
         source_event_ids=("$stop-reaction",),
@@ -6787,17 +6929,6 @@ def test_strict_ledger_read_accepts_durable_redaction_tombstone(tmp_path: Path) 
         "@agent:example",
         ledger_path=ledger_path,
     )
-    oracle.refresh_ledger_attributions(min_interval=0)
-    assert oracle.source_tombstoned("$stop-reaction")
-
-    pending_cleanup = replace(
-        tombstone,
-        pending_redaction_cleanup_event_ids=("$stop-reaction",),
-    )
-    _write_ledger(ledger_path, {"$stop-reaction": pending_cleanup})
-    assert live_fuzz.read_ledger_records(ledger_path, strict=True) == {
-        "$stop-reaction": pending_cleanup,
-    }
     oracle.refresh_ledger_attributions(min_interval=0)
     assert oracle.source_tombstoned("$stop-reaction")
 
@@ -7418,6 +7549,74 @@ async def test_model_source_audit_rejects_pre_edit_revision(tmp_path: Path) -> N
         # Observing the edited revision instead passes.
         auditor.observed_markers_for = lambda call_id: {4: frozenset({edited})}.get(call_id, frozenset())
         auditor._assert_model_saw_current_sources(events)
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_accepts_a_declined_edit_only_after_a_later_message(tmp_path: Path) -> None:
+    """An edit MindRoom declined leaves the answer on its old revision, which is right once another message followed."""
+    ledger_path = tmp_path / "event_journal.db"
+    orig = _source_marker("op:1", ORIGINAL_REVISION)
+    edited = _source_marker("op:1", "edit:5")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        source_current_markers={"$a": edited},
+        observed={4: frozenset({orig})},
+    )
+    auditor.source_revision_markers = {"$a": {"$edit": edited}}
+    # MindRoom settled the edit without a regeneration span.
+    auditor.declined_edits = lambda: frozenset({"$edit"})  # type: ignore[method-assign]
+    try:
+        record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        _write_ledger(ledger_path, {"$a": record})
+        thread = {"rel_type": "m.thread", "event_id": "$a", "m.in_reply_to": {"event_id": "$a"}}
+        source = {"event_id": "$a", "sender": "@user:example", "type": "m.room.message", "origin_server_ts": 10}
+        later = {
+            "event_id": "$b",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 20,
+            "content": {"body": "next", "msgtype": "m.text", "m.relates_to": thread},
+        }
+        events = {
+            "$a": {**source, "content": {"body": "original", "msgtype": "m.text"}},
+            "$edit": {
+                "event_id": "$edit",
+                "sender": "@user:example",
+                "type": "m.room.message",
+                "origin_server_ts": 30,
+                "content": {"m.relates_to": {"rel_type": "m.replace", "event_id": "$a"}},
+            },
+            "$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4)),
+        }
+        sent = [
+            _SentRecord(
+                "$a",
+                "!room:example",
+                "m.room.message",
+                sender="@user:example",
+                content=events["$a"]["content"],
+            ),
+            _SentRecord(
+                "$edit",
+                "!room:example",
+                "m.room.message",
+                sender="@user:example",
+                content=events["$edit"]["content"],
+            ),
+        ]
+        with pytest.raises(AssertionError, match="no later message followed it"):
+            auditor._assert_model_saw_current_sources(events, sent_records=sent)
+
+        auditor._assert_model_saw_current_sources(
+            {**events, "$b": later},
+            sent_records=[
+                *sent,
+                _SentRecord("$b", "!room:example", "m.room.message", sender="@user:example", content=later["content"]),
+            ],
+        )
     finally:
         await auditor.client.close()
 
@@ -9543,6 +9742,117 @@ async def test_chaos_checkpoint_releases_marker_for_no_response_source(monkeypat
     monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
     await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=3)
     assert runner._pending_edit_markers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["tombstoned", "declined"])
+async def test_chaos_checkpoint_releases_marker_for_an_edit_mindroom_cannot_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    cause: str,
+) -> None:
+    """An edit of a redacted or superseded source can change no reply, so the checkpoint stops waiting for one."""
+    runner = _temporal_revision_runner()
+    runner._pending_edit_markers = {"$root": {"$edit": _source_marker("root:10", "edit:15")}}
+    if cause == "declined":
+        runner.oracle.declined_edit_sources = frozenset({"$root"})
+    else:
+        runner.oracle._ledger_records["$root"] = TurnRecord.create(
+            source_event_ids=("$root",),
+            completed=False,
+            redacted_source_event_ids=("$root",),
+        )
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=4)
+    assert runner._pending_edit_markers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("journal_event_states", "released"),
+    [
+        ({"$redaction": "settled"}, True),
+        ({"$redaction": "pending"}, False),
+        ({"$redaction": "settled", "$root": "settled"}, False),
+    ],
+    ids=["seen_only_deleted", "redaction_unsettled", "source_admitted"],
+)
+async def test_chaos_checkpoint_releases_tombstone_for_source_mindroom_only_saw_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+    journal_event_states: dict[str, str],
+    released: bool,
+) -> None:
+    """A source redacted before MindRoom read it never starts a turn, so its settled redaction is the whole effect."""
+    runner = _temporal_revision_runner()
+    runner._pending_source_tombstones = {"$root"}
+    runner.redacted_targets = {"$root": "$redaction"}
+    runner.oracle.journal_event_states = journal_event_states
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    if released:
+        await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=4)
+        assert runner._pending_source_tombstones == set()
+    else:
+        with pytest.raises(AssertionError, match="timed out waiting for mutation effects"):
+            await runner._wait_for_pending_mutation_effects(deadline_seconds=0.05, batch_index=4)
+
+
+def test_runner_settles_edit_debts_whenever_the_oracle_refreshes_its_ledger() -> None:
+    """A reply wait refreshes the ledger, so it must also settle edit debts that block supersession proofs."""
+    stack = ManagedTuwunelStack()
+    try:
+        client = Mock(spec=LiveMatrixClient)
+        runner = LiveFuzzRunner(
+            stack,
+            (client,),
+            live_scenario_from_seed(1, steps=4, thread_count=2),
+            reply_timeout=1.0,
+            settle_seconds=0.0,
+        )
+        assert runner.oracle.after_ledger_refresh == runner._reconcile_edit_debts
+    finally:
+        stack.close()
+
+
+def test_cold_restart_resets_only_durable_nio_stores(tmp_path: Path) -> None:
+    """An account store without durable ingestion tables has no sync cursor to reset."""
+    keys = tmp_path / "encryption_keys"
+    (keys / "agent").mkdir(parents=True)
+    (keys / "user").mkdir()
+    durable = keys / "agent" / "agent.db"
+    with closing(sqlite3.connect(durable)) as database:
+        database.executescript(
+            "CREATE TABLE NioDurableMeta (id INTEGER PRIMARY KEY, cursor TEXT);"
+            "INSERT INTO NioDurableMeta VALUES (1, 'since');"
+            "CREATE TABLE NioDurableInput (id INTEGER PRIMARY KEY);"
+            "CREATE TABLE NioDurableBatch (sequence INTEGER PRIMARY KEY);",
+        )
+    with closing(sqlite3.connect(keys / "user" / "user.db")) as database:
+        database.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY)")
+
+    assert live_fuzz._durable_store_paths(tmp_path) == (durable,)
+    live_fuzz._reset_durable_sync_cursors(tmp_path)
+    with closing(sqlite3.connect(durable)) as database:
+        assert database.execute("SELECT cursor FROM NioDurableMeta").fetchone() == (None,)
+
+
+@pytest.mark.parametrize(
+    ("journal_event_states", "seen_only_deleted"),
+    [
+        ({"$redaction": "settled"}, True),
+        ({"$redaction": "pending"}, False),
+        ({"$redaction": "settled", "$source": "settled"}, False),
+        ({}, False),
+    ],
+    ids=["settled_unadmitted", "redaction_unsettled", "source_admitted", "redaction_unseen"],
+)
+def test_oracle_knows_a_source_mindroom_only_saw_deleted(
+    journal_event_states: dict[str, str],
+    seen_only_deleted: bool,
+) -> None:
+    """Only a settled redaction of a source MindRoom never journaled proves it saw the source already deleted."""
+    oracle = ExactReplyOracle(Mock(spec=LiveMatrixClient), "@agent:example")
+    oracle.journal_event_states = journal_event_states
+
+    assert oracle.saw_only_deleted("$source", "$redaction") is seen_only_deleted
 
 
 @pytest.mark.asyncio

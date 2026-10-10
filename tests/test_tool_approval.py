@@ -65,9 +65,11 @@ from mindroom.tool_approval import (
     tool_may_require_approval,
 )
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -261,7 +263,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
     cards.is_terminal_approval_card = AsyncMock(return_value=False)
     cards.load_matrix_delivery = AsyncMock(return_value=delivery)
     cards.acknowledge_matrix_delivery = AsyncMock(
-        return_value=DeliveryAcknowledgement(settled_event_id="$approval", bound=True),
+        return_value=DeliveryAcknowledgement(settled_event_id="$approval"),
     )
     resolve_action = AsyncMock(return_value="approval-card-1")
     manager = ApprovalManager(
@@ -663,16 +665,10 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="origin-team",
         room_id=room_id,
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
@@ -685,7 +681,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         state="waiting",
         runtime_generation="runtime-a",
     )
-    assert await responder.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(responder, continuation) == continuation
     requested_at = datetime.now(UTC)
     card_content = ApprovalManager._pending_event_content(
         approval_id=card_delivery_id,
@@ -781,7 +777,7 @@ async def test_continuation_decision_wakes_its_owning_bot_sources() -> None:
 async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_cards(tmp_path: Path) -> None:
     """One corrupt visible deadline cannot abort the room's remaining recovery page."""
     cards = MagicMock()
-    cards.maintain_approval_grants = AsyncMock(return_value=())
+    cards.maintain_automatic_approvals = AsyncMock(return_value=())
     cards.unacknowledged_matrix_deliveries = AsyncMock(return_value=())
     cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
     cards.pending_approval_cards = AsyncMock(
@@ -861,7 +857,7 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
 async def test_startup_recovery_counts_an_unreadable_card_as_failed_debt(tmp_path: Path) -> None:
     """A corrupt durable row keeps startup cleanup retryable instead of disappearing."""
     cards = MagicMock()
-    cards.maintain_approval_grants = AsyncMock(return_value=())
+    cards.maintain_automatic_approvals = AsyncMock(return_value=())
     cards.unacknowledged_matrix_deliveries = AsyncMock(return_value=())
     cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
     cards.pending_approval_cards = AsyncMock(
@@ -894,7 +890,7 @@ async def test_startup_recovery_drops_a_transport_failure_settled_by_the_same_pa
     """A successful immediate retry must not report delivery debt that is gone."""
     delivery_id = "approval-card-1"
     cards = MagicMock()
-    cards.maintain_approval_grants = AsyncMock(return_value=())
+    cards.maintain_automatic_approvals = AsyncMock(return_value=())
     cards.pending_approval_room_ids = AsyncMock(return_value=("!room:localhost",))
     cards.pending_approval_cards = AsyncMock(
         return_value=(
@@ -1026,7 +1022,7 @@ async def test_transient_removed_owner_cleanup_rearms_startup_retry() -> None:
         discard_unavailable_approval_continuation=AsyncMock(),
     )
     journal = MagicMock(
-        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+        approval_continuations=AsyncMock(return_value=(("agent@removed", continuation),)),
     )
     journal.principal.return_value = principal
     transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
@@ -1079,7 +1075,7 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages() -> None:
 
     assert journal.approval_continuations.await_args_list == [
         call(limit=2, after=None),
-        call(limit=2, after=("removed", "approval-1")),
+        call(limit=2, after="approval-1"),
     ]
     assert [call.args[1].approval_id for call in discard.await_args_list] == [
         "approval-0",
@@ -1183,11 +1179,11 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         claim_matrix_delivery=AsyncMock(side_effect=claim_notice),
         record_matrix_delivery_device=AsyncMock(),
         acknowledge_matrix_delivery=AsyncMock(
-            return_value=DeliveryAcknowledgement(settled_event_id="$notice", bound=True),
+            return_value=DeliveryAcknowledgement(settled_event_id="$notice"),
         ),
     )
     journal = MagicMock(
-        approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
+        approval_continuations=AsyncMock(return_value=(("agent@removed", continuation),)),
     )
     journal.principal.return_value = principal
     client = MagicMock()
@@ -1251,22 +1247,14 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
-        calls=(),
         state="claimed",
         runtime_generation="old-runtime",
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     await principal.enqueue_matrix_delivery(
         delivery_id=source_event_id,
         stage=DeliveryStage.FINAL,
@@ -1294,7 +1282,7 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
             event_id="$final-edit",
             delivered_projections=(),
         )
-        return await principal.finish_approval_continuation(observed.approval_id)
+        return await principal.finish_approval_continuation(observed.approval_id) is not None
 
     transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
     recovery = ApprovalRecovery(
@@ -1354,15 +1342,9 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
         response_event_id=waiting_event_id,
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
@@ -1376,7 +1358,7 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
         state="failing",
         failure_reason=reason,
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     notice_content = build_message_content(
         reason,
         thread_event_id="$thread",
@@ -1488,16 +1470,9 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
@@ -1510,7 +1485,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         state="failing",
         failure_reason=reason,
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     stale_delivery_id = await notice_store.enqueue_unavailable_approval_notice(
         approval_id=approval_id,
         room_id=continuation.room_id,
@@ -1600,16 +1575,9 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run it"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=approval_id,
-        run_id="run-1",
-        session_id="session-1",
-        entity_kind="agent",
         entity_name="removed",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        response_event_id="$waiting",
         sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
@@ -1622,7 +1590,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         state="failing",
         failure_reason="Requesting agent 'removed' is no longer available.",
     )
-    assert await principal.create_approval_continuation(continuation) == continuation
+    assert await paused_for_approval(principal, continuation) == continuation
     await notice_store.admit(
         InboundEvent(
             event_id=continuation.response_event_id,

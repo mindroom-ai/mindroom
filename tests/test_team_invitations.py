@@ -75,8 +75,6 @@ class TestTeamRoomMembership:
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test_room:localhost"],
-            team_mode="round_robin",
-            team_model=None,
             enable_streaming=False,
         )
         install_runtime_journal_support(bot)
@@ -133,8 +131,6 @@ class TestTeamRoomMembership:
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # No configured rooms
-            team_mode="round_robin",
-            team_model=None,
             enable_streaming=False,
         )
         install_runtime_journal_support(bot)
@@ -204,8 +200,6 @@ class TestTeamRoomMembership:
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            team_mode="round_robin",
-            team_model=None,
             enable_streaming=False,
         )
         install_runtime_journal_support(bot)

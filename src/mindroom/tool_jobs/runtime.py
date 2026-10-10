@@ -29,6 +29,7 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
+from mindroom.tool_system.call_record import without_tool_call_recording
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -268,7 +269,6 @@ class ToolJobRuntime:
         self._entries: dict[str, _Entry] = {}
         # Per-turn lookups read these instead of scanning every entry; `_add_entry` and `_remove_entry` keep them.
         # Sources are keyed by a job's recipient and the turn that started it.
-        self._by_source = _EntryIndex[tuple[str, str]]()
         self._by_conversation = _EntryIndex[tuple[str, str | None, str | None, str | None]]()
         self._lock = asyncio.Lock()
         self._closed = False
@@ -292,17 +292,13 @@ class ToolJobRuntime:
         return job_id in self._entries
 
     def _add_entry(self, entry: _Entry) -> None:
-        """Make an accepted job current and findable by its source and conversation, which never change."""
+        """Make an accepted job current and findable by its conversation, which never changes."""
         job = entry.job
         self._entries[job.job_id] = entry
-        if job.source_event_id is not None:
-            self._by_source.add((job.owner.recipient, job.source_event_id), entry)
         self._by_conversation.add(_conversation_key(job.owner), entry)
 
     def _remove_entry(self, job_id: str) -> None:
         job = self._entries.pop(job_id).job
-        if job.source_event_id is not None:
-            self._by_source.remove((job.owner.recipient, job.source_event_id), job_id)
         self._by_conversation.remove(_conversation_key(job.owner), job_id)
 
     def _visible(self, entry: _Entry, owner: ToolExecutionIdentity, depth: int) -> bool:
@@ -486,6 +482,8 @@ class ToolJobRuntime:
                 with (
                     # Human follow-ups release replies, never the background work they wait for.
                     human_message_signal_context(None),
+                    # The reply span that started the job may end first; the job owns its calls' outcome.
+                    without_tool_call_recording(),
                     job_control_context(entry.control),
                     queued_message_signal_context(None) as notice,
                 ):
@@ -677,14 +675,6 @@ class ToolJobRuntime:
                 failures.append(error)
         return failures
 
-    async def is_source_user_stopped(self, source_event_id: str, transport_agent_name: str) -> bool:
-        """Recognize a stopped original response, including foreground approval recovery."""
-        async with self._lock:
-            return any(
-                entry.job.user_stop_receipt_order is not None
-                for entry in self._by_source.get((transport_agent_name, source_event_id))
-            )
-
     async def cancel_revoked(self, *, denied: Callable[[BackgroundJob], bool]) -> None:
         """Withdraw execution whose grant is proven revoked, retaining owned cleanup; a failed job retries next pass."""
         async with self._lock:
@@ -760,46 +750,6 @@ class ToolJobRuntime:
         if not decided and stopped is not None and stopped.status in TERMINAL_STATUSES:
             outcome = stopped
         return outcome if outcome is not None and outcome.status in TERMINAL_STATUSES else default
-
-    async def _find(
-        self,
-        entries: Callable[[], Iterable[_Entry]],
-        matches: Callable[[_Entry], bool],
-    ) -> list[BackgroundJob]:
-        """Copy matching jobs, reading `entries` under the lock; a closed runtime has none."""
-        async with self._lock:
-            if self._closed:
-                return []
-            return [await self._snapshot(entry) for entry in entries() if matches(entry)]
-
-    async def stoppable_jobs(self) -> list[BackgroundJob]:
-        """Return jobs no Stop has marked whose execution or unconsumed outcome a saved Stop could still end."""
-        return await self._find(
-            self._entries.values,
-            lambda entry: (
-                entry.job.user_stop_receipt_order is None
-                and (entry.job.status not in TERMINAL_STATUSES or not entry.job.consumed)
-            ),
-        )
-
-    async def source_jobs(
-        self,
-        source_event_id: str,
-        *,
-        transport_agent_name: str,
-        room_id: str,
-        thread_id: str | None,
-        session_id: str,
-        requester_id: str,
-    ) -> list[BackgroundJob]:
-        """Recognize work a source started or consumed, even after result access is revoked, so recovery never replays it."""
-        return await self._find(
-            partial(self._by_conversation.get, (transport_agent_name, room_id, thread_id, requester_id)),
-            lambda entry: (
-                entry.job.owner.session_id == session_id
-                and source_event_id in {entry.job.source_event_id, entry.job.consumed_by_source}
-            ),
-        )
 
     async def held_jobs(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from dataclasses import replace
@@ -11,10 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from nio.api import RelationshipType
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
+import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
-from mindroom.custom_tools.chat_ui import ChatUITools
+from mindroom.custom_tools.chat_ui import ChatUITools, show_computer_once
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.client_visible_messages import extract_visible_message, is_visible_room_message
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
@@ -35,10 +39,16 @@ from tests.chat_ui_contract_fixture import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+
+@pytest.fixture(autouse=True)
+def _no_computer_shown_yet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test before any conversation has seen the agent's computer."""
+    monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", {})
 
 
 @pytest.fixture(params=["show_computer", "open_panel"])
@@ -56,13 +66,19 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     metadata = TOOL_METADATA["chat_ui"]
 
     assert metadata.requires_room_context
-    assert metadata.function_names == ("show_computer", "open_settings", "open_panel", "show_canvas")
+    assert metadata.function_names == (
+        "show_computer",
+        "open_settings",
+        "open_panel",
+        "show_canvas",
+        "read_canvas_state",
+    )
     assert [(field.name, field.default) for field in metadata.config_fields] == [
         ("enable_show_canvas", False),
         ("enable_canvas_libraries", False),
     ]
     assert sorted(ChatUITools().async_functions) == ["open_panel", "open_settings", "show_computer"]
-    assert "show_canvas" in ChatUITools(enable_show_canvas=True).async_functions
+    assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).async_functions)
     assert isinstance(get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None), ChatUITools)
     assert tuple(inspect.signature(ChatUITools.show_computer).parameters) == ("self",)
     assert tuple(inspect.signature(ChatUITools.open_settings).parameters) == ("self", "section")
@@ -73,7 +89,9 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         "html",
         "path",
         "canvas_event_id",
+        "share_state",
     )
+    assert tuple(inspect.signature(ChatUITools.read_canvas_state).parameters) == ("self", "canvas_event_id")
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
     function = ChatUITools().get_async_functions()["open_panel"]
     function.process_entrypoint(strict=True)
@@ -510,6 +528,282 @@ async def test_members_request_keeps_thread_transport_and_truthful_result(tmp_pa
     assert result["message"] == "UI action request sent."
 
 
+def _show_computer_metadata(context: ToolRuntimeContext, thread_id: str | None) -> dict[str, object]:
+    return {
+        "version": 1,
+        "action": "show_computer",
+        "requester_id": REQUESTER_ID,
+        "agent_user_id": context.client.user_id,
+        "room_id": ROOM_ID,
+        "thread_id": thread_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_show_computer_once_sends_the_show_computer_notice_once_per_thread(tmp_path: Path) -> None:
+    """The first browser use announces the computer with the notice show_computer() sends, and only once."""
+    announced = _context(tmp_path)
+    explicit = _context(tmp_path)
+
+    with tool_runtime_context(announced):
+        await show_computer_once()
+        await show_computer_once()
+    with tool_runtime_context(explicit):
+        await ChatUITools().show_computer()
+
+    announced.client.room_send.assert_awaited_once()
+    content = _sent_content(announced)
+    assert content == _sent_content(explicit)
+    assert content["io.mindroom.ui_action"] == _show_computer_metadata(announced, THREAD_ID)
+    assert content["msgtype"] == "m.notice"
+    assert content["body"] == "Open this agent's worker computer in MindRoom Chat."
+
+
+@pytest.mark.asyncio
+async def test_explicit_computer_request_without_a_reply_identity_still_sends(tmp_path: Path) -> None:
+    """Without a reply identity to compare, an explicit request sends even after the browser notice."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        await show_computer_once()
+        result = json.loads(await ChatUITools().open_panel(panel="computer"))
+
+    assert result["status"] == "ok"
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["browser", "explicit"])
+async def test_one_turn_sends_one_computer_notice(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+    first: str,
+) -> None:
+    """An agent that browses and shows its computer in the same reply posts one notice, in either order."""
+    context = replace(_context(tmp_path), correlation_id="$turn")
+    delivered = context.client.room_send.return_value
+
+    async def slow_send(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0)
+        return delivered
+
+    context.client.room_send.side_effect = slow_send
+
+    with tool_runtime_context(context):
+        calls = [show_computer_once(), computer_request()]
+        if first == "explicit":
+            calls.reverse()
+        results = await asyncio.gather(*calls)
+        repeated = json.loads(await computer_request())
+
+    context.client.room_send.assert_awaited_once()
+    assert repeated["status"] == "ok"
+    assert all(json.loads(result)["status"] == "ok" for result in results if result is not None)
+
+
+@pytest.mark.asyncio
+async def test_a_racing_request_sends_when_the_announcement_fails(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """A notice that is not delivered does not count as shown, even for a request that waited on it."""
+    context = replace(_context(tmp_path), correlation_id="$turn")
+    delivered = context.client.room_send.return_value
+    responses = [object(), delivered]
+
+    async def send(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0)
+        return responses.pop(0)
+
+    context.client.room_send.side_effect = send
+
+    with tool_runtime_context(context):
+        _announced, explicit = await asyncio.gather(show_computer_once(), computer_request())
+
+    assert context.client.room_send.await_count == 2
+    assert json.loads(explicit)["message"] == "UI action request sent."
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_request_does_not_count_as_shown(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """Stopping a reply while its notice is sending lets the next browser call announce the computer."""
+    context = replace(_context(tmp_path), correlation_id="$turn")
+    delivered = context.client.room_send.return_value
+    sending = asyncio.Event()
+
+    async def stalled_send(*_args: object, **_kwargs: object) -> object:
+        sending.set()
+        await asyncio.Event().wait()
+        return delivered
+
+    context.client.room_send.side_effect = stalled_send
+
+    with tool_runtime_context(context):
+        request = asyncio.create_task(computer_request())
+        await sending.wait()
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        context.client.room_send.side_effect = None
+        await show_computer_once()
+
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_later_turn_can_show_the_computer_again(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """A reply after the one that announced the computer can show it again, for example for a login."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(replace(context, correlation_id="$first-turn")):
+        await show_computer_once()
+    with tool_runtime_context(replace(context, correlation_id="$second-turn")):
+        assert json.loads(await computer_request())["status"] == "ok"
+
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_show_computer_once_announces_each_thread_and_the_room_timeline(tmp_path: Path) -> None:
+    """Each thread, and the room timeline itself, gets its own single announcement."""
+    contexts = [
+        (_context(tmp_path), THREAD_ID),
+        (_context(tmp_path, thread_id="$other-root"), "$other-root"),
+        (_context(tmp_path, thread_id=None, reply_to_event_id=None), None),
+    ]
+    assert len({context.client.user_id for context, _thread_id in contexts}) == 1
+
+    for context, _thread_id in contexts:
+        with tool_runtime_context(context):
+            await show_computer_once()
+            await show_computer_once()
+
+    for context, thread_id in contexts:
+        context.client.room_send.assert_awaited_once()
+        assert _sent_content(context)["io.mindroom.ui_action"] == _show_computer_metadata(context, thread_id)
+    assert "m.relates_to" not in _sent_content(contexts[2][0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alice_shows", ["explicitly", "by browsing"])
+async def test_each_requester_in_a_thread_gets_one_announcement(tmp_path: Path, alice_shows: str) -> None:
+    """Each requester has their own computer, so one requester's notice does not cover another's."""
+    bob_id = "@bob:example.org"
+    alice = _context(tmp_path)
+    bob = _context(tmp_path, requester_id=bob_id)
+    assert alice.client.user_id == bob.client.user_id
+
+    with tool_runtime_context(alice):
+        if alice_shows == "explicitly":
+            await ChatUITools().show_computer()
+        await show_computer_once()
+        await show_computer_once()
+    with tool_runtime_context(bob):
+        await show_computer_once()
+        await show_computer_once()
+
+    for context, requester_id in ((alice, REQUESTER_ID), (bob, bob_id)):
+        context.client.room_send.assert_awaited_once()
+        assert _sent_content(context)["io.mindroom.ui_action"]["requester_id"] == requester_id
+        assert _sent_content(context)["io.mindroom.ui_action"]["thread_id"] == THREAD_ID
+
+
+@pytest.mark.asyncio
+async def test_explicit_show_computer_suppresses_the_announcement(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """A conversation the agent already showed its computer to gets no second notice from browsing."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        assert json.loads(await computer_request())["status"] == "ok"
+        await show_computer_once()
+
+    context.client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_announcement_is_retried(tmp_path: Path) -> None:
+    """A notice that was not delivered does not count, so the next browser call tries again."""
+    context = _context(tmp_path)
+    delivered = context.client.room_send.return_value
+    context.client.room_send.return_value = object()
+
+    with tool_runtime_context(context):
+        await show_computer_once()
+        context.client.room_send.return_value = delivered
+        await show_computer_once()
+        await show_computer_once()
+
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_arguments", "undelivered", "reason"),
+    [
+        ({}, True, "Failed to send the UI action request."),
+        ({"reply_to_event_id": None}, False, "Failed to resolve Matrix thread fallback for UI action request."),
+    ],
+    ids=["delivery-failed", "thread-fallback-unresolved"],
+)
+async def test_undelivered_announcement_logs_a_warning(
+    tmp_path: Path,
+    context_arguments: dict[str, None],
+    undelivered: bool,
+    reason: str,
+) -> None:
+    """A notice that cannot be sent is logged with the reason, so the silent retries are traceable."""
+    context = _context(tmp_path, **context_arguments)
+    if undelivered:
+        context.client.room_send.return_value = object()
+
+    with tool_runtime_context(context), capture_logs() as logs:
+        await show_computer_once()
+
+    warnings = [log for log in logs if log["event"] == "The worker computer notice was not delivered"]
+    assert [(log["log_level"], log["reason"], log["room_id"], log["thread_id"]) for log in warnings] == [
+        ("warning", reason, ROOM_ID, THREAD_ID),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_uses_send_one_notice(tmp_path: Path) -> None:
+    """Two browser calls racing in one thread send a single notice."""
+    context = _context(tmp_path)
+    delivered = context.client.room_send.return_value
+
+    async def slow_send(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0)
+        return delivered
+
+    context.client.room_send.side_effect = slow_send
+
+    with tool_runtime_context(context):
+        await asyncio.gather(show_computer_once(), show_computer_once())
+
+    context.client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_show_computer_once_ignores_invalid_contexts(tmp_path: Path) -> None:
+    """Without a runtime context, or for a team, nothing is sent and nothing is raised."""
+    await show_computer_once()
+    team = _context(tmp_path, agent_name="research", include_team=True)
+
+    with tool_runtime_context(team):
+        await show_computer_once()
+
+    team.client.room_send.assert_not_awaited()
+
+
 CANVAS_HTML = "<button onclick=\"mindroom.submit({plan: 'pro'}, {label: 'Pro'})\">Pro</button>"
 CANVAS_BODY = "Interactive panel: Plans. Open it in MindRoom Chat to respond."
 
@@ -865,6 +1159,42 @@ async def test_canvas_update_edits_the_agents_own_canvas_in_place(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_canvas_update_without_a_title_keeps_the_first_title(tmp_path: Path) -> None:
+    """An update may omit the title; a new canvas may not."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas"))
+        missing = json.loads(await ChatUITools().show_canvas(html="<p>2</p>"))
+
+    assert result["status"] == "ok"
+    replacement = _sent_content(context)["m.new_content"]
+    assert replacement["body"] == CANVAS_BODY
+    assert replacement["io.mindroom.ui_action"]["canvas"] == {"title": "Plans", "html": "<p>2</p>"}
+    assert missing["status"] == "error"
+    assert "Canvas title must be one line" in missing["message"]
+
+
+@pytest.mark.asyncio
+async def test_canvas_update_without_a_title_needs_a_valid_first_title(tmp_path: Path) -> None:
+    """A canvas whose first title is unusable needs a title on every update."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, canvas={"title": "", "html": "<p>1</p>"}))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        missing = json.loads(await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas"))
+        given = json.loads(await ChatUITools().show_canvas(title="Seats", html="<p>2</p>", canvas_event_id="$canvas"))
+
+    assert missing["status"] == "error"
+    assert "Canvas title must be one line" in missing["message"]
+    assert given["status"] == "ok"
+    assert _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]["canvas"]["title"] == "Seats"
+
+
+@pytest.mark.asyncio
 async def test_room_level_canvas_can_be_updated_from_the_thread_its_answer_started(tmp_path: Path) -> None:
     """The user's reply to a room-level canvas starts a thread; the edit keeps the canvas room-level."""
     context = _context(tmp_path)
@@ -1116,3 +1446,205 @@ async def test_large_update_of_a_foreign_canvas_uploads_nothing(tmp_path: Path) 
     assert "Only your own canvases" in result["message"]
     context.client.upload.assert_not_awaited()
     context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_canvas_that_shares_its_state_says_so_from_the_start(tmp_path: Path) -> None:
+    """Sharing is an authority field of the request, so Chat can tell the user before anything is shared."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        await ChatUITools().show_canvas(title="Plans", html=CANVAS_HTML, share_state=True)
+
+    assert _sent_content(context)["io.mindroom.ui_action"]["share_state"] is True
+
+
+@pytest.mark.asyncio
+async def test_updates_keep_a_canvas_sharing_and_cannot_start_it(tmp_path: Path) -> None:
+    """An edit must repeat the original's sharing, and cannot turn sharing on behind the user's back."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+    await _update(context)
+    assert _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]["share_state"] is True
+
+    unshared = _context(tmp_path)
+    _serve_event(unshared, _canvas_source(unshared))
+    with tool_runtime_context(unshared):
+        result = json.loads(
+            await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas", share_state=True),
+        )
+    assert result["status"] == "error"
+    assert "decided when a canvas is first shown" in result["message"]
+    unshared.client.room_send.assert_not_awaited()
+
+
+def _state_copy(
+    *,
+    sender: str = REQUESTER_ID,
+    event_type: str = "io.mindroom.canvas_state",
+    ts: int = 2_000,
+    **content: object,
+) -> nio.Event:
+    return nio.Event.parse_event(
+        {
+            "type": event_type,
+            "event_id": f"$copy-{ts}",
+            "sender": sender,
+            "origin_server_ts": ts,
+            "content": {
+                "version": 1,
+                "m.relates_to": {"rel_type": "m.reference", "event_id": "$canvas"},
+                **content,
+            },
+        },
+    )
+
+
+def _serve_relations(context: ToolRuntimeContext, *events: object) -> MagicMock:
+    async def newest_first() -> AsyncIterator[object]:
+        for event in events:
+            yield event
+
+    relations = MagicMock(side_effect=lambda *_args, **_kwargs: newest_first())
+    context.client.room_get_event_relations = relations
+    return relations
+
+
+async def _read(context: ToolRuntimeContext, canvas_event_id: str = "$canvas") -> dict[str, object]:
+    with tool_runtime_context(context):
+        return json.loads(await ChatUITools(enable_show_canvas=True).read_canvas_state(canvas_event_id))
+
+
+@pytest.mark.asyncio
+async def test_reading_a_canvas_state_returns_the_requesters_newest_copy(tmp_path: Path) -> None:
+    """Copies from anyone else, and other references to the canvas, are skipped."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    relations = _serve_relations(
+        context,
+        _state_copy(sender="@mallory:example.org", ts=4_000, json='{"done":["forged"]}'),
+        _state_copy(event_type="m.room.message", ts=3_500, msgtype="m.text", body="a reply"),
+        _state_copy(ts=3_000, json='{"done":["tent"]}', inputs='{"#rate":"7"}'),
+        _state_copy(ts=2_000, json='{"done":[]}'),
+    )
+
+    result = await _read(context)
+
+    assert result["status"] == "ok"
+    assert result["state"] == {"done": ["tent"]}
+    assert result["inputs"] == {"#rate": "7"}
+    assert result["shared_at"] == "1970-01-01T00:00:03+00:00"
+    assert relations.call_args.args[:3] == (ROOM_ID, "$canvas", RelationshipType.reference)
+    assert relations.call_args.kwargs["direction"] == nio.MessageDirection.back
+
+
+@pytest.mark.asyncio
+async def test_reading_a_canvas_state_decrypts_copies_in_encrypted_rooms(tmp_path: Path) -> None:
+    """The server sees only m.room.encrypted, so the type is checked after decrypting."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    encrypted = MagicMock(spec=nio.MegolmEvent)
+    encrypted.sender = REQUESTER_ID
+    encrypted.server_timestamp = 5_000
+    _serve_relations(context, encrypted)
+    context.client.olm = MagicMock()
+    context.client.decrypt_event = MagicMock(return_value=_state_copy(json='{"done":["map"]}'))
+
+    result = await _read(context)
+
+    assert result["state"] == {"done": ["map"]}
+    context.client.decrypt_event.assert_called_once_with(encrypted)
+
+
+@pytest.mark.asyncio
+async def test_reading_a_large_canvas_state_follows_its_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State too large for one event arrives as a long-text sidecar."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    _serve_relations(context, _state_copy(msgtype="m.file", url="mxc://example.org/state"))
+
+    async def resolved(source: dict[str, object], _client: object) -> dict[str, object]:
+        return {**source, "content": {"version": 1, "json": '{"notes":"long"}'}}
+
+    monkeypatch.setattr("mindroom.custom_tools.chat_ui.resolve_event_source_content", resolved)
+
+    assert (await _read(context))["state"] == {"notes": "long"}
+
+
+@pytest.mark.asyncio
+async def test_reading_a_canvas_state_reports_nothing_shared_and_unshared_canvases(tmp_path: Path) -> None:
+    """The agent learns why there is no state, and only its own shared canvases can be read."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    _serve_relations(context)
+    nothing = await _read(context)
+    assert nothing["status"] == "ok"
+    assert "Nothing shared yet" in nothing["message"]
+
+    unshared = _context(tmp_path)
+    _serve_event(unshared, _canvas_source(unshared))
+    result = await _read(unshared)
+    assert result["status"] == "error"
+    assert "does not share its state" in result["message"]
+
+    foreign = _context(tmp_path)
+    _serve_event(foreign, _canvas_source(foreign, share_state=True), sender="@mindroom_other:example.org")
+    result = await _read(foreign)
+    assert result["action"] == "read_canvas_state"
+    assert "Only your own canvases can be read." in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_newest_copy_is_reported_never_replaced_by_an_older_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent acting on superseded choices is worse than one told to try again."""
+    older = _state_copy(ts=1_000, json='{"done":[]}')
+
+    undecryptable = _context(tmp_path)
+    _serve_event(undecryptable, _canvas_source(undecryptable, share_state=True))
+    encrypted = MagicMock(spec=nio.MegolmEvent)
+    encrypted.sender = REQUESTER_ID
+    _serve_relations(undecryptable, encrypted, older)
+    undecryptable.client.olm = MagicMock()
+    undecryptable.client.decrypt_event = MagicMock(side_effect=nio.EncryptionError("no key"))
+    result = await _read(undecryptable)
+    assert result["status"] == "error"
+    assert "could not be decrypted" in result["message"]
+
+    # A deleted copy is gone (servers drop it from the relations), so the one before it is current.
+    deleted = _context(tmp_path)
+    _serve_event(deleted, _canvas_source(deleted, share_state=True))
+    redacted = MagicMock(spec=nio.RedactedEvent)
+    redacted.sender = REQUESTER_ID
+    _serve_relations(deleted, redacted, older)
+    assert (await _read(deleted))["state"] == {"done": []}
+
+    unread = _context(tmp_path)
+    _serve_event(unread, _canvas_source(unread, share_state=True))
+    _serve_relations(unread, _state_copy(ts=3_000, msgtype="m.file", url="mxc://example.org/state"), older)
+
+    async def download_failed(source: dict[str, object], _client: object) -> dict[str, object]:
+        return {**source, "content": {"msgtype": "m.file", "url": "mxc://example.org/state"}}
+
+    monkeypatch.setattr("mindroom.custom_tools.chat_ui.resolve_event_source_content", download_failed)
+    assert "could not be read" in (await _read(unread))["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_buried_under_other_references_is_not_reported_as_nothing_shared(tmp_path: Path) -> None:
+    """Other members' references to the canvas cannot make the user's choices look absent."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, share_state=True))
+    noise = [_state_copy(sender="@mallory:example.org", ts=10_000 + index) for index in range(50)]
+    _serve_relations(context, *noise, _state_copy(json='{"done":["tent"]}'))
+
+    result = await _read(context)
+
+    assert result["status"] == "error"
+    assert "not among the newest references" in result["message"]

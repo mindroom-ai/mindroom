@@ -6,7 +6,6 @@ import json
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from enum import Enum
 from types import MappingProxyType
 
 from mindroom.history.types import HistoryScope
@@ -135,12 +134,6 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
-class EditPreparation(Enum):
-    """A locked edit snapshot needs rebuilding without settling its callback."""
-
-    REBUILD = "rebuild"
-
-
 class RevisionSnapshotChangedError(RuntimeError):
     """A stale request must retain its callback and retry canonical preparation."""
 
@@ -152,17 +145,15 @@ class RevisionReplay:
     source_event_id: str
     timestamp_ms: int
     redacted: bool = False
-    cleanup_pending: bool = False
     response_event_id: str | None = None
     legacy_summary_provenance: bool = False
 
     def to_record(self) -> dict[str, object]:
-        """Serialize ledger-owned provenance and cleanup state."""
+        """Serialize ledger-owned provenance."""
         return {
             "source_event_id": self.source_event_id,
             "timestamp_ms": self.timestamp_ms,
             "redacted": self.redacted,
-            "cleanup_pending": self.cleanup_pending,
             "response_event_id": self.response_event_id,
             "legacy_summary_provenance": self.legacy_summary_provenance,
         }
@@ -183,7 +174,6 @@ def _revision_replay_map(raw: Mapping[str, object] | None) -> Mapping[str, Revis
                     source,
                     timestamp,
                     value.get("redacted") is True,
-                    value.get("cleanup_pending") is True,
                     canonical_optional_string(value.get("response_event_id")),
                     value.get("legacy_summary_provenance") is True,
                 )
@@ -197,7 +187,6 @@ class _CanonicalSourceState:
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     redacted_source_event_ids: tuple[str, ...]
-    pending_redaction_cleanup_event_ids: tuple[str, ...]
     anchor_event_id: str | None
     source_event_prompts: Mapping[str, str] | None
     source_event_revisions: Mapping[str, SourceEventRevision] | None
@@ -216,15 +205,6 @@ class _CanonicalDeliveryState:
 
 
 @dataclass(frozen=True)
-class _CanonicalDispatchState:
-    """Canonical monotonic dispatch receipt orders."""
-
-    latest_edit_receipt_order: int | None
-    user_stop_receipt_order: int | None
-    user_stop_settled_receipt_order: int | None
-
-
-@dataclass(frozen=True)
 class _CanonicalCommandState:
     """Canonical command execution checkpoint."""
 
@@ -238,7 +218,6 @@ class _CanonicalContextState:
 
     response_owner: str | None
     requester_id: str | None
-    correlation_id: str | None
     history_scope: HistoryScope | None
     conversation_target: MessageTarget | None
 
@@ -250,7 +229,6 @@ class TurnRecord:
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
     redacted_source_event_ids: tuple[str, ...] = ()
-    pending_redaction_cleanup_event_ids: tuple[str, ...] = ()
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
@@ -260,14 +238,10 @@ class TurnRecord:
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     revision_replay: Mapping[str, RevisionReplay] | None = None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
-    latest_edit_receipt_order: int | None = None
-    user_stop_receipt_order: int | None = None
-    user_stop_settled_receipt_order: int | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
     prepared_voice_sources: Mapping[str, PreparedVoiceSource] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
-    correlation_id: str | None = None
     command_execution_started: bool = False
     command_result_text: str | None = None
     command_result_extra_content: CommandResultContent | None = None
@@ -282,7 +256,6 @@ class TurnRecord:
         *,
         discovery_event_ids: Sequence[str] = (),
         redacted_source_event_ids: Sequence[str] = (),
-        pending_redaction_cleanup_event_ids: Sequence[str] = (),
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
@@ -292,14 +265,10 @@ class TurnRecord:
         source_event_revisions: Mapping[str, object] | None = None,
         revision_replay: Mapping[str, object] | None = None,
         suppressed_source_event_revisions: Mapping[str, object] | None = None,
-        latest_edit_receipt_order: int | None = None,
-        user_stop_receipt_order: int | None = None,
-        user_stop_settled_receipt_order: int | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
         prepared_voice_sources: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
-        correlation_id: str | None = None,
         command_execution_started: bool = False,
         command_result_text: str | None = None,
         command_result_extra_content: CommandResultContent | None = None,
@@ -312,7 +281,6 @@ class TurnRecord:
             source_event_ids,
             discovery_event_ids=discovery_event_ids,
             redacted_source_event_ids=redacted_source_event_ids,
-            pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
             anchor_event_id=anchor_event_id,
             source_event_prompts=source_event_prompts,
             source_event_revisions=source_event_revisions,
@@ -325,16 +293,10 @@ class TurnRecord:
             visible_echo_event_id,
             visible_echo_is_fallback,
         )
-        dispatch = _canonical_dispatch_state(
-            latest_edit_receipt_order,
-            user_stop_receipt_order,
-            user_stop_settled_receipt_order,
-        )
         command = _canonical_command_state(command_execution_started, command_result_text)
         context = _canonical_context_state(
             response_owner,
             requester_id,
-            correlation_id,
             history_scope,
             conversation_target,
         )
@@ -342,7 +304,6 @@ class TurnRecord:
             source_event_ids=source.source_event_ids,
             discovery_event_ids=source.discovery_event_ids,
             redacted_source_event_ids=source.redacted_source_event_ids,
-            pending_redaction_cleanup_event_ids=source.pending_redaction_cleanup_event_ids,
             anchor_event_id=source.anchor_event_id,
             response_event_id=delivery.response_event_id,
             completed=completed,
@@ -352,14 +313,10 @@ class TurnRecord:
             source_event_revisions=source.source_event_revisions,
             revision_replay=_revision_replay_map(revision_replay) or None,
             suppressed_source_event_revisions=source.suppressed_source_event_revisions,
-            latest_edit_receipt_order=dispatch.latest_edit_receipt_order,
-            user_stop_receipt_order=dispatch.user_stop_receipt_order,
-            user_stop_settled_receipt_order=dispatch.user_stop_settled_receipt_order,
             source_event_metadata=source.source_event_metadata,
             prepared_voice_sources=source.prepared_voice_sources,
             response_owner=context.response_owner,
             requester_id=context.requester_id,
-            correlation_id=context.correlation_id,
             command_execution_started=command.command_execution_started,
             command_result_text=command.command_result_text,
             command_result_extra_content=(
@@ -389,18 +346,6 @@ class TurnRecord:
         if selected is not None:
             revisions.append(selected)
         return max(revisions, default=None)
-
-    @property
-    def invalidated_prompt_sources(self) -> frozenset[str]:
-        """Return slots whose deleted revision still lacks a canonical refill."""
-        prompts = self.source_event_prompts or {}
-        return frozenset(
-            value.source_event_id
-            for value in (self.revision_replay or {}).values()
-            if value.redacted
-            and value.source_event_id not in prompts
-            and value.source_event_id in self.replay_source_event_ids
-        )
 
     @property
     def indexed_event_ids(self) -> tuple[str, ...]:
@@ -439,7 +384,6 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     source_event_ids: Sequence[str]
     discovery_event_ids: Sequence[str]
     redacted_source_event_ids: Sequence[str]
-    pending_redaction_cleanup_event_ids: Sequence[str]
     anchor_event_id: str | None
     response_event_id: str | None
     completed: bool
@@ -449,14 +393,10 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     source_event_revisions: Mapping[str, object] | None
     revision_replay: Mapping[str, object] | None
     suppressed_source_event_revisions: Mapping[str, object] | None
-    latest_edit_receipt_order: int | None
-    user_stop_receipt_order: int | None
-    user_stop_settled_receipt_order: int | None
     source_event_metadata: Mapping[str, object] | None
     prepared_voice_sources: Mapping[str, object] | None
     response_owner: str | None
     requester_id: str | None
-    correlation_id: str | None
     command_execution_started: bool
     command_result_text: str | None
     command_result_extra_content: CommandResultContent | None
@@ -475,7 +415,6 @@ def canonicalize_turn_record(
         candidate.source_event_ids,
         discovery_event_ids=candidate.discovery_event_ids,
         redacted_source_event_ids=candidate.redacted_source_event_ids,
-        pending_redaction_cleanup_event_ids=candidate.pending_redaction_cleanup_event_ids,
         anchor_event_id=candidate.anchor_event_id,
         response_event_id=candidate.response_event_id,
         completed=candidate.completed,
@@ -485,14 +424,10 @@ def canonicalize_turn_record(
         source_event_revisions=candidate.source_event_revisions,
         revision_replay=candidate.revision_replay,
         suppressed_source_event_revisions=candidate.suppressed_source_event_revisions,
-        latest_edit_receipt_order=candidate.latest_edit_receipt_order,
-        user_stop_receipt_order=candidate.user_stop_receipt_order,
-        user_stop_settled_receipt_order=candidate.user_stop_settled_receipt_order,
         source_event_metadata=candidate.source_event_metadata,
         prepared_voice_sources=candidate.prepared_voice_sources,
         response_owner=candidate.response_owner,
         requester_id=candidate.requester_id,
-        correlation_id=candidate.correlation_id,
         command_execution_started=candidate.command_execution_started,
         command_result_text=candidate.command_result_text,
         command_result_extra_content=candidate.command_result_extra_content,
@@ -507,7 +442,6 @@ def _canonical_source_state(
     *,
     discovery_event_ids: Sequence[object],
     redacted_source_event_ids: Sequence[object],
-    pending_redaction_cleanup_event_ids: Sequence[object],
     anchor_event_id: object,
     source_event_prompts: Mapping[str, str] | None,
     source_event_revisions: Mapping[str, object] | None,
@@ -526,11 +460,6 @@ def _canonical_source_state(
         event_id for event_id in canonical_source_event_ids(redacted_source_event_ids) if event_id in indexed_ids
     )
     redacted_ids = set(canonical_redactions)
-    canonical_pending_cleanup = tuple(
-        event_id
-        for event_id in canonical_source_event_ids(pending_redaction_cleanup_event_ids)
-        if event_id in redacted_ids
-    )
     canonical_anchor = canonical_optional_string(anchor_event_id)
     if canonical_anchor is None and canonical_sources:
         canonical_anchor = canonical_sources[-1]
@@ -546,7 +475,6 @@ def _canonical_source_state(
         source_event_ids=canonical_sources,
         discovery_event_ids=canonical_discovery,
         redacted_source_event_ids=canonical_redactions,
-        pending_redaction_cleanup_event_ids=canonical_pending_cleanup,
         anchor_event_id=canonical_anchor,
         source_event_prompts=_immutable_prompt_map(
             canonical_sources,
@@ -595,20 +523,6 @@ def _canonical_delivery_state(
     )
 
 
-def _canonical_dispatch_state(
-    latest_edit: object,
-    user_stop: object,
-    settled_user_stop: object,
-) -> _CanonicalDispatchState:
-    """Return canonical monotonic dispatch receipt orders."""
-    latest_edit_order = _positive_int_or_none(latest_edit)
-    user_stop_order = _positive_int_or_none(user_stop)
-    settled_order = _positive_int_or_none(settled_user_stop)
-    if user_stop_order is None or (settled_order is not None and settled_order > user_stop_order):
-        settled_order = None
-    return _CanonicalDispatchState(latest_edit_order, user_stop_order, settled_order)
-
-
 def _canonical_command_state(started: object, result_text: object) -> _CanonicalCommandState:
     """Return a canonical command execution checkpoint."""
     canonical_result = canonical_optional_string(result_text)
@@ -618,7 +532,6 @@ def _canonical_command_state(started: object, result_text: object) -> _Canonical
 def _canonical_context_state(
     response_owner: object,
     requester_id: object,
-    correlation_id: object,
     history_scope: object,
     conversation_target: object,
 ) -> _CanonicalContextState:
@@ -626,7 +539,6 @@ def _canonical_context_state(
     return _CanonicalContextState(
         response_owner=canonical_optional_string(response_owner),
         requester_id=canonical_optional_string(requester_id),
-        correlation_id=canonical_optional_string(correlation_id),
         history_scope=history_scope if isinstance(history_scope, HistoryScope) else None,
         conversation_target=conversation_target if isinstance(conversation_target, MessageTarget) else None,
     )
@@ -666,11 +578,6 @@ def canonical_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str,
 def canonical_optional_string(value: object) -> str | None:
     """Return a non-empty string or None."""
     return value if isinstance(value, str) and value else None
-
-
-def _positive_int_or_none(value: object) -> int | None:
-    """Return one positive non-boolean integer or None."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _immutable_prompt_map(
@@ -830,11 +737,6 @@ def merge_committed_response(
             source_event_prompts=prompts,
             source_event_revisions=revisions,
             revision_replay=replay,
-            latest_edit_receipt_order=max(
-                current.latest_edit_receipt_order or 0,
-                committed.latest_edit_receipt_order or 0,
-            )
-            or None,
             timestamp=max(current.timestamp, committed.timestamp),
         ),
         tombstoned_event_ids=tombstoned_event_ids,
@@ -849,9 +751,8 @@ def sanitize_revision_replay(  # noqa: C901
 ) -> TurnRecord:
     """Join monotonic invalidation before removing any candidate provenance.
 
-    Acknowledgement is final for one physical revision: no future request may
-    consume it. Only ledger records carry cleanup state; model runs cannot
-    acknowledge debt or restore it after acknowledgement.
+    A revision tombstone is final: no future request may consume that physical
+    revision, and no later record can clear it.
     """
     replay = dict(candidate.revision_replay or {})
     for source, (timestamp, revision_id) in (candidate.source_event_revisions or {}).items():
@@ -863,18 +764,14 @@ def sanitize_revision_replay(  # noqa: C901
         if new is None or (old.redacted and not new.redacted):
             replay[event_id] = old
         elif old.redacted and new.redacted:
-            replay[event_id] = replace(
-                old,
-                cleanup_pending=old.cleanup_pending and new.cleanup_pending,
-                response_event_id=old.response_event_id or new.response_event_id,
-            )
+            replay[event_id] = replace(old, response_event_id=old.response_event_id or new.response_event_id)
         elif old.response_event_id is not None and new.response_event_id is None:
             replay[event_id] = replace(new, response_event_id=old.response_event_id)
         replay[event_id] = preserve_summary_provenance(replay[event_id], old)
     for event_id in tombstoned_event_ids:
         value = replay.get(event_id)
         if value is not None and not value.redacted:
-            replay[event_id] = replace(value, redacted=True, cleanup_pending=True)
+            replay[event_id] = replace(value, redacted=True)
     prompts = dict(candidate.source_event_prompts or {})
     revisions = dict(candidate.source_event_revisions or {})
     invalid_sources = {value.source_event_id for value in replay.values() if value.redacted}

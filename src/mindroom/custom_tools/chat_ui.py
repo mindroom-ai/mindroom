@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html as html_lib
+import json
 import unicodedata
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
 from agno.tools import Toolkit
+from nio.api import RelationshipType
 
+from mindroom.constants import UI_ACTION_CONTENT_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.file_access import resolve_agent_file
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
     send_message_result,
@@ -21,6 +28,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.identity import parse_historical_matrix_user_id
 from mindroom.matrix.large_messages import EDIT_MESSAGE_SIZE_LIMIT, calculate_event_size
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -41,41 +49,69 @@ _SettingsSection = Literal[
 ]
 _SidePanel = Literal["members", "computer"]
 
+logger = get_logger(__name__)
+
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
-_UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
+_SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
+
+
+@dataclass
+class _ComputerNotice:
+    """One conversation's show_computer notice: serialized sends and the reply that delivered it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    delivered: bool = False
+    reply: str | None = None
+
+
+# Conversations, keyed by agent Matrix user, requester, room, and thread (None for the room timeline),
+# whose show_computer notice was sent or attempted in this process, so the agent's first browser use
+# announces it only once and one reply (correlation ID) never sends it twice. Each requester has their
+# own computer and Chat shows only notices addressed to its own user.
+_SHOWN_COMPUTERS: dict[tuple[str, str, str, str | None], _ComputerNotice] = {}
 # Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
 _CANVAS_TITLE_MAX_UNITS = 120
+_CANVAS_TITLE_ERROR = (
+    f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters."
+)
 # A page that fits an edit envelope travels inside the event, so every canvas stays editable;
 # that plaintext ceiling also keeps the Megolm-encrypted event far below the 64 KB hard limit.
 # Larger pages are uploaded as (encrypted) Matrix media and the event carries a reference.
 _CANVAS_SIZE_PROBE_EVENT_ID = "$" + "x" * 64
 _CANVAS_PAGE_MAX_BYTES = 4 * 1024 * 1024
+# Chat shares a canvas's state as this event, a reference to the canvas, so one relations call finds the newest.
+_CANVAS_STATE_EVENT_TYPE = "io.mindroom.canvas_state"
+_CANVAS_STATE_SCAN_LIMIT = 50
 # Added to the agent's instructions. The map lists only the functions the agent has (see
 # ChatUITools.instructions), so include_tools or exclude_tools never advertise a missing function.
 _CHAT_UI_INSTRUCTIONS = (
     "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and "
     "none of them touches the user's own computer or browser. Side panels share one place on the screen, so "
-    "opening one replaces whichever is open. Each call only sends a request into the conversation: success "
-    "means it was sent, not that the user saw it."
+    "opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the "
+    "conversation: success means it was sent, not that the user saw it."
 )
 _FUNCTION_INSTRUCTIONS: dict[str, str] = {
     "open_panel": (
         "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
-        "browser that browser_control drives with target='host'. Use it to let the user watch you on a real "
-        "website, or take over, for example to log in. "
+        "browser that browser_control drives with target='host'. The user can watch you on a real website or take "
+        "over, for example to log in. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_computer": (
         "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
-        "browser_control drives with target='host'. Use it to let the user watch you on a real website, or take "
-        "over, for example to log in."
+        "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
+        "example to log in."
     ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
         "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
         "something in; their answer comes back as their next message. For a quick choice between a few "
         "options, just ask in your reply."
+    ),
+    "read_canvas_state": (
+        "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
+        "share_state=True, such as a checklist, without them sending anything."
     ),
     "open_settings": (
         "open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting."
@@ -86,7 +122,8 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
 # Lines that name another function; each is added only when every function it names is enabled.
 _SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
 _REAL_WEBSITE_HINT = (
-    "To show the user a real website, open it with browser_control and show the Computer panel; a canvas cannot."
+    "To show the user a real website, open it in your worker browser, whose first call in a conversation shows "
+    "the Computer panel; a canvas cannot."
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
@@ -108,6 +145,10 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
         "m.new_content": replacement,
         "m.relates_to": {"rel_type": "m.replace", "event_id": canvas_event_id},
     }
+
+
+def _computer_conversation(context: ToolRuntimeContext, requester_id: str) -> tuple[str, str, str, str | None]:
+    return (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
 
 
 def _canvas_title_is_valid(title: str) -> bool:
@@ -138,7 +179,7 @@ class ChatUITools(Toolkit):
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
         if enable_show_canvas:
-            tools.append(self.show_canvas)
+            tools.extend([self.show_canvas, self.read_canvas_state])
         super().__init__(name="chat_ui", add_instructions=True, tools=tools)
 
     @property
@@ -267,7 +308,7 @@ class ChatUITools(Toolkit):
     @classmethod
     async def _send_action(
         cls,
-        action: Literal["show_computer", "open_settings", "open_panel"],
+        action: Literal["open_settings", "open_panel"],
         body: str,
         **action_fields: object,
     ) -> str:
@@ -312,7 +353,7 @@ class ChatUITools(Toolkit):
             latest_thread_event_id=latest_thread_event_id if thread_id is not None else None,
             extra_content={
                 "msgtype": "m.notice",
-                _UI_ACTION_CONTENT_KEY: metadata,
+                UI_ACTION_CONTENT_KEY: metadata,
             },
         )
         delivered = await send_message_result(
@@ -345,13 +386,36 @@ class ChatUITools(Toolkit):
         out watching. They can take control, for example to log in; while they have it
         your browser calls are blocked, and when they hand it back you get a message.
         Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
-        and it never opens or controls the user's own browser. Success means the
+        and it never opens or controls the user's own browser. Your first worker
+        browser call in a conversation (browser_control with target='host', or any
+        browser_mcp function) already shows the user this panel; call show_computer
+        only to show it again in a later reply, for example when the user should log
+        in or after they closed it. One reply shows the panel once. Success means the
         request was sent, not that the client opened the panel.
         """
-        return await self._send_action(
-            "show_computer",
-            "Open this agent's worker computer in MindRoom Chat.",
-        )
+        validated = self._validated_context("show_computer")
+        if isinstance(validated, str):
+            return validated
+        context, requester_id = validated
+        notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+        async with notice.lock:
+            if notice.delivered and context.correlation_id is not None and notice.reply == context.correlation_id:
+                # This reply's first browser call, or an earlier show_computer, already delivered the notice.
+                return self._payload(
+                    "ok",
+                    action="show_computer",
+                    message="A Computer panel request was already sent in this reply.",
+                )
+            result = await self._send_validated_action(
+                context,
+                requester_id,
+                "show_computer",
+                _SHOW_COMPUTER_BODY,
+                {},
+            )
+            if json.loads(result)["status"] == "ok":
+                notice.delivered, notice.reply = True, context.correlation_id
+            return result
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
         """Open the user's MindRoom Chat Settings dialog at one section.
@@ -381,7 +445,11 @@ class ChatUITools(Toolkit):
         it your browser calls are blocked, and when they hand it back you get a
         message. Opening the panel does not navigate to a URL, send a prompt to
         ChatGPT, or take control, and it never opens or controls the user's own
-        browser: navigate first with browser_control, then open the panel.
+        browser. Your first worker browser call in a conversation (browser_control
+        with target='host', or any browser_mcp function) already shows the user this
+        panel; call open_panel(panel='computer') only to show it again in a later
+        reply, for example when the user should log in or after they closed it. One
+        reply shows the panel once.
 
         panel='members' opens the Members panel, listing the people and agents in
         this room.
@@ -389,7 +457,7 @@ class ChatUITools(Toolkit):
         Success means the UI request was sent, not that the client opened a panel.
 
         Args:
-            panel: 'computer' for your worker browser, or 'members' for this room's members.
+            panel: 'computer' for your worker browser, or 'members' (the default) for this room's members.
 
         """
         if panel not in _SIDE_PANELS:
@@ -409,10 +477,11 @@ class ChatUITools(Toolkit):
 
     async def show_canvas(
         self,
-        title: str,
+        title: str | None = None,
         html: str | None = None,
         path: str | None = None,
         canvas_event_id: str | None = None,
+        share_state: bool = False,
     ) -> str:
         """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
 
@@ -433,8 +502,11 @@ class ChatUITools(Toolkit):
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
         --mr-text-muted, --mr-accent, --mr-accent-text, --mr-success, --mr-warning,
-        --mr-danger, --mr-radius, and --mr-font. The page cannot see the user's account
-        or messages.
+        --mr-danger, --mr-radius, and --mr-font; window.mindroom.colorScheme is
+        'light' or 'dark' for choices the variables cannot make, such as chart colors.
+        The page cannot see the user's account or messages. Pages cost output tokens:
+        prefer SVG and CSS to embedded images, summarize large data instead of
+        inlining it, and leave out interactivity the page does not need.
 
         Keep interactivity inside the page; nothing reaches you until the user
         commits. To commit, call ``window.mindroom.submit(data, {label: "short
@@ -448,16 +520,40 @@ class ChatUITools(Toolkit):
         followed by the JSON data. If that revision is not your latest update, the user
         answered an earlier version of the page.
 
+        Inputs, selects, and textareas with an ``id`` or ``name`` keep their values
+        across reloads, your updates, and versions automatically (not passwords,
+        hidden inputs, or ``autocomplete="off"`` fields): give them stable ids, a new
+        id when a field's meaning changes, and redraw on their ``input`` events, which
+        Chat fires when it restores them. To keep anything else the user does in the
+        page, call
+        ``window.mindroom.saveState(value)`` on every change with up to 256K characters
+        of JSON (larger values throw); later loads of this canvas start with it in
+        ``window.mindroom.state``, which is ``undefined`` when nothing is saved. Read it
+        defensively: an earlier version of the page may have saved it. Saved state
+        stays on the user's device, only the 100 most recently saved canvases keep it,
+        and it reaches you only when the canvas shares it: with ``share_state=True``
+        (decided when the canvas is first shown; Chat tells the user), Chat keeps a
+        copy in the room, readable by its members, and ``read_canvas_state`` returns
+        it whenever you want, so a page like a checklist needs no send button; never
+        put secrets in ``saveState`` on such a page.
+
+        If the page throws an error or loads something Chat blocks, the user can send
+        you the errors as ``Canvas error (<canvas_event_id>, revision <event_id>):``
+        followed by one error per line.
+
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. Success means the request was sent, not that the user opened or
-        answered it.
+        canvas ID. Without it, show_canvas creates a separate canvas: use a new canvas for a
+        distinct artifact and an update for a new version of the same one. The user can
+        switch between this conversation's canvases from the room header. Success means
+        the request was sent, not that the user opened or answered it.
 
         Args:
-            title: Short single-line panel title.
+            title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
             html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
+            share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
 
         """
         validated = self._validated_context("show_canvas")
@@ -470,10 +566,11 @@ class ChatUITools(Toolkit):
         page = self._canvas_input_error(title, html, path, canvas_event_id) or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
+        target = await self._canvas_metadata(context, requester_id, canvas_event_id, title, share_state=share_state)
+        if isinstance(target, str):
+            return target
+        metadata, title = target
         body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
-        metadata = await self._canvas_metadata(context, requester_id, canvas_event_id)
-        if isinstance(metadata, str):
-            return metadata
         canvas = await self._canvas_field(context, metadata, body, title, page, canvas_event_id)
         if isinstance(canvas, str):
             return canvas
@@ -483,10 +580,63 @@ class ChatUITools(Toolkit):
                 requester_id,
                 "show_canvas",
                 body,
-                {"canvas": canvas},
+                {"canvas": canvas, **({"share_state": True} if share_state else {})},
                 formatted_body=html_lib.escape(body),
             )
         return await self._update_canvas(context, canvas_event_id, body, {**metadata, "canvas": canvas})
+
+    async def read_canvas_state(self, canvas_event_id: str) -> str:
+        """Read what the user last did in a canvas you showed with ``share_state=True``.
+
+        Returns the page's saved state (what it passed to ``window.mindroom.saveState``)
+        and its kept input values (by ``#id`` or name) as the user's Chat last shared
+        them, and when. Nothing is shared until the user changes something. The user
+        does not have to send anything, so call this whenever you need their current
+        choices, for example from a scheduled task.
+
+        Args:
+            canvas_event_id: Event ID of a canvas from this conversation shown with share_state=True.
+
+        """
+        action = "read_canvas_state"
+        validated = self._validated_context(action)
+        if isinstance(validated, str):
+            return validated
+        context, requester_id = validated
+        if not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$"):
+            return self._payload(
+                "error",
+                action=action,
+                message="canvas_event_id must be the event ID returned by an earlier show_canvas call.",
+            )
+        original = await self._canvas_target(context, requester_id, canvas_event_id, action=action)
+        if isinstance(original, str):
+            return original
+        if original.get("share_state") is not True:
+            return self._payload(
+                "error",
+                action=action,
+                canvas_event_id=canvas_event_id,
+                message="This canvas does not share its state; show a new canvas with share_state=True.",
+            )
+        shared = await _latest_shared_canvas_state(context.client, context.room_id, canvas_event_id, requester_id)
+        if not isinstance(shared, tuple):
+            # No copy is a plain answer; an unreadable newest copy is an error, never an older copy.
+            status, message = (
+                ("error", shared)
+                if shared
+                else ("ok", "Nothing shared yet: the user has not changed anything in this canvas.")
+            )
+            return self._payload(status, action=action, canvas_event_id=canvas_event_id, message=message)
+        state, inputs, shared_at = shared
+        return self._payload(
+            "ok",
+            action=action,
+            canvas_event_id=canvas_event_id,
+            shared_at=shared_at,
+            state=state,
+            inputs=inputs,
+        )
 
     @classmethod
     async def _canvas_metadata(
@@ -494,16 +644,33 @@ class ChatUITools(Toolkit):
         context: ToolRuntimeContext,
         requester_id: str,
         canvas_event_id: str | None,
-    ) -> dict[str, object] | str:
+        title: str,
+        *,
+        share_state: bool = False,
+    ) -> tuple[dict[str, object], str] | str:
+        """Return the request metadata and the title; an update without one keeps the canvas's first title."""
         metadata = cls._action_metadata(context, requester_id, "show_canvas", {})
         if canvas_event_id is None:
-            return metadata
+            return metadata, title
         original = await cls._canvas_target(context, requester_id, canvas_event_id)
         if isinstance(original, str):
             return original
-        # Chat accepts an edit only when its authority fields equal the original request's.
+        # Chat accepts an edit only when its authority fields equal the original request's, and
+        # whether a canvas shares its state is one of them, so the user is told before anything is shared.
         metadata["thread_id"] = original.get("thread_id")
-        return metadata
+        if original.get("share_state") is True:
+            metadata["share_state"] = True
+        elif share_state:
+            return cls._canvas_error(
+                "Sharing is decided when a canvas is first shown; show a new canvas with share_state=True.",
+                canvas_event_id=canvas_event_id,
+            )
+        match original.get("canvas"):
+            case {"title": str(first_title)} if not title:
+                title = first_title
+        if not _canvas_title_is_valid(title):
+            return cls._canvas_error(_CANVAS_TITLE_ERROR)
+        return metadata, title
 
     @classmethod
     def _canvas_input_error(
@@ -520,10 +687,9 @@ class ChatUITools(Toolkit):
                 "canvas_event_id must be the event ID returned by an earlier show_canvas call.",
                 canvas_event_id=canvas_event_id,
             )
-        if not _canvas_title_is_valid(title):
-            return cls._canvas_error(
-                f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters.",
-            )
+        # An update may omit the title; it is checked once the canvas's own title is known.
+        if (title or canvas_event_id is None) and not _canvas_title_is_valid(title):
+            return cls._canvas_error(_CANVAS_TITLE_ERROR)
         given = [value for value in (html, path) if value is not None and value != ""]
         if len(given) != 1:
             return cls._canvas_error("Give exactly one of html or path.")
@@ -590,7 +756,7 @@ class ChatUITools(Toolkit):
             "body": body,
             "format": "org.matrix.custom.html",
             "formatted_body": html_lib.escape(body),
-            _UI_ACTION_CONTENT_KEY: metadata,
+            UI_ACTION_CONTENT_KEY: metadata,
         }
 
     @classmethod
@@ -678,21 +844,25 @@ class ChatUITools(Toolkit):
         context: ToolRuntimeContext,
         requester_id: str,
         canvas_event_id: str,
+        *,
+        action: str = "show_canvas",
     ) -> dict[str, object] | str:
         """Return the original request of this agent's own canvas for the same requester and room."""
+        update = action == "show_canvas"
+        instead = "; call show_canvas without canvas_event_id instead." if update else "."
 
         def error(message: str) -> str:
-            return cls._canvas_error(message, canvas_event_id=canvas_event_id)
+            return cls._payload("error", action=action, message=message, canvas_event_id=canvas_event_id)
 
         response = await context.client.room_get_event(context.room_id, canvas_event_id)
         if not isinstance(response, nio.RoomGetEventResponse) or isinstance(response.event, nio.MegolmEvent):
-            return error("The canvas to update could not be read in this room.")
+            return error(f"The canvas {'to update ' if update else ''}could not be read in this room.")
         source = response.event.source if isinstance(response.event.source, dict) else {}
         unsigned = source.get("unsigned")
         if isinstance(unsigned, dict) and "redacted_because" in unsigned:
-            return error("That canvas was deleted; call show_canvas without canvas_event_id instead.")
+            return error(f"That canvas was deleted{instead}")
         content = source.get("content")
-        metadata = content.get(_UI_ACTION_CONTENT_KEY) if isinstance(content, dict) else None
+        metadata = content.get(UI_ACTION_CONTENT_KEY) if isinstance(content, dict) else None
         relation = content.get("m.relates_to") if isinstance(content, dict) else None
         if (
             response.event.sender == context.client.user_id
@@ -713,7 +883,7 @@ class ChatUITools(Toolkit):
             or metadata.get("agent_user_id") != context.client.user_id
             or (isinstance(relation, dict) and relation.get("rel_type") == "m.replace")
         ):
-            return error("Only your own canvases can be updated; call show_canvas without canvas_event_id instead.")
+            return error(f"Only your own canvases can be {'updated' if update else 'read'}{instead}")
         # A room-level canvas is answered by a reply that starts a thread, so any thread of the room may update it.
         thread_id = metadata.get("thread_id")
         if (
@@ -721,5 +891,105 @@ class ChatUITools(Toolkit):
             or metadata.get("room_id") != context.room_id
             or (thread_id is not None and thread_id != context.resolved_thread_id)
         ):
-            return error("That canvas belongs to another conversation; show a new canvas here instead.")
+            return error(
+                "That canvas belongs to another conversation"
+                + ("; show a new canvas here instead." if update else "."),
+            )
         return metadata
+
+
+async def show_computer_once() -> None:
+    """Send the show_computer notice unless this agent already showed the requester its computer here.
+
+    Contexts where Chat UI actions are unsupported, such as teams, the router, or a missing
+    runtime context, send nothing.
+    """
+    validated = ChatUITools._validated_context("show_computer")
+    if isinstance(validated, str):
+        return
+    context, requester_id = validated
+    notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+    # Sends for one conversation take turns, so concurrent first calls send one notice. An
+    # undelivered or cancelled notice does not count, so the next browser call tries again.
+    async with notice.lock:
+        if notice.delivered:
+            return
+        result = await ChatUITools._send_validated_action(
+            context,
+            requester_id,
+            "show_computer",
+            _SHOW_COMPUTER_BODY,
+            {},
+        )
+        payload = json.loads(result)
+        if payload["status"] == "ok":
+            notice.delivered, notice.reply = True, context.correlation_id
+            return
+        logger.warning(
+            "The worker computer notice was not delivered",
+            reason=payload.get("message"),
+            room_id=context.room_id,
+            thread_id=context.resolved_thread_id,
+        )
+
+
+def _parsed_json(value: object) -> object:
+    """A JSON text Chat shared, parsed; anything else is left out."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return json.loads(value)
+    except ValueError:
+        return None
+
+
+async def _latest_shared_canvas_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    canvas_event_id: str,
+    requester_id: str,
+) -> tuple[object, object, str] | str | None:
+    """Return the page state, kept inputs, and time of the newest copy the requester's Chat shared.
+
+    The newest copy still in the room is the answer: when it cannot be read, the reason is returned
+    instead of an older copy, so the agent never takes superseded choices for current ones. None means
+    no copy.
+    """
+    relations = client.room_get_event_relations(
+        room_id,
+        canvas_event_id,
+        RelationshipType.reference,
+        direction=nio.MessageDirection.back,
+    )
+    async with contextlib.aclosing(relations):
+        scanned = 0
+        async for related in relations:
+            scanned += 1
+            if scanned > _CANVAS_STATE_SCAN_LIMIT:
+                return "The user's copy is not among the newest references to this canvas; try again later."
+            if related.sender != requester_id:
+                continue
+            event = related
+            if isinstance(event, nio.MegolmEvent):
+                # Encrypted rooms hide the event type, so it is checked after decrypting.
+                try:
+                    event = client.decrypt_event(event) if client.olm is not None else None
+                except nio.EncryptionError:
+                    event = None
+                if event is None:
+                    return "The newest copy could not be decrypted yet; try again later."
+            if isinstance(event, nio.RedactedEvent):
+                # A deleted copy is gone; servers drop it from the relations anyway, so the next one counts.
+                continue
+            source = event.source if isinstance(event.source, dict) else {}
+            if (
+                getattr(event, "type", None) != _CANVAS_STATE_EVENT_TYPE
+                and source.get("type") != _CANVAS_STATE_EVENT_TYPE
+            ):
+                continue
+            content = (await resolve_event_source_content(source, client)).get("content")
+            if not isinstance(content, dict) or content.get("version") != 1:
+                return "The newest copy could not be read; try again later."
+            shared_at = datetime.fromtimestamp(related.server_timestamp / 1000, tz=UTC).isoformat()
+            return _parsed_json(content.get("json")), _parsed_json(content.get("inputs")), shared_at
+    return None

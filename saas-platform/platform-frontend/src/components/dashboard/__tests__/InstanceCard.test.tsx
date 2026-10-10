@@ -36,10 +36,8 @@ describe('InstanceCard', () => {
     current_period_end: null,
     trial_ends_at: null,
     cancelled_at: null,
-    max_agents: 1,
-    max_messages_per_day: 100,
-    max_storage_gb: 1,
     can_run_instances: false,
+    stripe_subscription_ended: true,
     trial_days_remaining: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -50,8 +48,16 @@ describe('InstanceCard', () => {
     tier: 'byok' as const,
     status: 'trialing' as const,
     trial_ends_at: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+    stripe_subscription_id: 'sub_stripe_trial',
     can_run_instances: true,
+    stripe_subscription_ended: false,
     trial_days_remaining: 2,
+  }
+  const activeSubscription = {
+    ...freeSubscription,
+    id: 'sub-active',
+    tier: 'hobby' as const,
+    can_run_instances: true,
   }
 
   beforeEach(() => {
@@ -64,7 +70,7 @@ describe('InstanceCard', () => {
 
   describe('No Instance State', () => {
     it('should show provision prompt when no instance exists', () => {
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
 
       expect(screen.getByText(/No instance provisioned yet/)).toBeInTheDocument()
       expect(screen.getByText(/Click below to create your MindRoom instance/)).toBeInTheDocument()
@@ -76,7 +82,7 @@ describe('InstanceCard', () => {
       const mockProvisionResult = { instance_id: 1, status: 'provisioning' }
       ;(provisionInstance as jest.Mock).mockResolvedValueOnce(mockProvisionResult)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -94,7 +100,7 @@ describe('InstanceCard', () => {
       const error = new Error('No subscription found')
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(error)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -113,7 +119,7 @@ describe('InstanceCard', () => {
       const error = new Error('Server error')
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(error)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -130,7 +136,7 @@ describe('InstanceCard', () => {
       abortError.name = 'AbortError'
       ;(provisionInstance as jest.Mock).mockRejectedValueOnce(abortError)
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)
@@ -143,14 +149,40 @@ describe('InstanceCard', () => {
       expect(mockAlert).not.toHaveBeenCalled()
     })
 
-    it('should send free users to billing instead of provisioning infrastructure', async () => {
+    it('should send free users to choosing a plan instead of provisioning infrastructure', async () => {
       render(<InstanceCard instance={null} subscription={freeSubscription} />)
 
       expect(screen.queryByRole('button', { name: /Provision Instance/i })).not.toBeInTheDocument()
-      expect(screen.getByRole('link', { name: /Start Trial/i })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: 'Choose a plan' })).toHaveAttribute(
         'href',
         '/dashboard/billing/upgrade'
       )
+    })
+
+    it('should wait for the subscription before offering a plan', () => {
+      render(<InstanceCard instance={null} subscription={null} subscriptionLoading />)
+
+      expect(screen.getByLabelText('Loading subscription')).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: 'Choose a plan' })).not.toBeInTheDocument()
+    })
+
+    it('should send a lapsed plan holder to billing instead of choosing a plan', () => {
+      render(
+        <InstanceCard
+          instance={null}
+          subscription={{
+            ...trialSubscription,
+            tier: 'hobby',
+            status: 'cancelled',
+            can_run_instances: false,
+            stripe_subscription_ended: true,
+            trial_days_remaining: null,
+          }}
+        />
+      )
+
+      expect(screen.getByRole('link', { name: 'Open billing' })).toHaveAttribute('href', '/dashboard/billing')
+      expect(screen.queryByRole('link', { name: 'Choose a plan' })).not.toBeInTheDocument()
     })
 
     it('should show trial time remaining for trial users who can provision', () => {
@@ -229,7 +261,7 @@ describe('InstanceCard', () => {
           <InstanceCard instance={{ ...mockInstance, status }} />
         )
         expect(screen.getByText(expectedText)).toBeInTheDocument()
-        rerender(<InstanceCard instance={null} />)
+        rerender(<InstanceCard instance={null} subscription={activeSubscription} />)
       })
     })
 
@@ -265,7 +297,7 @@ describe('InstanceCard', () => {
           <InstanceCard instance={{ ...mockInstance, updated_at: updatedAt }} />
         )
         expect(screen.getByText(new RegExp(expected))).toBeInTheDocument()
-        rerender(<InstanceCard instance={null} />)
+        rerender(<InstanceCard instance={null} subscription={activeSubscription} />)
       })
     })
 
@@ -431,7 +463,7 @@ describe('InstanceCard', () => {
       render(<InstanceCard instance={minimalInstance} />)
 
       expect(screen.getByText('MindRoom Instance')).toBeInTheDocument()
-      expect(screen.getByText('Free')).toBeInTheDocument() // Default tier
+      expect(screen.getByText('No plan')).toBeInTheDocument() // Default tier
       expect(screen.queryByText('Domain')).not.toBeInTheDocument()
       expect(screen.queryByText('Frontend')).not.toBeInTheDocument()
       expect(screen.queryByText('API')).not.toBeInTheDocument()
@@ -454,7 +486,7 @@ describe('InstanceCard', () => {
         () => new Promise(resolve => setTimeout(resolve, 1000))
       )
 
-      render(<InstanceCard instance={null} />)
+      render(<InstanceCard instance={null} subscription={activeSubscription} />)
       const button = screen.getByRole('button', { name: /Provision Instance/i })
 
       await userEvent.click(button)

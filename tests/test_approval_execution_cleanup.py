@@ -23,10 +23,11 @@ from mindroom.event_journal import ApprovalContinuation
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import PausedAnswer
 from mindroom.teams import TeamMode, continue_paused_team_run
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import test_runtime_paths
+from tests.conftest import message_origin, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -97,6 +98,7 @@ async def test_agent_approval_closes_storage_after_consumption_finalization_erro
         room_id=identity.room_id or "",
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
+        origin=message_origin(sender_id=identity.requester_id),
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
@@ -111,6 +113,7 @@ async def test_agent_approval_closes_storage_after_consumption_finalization_erro
     ):
         await execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={},

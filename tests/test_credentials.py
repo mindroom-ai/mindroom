@@ -4,6 +4,7 @@ import base64
 import errno
 import os
 import stat
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +222,71 @@ class TestCredentialsManager:
             locked_path.chmod(0o700)
 
         assert manager.load_credentials("openai") == {"api_key": "primary"}
+
+    def test_primary_manager_hardens_worker_stores_concurrently(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dormant worker stores are secured in overlapping calls, since each costs network round trips."""
+        storage_root = tmp_path / "mindroom_data"
+        payloads = []
+        for index in range(40):
+            credentials_dir = storage_root / "workers" / f"worker-{index}" / "credentials"
+            credentials_dir.mkdir(parents=True, mode=0o755)
+            payload = credentials_dir / "github_credentials.json"
+            payload.write_text("{}", encoding="utf-8")
+            payload.chmod(0o644)
+            payloads.append(payload)
+        # Two worker stores must be in progress at the same time to pass this barrier.
+        overlap = threading.Barrier(2, timeout=10)
+        harden_store = credentials_module._harden_worker_credential_store
+
+        def harden_while_overlapping(credential_path: Path) -> None:
+            if credential_path.parent.name in {"worker-0", "worker-1"}:
+                overlap.wait()
+            harden_store(credential_path)
+
+        monkeypatch.setattr(credentials_module, "_harden_worker_credential_store", harden_while_overlapping)
+
+        CredentialsManager(storage_root / "credentials")
+
+        for payload in payloads:
+            assert stat.S_IMODE(payload.parent.stat().st_mode) == 0o700
+            assert stat.S_IMODE(payload.stat().st_mode) == 0o600
+
+    def test_one_unsecurable_worker_store_does_not_stop_hardening_the_others(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A worker store that cannot be secured is logged while every other store is still hardened."""
+        storage_root = tmp_path / "mindroom_data"
+        payloads = []
+        for index in range(5):
+            credentials_dir = storage_root / "workers" / f"worker-{index}" / "credentials"
+            credentials_dir.mkdir(parents=True, mode=0o755)
+            payload = credentials_dir / "github_credentials.json"
+            payload.write_text("{}", encoding="utf-8")
+            payload.chmod(0o644)
+            payloads.append(payload)
+        failing_store = payloads[2].parent
+        harden_files = credentials_module._harden_existing_credential_files
+
+        def fail_one_store(path: Path) -> None:
+            if path == failing_store:
+                raise PermissionError(errno.EACCES, "locked by worker code", str(path))
+            harden_files(path)
+
+        monkeypatch.setattr(credentials_module, "_harden_existing_credential_files", fail_one_store)
+
+        manager = CredentialsManager(storage_root / "credentials")
+        manager.save_credentials("openai", {"api_key": "primary"})
+
+        assert manager.load_credentials("openai") == {"api_key": "primary"}
+        assert stat.S_IMODE(payloads[2].stat().st_mode) == 0o644
+        for payload in (*payloads[:2], *payloads[3:]):
+            assert stat.S_IMODE(payload.stat().st_mode) == 0o600
 
     def test_encrypted_save_and_load_credentials_round_trip(
         self,
@@ -2081,21 +2147,21 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Pa
         agent_name="alpha",
         execution_identity=None,
     )
-    settings = {"project": "alpha-project", "dataset": "demo", "location": "us-central1"}
+    settings = {"host": "alpha-db.example.test", "db_name": "demo", "user": "alpha"}
 
-    save_credentials_for_target("google_bigquery", settings, target)
+    save_credentials_for_target("postgres", settings, target)
 
-    primary_settings = manager.for_primary_runtime_agent_scope("alpha").load_credentials("google_bigquery")
-    worker_settings = worker_manager.load_credentials("google_bigquery")
+    primary_settings = manager.for_primary_runtime_agent_scope("alpha").load_credentials("postgres")
+    worker_settings = worker_manager.load_credentials("postgres")
     assert (primary_settings, worker_settings) == (settings, None)
-    assert load_credentials_for_target("google_bigquery", target) == settings
+    assert load_credentials_for_target("postgres", target) == settings
     access = _DashboardCredentialAccess(target=target, oauth_services=OAuthCredentialServices(providers={}))
-    assert "google_bigquery" in access.list_services()
+    assert "postgres" in access.list_services()
     # A worker copy of a tool's settings is ignored, so it is not listed either.
-    delete_credentials_for_target("google_bigquery", target)
-    worker_manager.save_credentials("google_bigquery", {"project": "planted"})
-    assert load_credentials_for_target("google_bigquery", target) is None
-    assert "google_bigquery" not in access.list_services()
+    delete_credentials_for_target("postgres", target)
+    worker_manager.save_credentials("postgres", {"host": "planted.example.test"})
+    assert load_credentials_for_target("postgres", target) is None
+    assert "postgres" not in access.list_services()
 
 
 def test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings(tmp_path: Path) -> None:

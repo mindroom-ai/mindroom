@@ -1,4 +1,4 @@
-"""Managed tool-job lifecycle: recovery, revocation, saved Stops, card denial, held-message wakes, and retention."""
+"""Managed tool-job lifecycle: recovery, revocation, card denial, and retention."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.disabled import index_parked_work
-from mindroom.tool_jobs.held_replies import conversation_work, decode_held_reply, waiting_notice
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
@@ -31,7 +30,6 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     register_background_runtime,
 )
-from mindroom.tool_jobs.user_stop import restore_user_stops
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -64,7 +62,7 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
 
 @dataclass
 class ToolJobRuntimeCoordinator:
-    """Own the background job runtime and wake the held messages whose work changed; replies deliver outcomes."""
+    """Own the background job runtime; replies deliver outcomes."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
@@ -77,9 +75,6 @@ class ToolJobRuntimeCoordinator:
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
-    # Recovered jobs a Stop saved while the runtime was away could still change, by recipient, until that recipient's
-    # bot exists to read its journal.
-    _unrestored_stops: dict[str, list[BackgroundJob]] = field(default_factory=dict, init=False)
 
     async def initialize(self) -> None:
         """Pin execution mode, then build the job runtime or index parked ownership, before dispatch can start."""
@@ -260,29 +255,9 @@ class ToolJobRuntimeCoordinator:
                 if error is not None:
                     logger.error("Tool job worker stopped; restarting", error=str(error))
             await runtime.recover()
-            self._unrestored_stops = {}
-            for job in await runtime.stoppable_jobs():
-                self._unrestored_stops.setdefault(job.owner.recipient, []).append(job)
-            await self._restore_user_stops()
             register_background_runtime(self.runtime_paths, runtime)
             self._task = asyncio.create_task(self._run(), name="tool_job_worker")
-        else:
-            await self._restore_user_stops()
         runtime.changed.set()
-
-    async def _restore_user_stops(self) -> None:
-        """Apply saved Stops to recovered jobs, for each recipient once its bot exists; a failed one retries next pass."""
-        journal = self._journal
-        for recipient, jobs in tuple(self._unrestored_stops.items()):
-            bot = self.bot_provider(recipient)
-            if journal is None or bot is None:
-                continue
-            try:
-                await restore_user_stops(self.runtime, bot.journal_principal(), journal.turn_records(recipient), jobs)
-            except Exception:
-                logger.exception("Saved user Stop restoration failed; retrying", recipient=recipient)
-                continue
-            self._unrestored_stops.pop(recipient, None)
 
     async def quiesce(self) -> None:
         """Stop the worker and execution while live response owners finish their receipts."""
@@ -306,7 +281,6 @@ class ToolJobRuntimeCoordinator:
                 release_background_tool_jobs(self.runtime_paths, self._instance)
             self._instance = self._runtime = self._journal = None
             self._initialized = False
-            self._unrestored_stops.clear()
 
     async def _run(self) -> None:
         next_retention = 0.0
@@ -323,45 +297,10 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked work, apply saved Stops, deny interrupted jobs' cards, and wake held messages; retry failures."""
+        """Stop revoked work and deny interrupted jobs' cards; retry failures."""
         await self.runtime.cancel_revoked(denied=self._denied)
-        await self._restore_user_stops()
         for job_id in tuple(self.runtime.unsettled_approvals):
             await settle_child_approvals(self.runtime, job_id)
-        await self._wake_held_replies()
-
-    async def _wake_held_replies(self) -> None:
-        """Admit one wake per saved hold whose work became ready, ended, or now waits for something else."""
-        journal = self._journal
-        if journal is None:
-            return
-        holds = journal.held_replies()
-        for saved in await holds.load_all():
-            if saved.woken_generation == saved.generation:
-                continue
-            try:
-                hold = decode_held_reply(saved)
-            except ValueError:
-                logger.exception(
-                    "Unreadable held reply; it waits for a newer reply to replace it",
-                    hold_id=saved.hold_id,
-                )
-                continue
-            if hold.key.recipient in self._unrestored_stops:
-                # A Stop saved while the runtime was away may still end this work.
-                continue
-            work = await conversation_work(self.runtime, hold.key, attempted=hold.offered)
-            if not hold.stopped and work.jobs and not work.ready and waiting_notice(work.jobs) == hold.notice:
-                continue
-            bot = self.bot_provider(hold.key.recipient)
-            # Synced membership: a bot outside the room costs no homeserver request on every pass.
-            if bot is None or not bot.running or bot.client is None or hold.key.room_id not in bot.client.rooms:
-                continue
-            try:
-                await bot.wake_held_reply(hold)
-                await holds.mark_woken(hold.key.hold_id, hold.generation)
-            except Exception:
-                logger.exception("Waking a held reply failed; retrying", hold_id=saved.hold_id)
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""
@@ -369,10 +308,10 @@ class ToolJobRuntimeCoordinator:
         if journal is None:
             return
         protected_sessions: set[tuple[str, str]] = set()
-        cursor: tuple[str, str] | None = None
+        cursor: str | None = None
         while owners := await journal.approval_continuations(limit=100, after=cursor):
             protected_sessions.update((owner.entity_name, owner.session_id) for _principal, owner in owners)
-            cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
+            cursor = owners[-1][1].approval_id
         finished: dict[tuple[str, str], bool] = {}
 
         async def source_finished(job: BackgroundJob) -> bool:

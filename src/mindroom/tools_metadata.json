@@ -44,7 +44,8 @@
         "show_computer",
         "open_settings",
         "open_panel",
-        "show_canvas"
+        "show_canvas",
+        "read_canvas_state"
       ],
       "helper_text": null,
       "icon": "PanelsTopLeft",
@@ -898,6 +899,32 @@
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Move a conversation thread into another room",
+      "display_name": "Thread Move",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "move_thread"
+      ],
+      "helper_text": null,
+      "icon": "Share2",
+      "icon_color": "text-sky-500",
+      "name": "thread_move",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,
@@ -3946,7 +3973,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": null,
+      "auth_provider": "google_cloud",
       "category": "development",
       "config_fields": [
         {
@@ -3986,16 +4013,19 @@
           "validation": null
         },
         {
-          "authored_override": false,
-          "default": null,
-          "description": "Optional Google Cloud credentials object passed directly to the toolkit",
-          "label": "Credentials",
-          "name": "credentials",
+          "authored_override": true,
+          "default": 100,
+          "description": "Maximum rows returned by run_sql_query (1 to 1000)",
+          "label": "Max Rows",
+          "name": "max_rows",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
-          "validation": null
+          "type": "number",
+          "validation": {
+            "max": 1000,
+            "min": 1
+          }
         },
         {
           "authored_override": true,
@@ -4049,11 +4079,15 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "google-cloud-bigquery"
+        "google-cloud-bigquery",
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
       ],
       "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
       "display_name": "Google BigQuery",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_bigquery",
+      "docs_url": "https://cloud.google.com/bigquery/docs/reference/rest",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -4061,12 +4095,13 @@
         "list_tables",
         "run_sql_query"
       ],
-      "helper_text": "Configure dataset, project, and location explicitly. If the toolkit needs credentials, pass them explicitly through saved config or a credentials object.",
+      "helper_text": "Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
       "name": "google_bigquery",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {
@@ -4268,7 +4303,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Allow updating existing spreadsheets",
+          "description": "Allow updating and formatting existing spreadsheets",
           "label": "Enable Update Operations",
           "name": "update",
           "options": null,
@@ -4285,7 +4320,7 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Read, create, and update Google Sheets spreadsheets",
+      "description": "Read, create, update, and format Google Sheets spreadsheets",
       "display_name": "Google Sheets",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
       "executes_code": false,
@@ -4293,7 +4328,8 @@
       "function_names": [
         "create_sheet",
         "read_sheet",
-        "update_sheet"
+        "update_sheet",
+        "batch_update_sheet"
       ],
       "helper_text": null,
       "icon": "SiGooglesheets",
@@ -9225,7 +9261,9 @@
         "cancel_schedule",
         "edit_schedule",
         "list_schedules",
-        "schedule"
+        "run_scheduled_call",
+        "schedule",
+        "schedule_tool_call"
       ],
       "helper_text": null,
       "icon": "Calendar",
@@ -10513,7 +10551,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. With worker routing, this controls the agent's worker browser. To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). The user's local browser requires the separately configured desktop target.",
+      "description": "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. With worker routing, this controls the agent's worker browser. If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel; use chat_ui.open_panel(panel='computer') only to show it again. The user's local browser requires the separately configured desktop target.",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "executes_code": false,
@@ -10550,7 +10588,7 @@
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [],
-      "description": "Native Playwright browser tools in an isolated worker Computer",
+      "description": "Native Playwright browser tools in an isolated worker Computer. If you have chat_ui, your first call in a conversation already shows the user the Computer panel; use chat_ui.open_panel(panel='computer') only to show it again.",
       "display_name": "Browser MCP",
       "docs_url": null,
       "executes_code": false,

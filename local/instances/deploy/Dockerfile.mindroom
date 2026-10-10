@@ -1,6 +1,6 @@
 # Multi-stage build for the MindRoom runtime image
 FROM ghcr.io/astral-sh/uv:latest AS uv
-FROM oven/bun:1 AS bun
+FROM mirror.gcr.io/oven/bun:1 AS bun
 
 # Install the fixed native browser server at build time. Runtime stays offline.
 FROM mirror.gcr.io/library/node:22-slim AS browser-mcp

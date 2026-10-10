@@ -14,7 +14,7 @@ import pytest
 
 from tests.test_helm_instance_worker_isolation import _render_chart, _run_helm_template, _values_files
 
-_NGINX_IMAGE = "nginx:alpine"
+_NGINX_IMAGE = "mirror.gcr.io/library/nginx:alpine"
 _IMMUTABLE = "public, max-age=31536000, immutable"
 
 

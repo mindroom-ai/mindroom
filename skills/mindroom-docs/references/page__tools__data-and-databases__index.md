@@ -14,10 +14,10 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
 | [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
 | [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
-| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud credentials |
+| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud connection or service account |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
 | [`google_docs`](#google_docs) | Creating, reading, and editing Google Docs | Google Docs OAuth |
-| [`google_sheets`](#google_sheets) | Reading, creating, and updating spreadsheets | Google Sheets OAuth |
+| [`google_sheets`](#google_sheets) | Reading, creating, updating, and formatting spreadsheets | Google Sheets OAuth |
 | [`openbb`](#openbb) | Stock quotes, symbol search, news, profiles, and price targets from switchable providers | Optional OpenBB PAT |
 | [`yfinance`](#yfinance) | Yahoo Finance quotes, fundamentals, statements, news, and history | None |
 | [`financial_datasets_api`](#financial_datasets_api) | Financial statements, filings, ownership, earnings, and crypto prices | API key |
@@ -26,9 +26,9 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
-`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, `credentials`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
+`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
-The Google tools connect through per-service OAuth; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
+The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
 
 ## [`sql`]
@@ -214,16 +214,23 @@ run_dataframe_operation("sales", "describe", {})
 
 ## [`google_bigquery`]
 
-`google_bigquery` provides `list_tables()`, `describe_table()`, and `run_sql_query()` for the configured dataset.
-The dataset is only the default for unqualified table names, so queries can still reference other datasets that the Google Cloud credentials can read.
-It authenticates with the MindRoom process's default Google Cloud credentials, not with MindRoom's Google OAuth connections.
+`google_bigquery` provides `list_tables()`, `describe_table(table_id)`, and `run_sql_query(query)` for the configured dataset.
+The dataset is only the default for unqualified table names, so queries can still reference other datasets that the account can read.
+It runs as the [Google Cloud connection](https://docs.mindroom.chat/deployment/google-services-oauth/#providers) for the agent's credential scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured, never as the MindRoom process's Application Default Credentials.
+That account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
+If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
+The tool always runs in the primary runtime, even when `worker_tools` lists it.
+
+`run_sql_query` accepts exactly one `SELECT` or `WITH` statement, with an optional trailing `;`.
+It refuses DML, DDL, scripts, and multiple statements with `Only a single read-only SELECT query is allowed`.
+It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `true` when more than `max_rows` rows were available.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `project` | `text` | yes | `null` | Google Cloud project ID. |
 | `dataset` | `text` | yes | `null` | Dataset name. |
 | `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
-| `credentials` | `text` | no | `null` | Programmatic only: a Google credentials object; rejected as an inline override. |
+| `max_rows` | `number` | no | `100` | Most rows `run_sql_query` returns, from `1` to `1000`. |
 | `list_tables` | `boolean` | no | `true` | Enable `list_tables()`. |
 | `describe_table` | `boolean` | no | `true` | Enable `describe_table()`. |
 | `run_sql_query` | `boolean` | no | `true` | Enable `run_sql_query()`. |
@@ -241,9 +248,9 @@ agents:
 
 ## [`google_drive`]
 
-<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b8f28170-351a-4c6a-b49a-f5b6bd2a3df1#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/58281caf-f956-4584-87ec-15bd2a2242cb#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%" poster="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-light="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-dark="https://github.com/user-attachments/assets/ce6ffe08-b3c1-4bdd-9d75-8e3abbea1e65">
+  <source src="https://github.com/user-attachments/assets/ffba1923-b463-4674-88af-5a862de1613f" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/690273d3-7fee-4e49-a1b5-75e39be00d8b" type="video/mp4">
 </video>
 
 `google_drive` works with files in the connected Google account, including shared drives the account can access.
@@ -319,10 +326,12 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 
 ## [`google_sheets`]
 
-`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, and `update_sheet(data, spreadsheet_id=None, range_name=None)`.
+`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, `update_sheet(data, spreadsheet_id=None, range_name=None)`, and `batch_update_sheet(spreadsheet_id, requests)`.
 When `spreadsheet_id` or `spreadsheet_range` is configured, `read_sheet()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
 `update_sheet()` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
 `update_sheet()` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
+`batch_update_sheet()` sends Sheets API [`batchUpdate`](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/batchUpdate) requests in order, for changes such as cell formatting, column widths, frozen rows, filters, and adding or renaming sheets.
+`batch_update_sheet()` can also delete sheets, rows, and ranges, and a [Tool Approval](https://docs.mindroom.chat/tool-approval/) rule for `update_sheet` does not match it; a `*update_sheet` rule matches both, including the prefixed names of additional Google workspace accounts.
 The tool is available only once the stored Google Sheets connection includes the Sheets scope; if the account is not connected, calls return an `OAuthConnectionRequired` result with a connect link.
 
 | Option | Type | Default | Notes |
@@ -331,7 +340,7 @@ The tool is available only once the stored Google Sheets connection includes the
 | `spreadsheet_range` | `text` | `null` | Range used by every `read_sheet()` call, such as `Sheet1!A1:Z100`. |
 | `read` | `boolean` | `true` | Enable `read_sheet()`. |
 | `create` | `boolean` | `true` | Enable `create_sheet()`. |
-| `update` | `boolean` | `true` | Enable `update_sheet()`. |
+| `update` | `boolean` | `true` | Enable `update_sheet()` and `batch_update_sheet()`. |
 
 ```yaml
 agents:

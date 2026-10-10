@@ -195,7 +195,7 @@ async def block_secret_reads(ctx):
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router, after a human joins a room | None | 3000 |
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
-| `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart | None | 5000 |
+| `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 
@@ -414,7 +414,7 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     origin: TurnOrigin,
-    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages
+    hook_source: str | None,                 # "<plugin>:<event>" for hook-sent messages, "automation/<name>" for automation prompts and notices
     dispatch_policy_source_kind: str | None,
 )
 # Derived properties: room_id (from target), requester_id, sender_id, source_kind (from origin).
@@ -467,7 +467,7 @@ ResponseResult(
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
 
-- For contexts that come from a message, the original human requester is carried along, so routing, permissions, and memory attribution use that human rather than the relaying bot.
+- For contexts that come from a message, the original human or configured bot-account requester is carried along, so routing, permissions, and memory attribution use that requester rather than the relaying bot.
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.

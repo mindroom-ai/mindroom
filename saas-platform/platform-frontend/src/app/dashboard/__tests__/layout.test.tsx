@@ -6,7 +6,6 @@ import { useAuth } from '@/hooks/useAuth'
 import { DarkModeProvider } from '@/hooks/useDarkMode'
 import { useInstance } from '@/hooks/useInstance'
 import { useSubscription } from '@/hooks/useSubscription'
-import { useUsage } from '@/hooks/useUsage'
 import { apiCall, clearSsoCookie, listInstances } from '@/lib/api'
 import { cache, instanceCache, subscriptionCache } from '@/lib/cache'
 import { createClient } from '@/lib/supabase/client'
@@ -33,13 +32,12 @@ function DashboardConsumers() {
   const { user, loading } = useAuth()
   const { loading: instanceLoading } = useInstance()
   const { loading: subscriptionLoading } = useSubscription()
-  const { loading: usageLoading } = useUsage()
 
   return (
     <>
       <output aria-label="Current user">{loading ? 'Loading' : user?.email}</output>
       <output aria-label="Dashboard data">
-        {instanceLoading || subscriptionLoading || usageLoading ? 'Loading' : 'Ready'}
+        {instanceLoading || subscriptionLoading ? 'Loading' : 'Ready'}
       </output>
     </>
   )
@@ -98,10 +96,7 @@ describe('dashboard authentication', () => {
       if (endpoint === '/my/subscription') {
         return new Response(null, { status: 404 })
       }
-      return new Response(JSON.stringify({
-        aggregated: { totalMessages: 0, totalAgents: 0, totalStorage: 0 },
-        usage: [],
-      }))
+      return new Response(JSON.stringify({}))
     })
   })
 

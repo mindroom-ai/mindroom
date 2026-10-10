@@ -59,6 +59,7 @@ jobs:
         run: |
           codesign --verify --deep --strict dist/macos/MindRoom.app
           hdiutil verify dist/macos/MindRoom.dmg
+          dist/macos/MindRoom.app/Contents/Resources/llama.cpp/llama-server --version
           swift - "dist/macos/MindRoom.app/Contents/Resources/MindRoom_MindRoom.bundle" <<'SWIFT'
           import AppKit
           let resources = Bundle(path: CommandLine.arguments[1])!

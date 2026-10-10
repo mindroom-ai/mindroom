@@ -79,7 +79,8 @@ matrix_message(message="Here is the report.", attachments=["att_abc123", "export
 ```
 
 Attachment arguments must be `att_*` IDs available in the current conversation or registered earlier in the same tool run.
-Metadata includes the kind, filename, MIME type, size, room ID, thread ID, sender, timestamps, the runtime-local path, and an `available` flag that reports whether the file still exists.
+Metadata includes the kind, filename, MIME type, size, room ID, thread ID, sender, timestamps, and an `available` flag that reports whether the file still exists.
+It also includes the runtime-local path, except for agents whose workspace tools run on a worker, where that path does not exist; their metadata has a `usage` note saying to save the file with `mindroom_output_path` instead.
 To post files into Matrix, pass attachment IDs or file paths to `matrix_message`; see [`matrix_message` attachments](tools/matrix-message.md#attachments).
 
 ### Viewing Content
@@ -101,9 +102,9 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because the runtime-local path in the metadata does not exist inside the worker.
+Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
-Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](deployment/sandbox-proxy.md#environment-variable-reference) (default 16 MiB).
+Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](deployment/sandbox-proxy.md#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](deployment/sandbox-proxy.md) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
 
 ### Registering Local Files

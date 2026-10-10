@@ -29,6 +29,7 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             "show_canvas",
             "show_canvas/update",
             "show_canvas/document",
+            "show_canvas/shared",
         )
     }
 
@@ -56,6 +57,11 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             assert metadata["canvas"]["document"]["url"] == "mxc://localhost/canvas-document"
             assert metadata["canvas"]["document"]["mimetype"] == "text/html"
             assert "html" not in metadata["canvas"]
+        if case["id"].endswith("/show_canvas/shared"):
+            assert metadata["share_state"] is True
+            assert case["replacement"]["content"]["m.new_content"]["io.mindroom.ui_action"]["share_state"] is True
+        else:
+            assert "share_state" not in metadata
         if case["id"].endswith("/show_canvas/update"):
             replacement = case["replacement"]["content"]
             assert replacement["m.relates_to"] == {"rel_type": "m.replace", "event_id": case["event"]["event_id"]}

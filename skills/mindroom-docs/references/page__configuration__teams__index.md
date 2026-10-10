@@ -2,9 +2,9 @@
 
 A team lets several agents answer one request together, either as a named team under `teams:` that has its own Matrix account, or as an ad hoc team formed when a message involves several agents.
 
-<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/b6ea7dff-8542-409f-823a-0cd3590a9555#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/3c28159d-4d3e-4e47-bc5e-07e4e0c5eed1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-light="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-dark="https://github.com/user-attachments/assets/41849fb8-3dd1-4b9c-8eff-33bb10803f48">
+  <source src="https://github.com/user-attachments/assets/cb657cd9-3114-442f-a4fa-d8e6a96b6425" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/9ee83e64-1425-4165-b1f5-5d4aa978b46e" type="video/mp4">
 </video>
 
 ## Team Modes

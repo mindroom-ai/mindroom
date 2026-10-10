@@ -5,9 +5,9 @@ Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so 
 Additional Atlassian sites can be added as separate, independently connected tools through a small plugin.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
-<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/0dee9f09-80e1-4244-bac3-4da13072bab4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a2f812aa-bd2c-4996-bc13-f41b2f3a8f94#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%" poster="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-light="https://github.com/user-attachments/assets/01040947-ffd8-4649-a7bd-baf96130d1a7" data-poster-dark="https://github.com/user-attachments/assets/95022cb5-336c-4abc-93e3-430d7dd8eb07">
+  <source src="https://github.com/user-attachments/assets/e0f957e4-d610-4408-b30b-87b9e553ee53" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a5a4917a-a373-499e-95d2-e8c30f354368" type="video/mp4">
 </video>
 
 The separate `jira` and `confluence` tools on [Project Management](https://docs.mindroom.chat/tools/project-management/) use a shared API token or password and also support Jira and Confluence Data Center.
@@ -245,8 +245,8 @@ To give an agent read access only, hide the write functions with [`exclude_tools
 The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 
-Downloads are limited to the inline attachment size, 16 MiB by default, which an operator raises with [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference).
-The 64 MiB limit for [registered files](https://docs.mindroom.chat/attachments/) still applies and cannot be raised.
+Downloads are limited to 64 MiB, the limit for [registered files](https://docs.mindroom.chat/attachments/), which cannot be raised.
+An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference).
 
 ## Limits
 
@@ -265,7 +265,7 @@ The 64 MiB limit for [registered files](https://docs.mindroom.chat/attachments/)
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
 | `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
 | `response_too_large` | The API response exceeded the size limit; narrow the request, for example with fewer fields or a smaller limit. |
-| `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit and the setting that raises it. |
+| `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit, and also the setting that raises it when an operator has lowered the limit. |
 | `attachment_unavailable` | The attachment does not exist or the connected account may not view it. |
 | `attachment_context_unavailable` | The call ran outside a conversation with attachment storage. |
 

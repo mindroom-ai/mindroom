@@ -109,6 +109,11 @@ def _account_is_pending_deletion(account: dict[str, Any]) -> bool:
     return account.get("status") == PENDING_DELETION_ACCOUNT_STATUS and account.get("deleted_at") is not None
 
 
+def account_may_sign_in(account: dict[str, Any]) -> bool:
+    """Whether some platform route admits the account, so its owner must still be able to sign in."""
+    return _account_is_active(account) or _account_is_pending_deletion(account)
+
+
 def _require_account_access(account: dict[str, Any], *, allow_pending_deletion: bool) -> None:
     """Reject suspended, unverified, and deleted accounts; optionally admit accounts awaiting deletion."""
     if _account_is_active(account) or (allow_pending_deletion and _account_is_pending_deletion(account)):

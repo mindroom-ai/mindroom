@@ -113,6 +113,8 @@ class MatrixServer:
     def __init__(self) -> None:
         self.user_id = "@mindroom_helper:localhost"
         self.device_id = "DEVICE"
+        # No token: room creation skips the capabilities probe and keeps the server's default version.
+        self.access_token: str | None = None
         self.rooms: dict[str, Any] = {}
         self.state: dict[str, list[dict[str, Any]]] = {}
         self.aliases: dict[str, str] = {}
@@ -1474,6 +1476,30 @@ async def test_imported_welcome_completion_needs_no_event_id(tmp_path: Path, mon
     restarted = service(tmp_path, server, monkeypatch)
     assert await restarted.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
     assert not server.messages
+
+
+@pytest.mark.asyncio
+async def test_a_version_12_room_accepts_its_creator_agent_without_listed_power(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Room version 12 never lists the creating agent in power levels, because its power is unlimited."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    create = next(event for event in server.state[room_id] if event["type"] == "m.room.create")
+    create["content"] = {"room_version": "12"}
+    power = next(event for event in server.state[room_id] if event["type"] == "m.room.power_levels")
+    del power["content"]["users"][server.user_id]
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    data = read_personal_room(path).model_dump()
+    data["welcome_completed"] = True
+    path.write_text(json.dumps(data))
+
+    restarted = service(tmp_path, server, monkeypatch)
+
+    assert await restarted.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+    assert server.create_count == 1
 
 
 @pytest.mark.asyncio

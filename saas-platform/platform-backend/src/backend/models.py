@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from backend.pricing import Discounts, PlanLimits, Product, Trial
+from backend.pricing import Discounts, Product, Trial
 
 
 class InstanceOut(BaseModel):
@@ -50,10 +50,8 @@ class SubscriptionOut(BaseModel):
     current_period_end: str | None = None
     trial_ends_at: str | None = None
     cancelled_at: str | None = None
-    max_agents: int
-    max_messages_per_day: int
-    max_storage_gb: int
     can_run_instances: bool
+    stripe_subscription_ended: bool
     trial_days_remaining: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -75,35 +73,6 @@ class ProvisionResponse(BaseModel):
     frontend_url: str | None = None
     api_url: str | None = None
     matrix_url: str | None = None
-
-
-class UsageMetricOut(BaseModel):
-    """Usage metric output model."""
-
-    id: str | None = None
-    subscription_id: str
-    metric_date: str
-    messages_sent: int
-    agents_used: int
-    storage_used_gb: float | int
-    created_at: str | None = None
-
-
-class UsageAggregateOut(BaseModel):
-    """Aggregated usage statistics model."""
-
-    model_config = {"populate_by_name": True}
-
-    total_messages: int = Field(alias="totalMessages")
-    total_agents: int = Field(alias="totalAgents")
-    total_storage: float | int = Field(alias="totalStorage")
-
-
-class UsageResponse(BaseModel):
-    """Response model for usage metrics."""
-
-    usage: list[UsageMetricOut]
-    aggregated: UsageAggregateOut
 
 
 class UrlResponse(BaseModel):
@@ -205,14 +174,6 @@ class SubscriptionCancelResponse(BaseModel):
     cancelled_at: str | None = None
 
 
-class SubscriptionReactivateResponse(BaseModel):
-    """Subscription reactivation response model."""
-
-    success: bool
-    message: str
-    subscription_id: str | None = None
-
-
 # Pricing Models
 class StripePriceResponse(BaseModel):
     """Stripe price ID response model."""
@@ -233,7 +194,6 @@ class PublicPlan(BaseModel):
     price_yearly: str
     description: str
     features: list[str]
-    limits: PlanLimits
     recommended: bool
     included_ai_budget_usd: int
     requires_customer_provider_keys: bool
@@ -279,7 +239,6 @@ class GdprExportResponse(BaseModel):
     personal_data: GdprPersonalData
     subscriptions: list[dict[str, Any]]
     instances: list[dict[str, Any]]
-    usage_metrics: list[dict[str, Any]]
     activity_history: list[dict[str, Any]]
     payments: list[dict[str, Any]]
     data_processing_purposes: list[str]

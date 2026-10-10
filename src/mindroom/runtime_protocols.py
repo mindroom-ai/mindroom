@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.automations.runner import AutomationRunner
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -61,6 +62,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def skill_reviews(self) -> SkillReviewRunner: ...  # noqa: D102
 
     @property
+    def automations(self) -> AutomationRunner: ...  # noqa: D102
+
+    @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
 
     def hook_message_sender(self) -> HookMessageSender | None: ...  # noqa: D102
@@ -70,6 +74,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def hook_room_state_putter(self) -> HookRoomStatePutter | None: ...  # noqa: D102
 
     def hook_matrix_admin(self) -> HookMatrixAdmin | None: ...  # noqa: D102
+
+    def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
+        """Return the Matrix client of one running managed entity."""
+        ...
 
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102
 

@@ -5,15 +5,18 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.config.judgment import LLMJudgmentConfig, OpenAIDecisionsJudgmentConfig
+from mindroom.credentials_sync import get_api_key_for_provider, get_api_key_for_service
+from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.llm import judge_with_llm
+from mindroom.judgment.openai_decisions import OPENAI_DECISIONS
+from mindroom.judgment.typesafe import SYSTEM_ONE
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.config.judgment import JudgmentConfig, TypeSafeJudgmentConfig
+    from mindroom.config.judgment import JudgmentConfig, ProbabilityJudgmentConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.judgment.answers import ChoiceDecision, JudgmentResult
@@ -36,7 +39,7 @@ def create_judgment_evaluator(
     if isinstance(settings, LLMJudgmentConfig):
         evaluate = partial(judge_with_llm, settings=settings, config=config, runtime_paths=runtime_paths, owner=owner)
     else:
-        client = _typesafe_client(settings, runtime_paths, question_id=question_id)
+        client = _probability_client(settings, runtime_paths, question_id=question_id)
         if client is None:
             return None
         evaluate = partial(client.judge, owner=owner, allow_network=True)
@@ -44,14 +47,14 @@ def create_judgment_evaluator(
 
 
 def create_choice_evaluator(
-    settings: TypeSafeJudgmentConfig,
+    settings: ProbabilityJudgmentConfig,
     runtime_paths: RuntimePaths,
     *,
     owner: str,
     question_id: str,
 ) -> _JudgmentEvaluator[ChoiceDecision] | None:
-    """Bind a System One choice using the shared credentials, limits and metrics."""
-    client = _typesafe_client(settings, runtime_paths, question_id=question_id)
+    """Bind a probability backend's choice using the shared credentials, limits and metrics."""
+    client = _probability_client(settings, runtime_paths, question_id=question_id)
     if client is None:
         return None
     return _logged_evaluator(
@@ -61,19 +64,36 @@ def create_choice_evaluator(
     )
 
 
-def _typesafe_client(
-    settings: TypeSafeJudgmentConfig,
+def _probability_client(
+    settings: ProbabilityJudgmentConfig,
     runtime_paths: RuntimePaths,
     *,
     question_id: str,
-) -> SystemOneClient | None:
-    key = (runtime_paths.env_value("TYPESAFE_API_KEY") or "").strip()
+) -> JudgmentClient | None:
+    credentials_service = None
+    if isinstance(settings, OpenAIDecisionsJudgmentConfig):
+        credentials_service = settings.credentials_service
+        wire = OPENAI_DECISIONS
+        key = (
+            get_api_key_for_provider("openai", runtime_paths)
+            if credentials_service is None
+            else get_api_key_for_service(credentials_service, runtime_paths)
+        )
+    else:
+        wire, key = SYSTEM_ONE, runtime_paths.env_value("TYPESAFE_API_KEY")
+    key = (key or "").strip()
     if not key:
-        logger.info("Judgment fallback", question=question_id, backend=settings.provider, failure="missing_credential")
+        logger.info(
+            "Judgment fallback",
+            question=question_id,
+            backend=settings.provider,
+            failure="missing_credential",
+            credentials_service=credentials_service,
+        )
         return None
-    return SystemOneClient(
+    return JudgmentClient(
         api_key=key,
-        model=PINNED_MODEL,
+        wire=wire,
         threshold=settings.threshold,
         timeout_seconds=settings.timeout_seconds,
     )

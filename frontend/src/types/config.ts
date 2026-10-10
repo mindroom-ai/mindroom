@@ -39,6 +39,7 @@ export interface MemoryConfig {
   file?: {
     path?: string | null;
     max_entrypoint_lines?: number;
+    max_entrypoint_tokens?: number;
   };
   search?: {
     mode?: MemorySearchMode;

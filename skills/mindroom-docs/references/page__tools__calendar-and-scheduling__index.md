@@ -17,9 +17,9 @@ If an agent calls either tool before the account is connected, the tool returns 
 
 ## [`google_calendar`]
 
-<video controls playsinline preload="metadata" aria-label="Two people plan a weekend trip with an agent that checks the calendar and books it" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/4fea9538-5d22-43b4-9147-7e8b496400a8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/ba40bcb7-19aa-4085-9c28-e99f1d171320#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Two people plan a weekend trip with an agent that checks the calendar and books it" style="width: 100%" poster="https://github.com/user-attachments/assets/5dc33fcf-8ef3-4e35-a8d9-8e8d2946470f" data-poster-light="https://github.com/user-attachments/assets/5dc33fcf-8ef3-4e35-a8d9-8e8d2946470f" data-poster-dark="https://github.com/user-attachments/assets/1d522e45-873f-4ed3-b6f4-99bf44b3a423">
+  <source src="https://github.com/user-attachments/assets/936b2d54-9e2c-4fc7-aef3-fab8e0004665" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/2dc8de4b-f91d-4bb1-aeda-3dc0ffb42901" type="video/mp4">
 </video>
 
 `google_calendar` provides `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.

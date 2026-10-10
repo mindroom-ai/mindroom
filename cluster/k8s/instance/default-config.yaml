@@ -11,7 +11,7 @@ models:
     context_window: 1050000
   sol:
     provider: openrouter
-    id: openai/gpt-6-sol
+    id: openai/gpt-6.1-sol
     context_window: 1050000
   luna:
     provider: openrouter
@@ -31,8 +31,8 @@ models:
     context_window: 1000000
   haiku:
     provider: openrouter
-    id: anthropic/claude-haiku-4.5
-    context_window: 200000
+    id: anthropic/claude-haiku-5.5
+    context_window: 1000000
   gemini_flash:
     provider: openrouter
     id: google/gemini-3.8-flash

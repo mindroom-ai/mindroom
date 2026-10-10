@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
+from agno.tools.function import ToolResult
 from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
 from structlog.testing import capture_logs
@@ -454,6 +455,104 @@ async def test_browser_open_rejects_localhost_target_url_by_default(monkeypatch:
 
     assert exc_info.value.reason == "private_hostname"
     open_tab.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"targetUrl": "https://example.com", "paths": ["page.html"]}, "targetUrl or one HTML file in paths"),
+        ({"paths": ["a.html", "b.html"]}, "targetUrl or one HTML file in paths"),
+        ({"paths": ["page.html"], "target": "desktop"}, "Opening a file requires target=host"),
+        ({"paths": ["../secret.html"]}, "must be an existing file inside the agent workspace"),
+    ],
+)
+async def test_browser_open_file_needs_one_workspace_file_on_the_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """A file opens only alone, on the host browser, and only where the agent may read."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "page.html").write_text("<p>hi</p>", encoding="utf-8")
+    (tmp_path / "secret.html").write_text("<p>secret</p>", encoding="utf-8")
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        tool_output_workspace_root=workspace,
+        device_user_id="@alice:example.org",
+        device_id="DEVICE",
+        device_ed25519="ed25519-key",
+    )
+    open_tab = AsyncMock()
+    monkeypatch.setattr(tool, "_open_tab", open_tab)
+
+    with pytest.raises(ValueError, match=message):
+        await tool.browser(action="open", **arguments)
+
+    open_tab.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_browser_opens_a_workspace_html_file_without_reaching_local_files(tmp_path: Path) -> None:
+    """An agent previews a page it wrote; the page cannot load or navigate to other local files."""
+    executable = _chromium_executable()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # A real image and page outside the workspace, so a failed load means it was blocked.
+    secret_image = tmp_path / "secret.png"
+    secret_image.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        ),
+    )
+    secret_page = tmp_path / "secret.html"
+    secret_page.write_text("<title>Secret</title>", encoding="utf-8")
+    (workspace / "page.html").write_text(
+        f"""<title>Plans</title><h1 id="state">Waiting</h1>
+<img id="local" src="{secret_image.as_uri()}">
+<script>document.getElementById('state').textContent = 'Rendered';</script>
+<script>drawChart();</script>""",
+        encoding="utf-8",
+    )
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": executable},
+    )
+    tool = BrowserTools(paths, tool_output_workspace_root=workspace)
+
+    async def page_state() -> list[object]:
+        payload = json.loads(
+            await tool.browser(
+                action="act",
+                request={
+                    "kind": "evaluate",
+                    "fn": "() => [document.title, document.getElementById('state').textContent, "
+                    "location.protocol, self.origin, document.getElementById('local').naturalWidth]",
+                },
+            ),
+        )
+        return payload["result"]
+
+    try:
+        opened = json.loads(await tool.browser(action="open", paths=["page.html"]))
+        assert (opened["title"], opened["path"]) == ("Plans", "page.html")
+        assert await page_state() == ["Plans", "Rendered", "about:", "null", 0]
+        # The page's own navigation to a local file is refused, so it stays on the agent's page.
+        await tool.browser(
+            action="act",
+            request={"kind": "evaluate", "fn": f"() => {{ location.href = '{secret_page.as_uri()}'; }}"},
+        )
+        await asyncio.sleep(0.5)
+        assert await page_state() == ["Plans", "Rendered", "about:", "null", 0]
+        console = json.loads(await tool.browser(action="console"))
+        assert {"level": "error", "text": "Uncaught ReferenceError: drawChart is not defined"} in console["entries"]
+        screenshot = await tool.browser(action="screenshot")
+        assert isinstance(screenshot, ToolResult)
+    finally:
+        await tool.aclose()
 
 
 @pytest.mark.asyncio

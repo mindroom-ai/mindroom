@@ -1,4 +1,4 @@
-"""The response boundary: continue a reply with ready job results, or end it holding its outstanding work."""
+"""The response boundary: continue a reply with ready job results, or report the work it leaves outstanding."""
 
 from __future__ import annotations
 
@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_jobs.held_replies import HoldKey, conversation_work, waiting_notice
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Iterator, Sequence
 
-    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 
 # How many times one message may continue with ready job results, counted apart from dynamic tool continuations.
@@ -36,53 +35,58 @@ def delegated_child_context() -> Iterator[None]:
 
 
 @dataclass(frozen=True)
-class ReplyBoundary:
-    """What a reply's last response boundary left of the work its message can hold."""
-
-    key: HoldKey
-    # The notice the message shows while it holds outstanding work, or None when it holds nothing.
-    notice: str | None
-    joins: int
-    # Outcomes the reply already asked for, which turns continuing its message do not ask for again.
-    offered: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True)
 class _JobJoin:
     """A reply's response boundary: ready results to continue with, or whether its message holds outstanding work."""
 
     prompt: str | None = None
     holds: bool = False
+    key: HoldKey | None = None
 
 
 @dataclass(frozen=True)
-class HeldContinuation:
-    """A turn continuing a held message: the ready work it retrieves first."""
+class HoldKey:
+    """Whose outstanding work one reply holds: one recipient's work for one requester in one conversation."""
 
-    # Outcomes this turn asks for first, with those the message already asked for, so neither is asked for again.
-    attempted_job_ids: frozenset[str]
-    # Ready results the message continued with before this turn; this turn's first retrieval adds one more.
-    joins: int
-
-
-@dataclass
-class ReplyBoundaryReport:
-    """One response's boundary outcome, read by its owner once the reply finished."""
-
-    boundary: ReplyBoundary | None = None
+    recipient: str
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+    # Work a silent schedule started is delivered silently, so visible replies never hold it, and the reverse.
+    silent: bool
+    # The entities whose work the reply retrieves: the agent, or a team's members.
+    participants: tuple[str, ...]
 
 
-_REPORT: ContextVar[ReplyBoundaryReport | None] = ContextVar("reply_boundary_report", default=None)
+@dataclass(frozen=True)
+class _ConversationWork:
+    """The outstanding work of one key, and the ready outcomes of it a turn may retrieve now."""
+
+    jobs: tuple[BackgroundJob, ...]
+    ready: tuple[BackgroundJob, ...]
 
 
-@contextmanager
-def reply_boundary_report(report: ReplyBoundaryReport) -> Iterator[None]:
-    """Collect the boundary outcome of the response run inside this scope into ``report``."""
-    token = _REPORT.set(report)
-    try:
-        yield
-    finally:
-        _REPORT.reset(token)
+async def conversation_work(
+    runtime: ToolJobRuntime,
+    key: HoldKey,
+    *,
+    attempted: Collection[str] = (),
+) -> _ConversationWork:
+    """Return the outstanding work of ``key``, apart from outcomes a reply already asked for."""
+    held = [
+        (job, readable)
+        for job, readable in await runtime.held_jobs(
+            transport_agent_name=key.recipient,
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_id=key.requester_id,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else None,
+        )
+        if job.owner.agent_name in key.participants and job.job_id not in attempted
+    ]
+    return _ConversationWork(
+        jobs=tuple(job for job, _readable in held),
+        ready=tuple(job for job, readable in held if readable and job.status in TERMINAL_STATUSES),
+    )
 
 
 def _retrieval_calls(jobs: Sequence[BackgroundJob]) -> str:
@@ -112,11 +116,11 @@ async def join_conversation_jobs(
     joins: int,
     agent_names: Sequence[str] | None = None,
 ) -> _JobJoin:
-    """Continue this reply with ready results, or record what it leaves outstanding for its message to hold.
+    """Continue this reply with ready results, or report what it leaves outstanding.
 
     The reply retrieves its conversation's work, including work earlier replies started. Work it already asked to
-    retrieve is not asked for again. With nothing ready, the reply ends, and its owner lets the message hold whatever
-    is still outstanding.
+    retrieve is not asked for again. With nothing ready, the reply ends, and outstanding work waits for the
+    conversation's next reply.
     """
     context = get_tool_runtime_context()
     if context is None or job_owns_execution() or _DELEGATED_CHILD.get():
@@ -137,12 +141,7 @@ async def join_conversation_jobs(
         attempted.update(job.job_id for job in work.ready)
         return _JobJoin(prompt=completion_prompt(work.ready))
     # At the join limit the message stops holding, and the next reply in the conversation takes the work.
-    holds = bool(work.jobs) and joins < _JOB_JOIN_LIMIT
-    report = _REPORT.get()
-    if report is not None:
-        notice = waiting_notice(work.jobs) if holds else None
-        report.boundary = ReplyBoundary(key, notice, joins, offered=frozenset(attempted))
-    return _JobJoin(holds=holds)
+    return _JobJoin(holds=bool(work.jobs) and joins < _JOB_JOIN_LIMIT, key=key)
 
 
 async def join_approval_jobs[RunT](

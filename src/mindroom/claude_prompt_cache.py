@@ -70,11 +70,18 @@ from mindroom.agno_compat_claude import (
     BEDROCK_MAX_INLINE_MEDIA_BYTES,
     MAX_INLINE_MEDIA_BYTES,
     request_kwargs_with_leading_tool_results,
+    request_kwargs_with_replay_safe_tool_search_results,
     request_kwargs_with_supported_inline_media,
     request_kwargs_without_replayed_citations,
 )
 from mindroom.agno_compat_model_hooks import install_client_factories
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.claude_wire_blocks import (
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_NAME,
+    TOOL_SEARCH_TOOL_TYPE,
+    as_dict,
+)
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.logging_config import get_logger
@@ -98,16 +105,7 @@ MAX_CACHE_MARKERS = 4
 MESSAGE_RUNG_COUNT = 2
 _MARKABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "document", "image"})
 
-TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
-_TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
-
-SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"
-TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
-# The request schema for replayed tool-search results accepts only these keys
-# (ToolSearchToolResultBlockParam); response blocks additionally carry
-# citations/parsed_output/text, which the API rejects as extra inputs.
-_TOOL_SEARCH_RESULT_INPUT_KEYS = frozenset({"type", "tool_use_id", "content", "cache_control"})
 
 
 def native_tool_search_supported(provider: str, model_id: str) -> bool:
@@ -204,24 +202,19 @@ def prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]
     return cache_control
 
 
-def _as_dict(value: object) -> dict[str, Any] | None:
-    """Return the value as a string-keyed dict when possible."""
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
-
-
 def _block_has_cache_marker(block: object) -> bool:
-    block_dict = _as_dict(block)
+    block_dict = as_dict(block)
     return block_dict is not None and block_dict.get("cache_control") is not None
 
 
 def _is_transient_context_block(block: object) -> bool:
-    block_dict = _as_dict(block)
+    block_dict = as_dict(block)
     return block_dict is not None and block_dict.get("type") == "text" and is_transient_context(block_dict.get("text"))
 
 
 def _is_markable_block(block: object) -> bool:
     """Return whether a wire-format content block may carry cache_control."""
-    block_dict = _as_dict(block)
+    block_dict = as_dict(block)
     if block_dict is None:
         # SDK block objects (assistant text/tool_use/thinking) are rebuilt by
         # Agno each request; leave them alone and ladder on dict blocks only.
@@ -240,7 +233,7 @@ def _move_transient_context_to_user_suffix(messages: list[Any]) -> list[Any]:
     """Move generated transient context after cacheable content in each user turn."""
     prepared_messages = list(messages)
     for message_index, message in enumerate(prepared_messages):
-        message_dict = _as_dict(message)
+        message_dict = as_dict(message)
         content = message_dict.get("content") if message_dict is not None else None
         if message_dict is None or message_dict.get("role") != "user" or not isinstance(content, list):
             continue
@@ -269,7 +262,7 @@ def _count_cache_markers(request_kwargs: dict[str, Any]) -> int:
     messages = request_kwargs.get("messages")
     if isinstance(messages, list):
         for message in messages:
-            message_dict = _as_dict(message)
+            message_dict = as_dict(message)
             content = message_dict.get("content") if message_dict is not None else None
             if isinstance(content, list):
                 count += sum(1 for block in content if _block_has_cache_marker(block))
@@ -296,7 +289,7 @@ def mark_message_cache_rungs(
     for message_index in range(len(marked_messages) - 1, -1, -1):
         if rungs_occupied >= rung_budget:
             break
-        message_dict = _as_dict(marked_messages[message_index])
+        message_dict = as_dict(marked_messages[message_index])
         content = message_dict.get("content") if message_dict is not None else None
         if message_dict is None or not isinstance(content, list):
             continue
@@ -307,7 +300,7 @@ def mark_message_cache_rungs(
                 break
             if not _is_markable_block(block):
                 continue
-            marked_block = dict(_as_dict(block) or {})
+            marked_block = dict(as_dict(block) or {})
             marked_block["cache_control"] = dict(cache_control)
             marked_content = list(content)
             marked_content[block_index] = marked_block
@@ -333,7 +326,7 @@ def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object
     if not isinstance(tools, list) or not tools:
         return tools, 0
     for tool_index in range(len(tools) - 1, -1, -1):
-        tool_dict = _as_dict(tools[tool_index])
+        tool_dict = as_dict(tools[tool_index])
         if tool_dict is not None and (
             tool_dict.get("defer_loading") is True or tool_dict.get("type") == TOOL_SEARCH_TOOL_TYPE
         ):
@@ -354,19 +347,6 @@ def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
 
 
-def _tool_search_result_ids(content: list[Any]) -> set[str]:
-    """Return tool-use IDs paired with search results in one message."""
-    result_ids: set[str] = set()
-    for block in content:
-        block_dict = _as_dict(block)
-        if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
-            continue
-        tool_use_id = block_dict.get("tool_use_id")
-        if isinstance(tool_use_id, str):
-            result_ids.add(tool_use_id)
-    return result_ids
-
-
 def _request_tool_names(request_kwargs: dict[str, Any]) -> frozenset[str]:
     """Return client tool names available on the current request."""
     tools = request_kwargs.get("tools")
@@ -375,125 +355,68 @@ def _request_tool_names(request_kwargs: dict[str, Any]) -> frozenset[str]:
     return frozenset(
         name
         for tool in tools
-        if (tool_dict := _as_dict(tool)) is not None and isinstance(name := tool_dict.get("name"), str)
+        if (tool_dict := as_dict(tool)) is not None and isinstance(name := tool_dict.get("name"), str)
     )
 
 
-def _replay_safe_tool_search_result(
+def _search_result_with_available_references(
     block_dict: dict[str, Any],
     available_tool_names: frozenset[str],
-) -> tuple[dict[str, Any] | None, bool]:
-    """Sanitize one replayed search result, dropping references to unavailable tools."""
-    changed = not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
-    prepared_block = {key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS}
-    content = _as_dict(prepared_block.get("content"))
-    if content is None:
-        return prepared_block, changed
-    tool_references = content.get("tool_references")
-    if not isinstance(tool_references, list):
-        return prepared_block, changed
-
-    available_references = []
-    for reference in tool_references:
-        reference_dict = _as_dict(reference)
-        tool_name = reference_dict.get("tool_name") if reference_dict is not None else None
-        if not isinstance(tool_name, str) or tool_name not in available_tool_names:
-            changed = True
-            continue
-        available_references.append(reference)
+) -> dict[str, Any] | None:
+    """Return one search result without references to unavailable tools, or None when all are available."""
+    content = as_dict(block_dict.get("content"))
+    tool_references = content.get("tool_references") if content is not None else None
+    if content is None or not isinstance(tool_references, list):
+        return None
+    available_references = [
+        reference
+        for reference in tool_references
+        if (reference_dict := as_dict(reference)) is not None
+        and isinstance(tool_name := reference_dict.get("tool_name"), str)
+        and tool_name in available_tool_names
+    ]
+    if len(available_references) == len(tool_references):
+        return None
     # Even when every reference is stale, keep the search as an empty result:
     # dropping its pair would change a signed turn whose blocks surround it.
-    if len(available_references) == len(tool_references):
-        return prepared_block, changed
-
-    prepared_content = dict(content)
-    prepared_content["tool_references"] = available_references
-    prepared_block["content"] = prepared_content
-    return prepared_block, True
+    return {**block_dict, "content": {**content, "tool_references": available_references}}
 
 
-def _replay_safe_message_content(
-    content: list[Any],
-    available_tool_names: frozenset[str],
-) -> tuple[list[Any], bool]:
-    """Repair replayed tool-search blocks in one assistant message."""
-    prepared_content: list[Any] = []
-    changed = False
-    for block in content:
-        block_dict = _as_dict(block)
-        if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
-            prepared_content.append(block)
-            continue
-        prepared_block, block_changed = _replay_safe_tool_search_result(
-            block_dict,
-            available_tool_names,
-        )
-        changed = changed or block_changed
-        if prepared_block is not None:
-            prepared_content.append(prepared_block)
+def _request_kwargs_without_unavailable_tool_references(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop replayed tool-search references to tools absent from this request.
 
-    paired_result_ids = _tool_search_result_ids(prepared_content)
-    sanitized_content: list[Any] = []
-    for block in prepared_content:
-        block_dict = _as_dict(block)
-        block_id = block_dict.get("id") if block_dict is not None else None
-        if (
-            block_dict is not None
-            and block_dict.get("type") == SERVER_TOOL_USE_BLOCK_TYPE
-            and block_dict.get("name") == _TOOL_SEARCH_TOOL_NAME
-            and (not isinstance(block_id, str) or block_id not in paired_result_ids)
-        ):
-            changed = True
-            continue
-        sanitized_content.append(block)
-    return sanitized_content, changed
-
-
-def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Repair replayed tool-search blocks before sending assistant history.
-
-    Agno replays captured server-tool blocks verbatim in assistant history,
-    and the SDK response block carries fields (``citations``, ``parsed_output``,
-    ``text``) that the request schema rejects with a 400 ("Extra inputs are
-    not permitted"). Once such a block is persisted, every later turn of that
-    conversation replays it, so the thread stays broken until the block is
-    sanitized here. Keys used for history identity (``type``, ``tool_use_id``)
-    are preserved.
-
-    Anthropic can also return a ``server_tool_use`` without its matching
-    ``tool_search_tool_result`` when native search and client tools are called
-    together. Replaying that orphan produces another 400. Search results can
-    likewise reference tools that are absent from a later request after its
-    dynamic tool surface changes. Drop unavailable references; a search left
-    with none stays as an empty result, like a search that matched nothing, so
-    the signed thinking blocks around it are not moved together. Valid pairs and
-    other server-tool types remain intact. The input structure is never mutated.
+    Search results can reference tools that a later request no longer offers after
+    its dynamic tool surface changes, which Claude rejects. A search left with no
+    references stays as an empty result, like a search that matched nothing, so
+    the signed thinking blocks around it are not moved together.
     """
     messages = request_kwargs.get("messages")
     if not isinstance(messages, list):
         return request_kwargs
     available_tool_names = _request_tool_names(request_kwargs)
-    sanitized_messages = list(messages)
+    prepared_messages = list(messages)
     changed = False
-    for message_index, message in enumerate(sanitized_messages):
-        message_dict = _as_dict(message)
+    for message_index, message in enumerate(messages):
+        message_dict = as_dict(message)
         content = message_dict.get("content") if message_dict is not None else None
         if message_dict is None or not isinstance(content, list):
             continue
-        sanitized_content, content_changed = _replay_safe_message_content(
-            content,
-            available_tool_names,
-        )
+        prepared_content = list(content)
+        content_changed = False
+        for block_index, block in enumerate(content):
+            block_dict = as_dict(block)
+            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
+                continue
+            filtered_block = _search_result_with_available_references(block_dict, available_tool_names)
+            if filtered_block is not None:
+                prepared_content[block_index] = filtered_block
+                content_changed = True
         if content_changed:
-            sanitized_message = dict(message_dict)
-            sanitized_message["content"] = sanitized_content
-            sanitized_messages[message_index] = sanitized_message
+            prepared_messages[message_index] = {**message_dict, "content": prepared_content}
             changed = True
     if not changed:
         return request_kwargs
-    prepared_kwargs = dict(request_kwargs)
-    prepared_kwargs["messages"] = sanitized_messages
-    return prepared_kwargs
+    return {**request_kwargs, "messages": prepared_messages}
 
 
 def _request_kwargs_with_deferred_tool_search(
@@ -514,7 +437,7 @@ def _request_kwargs_with_deferred_tool_search(
     non_deferred_tools: list[Any] = []
     deferred_tools: list[dict[str, Any]] = []
     for tool in tools:
-        tool_dict = _as_dict(tool)
+        tool_dict = as_dict(tool)
         if tool_dict is not None and tool_dict.get("name") in deferred_tool_names:
             deferred_tool = {**tool_dict, "defer_loading": True}
             # A deferred tool may not carry cache_control (the API returns a
@@ -528,7 +451,7 @@ def _request_kwargs_with_deferred_tool_search(
     deferred_tools.sort(key=lambda tool: str(tool.get("name")))
     prepared_kwargs = dict(request_kwargs)
     prepared_kwargs["tools"] = [
-        {"type": TOOL_SEARCH_TOOL_TYPE, "name": _TOOL_SEARCH_TOOL_NAME},
+        {"type": TOOL_SEARCH_TOOL_TYPE, "name": TOOL_SEARCH_TOOL_NAME},
         *non_deferred_tools,
         *deferred_tools,
     ]
@@ -699,7 +622,8 @@ def prepare_claude_request_kwargs(
     request_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply MindRoom's wire transformations to one Claude request payload."""
-    prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared_kwargs = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared_kwargs = _request_kwargs_without_unavailable_tool_references(prepared_kwargs)
     prepared_kwargs = request_kwargs_without_replayed_citations(prepared_kwargs)
     prepared_kwargs = request_kwargs_with_leading_tool_results(prepared_kwargs)
     prepared_kwargs = request_kwargs_with_supported_inline_media(

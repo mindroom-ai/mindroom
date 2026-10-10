@@ -1,4 +1,9 @@
-"""Exact durable transactions for background-script approval calls."""
+"""Exact durable transactions for detached approval calls.
+
+A detached call is decided on its own card rather than inside a paused run.
+Background-script calls and scheduled tool calls share this lifecycle; each
+kind's owner names its runs and reads its own card payloads.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,7 @@ __all__ = [
     "decision",
     "prune_calls",
     "reserve_delivery",
+    "reserve_script_delivery",
     "resolve",
     "resolve_call",
     "resolve_pending_calls",
@@ -59,9 +65,9 @@ def reserve_delivery(
     expires_at_ns: int,
     card: ApprovalCardReservation,
 ) -> bool:
-    """Atomically reserve one exact background-call target and frozen card."""
-    if card.tool_call_id != call_id or background_identity({"content": card.payload}) != (run_id, call_id):
-        msg = f"Background approval delivery {card.delivery_id!r} changed exact-call identity"
+    """Atomically reserve one exact detached call and its frozen card, which its caller verified names that call."""
+    if card.tool_call_id != call_id:
+        msg = f"Detached approval delivery {card.delivery_id!r} changed exact-call identity"
         raise ValueError(msg)
     epoch = transaction.fetchone(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
@@ -103,6 +109,33 @@ def reserve_delivery(
         card=card,
     )
     return True
+
+
+def reserve_script_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    run_id: str,
+    call_id: str,
+    expires_at_ns: int,
+    card: ApprovalCardReservation,
+) -> bool:
+    """Atomically reserve one background-script call and the card that names it."""
+    if background_identity({"content": card.payload}) != (run_id, call_id):
+        msg = f"Background approval delivery {card.delivery_id!r} changed exact-call identity"
+        raise ValueError(msg)
+    return reserve_delivery(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        call_id=call_id,
+        expires_at_ns=expires_at_ns,
+        card=card,
+    )
 
 
 def resolve(

@@ -273,14 +273,14 @@ async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_auth
 
     class _SingleToolSession:
         @staticmethod
-        async def list_tools(cursor: str | None = None) -> mcp_types.ListToolsResult:
+        async def list_tools(cursor: str | None = None, **_kwargs: object) -> mcp_types.ListToolsResult:
             assert cursor is None
             return mcp_types.ListToolsResult(
                 tools=[
                     mcp_types.Tool(
                         name="read",
                         description="Read",
-                        inputSchema={"type": "object", "properties": {}},
+                        input_schema={"type": "object", "properties": {}},
                     ),
                 ],
             )
@@ -293,9 +293,9 @@ async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_auth
         config.mcp_servers["demo"],
         cast("ClientSession", _SingleToolSession()),
         mcp_types.InitializeResult(
-            protocolVersion="2025-03-26",
+            protocol_version="2025-03-26",
             capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=mcp_types.Implementation(name="demo", version="1.0"),
+            server_info=mcp_types.Implementation(name="demo", version="1.0"),
         ),
     )
     toolkit = MindRoomMCPToolkit(

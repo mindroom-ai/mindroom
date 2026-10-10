@@ -27,8 +27,6 @@ class TurnIntent(StrEnum):
     """Semantic intent of one inbound turn after trusted metadata is normalized."""
 
     USER_MESSAGE = "user_message"
-    # The runtime continuing a reply that holds background work, on behalf of that reply's requester.
-    HELD_REPLY_CONTINUATION = "held_reply_continuation"
     MANAGED_MESSAGE = "managed_message"
     ROUTER_HANDOFF = "router_handoff"
     ROUTER_NOTICE = "router_notice"
@@ -173,14 +171,17 @@ def requester_id_from_trusted_original_sender(
     *,
     original_sender: str | None,
     original_sender_entity_name: str | None,
-    original_sender_is_human: bool,
+    original_sender_is_access_checked: bool,
     source_kind: str | None,
     sender_trusts_original_sender: bool,
 ) -> str | None:
-    """Return original-sender metadata that may act as the dispatch requester."""
+    """Return original-sender metadata that may act as the dispatch requester.
+
+    A relayed human or configured bot account stays the requester, so access applies to it, not the relaying entity.
+    """
     if not sender_trusts_original_sender or not original_sender:
         return None
-    if original_sender_is_human:
+    if original_sender_is_access_checked:
         return original_sender
     if original_sender_entity_name is not None and source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}:
         return original_sender

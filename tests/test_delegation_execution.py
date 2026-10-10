@@ -39,8 +39,7 @@ from mindroom.delegation.lifecycle import note_child_run_id
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import _cancel_delegations, cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
-from mindroom.response_sources import ResponseSources
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.teams import (
     _attach_team_pause_presentation,
@@ -52,6 +51,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
+from tests.approval_continuation_helpers import approval_continuation
 from tests.delegation_helpers import (
     DelegationModel,
     _call,
@@ -355,18 +355,14 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                     await _cancel_delegations(paused, config=config, runtime_paths=paths)
                 else:
                     await cancel_approval_delegations(
-                        ApprovalContinuation(
-                            approval_id="approval",
+                        approval_continuation(
                             run_id=response.run_id,
                             session_id="parent",
-                            entity_kind="agent",
                             entity_name="leader",
                             room_id=identity.room_id,
                             thread_id=None,
                             requester_id=identity.requester_id,
                             response_event_id="$response",
-                            sources=ResponseSources(("$source",), ("$source",)),
-                            calls=(),
                             state="failing",
                             execution_identity=state.children[0].execution_identity
                             | {"agent_name": "leader", "session_id": "parent"},

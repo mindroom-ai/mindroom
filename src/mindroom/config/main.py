@@ -38,6 +38,7 @@ from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.automations import Automation  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
@@ -1854,6 +1855,45 @@ class Config(BaseModel):
         # exclude_none keeps the "None inherits" tri-state; deep copy avoids aliasing memory.search.include.
         return self.memory.search.model_copy(update=override.model_dump(exclude_none=True), deep=True)
 
+    def _automation_block_reason(self, agent_name: str, automation: Automation) -> str | None:
+        """Return why an agent cannot run ``automation``, or None when it can.
+
+        Automations run unattended, so requester-private agents have no identity to run them as, and the
+        built-ins maintain file memory, which needs the file backend.
+        A plugin automation's own needs are checked when it fires, once its plugin is loaded.
+        """
+        if self.get_agent(agent_name).private is not None:
+            return "is private; automations run unattended and need a shared agent"
+        if automation.requires_file_memory and self._agent_memory_backend(agent_name) != "file":
+            return f"needs memory_backend: file for {automation.name}"
+        return None
+
+    def _agent_automations(self, agent_name: str) -> list[Automation]:
+        """Get one agent's automations: its own list, or the inherited defaults it can run."""
+        agent = self.get_agent(agent_name)
+        if agent.automations is not None:
+            return agent.automations
+        return [
+            entry for entry in self.defaults.automations if self._automation_block_reason(agent_name, entry) is None
+        ]
+
+    @model_validator(mode="after")
+    def validate_agent_automations(self) -> Config:
+        """Reject automations an agent lists but cannot run, or that name an unknown model."""
+        for automation in self.defaults.automations:
+            if automation.model is not None and automation.model not in self.models:
+                msg = f"defaults.automations {automation.name!r} uses unknown model {automation.model!r}"
+                raise ValueError(msg)
+        for agent_name, agent in self.agents.items():
+            for automation in agent.automations or []:
+                if (reason := self._automation_block_reason(agent_name, automation)) is not None:
+                    msg = f"Agent {agent_name!r} {reason}"
+                    raise ValueError(msg)
+                if automation.model is not None and automation.model not in self.models:
+                    msg = f"Agent {agent_name!r} automation {automation.name!r} uses unknown model {automation.model!r}"
+                    raise ValueError(msg)
+        return self
+
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""
         if not self.agents:
@@ -2035,10 +2075,38 @@ class Config(BaseModel):
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
 
+def _tag_automation_unions(node: Any) -> None:  # noqa: ANN401 - a JSON schema node
+    """Mark each automation union as chosen by ``name``, which the built-ins pin and plugin automations leave free."""
+    if isinstance(node, dict):
+        branches = node.get("oneOf")
+        if isinstance(branches, list) and {"$ref": "#/$defs/PluginAutomation"} in branches:
+            node["discriminator"] = {"propertyName": "name"}
+        for value in node.values():
+            _tag_automation_unions(value)
+    elif isinstance(node, list):
+        for value in node:
+            _tag_automation_unions(value)
+
+
+def _describe_automation_union(schema: dict[str, Any]) -> None:
+    """Shape the automation union for the dashboard's form: a pinned name per built-in and a free one for plugins."""
+    defs = schema["$defs"]
+    for built_in in ("PromptCurationAutomation", "DreamingAutomation"):
+        # The form fills required fields when a variant is picked, and the name is what selects the variant.
+        defs[built_in]["required"] = ["name", *defs[built_in].get("required", [])]
+    plugin = defs["PluginAutomation"]
+    plugin["title"] = "Plugin automation"
+    # Validation errors for a plugin entry are reported under this tag, since its name is not fixed.
+    plugin.setdefault("x-mindroom", {})["union_tag"] = "plugin"
+    _tag_automation_unions(schema)
+
+
 @cache
 def dashboard_config_schema() -> dict[str, Any]:
     """Return the Config JSON schema with dashboard hints and default-factory values."""
-    return Config.model_json_schema(schema_generator=DashboardJsonSchema)
+    schema = Config.model_json_schema(schema_generator=DashboardJsonSchema)
+    _describe_automation_union(schema)
+    return schema
 
 
 def redact_authored_config(payload: dict[str, Any]) -> dict[str, Any]:

@@ -2,31 +2,46 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
 import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
-import httpx
+import httpcore2
+import httpx2
 import pytest
+from httpcore2._backends.anyio import AnyIOBackend
+from mcp import ClientSession, MCPError
+from mcp.types import INTERNAL_ERROR
 
 import mindroom.mcp.transports as transport_module
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.config import MCPServerConfig
+from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.transports import (
     _build_stdio_server_parameters,
     _interpolate_mcp_env,
     _interpolate_mcp_headers,
+    _MCPTransportHandle,
     _server_fetch_mcp_http_client,
-    _TransportStreams,
     build_transport_handle,
 )
-from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
+from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport
+from mindroom.server_fetch_url import ServerFetchUrlError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.mcp.config import MCPTransport
+    from mindroom.mcp.transports import _TransportStreams
+
+_REMOTE_TRANSPORT_URLS: dict[MCPTransport, str] = {
+    "sse": "https://mcp.example/sse",
+    "streamable-http": "https://mcp.example/mcp",
+}
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -44,6 +59,31 @@ def _public_dns_for_mcp_transport_tests(monkeypatch: pytest.MonkeyPatch) -> None
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 443))],
     )
+
+
+def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, 443))]
+
+
+def _nested_exceptions(exc: BaseException) -> list[BaseException]:
+    """Flatten task-group and cause chains the SDK transports raise through."""
+    found = [exc]
+    if isinstance(exc, BaseExceptionGroup):
+        for nested in exc.exceptions:
+            found.extend(_nested_exceptions(nested))
+    if exc.__cause__ is not None:
+        found.extend(_nested_exceptions(exc.__cause__))
+    return found
+
+
+async def _initialize_over(handle: _MCPTransportHandle) -> None:
+    """Drive the SDK's own client stack over one MindRoom transport handle."""
+    async with (
+        asyncio.timeout(5),
+        handle.opener() as (read_stream, write_stream),
+        ClientSession(read_stream, write_stream) as session,
+    ):
+        await session.initialize()
 
 
 def test_interpolate_mcp_env_and_headers(tmp_path: Path) -> None:
@@ -126,9 +166,9 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
     async with handle.opener() as opened_streams:
         assert opened_streams == streams
 
-    httpx_client_factory = cast("Callable[[], httpx.AsyncClient]", captured.pop("httpx_client_factory"))
+    httpx_client_factory = cast("Callable[[], httpx2.AsyncClient]", captured.pop("httpx_client_factory"))
     async with httpx_client_factory() as client:
-        assert isinstance(client._transport, ServerFetchAsyncHTTPTransport)
+        assert isinstance(client._transport, ServerFetchAsyncHTTPX2Transport)
     assert captured == {
         "url": "https://mcp.example/sse",
         "headers": {"Authorization": "Bearer secret-token"},
@@ -138,25 +178,30 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
 
 
 @pytest.mark.asyncio
-async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_drops_session_getter(
+async def test_open_streamable_http_interpolates_headers_and_passes_timeouts_on_http_client(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Open streamable HTTP transports while dropping the session id getter."""
+    """Open streamable HTTP transports on a guarded client carrying headers and timeouts."""
     runtime_paths = _runtime_paths(tmp_path)
     read_stream = object()
     write_stream = object()
     captured: dict[str, object] = {}
 
     @asynccontextmanager
-    async def fake_streamablehttp_client(
+    async def fake_streamable_http_client(
         url: str,
-        **kwargs: object,
-    ) -> AsyncIterator[tuple[object, object, object]]:
-        captured.update(url=url, **kwargs)
-        yield read_stream, write_stream, lambda: "session-id"
+        *,
+        http_client: httpx2.AsyncClient,
+        max_sse_event_size: int | None,
+    ) -> AsyncIterator[tuple[object, object]]:
+        captured.update(url=url, http_client_closed=http_client.is_closed, max_sse_event_size=max_sse_event_size)
+        assert isinstance(http_client._transport, ServerFetchAsyncHTTPX2Transport)
+        assert http_client.headers["X-Token"] == "secret-token"
+        assert http_client.timeout == httpx2.Timeout(3.5, read=4.5)
+        yield read_stream, write_stream
 
-    monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    monkeypatch.setattr(transport_module, "streamable_http_client", fake_streamable_http_client)
     server_config = MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example/mcp",
@@ -170,15 +215,7 @@ async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_dro
     async with handle.opener() as streams:
         assert streams == (read_stream, write_stream)
 
-    httpx_client_factory = cast("Callable[[], httpx.AsyncClient]", captured.pop("httpx_client_factory"))
-    async with httpx_client_factory() as client:
-        assert isinstance(client._transport, ServerFetchAsyncHTTPTransport)
-    assert captured == {
-        "url": "https://mcp.example/mcp",
-        "headers": {"X-Token": "secret-token"},
-        "timeout": 3.5,
-        "sse_read_timeout": 4.5,
-    }
+    assert captured == {"url": "https://mcp.example/mcp", "http_client_closed": False, "max_sse_event_size": None}
 
 
 @pytest.mark.asyncio
@@ -191,14 +228,16 @@ async def test_remote_transport_latches_http_401_without_response_content(
     captured: dict[str, object] = {}
 
     @asynccontextmanager
-    async def fake_streamablehttp_client(
+    async def fake_streamable_http_client(
         _url: str,
-        **kwargs: object,
-    ) -> AsyncIterator[tuple[object, object, object]]:
-        captured.update(kwargs)
-        yield object(), object(), lambda: "session-id"
+        *,
+        http_client: httpx2.AsyncClient,
+        max_sse_event_size: int | None,  # noqa: ARG001
+    ) -> AsyncIterator[tuple[object, object]]:
+        captured.update(http_client=http_client)
+        yield object(), object()
 
-    monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    monkeypatch.setattr(transport_module, "streamable_http_client", fake_streamable_http_client)
     handle = build_transport_handle(
         "demo",
         MCPServerConfig(transport="streamable-http", url="https://mcp.example/mcp"),
@@ -206,14 +245,10 @@ async def test_remote_transport_latches_http_401_without_response_content(
     )
 
     async with handle.opener():
-        factory = cast("Callable[..., httpx.AsyncClient]", captured["httpx_client_factory"])
-        client = factory()
-        try:
-            request = httpx.Request("POST", "https://mcp.example/mcp")
-            for hook in client._event_hooks["response"]:
-                await hook(httpx.Response(401, request=request, content=b"secret provider response"))
-        finally:
-            await client.aclose()
+        client = cast("httpx2.AsyncClient", captured["http_client"])
+        request = httpx2.Request("POST", "https://mcp.example/mcp")
+        for hook in client.event_hooks["response"]:
+            await hook(httpx2.Response(401, request=request, content=b"secret provider response"))
 
     assert handle.authorization_rejected()
 
@@ -318,16 +353,16 @@ async def test_open_streamable_http_rejects_metadata_transport_url(
     runtime_paths = _runtime_paths(tmp_path)
 
     @asynccontextmanager
-    async def fake_streamablehttp_client(
+    async def fake_streamable_http_client(
         url: str,
         **kwargs: object,
-    ) -> AsyncIterator[tuple[object, object, object]]:
+    ) -> AsyncIterator[tuple[object, object]]:
         del url, kwargs
         msg = "unsafe MCP URL should be rejected before the streamable HTTP client opens"
         raise AssertionError(msg)
-        yield object(), object(), lambda: "session-id"
+        yield object(), object()
 
-    monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    monkeypatch.setattr(transport_module, "streamable_http_client", fake_streamable_http_client)
     server_config = MCPServerConfig(
         transport="streamable-http",
         url="http://169.254.169.254/latest/meta-data/",
@@ -349,3 +384,183 @@ async def test_mcp_http_client_factory_rejects_private_request_url() -> None:
             await client.get("http://127.0.0.1:8000/mcp")
 
     assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+@pytest.mark.parametrize(
+    ("dialed_address", "reason"),
+    [
+        ("10.0.0.5", "private_address"),
+        ("169.254.1.1", "blocked_address"),
+        ("169.254.169.254", "metadata_address"),
+    ],
+)
+async def test_sdk_http_client_refuses_rebound_dial_address(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: MCPTransport,
+    dialed_address: str,
+    reason: str,
+) -> None:
+    """A hostname that passes the open-time check but resolves internally when the SDK dials is never connected."""
+    lookups: list[str] = []
+    dialed: list[str] = []
+
+    def rebinding_getaddrinfo(host: str, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        lookups.append(host)
+        return _addrinfo("93.184.216.34" if len(lookups) == 1 else dialed_address)
+
+    async def record_connect(_backend: object, host: str, *_args: object, **_kwargs: object) -> object:
+        dialed.append(host)
+        msg = "connection refused"
+        raise httpcore2.ConnectError(msg)
+
+    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", rebinding_getaddrinfo)
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", record_connect)
+    handle = build_transport_handle(
+        "demo",
+        MCPServerConfig(transport=transport, url=_REMOTE_TRANSPORT_URLS[transport]),
+        _runtime_paths(tmp_path),
+    )
+
+    with pytest.raises(BaseException) as exc_info:  # noqa: PT011 - SSE raises directly, streamable HTTP in a group
+        await _initialize_over(handle)
+
+    errors = [exc for exc in _nested_exceptions(exc_info.value) if isinstance(exc, ServerFetchUrlError)]
+    assert [error.reason for error in errors] == [reason]
+    assert lookups == ["mcp.example", "mcp.example"]
+    assert dialed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+async def test_sdk_http_client_dials_only_the_validated_address(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: MCPTransport,
+) -> None:
+    """The SDK's connection goes to the address validated at dial time, not to a fresh hostname lookup."""
+    dialed: list[tuple[str, int]] = []
+
+    async def record_connect(_backend: object, host: str, port: int, *_args: object, **_kwargs: object) -> object:
+        dialed.append((host, port))
+        msg = "connection refused"
+        raise httpcore2.ConnectError(msg)
+
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", record_connect)
+    handle = build_transport_handle(
+        "demo",
+        MCPServerConfig(transport=transport, url=_REMOTE_TRANSPORT_URLS[transport]),
+        _runtime_paths(tmp_path),
+    )
+
+    with pytest.raises(BaseException) as exc_info:  # noqa: PT011 - SSE raises directly, streamable HTTP in a group
+        await _initialize_over(handle)
+
+    assert any(isinstance(exc, httpx2.ConnectError) for exc in _nested_exceptions(exc_info.value))
+    assert dialed == [("93.184.216.34", 443)]
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_401_is_latched_through_the_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bearer rejection the SDK reports only as a per-request JSON-RPC error still marks the handle rejected."""
+
+    def unauthorized(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, text="secret provider response", request=request)
+
+    monkeypatch.setattr(transport_module, "ServerFetchAsyncHTTPX2Transport", lambda: httpx2.MockTransport(unauthorized))
+    handle = build_transport_handle(
+        "demo",
+        MCPServerConfig(transport="streamable-http", url="https://mcp.example/mcp"),
+        _runtime_paths(tmp_path),
+    )
+
+    with pytest.raises(BaseException) as exc_info:  # noqa: PT011 - the session's task group wraps the request error
+        await _initialize_over(handle)
+
+    errors = [exc for exc in _nested_exceptions(exc_info.value) if isinstance(exc, MCPError)]
+    assert [error.code for error in errors] == [INTERNAL_ERROR]
+    assert "secret provider response" not in str(errors[0])
+    assert handle.authorization_rejected()
+
+
+@pytest.mark.asyncio
+async def test_sse_401_is_latched_and_classified_through_the_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A rejected SSE stream open keeps its structured HTTP status for OAuth reconnect classification."""
+
+    def unauthorized(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, text="secret provider response", request=request)
+
+    monkeypatch.setattr(transport_module, "ServerFetchAsyncHTTPX2Transport", lambda: httpx2.MockTransport(unauthorized))
+    handle = build_transport_handle(
+        "demo",
+        MCPServerConfig(transport="sse", url="https://mcp.example/sse"),
+        _runtime_paths(tmp_path),
+    )
+
+    with pytest.raises(httpx2.HTTPStatusError) as exc_info:
+        await _initialize_over(handle)
+
+    assert MCPServerManager._runtime_exception_has_http_status(exc_info.value, 401)
+    assert handle.authorization_rejected()
+
+
+@asynccontextmanager
+async def _serve_large_result_server(transport: MCPTransport) -> AsyncIterator[str]:
+    """Serve one tool whose result is larger than the SDK's default 1 MiB SSE event cap."""
+    import uvicorn  # noqa: PLC0415
+    from mcp.server.mcpserver import MCPServer  # noqa: PLC0415
+
+    server = MCPServer("Large result")
+
+    @server.tool()
+    def large() -> str:
+        return "x" * (2 * 1024 * 1024)
+
+    app = server.sse_app() if transport == "sse" else server.streamable_http_app()
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    uvicorn_server = uvicorn.Server(uvicorn.Config(app, log_level="error", ws="none"))
+    serving = asyncio.create_task(uvicorn_server.serve(sockets=[sock]))
+    while not uvicorn_server.started:  # noqa: ASYNC110 - uvicorn exposes startup only as a flag
+        await asyncio.sleep(0.01)
+    try:
+        yield f"http://127.0.0.1:{sock.getsockname()[1]}/{'sse' if transport == 'sse' else 'mcp'}"
+    finally:
+        uvicorn_server.should_exit = True
+        await serving
+        sock.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+async def test_remote_transports_deliver_results_larger_than_one_mebibyte(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: MCPTransport,
+) -> None:
+    """Tool results are not cut off by the SDK's per-event SSE cap, which 1.x did not have."""
+    monkeypatch.setattr(transport_module, "validate_server_fetch_url", lambda url, **_kwargs: url)
+    monkeypatch.setattr(transport_module, "ServerFetchAsyncHTTPX2Transport", httpx2.AsyncHTTPTransport)
+    async with _serve_large_result_server(transport) as url:
+        handle = build_transport_handle(
+            "large",
+            MCPServerConfig(transport=transport, url=url),
+            _runtime_paths(tmp_path),
+        )
+        async with (
+            asyncio.timeout(20),
+            handle.opener() as (read_stream, write_stream),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool("large", {})
+    assert result.is_error is False
+    assert len(result.content[0].text) == 2 * 1024 * 1024  # type: ignore[union-attr]

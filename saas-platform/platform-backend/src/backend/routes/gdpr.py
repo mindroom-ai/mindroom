@@ -55,12 +55,6 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user_allow_delet
     # Get instances
     instances = instances_data.get_instances_for_account(sb, account_id)
 
-    # Get usage metrics (last 90 days)
-    usage_result = (
-        sb.table("usage_metrics").select("*").in_("subscription_id", [s["id"] for s in subscriptions]).execute()
-    )
-    usage_metrics = usage_result.data or []
-
     # Get audit logs (non-sensitive fields only)
     audit_result = (
         sb.table("audit_logs")
@@ -87,7 +81,6 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user_allow_delet
         },
         "subscriptions": subscriptions,
         "instances": instances,
-        "usage_metrics": usage_metrics,
         "activity_history": audit_logs,
         "payments": payments,
         "data_processing_purposes": [

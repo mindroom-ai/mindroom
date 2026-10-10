@@ -138,13 +138,13 @@ def test_plain_hook_with_managed_requester_still_requires_mention() -> None:
     assert origin.blocks_unmentioned_managed_sender
 
 
-def test_requester_id_from_trusted_original_sender_accepts_human_metadata() -> None:
-    """Trusted human original-sender metadata may act as the requester."""
+def test_requester_id_from_trusted_original_sender_accepts_access_checked_metadata() -> None:
+    """Trusted original-sender metadata naming a human or configured bot account may act as the requester."""
     assert (
         requester_id_from_trusted_original_sender(
             original_sender="@human:localhost",
             original_sender_entity_name=None,
-            original_sender_is_human=True,
+            original_sender_is_access_checked=True,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
             sender_trusts_original_sender=True,
         )
@@ -152,13 +152,13 @@ def test_requester_id_from_trusted_original_sender_accepts_human_metadata() -> N
     )
 
 
-def test_requester_id_from_trusted_original_sender_rejects_non_human_unmanaged_metadata() -> None:
-    """Unmanaged bot and internal-user metadata must not become a human requester."""
+def test_requester_id_from_trusted_original_sender_rejects_internal_user_metadata() -> None:
+    """MindRoom's internal account is never access-checked, so its metadata must not become the requester."""
     assert (
         requester_id_from_trusted_original_sender(
-            original_sender="@bridge_bot:localhost",
+            original_sender="@mindroom_user:localhost",
             original_sender_entity_name=None,
-            original_sender_is_human=False,
+            original_sender_is_access_checked=False,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
             sender_trusts_original_sender=True,
         )
@@ -173,7 +173,7 @@ def test_requester_id_from_trusted_original_sender_accepts_managed_scheduled_fir
         requester_id_from_trusted_original_sender(
             original_sender="@mindroom_router:localhost",
             original_sender_entity_name="router",
-            original_sender_is_human=False,
+            original_sender_is_access_checked=False,
             source_kind=source_kind,
             sender_trusts_original_sender=True,
         )
@@ -187,7 +187,7 @@ def test_requester_id_from_trusted_original_sender_rejects_managed_plain_hooks()
         requester_id_from_trusted_original_sender(
             original_sender="@mindroom_router:localhost",
             original_sender_entity_name="router",
-            original_sender_is_human=False,
+            original_sender_is_access_checked=False,
             source_kind=HOOK_SOURCE_KIND,
             sender_trusts_original_sender=True,
         )
@@ -201,7 +201,7 @@ def test_requester_id_from_trusted_original_sender_requires_original_sender() ->
         requester_id_from_trusted_original_sender(
             original_sender=None,
             original_sender_entity_name=None,
-            original_sender_is_human=False,
+            original_sender_is_access_checked=False,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
             sender_trusts_original_sender=True,
         )

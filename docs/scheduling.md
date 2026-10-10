@@ -7,9 +7,9 @@ icon: lucide/calendar-clock
 Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
 Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
 
-<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/cfbbac8e-6942-4bac-a920-ac3946951174#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a3bacdb7-7d59-42d2-8d0f-33f391c412b2#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-light="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-dark="https://github.com/user-attachments/assets/38261697-8f2a-478d-a256-32559e107315">
+  <source src="https://github.com/user-attachments/assets/e59e09c8-c8c7-4e90-8e3c-30b8f18b6de2" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/fdbc3860-9301-4d62-907a-857c818d4e73" type="video/mp4">
 </video>
 
 ## Commands
@@ -101,9 +101,9 @@ Use `!list_schedules` to find task IDs.
 
 ## [`scheduler`]
 
-<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/41986747-dfb3-41cd-b3c6-b60f8eabdab8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d8729fbc-7377-4b80-b3c2-c39394eb19a4#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-light="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-dark="https://github.com/user-attachments/assets/6194d6c7-89e7-4e66-8810-048efc3b3001">
+  <source src="https://github.com/user-attachments/assets/2fa5d666-16bd-4864-b27f-fb212609e2a1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/7a68cee9-24d4-43cf-84de-599405fd16d7" type="video/mp4">
 </video>
 
 The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.
@@ -121,6 +121,8 @@ agents:
 | --- | --- |
 | `schedule(request, new_thread, history_limit=None, silent=None, model=None)` | `new_thread` is required |
 | `edit_schedule(task_id, request, history_limit=None, silent=None, model=None)` | Omitted arguments keep the task's current settings |
+| `schedule_tool_call(tool_name, arguments_json, execute_at, description)` | One approval-gated call that the requester approves now; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
+| `run_scheduled_call(task_id, arguments_json=None)` | Runs a pre-approved scheduled call when its task asks; see [Pre-Approved Tool Calls](#pre-approved-tool-calls) |
 | `list_schedules()` | |
 | `cancel_schedule(task_id)` | |
 
@@ -188,6 +190,36 @@ It takes precedence over room and thread model settings without changing them fo
 Omitting `model` on creation uses normal model selection; omitting it on an edit keeps the saved choice, and an empty string restores normal model selection.
 Parsing the scheduling request itself always uses the default model.
 
+## Pre-Approved Tool Calls
+
+An agent can store one of its own approval-gated tool calls to run later, and the requester approves it while scheduling it, so a gated action such as an external message runs at its time without a second approval.
+The agent calls `schedule_tool_call(tool_name, arguments_json, execute_at, description)` from a thread.
+`tool_name` must be one of that agent's own tools, `arguments_json` is a JSON object of the call's arguments, and `execute_at` is an ISO 8601 time with a UTC offset, such as `2026-10-04T09:00:00-04:00`.
+The `tool_approval` policy must require approval for the call (or the tool must ask for its own confirmation), the scheduler must be an agent rather than a team, and the agent must be able to reply to the requester in that room; otherwise the scheduler refuses it.
+
+```python
+schedule_tool_call(
+    tool_name="post_slack_message",
+    arguments_json='{"channel": "U0123ABCD", "text": "Good morning! The report is ready."}',
+    execute_at="2026-10-04T09:00:00-04:00",
+    description="Morning report DM",
+)
+```
+
+MindRoom stores the call and posts an approval card in the thread showing the tool, its arguments, and the send time; only the requester can approve or deny it, and it expires at the send time.
+The requester approves either the stored arguments or, when the card offers it, any arguments to the same tool.
+Approving any arguments lets the agent decide the arguments for that tool when the task runs, following the task's description, so choose it only when the content must be decided later.
+The card offers it only when requesters approve their own calls; operators can stop offering it with [`tool_approval.scheduled_any_arguments`](tool-approval.md), and generic MCP `*_call_tool` calls and tools that ask for their own confirmation are always approved exactly.
+
+When the task runs, it asks the agent to call `run_scheduled_call(task_id)`, which runs the stored call once with the stored arguments, without a new card, and posts an approved receipt naming who approved it, when, and for which scope.
+With an any-arguments approval the agent may pass `arguments_json` to `run_scheduled_call` to replace the arguments for the same tool.
+The approval can be used once, by that agent for that requester in that thread, from when the task runs until 15 minutes after its scheduled time.
+If the card was not approved in time, `run_scheduled_call` runs nothing and the agent can call the tool directly, which asks for approval as usual.
+If the requester denies the card, the task does not run, and cancelling the task withdraws the approval.
+A pre-approved task cannot be edited; cancel it and schedule the call again.
+The arguments are not posted in the task or its trigger message; MindRoom keeps them with the approval, and the card shows them with secrets hidden.
+Recurring schedules cannot pre-approve calls.
+
 ## Timezone
 
 The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
@@ -234,3 +266,98 @@ Recurring progress is kept in `tracking/recurring_schedules/` under the storage 
 Without it, or after a schedule edit, MindRoom resumes from the next future occurrence without replaying past ones.
 Restarts do not post the same trigger twice.
 For `schedule:fired` hooks that run more than once for the same occurrence, see [Hooks](hooks.md#event-notes).
+
+## Automations
+
+Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
+MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](plugins.md#automations) can add more.
+The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
+Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
+
+```yaml
+defaults:
+  automations: []                # inherited by agents that omit the field
+
+agents:
+  mind:
+    memory_backend: file
+    automations:
+      - prompt_curation          # the built-in with its defaults
+      # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
+      - dreaming
+      - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}   # from a plugin
+```
+
+- An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
+- Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
+- `cron` is a five-field expression in the configured [timezone](#timezone).
+- `room` is a room alias or ID; it defaults to the agent's first configured room.
+- Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
+- `agents.<name>.automations: []` turns inherited defaults off for one agent.
+- Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
+- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
+- Edits apply on config reload without restarting the agent.
+- The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
+- When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
+- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- A check that cannot read what it checks posts a warning in the room.
+- A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
+
+For conditions that need your own code, write a [plugin automation](plugins.md#automations), or gate an ordinary recurring schedule with a [`schedule:fired` hook](hooks.md#event-notes), which can suppress a fire or rewrite its message.
+
+### `prompt_curation`
+
+Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
+`prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
+
+1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4).
+2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
+3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
+4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
+    - a file can no longer be read safely;
+    - a file shrank by more than 25%;
+    - the files total less than the floor, or did not shrink;
+    - a file is no longer valid UTF-8;
+    - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
+
+When the files changed and none of these holds, verify reports the new size and marks the thread resolved.
+When the prompt files are unchanged, verify only checks that no `memory/` detail was deleted, and otherwise reports that nothing changed.
+Verify never changes the files; the agent's answer to a re-check is not verified again, and the next pass comes on the next scheduled check.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `0 4 * * *` | When to check |
+| `room` | first configured room | Where to post the prompt |
+| `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
+| `min_reduction` | `0.10` (at most `0.25`) | Smallest cut the prompt asks for; no file may shrink more than 25%, so no pass can be asked for more |
+| `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
+| `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
+| `model` | the agent's model | A key of `models` to run the prompt and its re-check with, for example one with a larger context window than the agent's everyday model |
+
+`prompt_curation` needs `memory_backend: file`, because moved detail must stay searchable, and the prompt templates are overridable as `PROMPT_CURATION_PROMPT_TEMPLATE` and `PROMPT_CURATION_RECHECK_TEMPLATE`.
+
+### `dreaming`
+
+`dreaming` keeps the agent's `memory/` files current: each night it reconciles them with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+1. It runs only when a [thread export](thread-exports.md) or a daily note from before today is new or changed since its last run, so a night without new threaded messages in the agent's rooms and without new daily notes costs nothing.
+2. The agent proposes changes in a copy of `memory/`: it updates facts that later evidence corrects, marks superseded lines instead of deleting them, files new durable facts such as decisions, preferences, and stable settings in topic files with their source and date, records conflicting sources with both versions, and removes duplicates.
+   It leaves transient tasks in the daily notes and never removes or doubts a fact only because newer notes do not mention it.
+3. A second run, in a thread of its own, reviews the proposal against its sources and approves or rejects it.
+4. MindRoom applies an approved proposal and marks both threads resolved.
+
+MindRoom never changes `MEMORY.md`, context files, or today's daily note; the agent suggests changes to them in its report.
+When the review rejects a proposal, a run stops unfinished or changes a file it may not, or memory changed during the run, nothing is applied; the next run, once a new thread export or daily note arrives, retries the same inputs and starts from any proposal that reached review and its review.
+A run handles at most 40 inputs; the rest wait for later runs.
+Turning the automation or thread exports on starts from conversations and notes of the last seven days instead of reviewing the older archive.
+Each run keeps its agenda and report, and a run that reached review also its patch and verdict, in `.mindroom/dreaming/runs/<run>/` in the workspace, the newest 30 runs at least; undo an applied run with `git apply -R .mindroom/dreaming/runs/<run>/proposal.patch` from the workspace root.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `15 3 * * *` | When to check |
+| `room` | first configured room | Where both prompts are posted |
+| `model` | the agent's model | A key of `models` to run both prompts with |
+
+`dreaming` needs `memory_backend: file` and something to work from: [auto-flush](memory.md#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](thread-exports.md) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
+It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.

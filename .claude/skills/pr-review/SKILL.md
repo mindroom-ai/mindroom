@@ -70,7 +70,8 @@ Do not require refactors of untouched code unless they have clear immediate ROI.
 - **PR**: Is the PR description and title clear and informative?
 - **Docs**: Do docs changes follow the Documentation Policy in @AGENTS.md?
   A change to configuration, user-visible behavior, or an operator procedure without an update to its owning page is a blocker.
-  Docs text that narrates a bug fix or describes implementation mechanics outside `docs/architecture/` is also a blocker; a fix that restores documented behavior needs no docs change.
+  Docs text that fails the policy's question test is also a blocker: a narrated bug fix, or, in user docs, implementation mechanics or a hardening limit or rare failure or recovery path that no user would plausibly ask about.
+  A fix that restores documented behavior, a refactor, or hardening whose limits normal use never reaches needs no user-docs change, so never ask for one; contributor and operator pages, meaning `docs/architecture/` and pages outside the `zensical.toml` nav, follow their own update rules.
 - **Tests**: Are there tests, and do they cover the changes adequately?
   Are they testing something meaningful or are they just trivial?
   On NixOS, run them inside `nix-shell shell.nix` (or use `nix-shell shell.nix --run 'uv run pytest -x -n 0 --no-cov -v'`).

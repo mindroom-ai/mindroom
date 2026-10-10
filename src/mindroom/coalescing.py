@@ -8,7 +8,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import islice
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .cancellation import request_task_cancel
 from .coalescing_batch import (
@@ -20,6 +20,7 @@ from .coalescing_batch import (
     build_prepared_turn,
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
+    pending_event_addressing,
     pending_event_run_identity,
 )
 from .coalescing_cleanup import (
@@ -32,11 +33,12 @@ from .coalescing_policy import (
     QueueKind,
     is_coalescing_exempt_source_kind,
     pending_event_is_text,
+    pending_events_sent_together,
     queue_kind,
     source_or_event_allows_room_scope_batching,
 )
 from .dispatch_recovery_context import turn_dispatch_recovery_scope
-from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .logging_config import get_logger
 from .response_admission import ResponseAdmissionRefusedError
@@ -49,7 +51,7 @@ from .runtime_shutdown import (
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from .ingress_lanes import LaneDelivery
 
@@ -205,7 +207,11 @@ class CoalescingGate:
     they flush as soon as the conversation idles, since later ingress is
     admitted under the conversation's live key and could never join the held
     backlog. Each consecutive same-requester run flushes as its own turn, so
-    no sender's messages execute under another sender's identity.
+    no sender's messages execute under another sender's identity. At the top
+    level of a thread-mode room, where each message starts its own
+    conversation, only a burst whose messages were each sent within the
+    debounce window of the previous one and that holds voice or media shares
+    a turn, even when a backlog is delivered at once.
     """
 
     def __init__(
@@ -250,6 +256,45 @@ class CoalescingGate:
         """Return whether a lane or coalescing gate still owns one exact source."""
         return self._lanes.has_pending_source_event(source_event_id) or self._gate_owns_source_event(source_event_id)
 
+    def apply_pending_edit(
+        self,
+        *,
+        room_id: str,
+        source_event_id: str,
+        sender: str,
+        body: str,
+        new_content: Mapping[str, Any],
+        for_another_participant: bool | None,
+    ) -> bool:
+        """Give a text message still waiting in a queue the text its sender edited it to; return whether one did.
+
+        A message a flush already claimed answers the text it had then.
+        """
+        for gate in self._gates.values():
+            for queued in gate.queue:
+                pending_event = queued.pending_event
+                event = pending_event.event
+                if (
+                    queued.source_event_id != source_event_id
+                    or pending_event.room.room_id != room_id
+                    or event.sender != sender
+                    or event.raw_event is not None
+                ):
+                    continue
+                content = dict(new_content)
+                # The edit's new content carries no relation; the message stays where it was posted.
+                relation = event.source.get("content", {}).get("m.relates_to")
+                if relation is not None:
+                    content["m.relates_to"] = relation
+                pending_event.event = replace(
+                    event,
+                    body=body,
+                    source={**event.source, "content": content},
+                    for_another_participant=for_another_participant,
+                )
+                return True
+        return False
+
     def queued_pending_events(self, key: CoalescingKey) -> tuple[PendingEvent, ...]:
         """Return the unclaimed events still queued under one coalescing key."""
         gate = self._gates.get(key)
@@ -259,10 +304,11 @@ class CoalescingGate:
         """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
         return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
 
-    def follow_up_backlog_queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
-        """Return whether an active follow-up backlog still queues a run other than this requester's own messages."""
-        return is_active_follow_up_coalescing_key(key) and any(
+    def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
+        """Return whether a queue still holds a run other than this requester's own messages for this agent."""
+        return any(
             pending_event_run_identity(key, pending_event) != (requester_user_id, None)
+            or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
 
@@ -379,6 +425,10 @@ class CoalescingGate:
         )
 
     @staticmethod
+    def _queued_event_is_voice(queued: _QueuedEvent) -> bool:
+        return VOICE_SOURCE_KIND in {queued.source_kind, queued.pending_event.event.source_kind}
+
+    @staticmethod
     def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
         return (
             queued.source_event_id == thread_id
@@ -394,11 +444,15 @@ class CoalescingGate:
         room_gate = self._gates.get(room_key)
         if room_gate is None or room_gate.phase is not _GatePhase.DEBOUNCE or room_gate.claimed_admissions:
             return None
-        candidate_count = self._front_normal_run_length(room_gate, coalesce_normal_events=True)
+        candidate_count = self._front_normal_run_length(room_gate, run_limit=self._front_run_limit(room_key, room_gate))
         candidates = list(room_gate.queue)[:candidate_count]
+        # A voice note ends a room burst, except the one this thread's caption replies to.
         if (
             not candidates
-            or pending_event_is_text(candidates[-1].pending_event)
+            or (
+                self._queued_event_is_voice(candidates[-1])
+                and not self._queued_event_is_thread_root_media(candidates[-1], key.thread_id)
+            )
             or not self._queued_event_allows_room_scope_batching(candidates[-1])
             or not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates)
         ):
@@ -535,7 +589,7 @@ class CoalescingGate:
     def _front_normal_run_length(
         gate: _GateEntry,
         *,
-        coalesce_normal_events: bool,
+        run_limit: int | None,
         max_receipt_time: float | None = None,
     ) -> int:
         count = 0
@@ -544,7 +598,7 @@ class CoalescingGate:
                 break
             if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 break
-            if count > 0 and not coalesce_normal_events:
+            if run_limit is not None and count >= run_limit:
                 break
             count += 1
         return count
@@ -553,13 +607,13 @@ class CoalescingGate:
     def _front_live_run_length(
         gate: _GateEntry,
         *,
-        coalesce_normal_events: bool,
+        run_limit: int | None,
         max_receipt_time: float | None = None,
     ) -> int:
         """Keep later adaptive text behind an already complete live utterance."""
         normal_count = CoalescingGate._front_normal_run_length(
             gate,
-            coalesce_normal_events=coalesce_normal_events,
+            run_limit=run_limit,
             max_receipt_time=max_receipt_time,
         )
         immediate_count = 0
@@ -577,25 +631,22 @@ class CoalescingGate:
     def _has_barrier_after_front_normal_run(
         gate: _GateEntry,
         *,
-        coalesce_normal_events: bool,
+        run_limit: int | None,
     ) -> bool:
-        normal_count = CoalescingGate._front_live_run_length(
-            gate,
-            coalesce_normal_events=coalesce_normal_events,
-        )
+        normal_count = CoalescingGate._front_live_run_length(gate, run_limit=run_limit)
         return normal_count < len(gate.queue)
 
-    def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> bool:
+    def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
         """Return whether the claimable front run is terminated by a text-like utterance."""
-        count = self._front_live_run_length(gate, coalesce_normal_events=coalesce_normal_events)
+        count = self._front_live_run_length(gate, run_limit=run_limit)
         return (
             count > 0
             and pending_event_is_text(gate.queue[count - 1].pending_event)
             and gate.queue[count - 1].pending_event.text_debounce_seconds <= 0
         )
 
-    def _front_debounce_seconds(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> float:
-        count = self._front_live_run_length(gate, coalesce_normal_events=coalesce_normal_events)
+    def _front_debounce_seconds(self, gate: _GateEntry, *, run_limit: int | None) -> float:
+        count = self._front_live_run_length(gate, run_limit=run_limit)
         if count and pending_event_is_text(gate.queue[count - 1].pending_event):
             return max(gate.queue[count - 1].pending_event.text_debounce_seconds, 0.0)
         return max(self._debounce_seconds(), 0.0)
@@ -604,15 +655,13 @@ class CoalescingGate:
     def _front_normal_run_latest_receipt_time(
         gate: _GateEntry,
         *,
-        coalesce_normal_events: bool,
+        run_limit: int | None,
         debounce_seconds: float,
     ) -> float:
         if not gate.queue:
             return time.monotonic()
         latest_receipt_time = gate.queue[0].receipt_time
-        if not coalesce_normal_events:
-            return latest_receipt_time
-        for queued in list(gate.queue)[1:]:
+        for queued in islice(gate.queue, 1, run_limit):
             if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 break
             if queued.receipt_time > latest_receipt_time + debounce_seconds:
@@ -855,7 +904,7 @@ class CoalescingGate:
         self,
         gate: _GateEntry,
         *,
-        coalesce_normal_events: Callable[[], bool],
+        run_limit: Callable[[], int | None],
     ) -> _DebounceWaitResult:
         """Wait for the live quiet window, returning early when the batch completes.
 
@@ -867,25 +916,25 @@ class CoalescingGate:
         if not gate.queue:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
-        coalesce = coalesce_normal_events()
-        debounce_seconds = self._front_debounce_seconds(gate, coalesce_normal_events=coalesce)
+        limit = run_limit()
+        debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
         if (
             debounce_seconds <= 0
             or self._is_shutting_down()
             or gate.drain_all_requested
-            or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce)
+            or self._front_normal_run_ends_with_text(gate, run_limit=limit)
         ):
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
         quiet_deadline = (
             self._front_normal_run_latest_receipt_time(
                 gate,
-                coalesce_normal_events=coalesce,
+                run_limit=limit,
                 debounce_seconds=debounce_seconds,
             )
             + debounce_seconds
         )
-        if self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce):
+        if self._has_barrier_after_front_normal_run(gate, run_limit=limit):
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=quiet_deadline)
         gate.deadline = quiet_deadline
@@ -893,45 +942,52 @@ class CoalescingGate:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
-            coalesce = coalesce_normal_events()
-            debounce_seconds = self._front_debounce_seconds(gate, coalesce_normal_events=coalesce)
-            if not gate.queue or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
+            limit = run_limit()
+            debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
+            if not gate.queue or self._front_normal_run_ends_with_text(gate, run_limit=limit):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
                 self._is_shutting_down()
                 or gate.drain_all_requested
-                or self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce)
+                or self._has_barrier_after_front_normal_run(gate, run_limit=limit)
             ):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
             quiet_deadline = (
                 self._front_normal_run_latest_receipt_time(
                     gate,
-                    coalesce_normal_events=coalesce,
+                    run_limit=limit,
                     debounce_seconds=debounce_seconds,
                 )
                 + debounce_seconds
             )
             gate.deadline = quiet_deadline
 
-    @staticmethod
-    def _front_admissions_allow_room_scope_coalescing(gate: _GateEntry) -> bool:
-        """Return whether front normal admissions allow room-level batching policy."""
-        for queued in gate.queue:
-            if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
-                return False
-            if CoalescingGate._queued_event_allows_room_scope_batching(queued):
-                return True
-        return False
+    def _front_run_limit(self, key: CoalescingKey, gate: _GateEntry) -> int | None:
+        """Return how many front admissions may share one turn, or None for the whole front run.
 
-    def _should_coalesce_normal_events(self, key: CoalescingKey, gate: _GateEntry) -> bool:
-        if key.thread_id is not None:
-            return True
-        if self._room_scope_is_single_conversation is not None and self._room_scope_is_single_conversation(
-            key.room_id,
+        A thread, or a room treated as one conversation, batches its whole front run.
+        Otherwise each room-level message starts its own conversation, so only a
+        burst whose messages were each sent within the debounce window of the
+        previous one, and that holds voice or media, shares a turn.
+        """
+        if key.thread_id is not None or (
+            self._room_scope_is_single_conversation is not None and self._room_scope_is_single_conversation(key.room_id)
         ):
-            return True
-        return self._front_admissions_allow_room_scope_coalescing(gate)
+            return None
+        window_seconds = max(self._debounce_seconds(), 0.0)
+        burst: list[_QueuedEvent] = []
+        for queued in gate.queue:
+            if self._queued_kind(queued) is not QueueKind.NORMAL:
+                break
+            if burst and not pending_events_sent_together(
+                burst[-1].pending_event,
+                queued.pending_event,
+                window_seconds=window_seconds,
+            ):
+                break
+            burst.append(queued)
+        return len(burst) if any(self._queued_event_allows_room_scope_batching(queued) for queued in burst) else 1
 
     def _log_dispatch_failure(
         self,
@@ -1150,7 +1206,7 @@ class CoalescingGate:
 
         candidate_count = self._front_live_run_length(
             gate,
-            coalesce_normal_events=self._should_coalesce_normal_events(key, gate),
+            run_limit=self._front_run_limit(key, gate),
             max_receipt_time=debounce_result.quiet_deadline,
         )
         if candidate_count == 0:
@@ -1167,11 +1223,24 @@ class CoalescingGate:
 
     @staticmethod
     def _front_same_run_identity_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
-        """Cap a front run at its first run-identity change so each turn runs as its own sender."""
+        """Cap a front run at its first change of run identity or addressing, so each turn runs as its own sender.
+
+        Uploads that mention nobody just before an addressing change stay with the message after them, their caption.
+        """
         front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
+        addressing: bool | None = None
+        uploads_start: int | None = None
         for index, queued in enumerate(islice(gate.queue, count)):
             if pending_event_run_identity(key, queued.pending_event) != front_identity:
                 return index
+            event_addressing = pending_event_addressing(queued.pending_event)
+            if event_addressing is None:
+                uploads_start = index if uploads_start is None else uploads_start
+                continue
+            if addressing is not None and event_addressing != addressing:
+                return index if uploads_start is None else uploads_start
+            addressing = event_addressing
+            uploads_start = None
         return count
 
     async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:
@@ -1185,10 +1254,7 @@ class CoalescingGate:
         candidate_count = self._front_same_run_identity_length(
             key,
             gate,
-            self._front_normal_run_length(
-                gate,
-                coalesce_normal_events=True,
-            ),
+            self._front_normal_run_length(gate, run_limit=None),
         )
         if candidate_count == 0:
             return False
@@ -1213,7 +1279,7 @@ class CoalescingGate:
 
         debounce_result = await self._wait_for_debounce(
             gate,
-            coalesce_normal_events=lambda key=key, entry=gate: self._should_coalesce_normal_events(key, entry),
+            run_limit=lambda key=key, entry=gate: self._front_run_limit(key, entry),
         )
         if not gate.queue:
             return

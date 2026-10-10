@@ -24,6 +24,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](https://docs.mindroom.chat/getting-started/)).
+The [macOS app's local model setup](https://docs.mindroom.chat/installation/macos-app/#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.
 
 ## Model Config Fields
 
@@ -69,7 +70,7 @@ models:
 
   haiku:
     provider: anthropic
-    id: claude-haiku-4-5
+    id: claude-haiku-5-5
     context_window: 200000
 
   # OpenAI
@@ -248,7 +249,7 @@ models:
       reasoning_effort: high
 ```
 
-[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Sol and Luna support function calling in Chat Completions only with `reasoning_effort: none`.
+[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6.1 Sol and GPT-6 Luna support function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
 Selecting Responses keeps any `extra_kwargs.store: false` setting.
@@ -457,7 +458,7 @@ Some models reject sampling controls:
 
 - Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
 - MindRoom also omits those controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
-- [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6 Sol and Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
+- [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Sol and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 - For Mem0 memory extraction with `provider: openai`, use GPT-6 Luna; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 models reject.
 
 ## Prompt Caching

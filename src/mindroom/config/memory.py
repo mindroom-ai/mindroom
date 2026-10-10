@@ -103,6 +103,11 @@ class _MemoryFileConfig(BaseModel):
         ge=1,
         description="Maximum number of lines to preload from MEMORY.md",
     )
+    max_entrypoint_tokens: int = Field(
+        default=50000,
+        ge=1,
+        description="Maximum estimated tokens (characters / 4) of whole lines to preload from MEMORY.md",
+    )
 
 
 class _MemoryAutoFlushBatchConfig(BaseModel):

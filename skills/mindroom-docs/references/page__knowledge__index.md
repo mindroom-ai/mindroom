@@ -52,7 +52,7 @@ agents:
 
 A files-mode base has no vector index, does not use the embedder, and does not provide `search_knowledge_base`.
 The agent needs a workspace, which `memory_backend: file` creates at `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
-When the base's path is inside that workspace, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
+When the base's path is inside that workspace and the folder exists, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
 Bases outside the workspace are not linked, and with the default [`file_access: workspace`](https://docs.mindroom.chat/configuration/agents/#configuration-options) the agent's file tools cannot reach them.
 
 ## Configuration
@@ -370,6 +370,49 @@ Store this object under the service named by `credentials_service`:
 `private_key_file` must be an absolute path, ideally a read-only secret mount; do not put the PEM contents in the credential object.
 `repo_url` must use the canonical `https://github.com/<owner>/<repository>` form.
 MindRoom requests short-lived installation tokens limited to that repository with read-only Contents permission, so the App needs Contents read access, and the tokens are never written to disk or logs.
+
+## Open Knowledge Format Bundles
+
+An [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF) bundle is a folder of markdown files whose YAML frontmatter records who wrote each concept, who verified it, and whether it is current.
+Use `mode: files` for OKF bundles, because semantic search cannot filter on frontmatter.
+Agents with the bundled `open-knowledge-format` skill report trust and freshness when they answer, and when they edit, they record themselves as the author and add a `verified` entry only when a person confirms the content.
+
+### Reading a Published Bundle
+
+Mirror the bundle's repository inside the agent workspace and name the bundle root in the description:
+
+```yaml
+knowledge_bases:
+  acme_okf:
+    description: Acme Retail finance knowledge, a read-only Open Knowledge Format (OKF) bundle mirrored from Git. Start at knowledge/acme_okf/bundles/acme_retail/index.md.
+    mode: files
+    path: ${MINDROOM_STORAGE_PATH}/agents/analyst/workspace/okf/acme
+    git:
+      repo_url: https://github.com/GoogleCloudPlatform/open-knowledge-format
+
+agents:
+  analyst:
+    display_name: Analyst
+    role: Answers questions from the team's knowledge bundles
+    memory_backend: file
+    tools: [file]
+    knowledge_bases: [acme_okf]
+    skills: [open-knowledge-format]
+```
+
+The mirror is a [Git-backed base](#git-backed-knowledge-bases), so trigger a sync from the dashboard to clone it before the first poll.
+
+### Maintaining a Bundle with Agents
+
+For a bundle that agents edit, create a local folder with a root `index.md` inside the agent workspace, then add it to the agent's `knowledge_bases`:
+
+```yaml
+knowledge_bases:
+  ops_wiki:
+    description: The team's ops wiki, an Open Knowledge Format (OKF) bundle that the team and its agents maintain.
+    mode: files
+    path: ${MINDROOM_STORAGE_PATH}/agents/analyst/workspace/okf/ops_wiki
+```
 
 ## Embedder Configuration
 

@@ -31,7 +31,6 @@ from backend.routes import (
     sso,
     stripe_routes,
     subscriptions,
-    usage,
     webhooks,
 )
 from fastapi import FastAPI, Request
@@ -271,7 +270,6 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(accounts.router)
 app.include_router(subscriptions.router)
-app.include_router(usage.router)
 app.include_router(instances.router)
 app.include_router(matrix_oidc.router)
 app.include_router(provisioner.router)
@@ -281,9 +279,6 @@ app.include_router(stripe_routes.router)
 app.include_router(sso.router)
 app.include_router(webhooks.router)
 app.include_router(gdpr.router)
-
-# Keep a reference list of primary endpoints for tooling/tests that grep this file
-EXPOSED_ENDPOINTS = ["/my/subscription", "/my/usage", "/my/account/admin-status", "/admin/stats"]
 
 
 if __name__ == "__main__":

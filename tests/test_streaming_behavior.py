@@ -49,9 +49,10 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import (
-    _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
+    CANCELLED_RESPONSE_NOTE,
+    ProgressPermission,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingLifecycleSuspensionError,
@@ -87,8 +88,10 @@ from tests.conftest import (
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
@@ -243,6 +246,44 @@ async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_pat
     assert shutdown_error is None
     mock_client.room_send.assert_awaited_once()
     assert mock_client.room_send.await_args.kwargs["content"]["body"] == "latest body"
+
+
+@pytest.mark.asyncio
+async def test_a_progress_edit_its_records_defer_is_skipped_not_failed(tmp_path: Path) -> None:
+    """While an earlier durable write of the reply is unresolved, progress waits; a later edit shows it."""
+    mock_client = _make_matrix_client_mock()
+    mock_response = MagicMock()
+    mock_response.__class__ = nio.RoomSendResponse
+    mock_response.event_id = "$edit"
+    mock_client.room_send.return_value = mock_response
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    permissions = [ProgressPermission.DEFER, ProgressPermission.SEND]
+
+    async def write_ahead(_progress: object) -> ProgressPermission:
+        return permissions.pop(0)
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        update_interval=10.0,
+        min_update_interval=10.0,
+        interval_ramp_seconds=0.0,
+        update_char_threshold=1,
+        min_update_char_threshold=1,
+        min_char_update_interval=0.0,
+        progress_write_ahead=write_ahead,
+    )
+    streaming.event_id = "$reply"
+    streaming.accumulated_text = "progress"
+    streaming.chars_since_last_update = len(streaming.accumulated_text)
+
+    assert await streaming._send_or_edit_message(mock_client)
+    mock_client.room_send.assert_not_awaited()
+    streaming.accumulated_text = "more progress"
+    assert await streaming._send_or_edit_message(mock_client)
+    mock_client.room_send.assert_awaited_once()
+    assert mock_client.room_send.await_args.kwargs["content"]["m.new_content"]["body"] == "more progress"
 
 
 @pytest.fixture
@@ -747,7 +788,7 @@ class TestStreamingBehavior:
 
     def test_is_interrupted_partial_reply_detects_terminal_markers(self) -> None:
         """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
-        assert is_interrupted_partial_reply(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply("Draft answer\n\n**[Response interrupted by an error: boom]**")
         assert is_interrupted_partial_reply("Draft [cancelled]   ")
         assert not is_interrupted_partial_reply("Discuss [error] in this sentence")
@@ -756,13 +797,13 @@ class TestStreamingBehavior:
 
     def test_is_interrupted_partial_reply_recognises_all_three_variants(self) -> None:
         """Interrupted partial-reply detection should recognize every live cancel note."""
-        assert is_interrupted_partial_reply(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply(build_restart_interrupted_body("Draft answer"))
 
     def test_clean_partial_reply_text_strips_shared_markers(self) -> None:
         """Shared partial-reply cleanup should normalize cancelled/error/placeholder bodies."""
-        assert clean_partial_reply_text(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == "Draft answer"
+        assert clean_partial_reply_text(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == "Draft answer"
         assert (
             clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
         )
@@ -786,7 +827,7 @@ class TestStreamingBehavior:
 
     def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
         """User-stop labels should collapse to the canonical interrupted replay marker."""
-        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == (
+        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == (
             f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
@@ -1974,7 +2015,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_journal_support(bot)
-        bot.client = MagicMock(rooms={})
+        bot.client = make_matrix_client_mock(user_id=mock_helper_agent.user_id)
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         replace_response_runner_deps(
             bot,
@@ -2003,44 +2044,32 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
-            *,
-            retry_sync_recovery: bool = False,  # noqa: ARG001
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             sent_contents.append(content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            _new_content: dict[str, object],
-            _new_text: str,
-            *,
-            retry_sync_recovery: bool = False,  # noqa: ARG001
-        ) -> DeliveredMatrixEvent:
-            return DeliveredMatrixEvent(event_id="$stream_1", content_sent={})
-
+        request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=(envelope.source_event_id,),
+                logical_source_event_ids=(envelope.source_event_id,),
+            ),
+            thread_history=[],
+            prompt="Continue",
+            user_id="@user:localhost",
+            response_envelope=envelope,
+            correlation_id="$request:localhost",
+        )
+        runner = unwrap_extracted_collaborator(bot._response_runner)
         with (
-            patch("mindroom.streaming.send_message_result", new=record_send),
-            patch("mindroom.streaming.edit_message_result", new=record_edit),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=record_send),
             patch_response_runner_module(
                 stream_agent_response=MagicMock(return_value=response_stream()),
                 typing_indicator=noop_typing,
             ),
         ):
-            generation = await bot._response_runner._process_and_respond_streaming(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=(envelope.source_event_id,),
-                        logical_source_event_ids=(envelope.source_event_id,),
-                    ),
-                    thread_history=[],
-                    prompt="Continue",
-                    user_id="@user:localhost",
-                    response_envelope=envelope,
-                    correlation_id="$request:localhost",
-                ),
-            )
+            async with response_span(runner, request):
+                generation = await runner._process_and_respond_streaming(request)
 
         assert generation.delivery.event_id == "$stream_1"
         assert sent_contents
@@ -2311,7 +2340,7 @@ class TestStreamingBehavior:
 
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
-        assert edited_texts[-1] == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
+        assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
         assert exc_info.value.transport_outcome.terminal_status == "cancelled"
         assert exc_info.value.transport_outcome.failure_reason == "cancelled_by_user"
 

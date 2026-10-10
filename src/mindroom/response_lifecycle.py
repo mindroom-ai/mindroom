@@ -18,7 +18,6 @@ from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
-from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -253,6 +252,37 @@ class ResponseLifecycleCoordinator:
 
     _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
+    # A pending approval counts as an active response turn of its conversation, by approval.
+    _approval_holds: dict[str, ResponseLifecycleKey] = field(default_factory=dict)
+
+    def hold_for_approval(self, approval_id: str, target: MessageTarget) -> None:
+        """Keep a conversation busy while an approval of its reply is pending; holding it again changes nothing.
+
+        Later messages wait as they wait behind a running response. The hold
+        does not take the lifecycle lock, so the approval's own resume and
+        settlement still run.
+        """
+        if approval_id in self._approval_holds:
+            return
+        self._approval_holds[approval_id] = target.lifecycle_key
+        self._get_or_create_queued_signal(target).begin_response_turn()
+
+    def release_approval_hold(self, approval_id: str) -> None:
+        """End the hold of an approval that ended, letting its conversation's waiting messages run."""
+        lifecycle_key = self._approval_holds.pop(approval_id, None)
+        if lifecycle_key is not None:
+            self._thread_queued_signals[lifecycle_key].finish_response_turn()
+
+    def release_approval_holds_in_room(self, room_id: str) -> None:
+        """End the holds of a room this bot left, whose approvals the departure ended."""
+        for approval_id, lifecycle_key in tuple(self._approval_holds.items()):
+            if lifecycle_key.room_id == room_id:
+                self.release_approval_hold(approval_id)
+
+    def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:
+        """Return the approvals that hold one conversation."""
+        lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
+        return tuple(approval_id for approval_id, key in self._approval_holds.items() if key == lifecycle_key)
 
     def _has_active_response_for_thread_key(self, lifecycle_key: ResponseLifecycleKey) -> bool:
         queued_signal = self._thread_queued_signals.get(lifecycle_key)
@@ -405,9 +435,6 @@ class ResponseLifecycleCoordinator:
         existing_turn = queued_signal.begin_response_turn()
         if not (existing_turn or lifecycle_lock.locked()):
             return None
-        if response_envelope.origin.intent is TurnIntent.HELD_REPLY_CONTINUATION:
-            # The running reply takes over the work this wake would continue, so the wake must not end its waits.
-            return None
         source_event_id = response_envelope.source_event_id
         if signal_queued_message and self._should_signal_queued_message(response_envelope):
             # An ingress reservation may already hold this source's notice for the running reply.
@@ -551,37 +578,6 @@ class ResponseLifecycleCoordinator:
                 notice=notice,
                 queued_signal=queued_signal,
             )
-
-    async def run_locked_target_operation(
-        self,
-        *,
-        target: MessageTarget,
-        while_waiting: Callable[[], Awaitable[None]] | None,
-        locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
-    ) -> _LockedResponseResult:
-        """Run a non-response operation under one target's response lock."""
-        lifecycle_lock = self._response_lifecycle_lock(target)
-        acquire_task = asyncio.create_task(lifecycle_lock.acquire())
-        lock_acquired = False
-        try:
-            if while_waiting is None:
-                await acquire_task
-                lock_acquired = True
-                return await locked_operation()
-            while not acquire_task.done():
-                await while_waiting()
-                await asyncio.wait({acquire_task}, timeout=0.01)
-            await acquire_task
-            lock_acquired = True
-            return await locked_operation()
-        finally:
-            if not acquire_task.done():
-                acquire_task.cancel()
-                await asyncio.gather(acquire_task, return_exceptions=True)
-            elif not lock_acquired and not acquire_task.cancelled() and acquire_task.exception() is None:
-                lifecycle_lock.release()
-            if lock_acquired:
-                lifecycle_lock.release()
 
 
 @dataclass(frozen=True)

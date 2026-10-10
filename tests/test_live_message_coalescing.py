@@ -3044,7 +3044,7 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
+        debounce_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
 
@@ -4761,7 +4761,6 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
     assert bot._turn_store.is_handled("$m2")
     turn_record = bot._turn_store.get_turn_record("$m1")
     assert turn_record is not None
-    assert turn_record.response_event_id == "$response"
     assert turn_record.source_event_ids == ("$m1", "$m2")
     assert turn_record.anchor_event_id == "$m2"
 

@@ -421,7 +421,7 @@ class TestInstancesEndpoints:
         response = client.post("/my/instances/provision")
 
         assert response.status_code == 402
-        assert "Upgrade" in response.json()["detail"]
+        assert "Choose a plan" in response.json()["detail"]
         mock_provision_instance.assert_not_called()
 
     def test_start_user_instance_success(

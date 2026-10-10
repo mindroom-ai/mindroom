@@ -871,8 +871,11 @@ function UnionEditor({
             root={root}
             value={effective}
             // Pydantic reports discriminated-union errors under the tag value.
-            path={[...path, String(selected.discriminatorValue)]}
-            exclude={[discriminator]}
+            path={[...path, selected.errorTag ?? ""]}
+            // A variant with a fixed tag sets it itself; the fallback variant lets the user type it.
+            exclude={
+              selected.discriminatorValue === undefined ? [] : [discriminator]
+            }
             onFieldChange={(key, next) =>
               onChange(setObjectKey(effective, key, next))
             }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tracemalloc
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -83,11 +84,12 @@ def test_clear_thread_export_root_removes_only_owned_content(tmp_path: Path) -> 
     note = output_dir / "operator-note.txt"
     note.write_text("keep", encoding="utf-8")
 
-    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+    assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is True
 
     assert not room_dir.exists()
     assert (output_dir / _ROOT_MARKER_FILENAME).exists()
     assert note.read_text(encoding="utf-8") == "keep"
+    assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
 
     prepare_export_root(output_dir, trusted_root=tmp_path)
 
@@ -95,12 +97,14 @@ def test_clear_thread_export_root_removes_only_owned_content(tmp_path: Path) -> 
 def test_clear_thread_export_root_retains_empty_owned_directory(
     tmp_path: Path,
 ) -> None:
-    """Cleanup retains the owned root so later exports can reuse it safely."""
+    """Cleanup retains the owned root so later exports can reuse it safely, and an empty one costs no fsync."""
     output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
     _mark_export_root(output_dir)
 
-    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+    with patch.object(thread_export_storage, "_fsync_directory_fd") as fsync:
+        assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
 
+    fsync.assert_not_called()
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
 
 
@@ -116,6 +120,46 @@ def test_clear_thread_export_root_never_drops_ownership_before_cleanup_finishes(
 
     unlink.assert_not_called()
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+def test_clear_thread_export_root_warns_once_per_unrecognized_entry(tmp_path: Path) -> None:
+    """Repeat clearing passes report each foreign entry path once and log later passes at debug level."""
+    output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
+    _mark_export_root(output_dir)
+    notes = [output_dir / "notes.txt", output_dir / "lobby" / "notes.txt", output_dir / "support" / "notes.txt"]
+    for note in notes:
+        note.parent.mkdir(exist_ok=True)
+        note.write_text("keep", encoding="utf-8")
+
+    with (
+        patch("mindroom.thread_export.storage.logger.warning") as warning,
+        patch("mindroom.thread_export.storage.logger.debug") as debug,
+    ):
+        for _ in range(3):
+            assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
+
+    assert all(note.read_text(encoding="utf-8") == "keep" for note in notes)
+    assert all(call.args == ("Leaving unrecognized thread export entry untouched",) for call in warning.call_args_list)
+    assert sorted(call.kwargs["entry"] for call in warning.call_args_list) == [
+        "lobby/notes.txt",
+        "notes.txt",
+        "support/notes.txt",
+    ]
+    assert [call.args for call in debug.call_args_list] == [("Leaving unrecognized thread export entry untouched",)] * 6
+
+
+def test_unrecognized_entry_warnings_start_over_when_the_set_is_full(tmp_path: Path) -> None:
+    """Worker-created entry names cannot grow the warned set past its cap."""
+    with (
+        patch.object(thread_export_storage, "_MAX_WARNED_UNRECOGNIZED_ENTRIES", 2),
+        patch.object(thread_export_storage, "_WARNED_UNRECOGNIZED_ENTRIES", set()) as warned,
+        patch("mindroom.thread_export.storage.logger.warning") as warning,
+    ):
+        for entry in ("a", "b", "c", "c", "a"):
+            thread_export_storage._log_unrecognized_entry(tmp_path, entry)
+
+    assert [call.kwargs["entry"] for call in warning.call_args_list] == ["a", "b", "c", "a"]
+    assert warned == {(tmp_path, "c"), (tmp_path, "a")}
 
 
 def test_clear_thread_export_root_rejects_replaced_parent(tmp_path: Path) -> None:
@@ -332,8 +376,8 @@ def test_room_removal_preserves_a_present_unrecognized_directory(
             remove_room_export(output_dir, _room())
 
     assert keep.read_text(encoding="utf-8") == "private"
-    assert warning.call_count == 2
-    assert all(call.args == ("Leaving unrecognized thread export entry untouched",) for call in warning.call_args_list)
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Leaving unrecognized thread export entry untouched",)
 
 
 def test_room_retraction_is_idempotent_beside_a_foreign_file(tmp_path: Path) -> None:
@@ -580,8 +624,6 @@ def test_thread_above_the_read_cap_stays_indexed_and_is_not_rewritten(
 ) -> None:
     """A thread file above the read cap is still written, indexed from its header, and left alone while unchanged."""
     monkeypatch.setattr(thread_export_storage, "MAX_READ_BYTES", 4_096)
-    # `_read_text_at` binds the cap as its default, so it is lowered there too.
-    monkeypatch.setitem(thread_export_storage._read_text_at.__kwdefaults__, "max_bytes", 4_096)
     output_dir = tmp_path / "thread_exports"
     room = _room()
 
@@ -611,6 +653,57 @@ def test_thread_above_the_read_cap_stays_indexed_and_is_not_rewritten(
     with patch.object(thread_export_storage, "_atomic_write_at", side_effect=AssertionError("rewrote an export")):
         assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")) is False
         write_room_index(output_dir, room)
+
+
+def test_thread_whose_file_passes_the_cap_fails_and_keeps_its_previous_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each emoji takes ten bytes of YAML, so a thread the message guard admits can still be refused for its file size."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+
+    def payload(body: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "thread": {"id": "$emoji:localhost", "source": "matrix"},
+            "messages": [{"event_id": "$e:localhost", "sender": "@user:localhost", "body": body}],
+        }
+
+    assert write_thread_payload(output_dir, room, "$emoji:localhost", payload("short")) is True
+    path = output_dir / "lobby" / _thread_filename("$emoji:localhost")
+    previous = path.read_bytes()
+    monkeypatch.setattr(thread_export_storage, "_MAX_THREAD_FILE_BYTES", 4_096)
+
+    # Four kilobytes of message JSON become ten kilobytes of YAML.
+    with pytest.raises(RuntimeError, match="too large to export"):
+        write_thread_payload(output_dir, room, "$emoji:localhost", payload("\U0001f600" * 1_000))
+    assert path.read_bytes() == previous
+
+
+def test_unchanged_thread_check_holds_one_copy_of_each_export(tmp_path: Path) -> None:
+    """Deciding that a large thread is unchanged holds its new and existing exports, not stripped copies of both."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+
+    def payload(exported_at: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "thread": {"id": "$large:localhost", "source": "matrix", "exported_at": exported_at, "message_count": 1},
+            "messages": [{"event_id": "$e:localhost", "sender": "@user:localhost", "body": "x" * (4 << 20)}],
+        }
+
+    assert write_thread_payload(output_dir, room, "$large:localhost", payload("2026-10-01T00:00:00.123456+00:00"))
+    size = (output_dir / "lobby" / _thread_filename("$large:localhost")).stat().st_size
+    unchanged = payload("2026-10-02T00:00:00+00:00")
+    tracemalloc.start()
+    try:
+        assert write_thread_payload(output_dir, room, "$large:localhost", unchanged) is False
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # The new export, the existing file, and the read's own buffers stay below four copies.
+    assert peak < 4 * size
 
 
 def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
@@ -712,6 +805,66 @@ def test_room_index_rebuild_reads_its_newest_threads_within_a_budget(
         assert indexed() == (["$thread-1:localhost", "$thread-2:localhost"], [])
 
 
+def test_room_index_rebuild_bounds_the_index_planted_thread_values_serialize_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted thread values that serialize to far more than their files cannot grow the index past its budget."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    payload = {"version": 1, "thread": {"id": "$real:localhost", "source": "matrix"}, "messages": []}
+    write_thread_payload(output_dir, room, "$real:localhost", payload)
+    room_dir = output_dir / "lobby"
+    # Indented JSON puts each leaf of a nested id on its own deeply indented line, about forty times its YAML size.
+    nested_id = "[" * 60 + ",".join(["0"] * 3_000) + "]" * 60
+    planted = [room_dir / _thread_filename(f"$planted-{index}:localhost") for index in range(4)]
+    for index, path in enumerate(planted):
+        path.write_text(f"thread:\n  id: {nested_id}\nmessages: []\n", encoding="utf-8")
+        os.utime(path, ns=(index * 1_000_000_000, index * 1_000_000_000))
+    budget = 1 << 20
+    monkeypatch.setattr(thread_export_storage, "_MAX_ROOM_INDEX_JSON_BYTES", budget)
+
+    write_room_index(output_dir, room)
+
+    index_path = room_dir / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert [entry["file"] for entry in index["threads"]] == [
+        _thread_filename("$real:localhost"),
+        planted[3].name,
+        planted[2].name,
+    ]
+    assert index["unindexed_files"] == [planted[0].name, planted[1].name]
+    assert index_path.stat().st_size < budget + (64 << 10)
+
+
+@pytest.mark.parametrize("planted", ["oversized", "deeply-nested"])
+def test_planted_room_index_too_costly_to_decode_is_rebuilt(tmp_path: Path, planted: str) -> None:
+    """Worker code can replace index.json, so one too large or too deep to decode cheaply is rebuilt instead of trusted."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    payload = {"version": 1, "thread": {"id": "$thread:localhost", "source": "matrix"}, "messages": []}
+    write_thread_payload(output_dir, room, "$thread:localhost", payload)
+    write_room_index(output_dir, room)
+    index = output_dir / "lobby" / "index.json"
+    rebuilt = index.read_bytes()
+    if planted == "oversized":
+        # Its filename set still matches, so only its size keeps an unchanged pass from trusting it.
+        index.write_bytes(rebuilt + b" " * thread_export_storage._MAX_ROOM_INDEX_JSON_BYTES)
+    else:
+        index.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+
+    tracemalloc.start()
+    try:
+        write_room_index(output_dir, room, thread_files_changed=False)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert index.read_bytes() == rebuilt
+    # Neither the drift check nor the rewrite reads the oversized file.
+    assert peak < thread_export_storage._MAX_ROOM_INDEX_JSON_BYTES
+
+
 @pytest.mark.parametrize("filename", ["marker", "index"])
 def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: str) -> None:
     """A FIFO agent code plants where an export file belongs is refused instead of blocking the primary."""
@@ -722,6 +875,6 @@ def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: st
             (tmp_path / "marker").rename(tmp_path / thread_export_storage._ROOT_MARKER_FILENAME)
             assert thread_export_storage._has_valid_export_root_marker(root_fd) is False
         else:
-            assert thread_export_storage._read_text_at(root_fd, "index.yaml") is None
+            assert thread_export_storage._read_bytes_at(root_fd, "index.yaml", max_bytes=1_024) is None
     finally:
         os.close(root_fd)

@@ -16,6 +16,8 @@ image:
   digest: ""
   pullPolicy: Always
 
+# Applied to every chart pod and to dedicated Kubernetes worker pods.
+# With a separate workers.kubernetes.namespace, create these Secrets there too; the chart does not copy them.
 imagePullSecrets: []
 
 deploymentAnnotations: {}
@@ -87,7 +89,7 @@ runtime:
   timezone: ""
   timing: false
 
-# Optional listener serving only /api/script-gateway to background scripts on dedicated Kubernetes workers.
+# Optional listener serving only /api/script-gateway and the capability-authenticated /api/agent-cli routes to dedicated Kubernetes workers.
 # Requires workers.backend=kubernetes and the chart's worker egress NetworkPolicy; see "Background Script Gateway" in the README.
 scriptGateway:
   enabled: false
@@ -304,6 +306,13 @@ apiAuth:
   # pod network from dedicated Kubernetes workers, so the chart gives the primary a generated MINDROOM_API_KEY;
   # set true only when other API auth is configured.
   allowUnauthenticatedPrimary: false
+  # Existing Secret holding the primary's MINDROOM_API_KEY instead of the generated one.
+  # Use it with helm template and GitOps tools, where the generated key changes on every offline render.
+  # It must be a Secret this chart does not manage, not <fullname>-api-key, which the chart then stops rendering;
+  # to keep the current key, copy it from <fullname>-api-key into that Secret first.
+  existingSecret: ""
+  # Key in existingSecret that holds the API key.
+  key: MINDROOM_API_KEY
 
 matrix:
   homeserverUrl: ""

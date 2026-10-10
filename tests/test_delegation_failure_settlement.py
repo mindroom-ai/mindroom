@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,32 +10,24 @@ import pytest
 from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.approval_response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
-from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
-from mindroom.response_sources import ResponseSources
-from mindroom.tool_system.events import ToolTraceEntry, serialize_tool_trace
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.delivery_gateway import EditTextRequest
-
 
 def _continuation() -> ApprovalContinuation:
-    return ApprovalContinuation(
+    return approval_continuation(
         approval_id="approval-1",
         run_id="parent-run",
         session_id="parent-session",
-        entity_kind="agent",
         entity_name="leader",
         room_id="!room:test",
-        thread_id="$thread",
         requester_id="@human:test",
         response_event_id="$response",
-        sources=ResponseSources(("$source",), ("$source",)),
-        calls=(),
         state="failing",
         failure_reason="cancelled_by_user",
     )
@@ -59,13 +50,14 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
 
     store = MagicMock(spec=PrincipalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
-    store.finish_approval_continuation = AsyncMock(side_effect=finish)
     coordinator = ApprovalResponseCoordinator(
         config=lambda: config,
         runtime_paths=paths,
         store=store,
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
+        finish_approval=finish,
+        release_approval=AsyncMock(return_value=True),
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
@@ -86,83 +78,70 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
     )
 
 
-async def _settled_edit(
-    tmp_path: Path,
-    continuation: ApprovalContinuation,
-    reason: str,
-    *,
-    visible_text: str | None = None,
-) -> EditTextRequest:
-    """Settle one failed continuation and return the edit its reply received."""
+@pytest.mark.asyncio
+async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> None:
+    """The room-visible failure reply never shows credentials carried by a raw exception reason."""
+    continuation = _continuation()
+    api_key = "sk-" + "test" + "A1b2C3d4E5f6G7h8J9k0"
+    password = "hunter" + "2secret"
+    reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
     store = MagicMock(spec=PrincipalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
-    store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
+    finish_approval = AsyncMock(side_effect=[False, True])
     gateway = MagicMock(spec=DeliveryGateway)
-    gateway.edit_text = AsyncMock(return_value=True)
+    gateway.write_approval_failure_note = AsyncMock(return_value=True)
     coordinator = ApprovalResponseCoordinator(
         config=Config,
         runtime_paths=test_runtime_paths(tmp_path),
         store=store,
         delivery_gateway=gateway,
         retry_sources=lambda _room, _sources: None,
+        finish_approval=finish_approval,
+        release_approval=AsyncMock(return_value=True),
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
         patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
         patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
     ):
-        assert await coordinator.settle_failure(continuation, reason, visible_text=visible_text)
-    return gateway.edit_text.await_args.args[0]
+        assert await coordinator.settle_failure(continuation, reason)
 
-
-@pytest.mark.asyncio
-async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> None:
-    """The room-visible failure reply never shows credentials carried by a raw exception reason."""
-    api_key = "sk-" + "test" + "A1b2C3d4E5f6G7h8J9k0"
-    password = "hunter" + "2secret"
-    reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
-
-    visible = (await _settled_edit(tmp_path, _continuation(), reason)).new_text
-
+    visible = gateway.write_approval_failure_note.await_args.kwargs["text"]
     assert api_key not in visible
     assert password not in visible
     assert "Incorrect API key provided" in visible
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("show_tool_calls", [True, False])
 @pytest.mark.parametrize(
-    "latest",
-    [
-        None,
-        "Streamed on.\n\n🔧 `write_file` [1] ⏳\n\n**[Response cancelled by user]**",
-        "Streamed on.\n\n🔧 `write_file` [1] ⏳\n\n🔧 `read_file` [2]\n\n**[Response cancelled by user]**",
-    ],
+    ("reason", "note"),
+    [("cancelled_by_user", "cancelled"), ("Paused run is no longer available", "error")],
 )
-async def test_stopped_approval_keeps_its_visible_answer_and_trace(
-    tmp_path: Path,
-    show_tool_calls: bool,
-    latest: str | None,
-) -> None:
-    """A stopped approval ends cancelled with the answer it was showing and the trace that answer still presents."""
-    trace = [ToolTraceEntry(type="tool_call_started", tool_name="write_file", tool_call_id="call-1")]
-    continuation = replace(
-        _continuation(),
-        response_text="About to write.\n\n🔧 `write_file` [1] ⏳\n\n",
-        response_tool_trace=serialize_tool_trace(trace, include_internal=True),
-        show_tool_calls=show_tool_calls,
+@pytest.mark.asyncio
+async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, note: str) -> None:
+    """Clients and later turns treat a stopped or failed continuation as interrupted, not as a finished reply."""
+    continuation = _continuation()
+    store = MagicMock(spec=PrincipalStore)
+    store.approval_continuation = AsyncMock(return_value=continuation)
+    finish_approval = AsyncMock(side_effect=[False, True])
+    gateway = MagicMock(spec=DeliveryGateway)
+    gateway.write_approval_failure_note = AsyncMock(return_value=True)
+    coordinator = ApprovalResponseCoordinator(
+        config=Config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        store=store,
+        delivery_gateway=gateway,
+        retry_sources=lambda _room, _sources: None,
+        finish_approval=finish_approval,
+        release_approval=AsyncMock(return_value=True),
     )
+    with (
+        patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
+        patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
+        patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
+    ):
+        assert await coordinator.settle_failure(continuation, reason)
 
-    request = await _settled_edit(tmp_path, continuation, "cancelled_by_user", visible_text=latest)
-
-    assert request.new_text == latest or (
-        latest is None
-        and request.new_text == "About to write.\n\n🔧 `write_file` [1] ⏳\n\n**[Response cancelled by user]**"
-    )
-    assert request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED}
-    # A body that streamed a further tool has outgrown the saved trace.
-    outgrown = latest is not None and "read_file" in latest
-    assert request.tool_trace == (trace if show_tool_calls and not outgrown else None)
+    assert gateway.write_approval_failure_note.await_args.kwargs["note"] == note
 
 
 @pytest.mark.asyncio

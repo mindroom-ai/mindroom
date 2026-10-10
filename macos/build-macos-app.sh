@@ -360,6 +360,7 @@ cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Merge '$ICON_INFO_PLIST'" "$APP_DIR/Contents/Info.plist"
 ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
+bash "$ROOT_DIR/macos/bundle-llama-cpp.sh" "$APP_DIR/Contents/Resources/llama.cpp"
 ditto "$ICON_BUILD_DIR" "$APP_DIR/Contents/Resources"
 ditto "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/${APP_NAME}_${APP_NAME}.bundle"
 ditto "$HELPER_BUILD_DIR/dist/MindRoom Desktop Helper.app" "$HELPER_APP"
@@ -373,6 +374,10 @@ stamp_info_plist
 HELPER_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist")
 HELPER_BUILD_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_DIR/Contents/Info.plist")
 sign_executable "$APP_DIR/Contents/Resources/bin/uv"
+for library in "$APP_DIR/Contents/Resources/llama.cpp/"*.dylib; do
+    if [[ ! -L "$library" ]]; then sign_executable "$library"; fi
+done
+sign_executable "$APP_DIR/Contents/Resources/llama.cpp/llama-server"
 HELPER_INFO="$HELPER_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $HELPER_VERSION" "$HELPER_INFO"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $HELPER_BUILD_VERSION" "$HELPER_INFO"

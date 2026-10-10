@@ -3,10 +3,10 @@
 A cancelled ``await`` cannot stop a thread that is already running. Awaiting
 ``asyncio.to_thread`` bare therefore returns while the statement is still on the
 connection, and whatever the await was holding is released a moment too early:
-the writer lock goes to the next caller, the pooled reader is handed back, or
-``close()`` closes the connection out from under a live statement. SQLite pays
-for that last one with a segmentation fault; PostgreSQL pays for the first two
-by running the next transaction inside a stranger's open one.
+the writer runs the next batch on that connection, the pooled reader is handed
+back, or ``close()`` closes the connection out from under a live statement.
+SQLite pays for that last one with a segmentation fault; PostgreSQL pays for the
+first two by running the next transaction inside a stranger's open one.
 
 The fix is the same in both backends and belongs in neither of them: journal
 work runs on an owned pool and an offloaded statement is awaited to completion

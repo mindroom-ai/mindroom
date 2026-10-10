@@ -7,17 +7,7 @@ import { provisionInstance } from '@/lib/api'
 import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
-
-const INFRASTRUCTURE_TIERS = new Set(['byok', 'hobby', 'pro', 'enterprise'])
-
-function subscriptionCanRunInfrastructure(subscription: Subscription | null | undefined) {
-  if (subscription === undefined) return true
-  if (typeof subscription?.can_run_instances === 'boolean') return subscription.can_run_instances
-  if (!subscription || !INFRASTRUCTURE_TIERS.has(subscription.tier)) return false
-  if (subscription.status === 'active' || subscription.status === 'past_due') return true
-  if (subscription.status !== 'trialing' || !subscription.trial_ends_at) return false
-  return new Date(subscription.trial_ends_at).getTime() > Date.now()
-}
+import { planAction, planState } from '@/lib/plan-state'
 
 function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
@@ -38,9 +28,11 @@ function subscriptionAccessMessage(subscription: Subscription | null | undefined
 export function InstanceCard({
   instance,
   subscription,
+  subscriptionLoading = false,
 }: {
   instance: Instance | null
   subscription?: Subscription | null
+  subscriptionLoading?: boolean
 }) {
   const [isProvisioning, setIsProvisioning] = useState(false)
   const copyToClipboard = async (text: string) => {
@@ -112,8 +104,20 @@ export function InstanceCard({
   // Tenant access is handled by the configured instance auth layer; open via plain link.
 
   // No instance yet - show provision card
+  if (!instance && subscriptionLoading && !subscription) {
+    return (
+      <Card>
+        <CardHeader>MindRoom Instance</CardHeader>
+        <div className="flex justify-center py-8">
+          <Loader2 className="w-8 h-8 animate-spin text-orange-500" aria-label="Loading subscription" />
+        </div>
+      </Card>
+    )
+  }
+
   if (!instance) {
-    const canProvision = subscriptionCanRunInfrastructure(subscription)
+    const state = planState(subscription)
+    const nextStep = state === 'active' ? null : planAction(state)
     const accessMessage = subscriptionAccessMessage(subscription)
 
     return (
@@ -124,7 +128,7 @@ export function InstanceCard({
           {accessMessage && (
             <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">{accessMessage}</p>
           )}
-          {canProvision ? (
+          {!nextStep ? (
             <>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
                 No instance provisioned yet. Click below to create your MindRoom instance.
@@ -146,14 +150,14 @@ export function InstanceCard({
             </>
           ) : (
             <>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Hosted instances require an active trial or paid plan.
-              </p>
+              {!accessMessage && (
+                <p className="text-gray-600 dark:text-gray-400 mb-6">{nextStep.step} to run a hosted instance.</p>
+              )}
               <Link
-                href="/dashboard/billing/upgrade"
+                href={nextStep.href}
                 className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
               >
-                Start Trial
+                {nextStep.label}
               </Link>
             </>
           )}
@@ -161,6 +165,8 @@ export function InstanceCard({
       </Card>
     )
   }
+
+  const noPlan = !instance.tier || instance.tier === 'free'
 
   const getStatusIcon = () => {
     switch (instance.status) {
@@ -334,7 +340,7 @@ export function InstanceCard({
         {/* Tier */}
         <div className="flex items-center justify-between">
           <span className="text-gray-600 dark:text-gray-400">Tier</span>
-          <span className="font-medium capitalize dark:text-gray-200">{instance.tier || 'Free'}</span>
+          <span className={`font-medium dark:text-gray-200 ${noPlan ? '' : 'capitalize'}`}>{noPlan ? 'No plan' : instance.tier}</span>
         </div>
 
         {/* Chat Interface */}

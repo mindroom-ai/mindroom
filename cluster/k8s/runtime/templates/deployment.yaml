@@ -12,7 +12,7 @@
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
 {{- $bootstrap := include "mindroom-runtime.bootstrapBundle" . | fromJson -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
-{{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
+{{- $generatesApiKey := include "mindroom-runtime.generatesApiKey" . -}}
 {{- $envFrom := include "mindroom-runtime.keyedList" (dict "value" .Values.env.envFrom "path" "env.envFrom") | fromJsonArray -}}
 {{- $stateInitDirs := include "mindroom-runtime.stateStorageInitDirs" . -}}
 apiVersion: apps/v1
@@ -107,7 +107,8 @@ spec:
         {{- if hasKey $bundle "overwrite" -}}
         {{- $overwrite = $bundle.overwrite -}}
         {{- end -}}
-        - name: {{ printf "content-bundle-%s" $bundle.name | trunc 63 | trimSuffix "-" }}
+        {{- $containerName := printf "content-bundle-%s" $bundle.name | trunc 63 | trimSuffix "-" -}}
+        - name: {{ $containerName }}
           image: {{ $bundle.image | quote }}
           imagePullPolicy: {{ default "IfNotPresent" $bundle.imagePullPolicy }}
           command:
@@ -115,15 +116,13 @@ spec:
             - -ec
           args:
             - |-
-              set -eu
-              {{- if $overwrite }}
-              rm -rf {{ $targetPath | quote }}
-              {{- end }}
-              mkdir -p {{ $targetPath | quote }}
-              cp -a {{ printf "%s/." $sourcePath | quote }} {{ printf "%s/" $targetPath | quote }}
+              {{- include "mindroom-runtime.contentBundleCopyScript" $overwrite | nindent 14 }}
               {{- if and $bundle.seed $bundle.seed.enabled }}
               {{ include "mindroom-runtime.contentBundleSeedCommand" (list $bundle) }}
               {{- end }}
+            - {{ $containerName | quote }}
+            - {{ $sourcePath | quote }}
+            - {{ $targetPath | quote }}
           volumeMounts:
             - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
               mountPath: {{ $.Values.storage.mountPath }}
@@ -288,6 +287,10 @@ spec:
               value: {{ include "mindroom-runtime.workerImage" . | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY
               value: {{ default .Values.image.pullPolicy .Values.workers.kubernetes.image.pullPolicy | quote }}
+            {{- with .Values.imagePullSecrets }}
+            - name: MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_SECRETS_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_PORT
               value: {{ .Values.workers.kubernetes.port | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME
@@ -426,6 +429,13 @@ spec:
             {{- if .Values.matrix.appserviceToken.existingSecret }}
             - name: MATRIX_APPSERVICE_TOKEN_FILE
               value: {{ printf "/etc/mindroom/matrix-appservice/%s" .Values.matrix.appserviceToken.key | quote }}
+            {{- end }}
+            {{- if .Values.apiAuth.existingSecret }}
+            - name: MINDROOM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiAuth.existingSecret }}
+                  key: {{ .Values.apiAuth.key }}
             {{- end }}
             {{- range $entry := .Values.providerCredentials }}
             - name: {{ include "mindroom-runtime.providerCredentialEnvName" (list $ $entry) }}

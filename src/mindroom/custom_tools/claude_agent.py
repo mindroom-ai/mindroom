@@ -235,7 +235,6 @@ class _ClaudeSessionManager:
 
         The SDK's reader tasks and subprocess copy the connecting context and live as long as the session,
         which outlives the tool call and turn that open it; that turn's contextvars hold its Agent and tools.
-        The SDK's stderr task group must also exit in the task that entered it, or its cancellation never settles.
         """
         connected = asyncio.get_running_loop().create_future()
 

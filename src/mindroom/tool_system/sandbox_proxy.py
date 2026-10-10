@@ -21,7 +21,7 @@ import httpx
 
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
-from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
+from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
@@ -72,7 +72,6 @@ _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
-_DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
@@ -202,18 +201,18 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
 
 
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
-    """Return the hard cap for inline primary-to-worker attachment saves."""
+    """Return the hard cap for inline primary-to-worker attachment saves, by default the retained media limit."""
     raw_value = (
         runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV)
         or os.environ.get(INLINE_ATTACHMENT_BYTES_ENV)
-        or str(_DEFAULT_INLINE_ATTACHMENT_BYTES)
+        or str(RETAINED_MEDIA_MAX_BYTES)
     )
     try:
         limit = int(raw_value)
     except ValueError:
-        return _DEFAULT_INLINE_ATTACHMENT_BYTES
+        return RETAINED_MEDIA_MAX_BYTES
     if limit <= 0:
-        return _DEFAULT_INLINE_ATTACHMENT_BYTES
+        return RETAINED_MEDIA_MAX_BYTES
     return limit
 
 

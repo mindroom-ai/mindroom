@@ -13,6 +13,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 
+from mindroom import reply_lifecycle as rl
 from mindroom.agent_storage import get_team_session
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
@@ -57,6 +58,7 @@ from tests.bot_helpers import (
     make_mock_agent_user,
     make_test_agent_bot,
     make_test_team_bot,
+    unique_room_send_responses,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -109,7 +111,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         install_direct_response_admission(bot)
         _wrap_extracted_collaborators(bot)
@@ -778,7 +779,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
@@ -823,7 +823,6 @@ class TestAgentBot(AgentBotTestBase):
                     prompt="Team, summarize this thread",
                     thread_history=[],
                     existing_event_id="$existing",
-                    existing_event_is_placeholder=True,
                     user_id="@alice:localhost",
                     response_envelope=_hook_envelope(body="hello", source_event_id="$event", thread_id="$thread"),
                     correlation_id="corr-nonteam-fallback",
@@ -854,7 +853,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
@@ -939,14 +937,8 @@ class TestAgentBot(AgentBotTestBase):
         assert result == "$reject"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("retry_source", "expected_memory_calls"), [(None, 1), ("$event", 0)])
-    async def test_generate_team_response_queues_memory_before_helper_failure(
-        self,
-        tmp_path: Path,
-        retry_source: str | None,
-        expected_memory_calls: int,
-    ) -> None:
-        """Initial edits queue memory, while restart retries reuse that durable input."""
+    async def test_generate_team_response_queues_memory_before_helper_failure(self, tmp_path: Path) -> None:
+        """A team response queues its memory save before the helper runs, so a failing helper keeps it."""
 
         async def fake_store_conversation_memory(*args: object, **kwargs: object) -> None:
             store_calls.append((args, kwargs))
@@ -968,7 +960,7 @@ class TestAgentBot(AgentBotTestBase):
             return task
 
         async def fail_helper(*_args: object, **_kwargs: object) -> str:
-            assert any(name.startswith("memory_save_team_") for name in scheduled_names) is (retry_source is None)
+            assert any(name.startswith("memory_save_team_") for name in scheduled_names)
             msg = "boom"
             raise RuntimeError(msg)
 
@@ -980,7 +972,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
@@ -1029,15 +1020,14 @@ class TestAgentBot(AgentBotTestBase):
                         user_id="@alice:localhost",
                         agent_name=bot.agent_name,
                     ),
-                    sync_restart_retry_source_event_id=retry_source,
                 ),
             )
 
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert len(store_calls) == expected_memory_calls
-        assert sum(name.startswith("memory_save_team_") for name in scheduled_names) == expected_memory_calls
+        assert len(store_calls) == 1
+        assert sum(name.startswith("memory_save_team_") for name in scheduled_names) == 1
 
     @pytest.mark.asyncio
     async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(
@@ -1080,7 +1070,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
@@ -1201,7 +1190,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
@@ -1340,6 +1328,8 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        # The startup placeholder lands, binding the reply's event.
+        unique_room_send_responses(bot.client, prefix="$placeholder")
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
         with (
@@ -1375,8 +1365,6 @@ class TestAgentBot(AgentBotTestBase):
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
-                    existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_envelope=_hook_envelope(
                         body="Continue",
                         source_event_id="$event",
@@ -1392,7 +1380,10 @@ class TestAgentBot(AgentBotTestBase):
         assert _visible_response_event_id(resolution) == "$placeholder"
         mock_team_response.assert_not_awaited()
         send_kwargs = mock_send_streaming_response.await_args.kwargs
-        assert send_kwargs["existing_event_id"] == "$placeholder"
+        # The stream adopts the placeholder this turn's reply created.
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+        assert reply is not None
+        assert send_kwargs["existing_event_id"] == reply.event_id is not None
         assert send_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
@@ -1419,8 +1410,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.orchestrator = MagicMock()
         bot._redact_message_event = AsyncMock(return_value=True)
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
-        add_stop_button = AsyncMock(return_value=None)
-        bot.stop_manager.add_stop_button = add_stop_button
         mock_team_response = AsyncMock(return_value="Finding")
         mock_team_response_stream = MagicMock(side_effect=fake_team_response_stream)
 
@@ -1439,6 +1428,10 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.delivery_gateway.DeliveryGateway.edit_text",
                 new=AsyncMock(return_value="$response"),
             ) as edit_text,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.add_reply_stop_button",
+                new=AsyncMock(),
+            ) as add_stop_button,
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -1619,7 +1612,6 @@ class TestAgentBot(AgentBotTestBase):
                     thread_history=[],
                     user_id="@alice:localhost",
                     existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_envelope=_hook_envelope(
                         body="Continue",
                         source_event_id="$event",
@@ -1640,7 +1632,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Suppressed team placeholder responses should not leak the redacted placeholder id."""
+        """A suppressed team answer leaves no reply event behind and reports none."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def before_hook(ctx: BeforeResponseContext) -> None:
@@ -1670,8 +1662,6 @@ class TestAgentBot(AgentBotTestBase):
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
-                    existing_event_id="$placeholder",
-                    existing_event_is_placeholder=True,
                     response_envelope=_hook_envelope(
                         body="Continue",
                         source_event_id="$event",
@@ -1684,8 +1674,9 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert resolution is None
-        bot._redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Suppressed placeholder response",
-        )
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.GONE
+        # Nothing was shown, so nothing is left to redact.
+        assert reply.event_id is None
+        bot._redact_message_event.assert_not_awaited()

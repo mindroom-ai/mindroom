@@ -6,6 +6,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -60,6 +61,8 @@ def _run_helm_template(
 ) -> subprocess.CompletedProcess[str]:
     helm = shutil.which("helm")
     if helm is None:
+        if os.environ.get("CI"):
+            pytest.fail("helm must be available in CI, where the pytest workflow runs these checks")
         pytest.skip("helm is required for rendered chart checks")
     return subprocess.run(
         [
@@ -532,13 +535,11 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
     )
     assert team_config["imagePullPolicy"] == "IfNotPresent"
     assert team_config["command"] == ["sh", "-ec"]
-    assert team_config["args"] == [
-        "set -eu\n"
-        'rm -rf "/app/agent_data/content-bundles/team-config"\n'
-        'mkdir -p "/app/agent_data/content-bundles/team-config"\n'
-        'cp -a "/bundle/." "/app/agent_data/content-bundles/team-config/"\n'
-        '"/app/agent_data/content-bundles/team-config/scripts/seed-content.sh"',
-    ]
+    team_config_script, *team_config_args = team_config["args"]
+    assert team_config_args == ["content-bundle-team-config", "/bundle", "/app/agent_data/content-bundles/team-config"]
+    # The seed runs after the sync, which tests/test_runtime_chart_content_bundles.py executes.
+    assert team_config_script.startswith("set -eu\nsrc=$1\ndst=$2\n")
+    assert team_config_script.endswith('\nfi\n"/app/agent_data/content-bundles/team-config/scripts/seed-content.sh"')
     assert team_config["volumeMounts"] == [
         {
             "name": "storage",
@@ -546,9 +547,10 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
         },
     ]
     assert policy_pack["args"] == [
-        "set -eu\n"
-        'mkdir -p "/app/agent_data/content-bundles/policy-pack"\n'
-        'cp -a "/bundle/." "/app/agent_data/content-bundles/policy-pack/"',
+        'set -eu\nmkdir -p "$2"\ncp -a "$1/." "$2/"',
+        "content-bundle-policy-pack",
+        "/bundle",
+        "/app/agent_data/content-bundles/policy-pack",
     ]
 
 
@@ -724,7 +726,7 @@ def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, sour
     revision = hashlib.sha256(f"{_BOOTSTRAP_BUNDLE_DIGEST}:{image_dir}".encode()).hexdigest()
     assert command[command.index("--bootstrap-config-bundle-revision") + 1] == revision
     transport = _init_container(deployment, "content-bundle-team-config")
-    assert '"/app/agent_data/config-source/"' in transport["args"][0]
+    assert transport["args"][2:] == ["/bundle", "/app/agent_data/config-source"]
 
 
 def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> None:
@@ -2840,6 +2842,26 @@ def test_runtime_chart_rejects_agent_vault_default_proxy_url_with_approved_egres
     assert "approvedEgress with Agent Vault must be squid-first" in completed.stderr
 
 
+def _access_grants_config(job: dict[str, Any]) -> dict[str, Any]:
+    """Return the grants config the access-grants Job mounts from its own pod template annotation."""
+    pod = job["spec"]["template"]
+    [volume] = [volume for volume in pod["spec"]["volumes"] if volume["name"] == "access-grants-config"]
+    [item] = volume["downwardAPI"]["items"]
+    assert item["path"] == "access-grants.yaml"
+    annotation = re.fullmatch(r"metadata\.annotations\['(.+)'\]", item["fieldRef"]["fieldPath"])
+    assert annotation is not None
+    return yaml.safe_load(pod["metadata"]["annotations"][annotation.group(1)])
+
+
+def _access_grants_config_maps(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        doc
+        for doc in docs
+        if doc["kind"] == "ConfigMap"
+        and doc["metadata"].get("labels", {}).get("app.kubernetes.io/component") == "agent-vault-access-grants"
+    ]
+
+
 def test_runtime_chart_agent_vault_access_grants_are_noop_by_default() -> None:
     """Access grants should not add grant resources unless explicitly enabled with grants."""
     docs = _render_runtime_chart()
@@ -2892,10 +2914,9 @@ def test_runtime_chart_agent_vault_access_grants_renders_shared_grant_job(tmp_pa
         values_files=(values_path,),
         release_name="mindroom-runtime",
     )
-    config_map = _resource(docs, "ConfigMap", "agent-vault-access-grants")
     job = _resource(docs, "Job", "agent-vault-access-grants")
     container = _container(job, "access-grants")
-    config = yaml.safe_load(config_map["data"]["access-grants.yaml"])
+    config = _access_grants_config(job)
 
     assert config == {
         "apiUrl": "http://agent-vault:14321",
@@ -2977,7 +2998,7 @@ def test_runtime_chart_agent_vault_access_grants_renders_user_agent_grant(tmp_pa
         values_files=(values_path,),
         release_name="mindroom-runtime",
     )
-    config = yaml.safe_load(_resource(docs, "ConfigMap", "agent-vault-access-grants")["data"]["access-grants.yaml"])
+    config = _access_grants_config(_resource(docs, "Job", "agent-vault-access-grants"))
 
     assert config["grants"] == [
         {
@@ -3029,7 +3050,7 @@ def test_runtime_chart_agent_vault_access_grants_renders_user_grant(tmp_path: Pa
         values_files=(values_path,),
         release_name="mindroom-runtime",
     )
-    config = yaml.safe_load(_resource(docs, "ConfigMap", "agent-vault-access-grants")["data"]["access-grants.yaml"])
+    config = _access_grants_config(_resource(docs, "Job", "agent-vault-access-grants"))
 
     assert config["grants"] == [
         {
@@ -3109,6 +3130,7 @@ def _render_agent_vault_jobs(
     job_naming: str,
     grant_email: str = "maintainer@example.test",
     kubectl_image: str = "registry.example.test/kubectl:1",
+    chart_dir: Path = Path("cluster/k8s/runtime"),
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     agent_vault = {
         "enabled": True,
@@ -3124,7 +3146,7 @@ def _render_agent_vault_jobs(
     }
     values = {"workers": {"backend": "kubernetes", "kubernetes": {"agentVault": agent_vault}}}
     docs = _render_chart(
-        Path("cluster/k8s/runtime"),
+        chart_dir,
         values_files=_values_files(tmp_path, values),
         release_name="mindroom-runtime",
     )
@@ -3142,36 +3164,57 @@ def test_runtime_chart_agent_vault_content_hash_jobs_skip_helm_hooks(tmp_path: P
         assert "annotations" not in job["metadata"]
         assert job["spec"]["ttlSecondsAfterFinished"] == 86400
         assert job["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] == base_name
-    grants_pod = grants_job["spec"]["template"]["spec"]
-    assert grants_pod["automountServiceAccountToken"] is False
-    config_map_name = grants_pod["volumes"][0]["configMap"]["name"]
-    assert re.fullmatch(r"agent-vault-access-grants-[0-9a-f]{10}", config_map_name)
-    assert _resource(docs, "ConfigMap", config_map_name)
+    assert grants_job["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+    assert _access_grants_config(grants_job)["grants"][0]["email"] == "maintainer@example.test"
+    assert _access_grants_config_maps(docs) == []
     assert bootstrap_job["spec"]["template"]["spec"]["serviceAccountName"] == "agent-vault-bootstrap"
 
 
 def test_runtime_chart_agent_vault_content_hash_tracks_each_jobs_inputs(tmp_path: Path) -> None:
-    """Only the Job whose rendered inputs changed gets a new name, and each grants Job mounts its own config."""
+    """Only the Job whose rendered inputs changed gets a new name, and each grants Job carries its own config."""
 
-    def names(**overrides: str) -> tuple[str, str, str]:
-        docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
-        config_map_name = grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"]
-        grants = yaml.safe_load(_resource(docs, "ConfigMap", config_map_name)["data"]["access-grants.yaml"])["grants"]
+    def names(**overrides: str) -> tuple[str, str]:
+        _, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
+        grants = _access_grants_config(grants_job)["grants"]
         assert grants[0]["email"] == overrides.get("grant_email", "maintainer@example.test")
-        return grants_job["metadata"]["name"], config_map_name, bootstrap_job["metadata"]["name"]
+        return grants_job["metadata"]["name"], bootstrap_job["metadata"]["name"]
 
-    grants_name, config_map_name, bootstrap_name = names()
-    assert names() == (grants_name, config_map_name, bootstrap_name)
-    changed_grants_name, changed_config_map_name, same_bootstrap_name = names(grant_email="second@example.test")
+    grants_name, bootstrap_name = names()
+    assert names() == (grants_name, bootstrap_name)
+    changed_grants_name, same_bootstrap_name = names(grant_email="second@example.test")
     assert changed_grants_name != grants_name
-    assert changed_config_map_name != config_map_name
     assert same_bootstrap_name == bootstrap_name
-    same_grants_name, same_config_map_name, changed_bootstrap_name = names(
-        kubectl_image="registry.example.test/kubectl:2",
-    )
+    same_grants_name, changed_bootstrap_name = names(kubectl_image="registry.example.test/kubectl:2")
     assert same_grants_name == grants_name
-    assert same_config_map_name == config_map_name
     assert changed_bootstrap_name != bootstrap_name
+
+
+@pytest.mark.parametrize("job_naming", ["fixed", "contentHash"])
+@pytest.mark.parametrize(
+    ("chart_field", "label", "bumped_label"),
+    [("version", "helm.sh/chart", "mindroom-runtime-9.9.9"), ("appVersion", "app.kubernetes.io/version", "9.9.9")],
+)
+def test_runtime_chart_agent_vault_jobs_keep_name_and_pod_template_across_version_bumps(
+    tmp_path: Path,
+    job_naming: str,
+    chart_field: str,
+    label: str,
+    bumped_label: str,
+) -> None:
+    """A chart or app version bump alone relabels the Jobs but keeps their names and immutable pod templates."""
+    bumped_chart = tmp_path / "chart"
+    shutil.copytree(Path("cluster/k8s/runtime"), bumped_chart)
+    chart_yaml = bumped_chart / "Chart.yaml"
+    chart = yaml.safe_load(chart_yaml.read_text(encoding="utf-8"))
+    chart_yaml.write_text(yaml.safe_dump({**chart, chart_field: "9.9.9"}), encoding="utf-8")
+
+    _, *jobs = _render_agent_vault_jobs(tmp_path, job_naming=job_naming)
+    _, *bumped_jobs = _render_agent_vault_jobs(tmp_path, job_naming=job_naming, chart_dir=bumped_chart)
+
+    for job, bumped_job in zip(jobs, bumped_jobs, strict=True):
+        assert bumped_job["metadata"]["labels"][label] == bumped_label
+        assert bumped_job["metadata"]["name"] == job["metadata"]["name"]
+        assert bumped_job["spec"]["template"] == job["spec"]["template"]
 
 
 def test_runtime_chart_agent_vault_fixed_jobs_keep_names_and_grant_hook(tmp_path: Path) -> None:
@@ -3179,8 +3222,8 @@ def test_runtime_chart_agent_vault_fixed_jobs_keep_names_and_grant_hook(tmp_path
     docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="fixed")
 
     assert grants_job["metadata"]["name"] == "agent-vault-access-grants"
-    assert grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] == "agent-vault-access-grants"
-    assert _resource(docs, "ConfigMap", "agent-vault-access-grants")
+    assert _access_grants_config(grants_job)["grants"][0]["email"] == "maintainer@example.test"
+    assert _access_grants_config_maps(docs) == []
     assert grants_job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
     assert bootstrap_job["metadata"]["name"] == "agent-vault-bootstrap"
     assert "annotations" not in bootstrap_job["metadata"]
@@ -4008,6 +4051,65 @@ def test_runtime_chart_opt_out_skips_generated_api_key(backend: str) -> None:
 
     assert not any(doc["kind"] == "Secret" and doc["metadata"]["name"] == "mindroom-runtime-api-key" for doc in docs)
     assert "envFrom" not in mindroom_container
+
+
+@pytest.mark.parametrize("backend", ["static_runner", "kubernetes"])
+def test_runtime_chart_existing_api_key_secret_replaces_generated_key(backend: str) -> None:
+    """An existing Secret gives the primary a key that offline renders cannot rotate, and only the primary reads it."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        f"workers.backend={backend}",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "apiAuth.existingSecret=operator-api",
+        "apiAuth.key=primary-key",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    mindroom_container = _container(deployment, "mindroom")
+
+    assert not any(doc["kind"] == "Secret" and doc["metadata"]["name"] == "mindroom-runtime-api-key" for doc in docs)
+    assert "envFrom" not in mindroom_container
+    assert _env_by_name(mindroom_container)["MINDROOM_API_KEY"] == {
+        "name": "MINDROOM_API_KEY",
+        "valueFrom": {"secretKeyRef": {"name": "operator-api", "key": "primary-key"}},
+    }
+    for container in deployment["spec"]["template"]["spec"]["containers"]:
+        if container["name"] != "mindroom":
+            assert "MINDROOM_API_KEY" not in _env_by_name(container)
+
+
+@pytest.mark.parametrize(
+    ("set_args", "error"),
+    [
+        (
+            ("apiAuth.allowUnauthenticatedPrimary=true",),
+            "apiAuth.existingSecret cannot be set when apiAuth.allowUnauthenticatedPrimary=true",
+        ),
+        (("apiAuth.key=",), "apiAuth.key is required when apiAuth.existingSecret is set"),
+        (
+            ("apiAuth.existingSecret=mindroom-runtime-api-key",),
+            "apiAuth.existingSecret must name a Secret the chart does not manage, not mindroom-runtime-api-key",
+        ),
+        (
+            ("env.extra[0].name=MINDROOM_API_KEY", "env.extra[0].value=duplicate"),
+            "apiAuth.existingSecret and env.extra both set MINDROOM_API_KEY; remove one of them",
+        ),
+    ],
+)
+def test_runtime_chart_rejects_conflicting_existing_api_key_secret(set_args: tuple[str, ...], error: str) -> None:
+    """An existing API key Secret must be the primary's only key source."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "apiAuth.existingSecret=operator-api",
+        *set_args,
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert error in completed.stderr
 
 
 def test_runtime_chart_dedicated_workers_skip_static_runner_storage() -> None:

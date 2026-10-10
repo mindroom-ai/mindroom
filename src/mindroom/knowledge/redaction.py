@@ -1,11 +1,11 @@
 """Credential redaction helpers for knowledge Git URLs.
 
-Deliberately the same logic as ``origin/main``, made *total*. ``urlsplit`` raises
-when a netloc holds a codepoint that NFKC-normalises to a URL delimiter --
-U+FF20 for ``@``, U+FF1A for ``:`` -- and these helpers were called unguarded, so
-a malformed URL turned a Git failure into an unrelated ``ValueError`` while that
-failure was being recorded, and left the knowledge API returning 500 for as long
-as the error stayed persisted. No credential is needed to reach any of that.
+These helpers never raise on a URL's contents. ``urlsplit`` raises when a netloc
+holds a codepoint that NFKC-normalises to a URL delimiter -- U+FF20 for ``@``,
+U+FF1A for ``:`` -- and a raise here would turn a Git failure into an unrelated
+``ValueError`` while that failure is recorded, leaving the knowledge API
+returning 500 for as long as the error stays persisted. No credential is needed
+to reach any of that.
 
 Widening *what* gets redacted is a separate and larger question:
 ``src/mindroom/redaction.py`` is a second, older redactor wired in as a global
@@ -24,11 +24,11 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse, urlunparse
 
 from mindroom.git_urls import credential_free_repo_url
+from mindroom.redaction import URL_PATTERN
 
 if TYPE_CHECKING:
     from urllib.parse import ParseResult
 
-_URL_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
 _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
     r"\bAuthorization:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
     re.IGNORECASE,
@@ -157,7 +157,7 @@ def redact_credentials_in_text(value: str) -> str:
     unique_decoded_values.sort(key=len, reverse=True)
     for decoded_value in unique_decoded_values:
         redacted = redacted.replace(decoded_value, "***")
-    return _URL_PATTERN.sub(lambda match: redact_url_credentials(match.group(0)), redacted)
+    return URL_PATTERN.sub(lambda match: match["prefix"] + redact_url_credentials(match["url"]), redacted)
 
 
 def credential_free_url_identity(value: str) -> str:

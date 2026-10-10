@@ -6,7 +6,6 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.event_journal import EventKind
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.runtime import parse_saved_job
@@ -34,13 +33,11 @@ def _parked_work(runtime_paths: RuntimePaths) -> ParkedWork | None:
 
 
 def event_is_parked(config: Config, runtime_paths: RuntimePaths, entity_name: str, event: JournalEvent) -> bool:
-    """Fence saved sources and every held reply's wake before any handoff."""
+    """Fence saved sources before any handoff."""
     if background_tool_jobs_enabled(config, runtime_paths):
         return False
     parked = _parked_work(runtime_paths)
-    return event.kind is EventKind.HELD_REPLY_WAKE or (
-        parked is not None and (entity_name, event.event_id) in parked.sources
-    )
+    return parked is not None and (entity_name, event.event_id) in parked.sources
 
 
 def approval_is_parked(runtime_paths: RuntimePaths, approval_id: str) -> bool:
@@ -76,7 +73,7 @@ async def index_parked_work(journal: EventJournalStore) -> ParkedWork:
         record = await journal.turn_records(entity_name).load(event_id)
         if record is not None:
             parked.sources.update((entity_name, source) for source in record.source_event_ids)
-    cursor: tuple[str, str] | None = None
+    cursor: str | None = None
     while owners := await journal.approval_continuations(limit=100, after=cursor):
         for _principal_id, continuation in owners:
             owns_source = any(
@@ -87,5 +84,5 @@ async def index_parked_work(journal: EventJournalStore) -> ParkedWork:
                 parked.sources.update(
                     (continuation.entity_name, event_id) for event_id in continuation.source_event_ids
                 )
-        cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
+        cursor = owners[-1][1].approval_id
     return parked

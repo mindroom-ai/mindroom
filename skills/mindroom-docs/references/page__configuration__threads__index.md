@@ -113,10 +113,11 @@ After a judgment backend approves, the agent replies normally with its own model
 
 | Field | Backend | Default | Description |
 |-------|---------|---------|-------------|
-| `provider` | both | Required | `llm` for a configured model alias, or `typesafe` for System One |
+| `provider` | all | Required | `llm` for a configured model alias, `typesafe` for System One, or `openai_decisions` for the OpenAI Decisions API |
 | `model` | `llm` | Required | Existing alias under `models`, which can be cheaper than the reply model |
-| `threshold` | `typesafe` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
-| `timeout_seconds` | both | `5` for `llm`, `1.5` for `typesafe` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
+| `threshold` | `typesafe`, `openai_decisions` | `0.8` | Minimum probability from `0` to `1`; rejected for `llm` |
+| `credentials_service` | `openai_decisions` | `null` | Credential service holding the OpenAI API key, instead of the OpenAI model credential |
+| `timeout_seconds` | all | `5` for `llm`, otherwise `1.5` | Positive deadline of at most `30` seconds; for participation it starts after `debounce_seconds` |
 
 Unknown fields are rejected.
 
@@ -141,13 +142,19 @@ To use System One instead, set `TYPESAFE_API_KEY` in the process environment or 
         timeout_seconds: 1.5
 ```
 
+To use the OpenAI Decisions API with `gpt-6-luna`, set `provider: openai_decisions` instead.
+It uses the same OpenAI API key as OpenAI models, from `OPENAI_API_KEY` or the dashboard, and always calls `api.openai.com`, regardless of any model `base_url`.
+When OpenAI models go through a proxy, that credential holds the proxy's key, which `api.openai.com` rejects; set `credentials_service` to a service holding a real OpenAI key instead.
+A named service that has no key skips the backend; it never falls back to the OpenAI model credential.
+No environment variable fills a custom service name, so add its `api_key` in the dashboard or through [credential seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds).
+
 The LLM backend uses the alias's normal provider credentials and receives no tools, agent system prompt, or agent memory.
 A model alias whose provider adds native tools that cannot be disabled is refused.
-For participation, a TypeSafe probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
-Both backends get the same question and context, but their judgments can differ.
+For participation, a TypeSafe or OpenAI Decisions probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
+All backends get the same question and context, but their judgments can differ.
 
 At most eight judgments run at once across the process, including [router judgments](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
-Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe and OpenAI Decisions, without request text or credentials.
 
 #### Participation Context and Fallback
 
@@ -159,15 +166,15 @@ Missing credentials, a full limit, a timeout, a provider error, malformed output
 ## Mid-Turn Coalescing
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
-Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the active task finishes.
-The setting applies in every room where the agent may reply, including ad hoc rooms, and has no per-room override.
-Omitting it or setting it to `null` keeps the wrap-up notice, and teams do not inherit it from their members.
+A "thanks" or "is this still running?" can therefore cut a long task short.
+Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
+The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `judgment` | object | Required | LLM model alias or TypeSafe backend; see [Judgment Backends](#judgment-backends) |
-| `instructions` | string | `""` | Extra guidance for the finish-or-wrap-up decision |
-| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait; nonblank and at most 64 characters |
+| `judgment` | object | Required | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](#judgment-backends) |
+| `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
+| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
 
 ```yaml
 agents:
@@ -182,27 +189,39 @@ agents:
         timeout_seconds: 5
 ```
 
-The judge asks whether any queued message requires an immediate change, pause, or stop.
-Acknowledgements, praise, thanks, "continue", and "do not interrupt" let the task continue, while corrections and relevant changes take priority even alongside praise.
-Unrelated requests wait for a later turn unless the user asks for an immediate switch.
-With TypeSafe, the task continues when `1 - P(interrupt) >= threshold`, so the default `0.8` tolerates interruption probabilities up to `0.2`.
-With the LLM backend, an explicit `false` answer lets the task continue.
-Abstentions, timeouts, missing credentials, a full judgment limit, and backend errors keep the wrap-up behavior.
+The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
+It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
+When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
+With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
+
+The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
+Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
+Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
+Attachment contents, tool arguments and results, system prompts, and memory are never sent, but message text can still contain private information.
+
+The agent gets the wrap-up notice without a judgment when:
+
+- the thread's history could not be read completely;
+- the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;
+- the active request and queued messages alone exceed 16 KB, or more than eight messages are queued;
+- anything the judge would see looks like a credential;
+- the agent replies in `thread_mode: room`.
+
+Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
-The judge sees the active request, earlier public conversation, up to eight queued human messages, the configured guidance, and the agent's visible reply text as published when each message was queued.
-Private tool results and arguments, system prompts, memory, and attachment contents are not sent, but message text can still contain private information.
-Within the judge's 16 KB limit, the active request and queued messages are always sent whole, while older conversation drops out first and long earlier messages are shortened.
-The wrap-up notice is sent without a judgment when conversation history is missing, incomplete, or contains media, when the active request and queued messages alone exceed the limit, when a message contains attachments or text that looks like a credential, and for `thread_mode: room` turns.
-Each skipped judgment logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and backend errors log `Mid-turn continuation evaluated` with a `failure`.
-
-Queued messages stay queued and are handled after the active response finishes.
-A finish decision covers only the messages it saw, so a later message needs a new decision, and a wrap-up notice once sent is not reversed.
-The wrap-up notice asks the model to hand off; it does not cancel tools, abort the response, or show the model the queued text, and stopping responses and tool approval work as usual.
-With `defer_reaction` set, each message that can wait gets the reaction once; wrap-up decisions and failed judgments never react.
+Queued messages are handled after the active response finishes either way.
+A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
+A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
+The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
+With `defer_reaction` set, each message that can wait gets that reaction once.
 
 ## Message Edits
 
-When a user edits a message that already received an agent response, the agent regenerates its reply for the updated content and edits its previous reply in place.
+When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
+If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
+While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
 Edits by agents never trigger regeneration.
 When another agent's reply finishes with a mention of this agent, it reaches this agent as a new message.

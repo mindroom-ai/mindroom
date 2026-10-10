@@ -351,7 +351,7 @@ On the host target, `snapshot()` returns `ai` or `aria` format with element refs
 `act()` takes `request.kind` set to `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, or `close`.
 The desktop target returns the browser's native accessibility snapshot and rejects `targetId` and host-only options such as `profile`, snapshot format hints, `inputRef`, and `timeoutMs`.
 Desktop-target calls always run in the primary process, so routing `browser` to a worker isolates only host-target calls.
-To show the worker browser to the user, see [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/#control-the-browser-then-show-it).
+To show the worker browser to the user, see [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/#show-the-worker-browser).
 
 #### Screenshots and Files
 
@@ -370,6 +370,15 @@ With the default `workspace`, `upload` accepts files in the artifact directory, 
 Everything else is refused, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces; in a worker only the worker workspace is readable.
 With `unrestricted`, `upload` accepts any file its process can read.
 One browser holds at most 256 MiB of uploaded files until their tabs close, so a larger upload is refused until a tab is closed.
+
+On the host target, `open` also takes one HTML file in `paths` instead of `targetUrl`, read under the same rules as `upload`, so an agent can check a page it wrote with `screenshot`, `console` (which also lists uncaught errors), and `act`.
+The file is UTF-8 text of at most 16 MiB.
+The page cannot load or navigate to other local files, and relative links in it do not resolve; its network requests follow the same checks as any page.
+
+```python
+browser_control(action="open", paths=["slides/deck.html"])
+browser_control(action="screenshot")
+```
 
 #### Profiles and Signed-In Sessions
 

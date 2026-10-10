@@ -218,6 +218,158 @@ image digest and the selected image directory. root is the directory the transpo
 {{- toJson $bootstrap -}}
 {{- end -}}
 
+{{- /*
+Content-bundle init script; takes the bundle's overwrite flag and receives the source and target paths as $1 and $2.
+With overwrite, the target ends up with the same entries, types, contents, modes, symlink targets, and (where cp -a
+can preserve them) owners as after rm -rf and cp -a, but only entries that differ are rewritten, so a restart on
+network storage copies only what changed. Unlike a full copy, unchanged files keep their timestamps, directory
+timestamps and symlink owners are not synced, and hard-link relationships between files are not guaranteed to be preserved.
+Every start compares both trees in full, but with one stat and one md5sum batch per tree instead of processes per
+file, so the number of processes grows with the changes and symlinks, not with the files.
+An image missing a tool the sync uses, or a name with a newline in either tree (listings are line-based),
+falls back to the full copy. Directory modes and owners are applied last, deepest first, so copying into a
+directory that ends up read-only still works. It needs only POSIX sh and BusyBox-compatible tools.
+*/ -}}
+{{- define "mindroom-runtime.contentBundleCopyScript" -}}
+set -eu
+{{- if . }}
+src=$1
+dst=$2
+nl='
+'
+kind() {
+  if [ -L "$1" ]; then k=l
+  elif [ -d "$1" ]; then k=d
+  elif [ -f "$1" ]; then k=f
+  elif [ -e "$1" ]; then k=o
+  else k=-
+  fi
+}
+# BusyBox test -w is always true for root, which root-squashed NFS does not honour, so root always tries u+w.
+# Best effort: a parent we may not chmod can still be writable, and the copy or removal reports a real denial.
+writable() { if [ "$uid" = 0 ] || [ ! -w "$1" ]; then chmod u+w "$1" 2>/dev/null || :; fi; }
+if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
+mkdir -p "$dst"
+reason=
+for tool in find stat md5sum awk readlink chmod chown id; do
+  command -v "$tool" >/dev/null || reason="the image has no $tool"
+done
+[ -n "$reason" ] || find "$dst" -prune -exec stat {} + >/dev/null 2>&1 || reason="its find has no -exec {} +"
+[ -n "$reason" ] || [ -z "$(find "$src" "$dst" -name "*$nl*")" ] || reason="a name contains a newline"
+if [ -n "$reason" ]; then
+  echo "$0: $reason, so $dst is replaced by a full copy" >&2
+  chmod -R u+w "$dst" 2>/dev/null || :
+  rm -rf "$dst"
+  mkdir -p "$dst"
+  cp -a "$src/." "$dst/"
+else
+  uid=$(id -u)
+  # cp -a keeps ownership only where chown works, so compare it only then (root without NFS root squashing).
+  own=
+  if [ "$uid" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
+  # Listings of "<hex type and mode> <uid> <gid> <size> ./path" and "<md5>  ./path"; an unreadable file has no
+  # checksum, so it counts as changed and a copy from an unreadable source fails below.
+  sums() { cd "$1" && find . -type f -exec md5sum {} + 2>/dev/null || :; }
+  stats() { cd "$1" && shift && find . "$@" -exec stat -c '%f %u %g %s %n' {} +; }
+  source_stats=$(stats "$src")
+  source_sums=$(sums "$src")
+  target_stats=$(stats "$dst")
+  target_sums=$(sums "$dst")
+  # Reads source stats, source sums, target stats, and target sums, separated by "/" lines, and prints what a pass
+  # visits: target entries that may have to go (remove), source entries that may have to be copied (copy), or source
+  # directories, deepest first, whose mode or owner differs (dirs). Symlinks are always visited, since only
+  # readlink compares their targets. GNU md5sum escapes a name with a backslash and marks the line with one.
+  plan() {
+    printf '%s\n' "$2" / "$3" / "$4" / "$5" | awk -v want="$1" -v own="$own" '
+      function name(line, fields) {
+        while (fields--) line = substr(line, index(line, " ") + 1)
+        return line
+      }
+      function unescape(s, out, c, i) {
+        for (i = 1; i <= length(s); i++) {
+          c = substr(s, i, 1)
+          if (c == "\\") { c = substr(s, ++i, 1); c = (c == "n") ? "\n" : ((c == "r") ? "\r" : c) }
+          out = out c
+        }
+        return out
+      }
+      $0 == "/" { part++; next }
+      $0 == "" { next }
+      part % 2 == 0 {
+        side = part ? "d" : "s"; p = name($0, 4)
+        if (part) target[++m] = p; else source[++n] = p
+        type[side p] = substr($1, 1, length($1) - 3); mode[side p] = substr($1, length($1) - 2)
+        owner[side p] = $2 " " $3; size[side p] = $4
+        next
+      }
+      {
+        side = part == 1 ? "s" : "d"; sum = $1; p = name($0, 2)
+        if (sum ~ /^\\/) { sum = substr(sum, 2); p = unescape(p) }
+        # The prefix keeps checksums such as 0e1... and 0e2... from comparing equal as numbers.
+        sums[side p] = "x" sum
+      }
+      END {
+        if (want == "remove") for (i = 1; i <= m; i++) {
+          p = target[i]
+          if (p != "." && (!(("s" p) in type) || type["s" p] != type["d" p] || type["d" p] !~ /^[84]$/)) print p
+        }
+        if (want == "copy") for (i = 1; i <= n; i++) {
+          p = source[i]; t = type["s" p]
+          if (p == "." || t == "4" && type["d" p] == "4") continue
+          if (t != "8" || type["d" p] != "8" || mode["s" p] != mode["d" p] || size["s" p] != size["d" p] ||
+            own != "" && owner["s" p] != owner["d" p] || !(("s" p) in sums) || sums["s" p] != sums["d" p]) print p
+        }
+        if (want == "dirs") for (i = n; i > 0; i--) {
+          p = source[i]
+          if (type["s" p] == "4" && (mode["s" p] != mode["d" p] || own != "" && owner["s" p] != owner["d" p])) print p
+        }
+      }'
+  }
+  # Plans are assigned on their own, so a failing planner stops the init; a while loop's status would hide it.
+  removals=$(plan remove "$source_stats" "$source_sums" "$target_stats" "$target_sums")
+  copies=$(plan copy "$source_stats" "$source_sums" "$target_stats" "$target_sums")
+  # Remove target entries that are missing from the source, of another type, special, or a different symlink.
+  gone=
+  [ -z "$removals" ] || printf '%s\n' "$removals" | while IFS= read -r p; do
+    case $p in "$gone"/*) continue ;; esac
+    kind "$src/$p"; sk=$k
+    kind "$dst/$p"
+    case $sk$k in
+      dd|ff) continue ;;
+      ll) [ "$(readlink "$src/$p"; echo .)" != "$(readlink "$dst/$p"; echo .)" ] || continue ;;
+    esac
+    writable "$dst/${p%/*}"
+    [ "$k" != d ] || chmod -R u+w "$dst/$p" 2>/dev/null || :
+    rm -rf "$dst/$p"
+    gone=$p
+  done
+  # Copy missing entries whole, and recopy files whose size, mode, owner, or content differ.
+  new=
+  [ -z "$copies" ] || printf '%s\n' "$copies" | while IFS= read -r p; do
+    case $p in "$new"/*) continue ;; esac
+    kind "$dst/$p"
+    case $k in -|f) writable "$dst/${p%/*}" ;; *) continue ;; esac
+    [ "$k" = - ] || rm -f "$dst/$p"
+    cp -a "$src/$p" "$dst/$p"
+    [ "$k" != - ] || new=$p
+  done
+  # Fix directory modes and owners deepest first, including parents that writable changed.
+  target_dirs=$(stats "$dst" -type d)
+  dirs=$(plan dirs "$source_stats" "" "$target_dirs" "")
+  [ -z "$dirs" ] || printf '%s\n' "$dirs" | while IFS= read -r p; do
+    m=$(stat -c "%a$own" "$src/$p")
+    set -- $m
+    [ -z "$own" ] || chown "$2:$3" "$dst/$p"
+    # The leading zeros make GNU chmod clear a directory's setgid bit too.
+    chmod "00$1" "$dst/$p"
+  done
+fi
+{{- else }}
+mkdir -p "$2"
+cp -a "$1/." "$2/"
+{{- end }}
+{{- end -}}
+
 {{- define "mindroom-runtime.contentBundleSeedCommand" -}}
 {{- $bundle := index . 0 -}}
 {{- range $argIndex, $arg := $bundle.seed.command -}}
@@ -247,6 +399,11 @@ image digest and the selected image directory. root is the directory the transpo
 {{- else if .Values.workers.sandbox.proxyToken.value -}}
 {{- printf "%s-sandbox-proxy" (include "mindroom-runtime.fullname" .) -}}
 {{- end -}}
+{{- end -}}
+
+{{- /* Whether the chart generates the primary's MINDROOM_API_KEY in the <fullname>-api-key Secret. */ -}}
+{{- define "mindroom-runtime.generatesApiKey" -}}
+{{- if not (or .Values.apiAuth.allowUnauthenticatedPrimary .Values.apiAuth.existingSecret) -}}true{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerNamespace" -}}
@@ -675,9 +832,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
 
 {{/*
-Agent Vault Job (or grants ConfigMap) name from (list root baseName renderedInputs).
+Agent Vault Job name from (list root baseName renderedInputs).
 jobNaming=contentHash appends a hash of the rendered inputs, so a plain `kubectl apply`
-creates a new object when they change and leaves the existing one alone otherwise.
+creates a new Job when they change and leaves the existing one alone otherwise.
 */}}
 {{- define "mindroom-runtime.agentVaultJobName" -}}
 {{- $root := index . 0 -}}

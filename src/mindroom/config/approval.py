@@ -82,6 +82,13 @@ class ToolApprovalConfig(BaseModel):
         default_factory=list,
         description="Ordered approval rules; the first matching rule wins",
     )
+    scheduled_any_arguments: bool = Field(
+        default=True,
+        description=(
+            "Let a requester approve a scheduled tool call for any arguments to the same tool, "
+            "not only the exact arguments it was scheduled with"
+        ),
+    )
 
     @field_validator("timeout_days", mode="before")
     @classmethod

@@ -78,6 +78,7 @@ agents:
 | `learning_mode` | string | `null` | `always` learns after every turn; `agentic` lets the agent decide through a tool call |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory but not `learning`. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
+| `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 | `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
 | `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
 | `private` | object | `null` | Give each requester a separate copy of the agent's state; see [Private Instances](#private-instances) |
@@ -208,6 +209,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `worker_scope` | `null` |
 | `file_access` | `workspace` |
 | `allow_self_config` | `false` |
+| `automations` | `[]`; private agents never inherit them, and agents without file memory skip the built-ins. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 
 `defaults.tools` (default `[scheduler]`) is added to every agent with `include_default_tools: true`; set it to `[]` to add nothing.
 It accepts the same per-tool overrides as `agents.<name>.tools`.

@@ -40,7 +40,9 @@ async def test_stalled_transport_times_out_and_releases_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A lost response cannot monopolize the scope or lose its frozen transaction."""
-    monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 0.05, raising=False)
+    # The claim timeout also covers authorization and the durable payload write before the transport,
+    # which can take a few hundred milliseconds on a loaded host.
+    monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 1.0, raising=False)
     accepted = asyncio.Event()
     never = asyncio.Event()
 
@@ -55,7 +57,7 @@ async def test_stalled_transport_times_out_and_releases_scope(
         first_task = asyncio.create_task(
             MatrixMessageTools().matrix_message(message="first", idempotency_key="stalled"),
         )
-        async with asyncio.timeout(1):
+        async with asyncio.timeout(10):
             await accepted.wait()
             first = json.loads(await first_task)
         assert first["status"] == "error"

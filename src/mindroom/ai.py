@@ -2368,7 +2368,16 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(skipped)
             else:
                 yield get_user_friendly_error_message(run_error, agent_name, runtime_paths=runtime_paths)
-                yield AttemptResolved(HandledAttempt())
+                yield AttemptResolved(
+                    HandledAttempt(
+                        metadata_content=_build_interrupted_metadata(
+                            state,
+                            RunStatus.error,
+                            attempt.attempt_run_id,
+                            session_id,
+                        ),
+                    ),
+                )
             return
 
         if state.cancelled_run_event is not None:

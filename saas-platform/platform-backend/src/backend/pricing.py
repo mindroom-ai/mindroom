@@ -25,24 +25,8 @@ class Product(BaseModel):
     metadata: ProductMetadata
 
 
-class PlanLimits(BaseModel):
-    """Plan limits and capabilities."""
-
-    max_agents: int | Literal["unlimited"]
-    max_messages_per_day: int | Literal["unlimited"]
-    storage_gb: int | Literal["unlimited"]
-    support: str
-    integrations: str
-    workflows: bool
-    analytics: str
-    sla: bool
-    training: bool
-    sso: bool
-    custom_development: bool
-    on_premise: bool
-    dedicated_infrastructure: bool
-
-
+# `pricing-config.yaml` keeps a `free` entry for accounts that never subscribed to a plan.
+# It is not offered as a plan, and entitlements never let it run a hosted instance.
 class Plan(BaseModel):
     """Pricing plan configuration."""
 
@@ -51,7 +35,6 @@ class Plan(BaseModel):
     price_yearly: int | Literal["custom"]
     description: str
     features: list[str]
-    limits: PlanLimits
     stripe_price_id_monthly: str | None = None
     stripe_price_id_yearly: str | None = None
     stripe_price_id_monthly_live: str | None = None
@@ -229,45 +212,6 @@ def is_trial_enabled_for_plan(plan: str) -> bool:
         return False
 
     return plan in config.trial.applicable_plans
-
-
-def get_plan_limits_from_metadata(tier: str) -> dict[str, Any]:
-    """Get plan limits for a specific tier.
-
-    Args:
-        tier: Plan tier (e.g., 'free', 'byok', 'hobby', 'pro', 'enterprise')
-
-    Returns:
-        Dictionary of plan limits with keys like 'max_agents', 'max_messages_per_day'
-
-    """
-    plan = get_plan_details(tier)
-
-    if not plan:
-        available_plans = ", ".join(load_pricing_config_model().plans.keys())
-        msg = f"Plan '{tier}' not found in pricing configuration. Available plans: {available_plans}"
-        raise ValueError(msg)
-
-    # Convert Pydantic model to dict, handling "unlimited" values
-    limits = {}
-
-    # Handle unlimited as a very large number for database storage
-    if plan.limits.max_agents == "unlimited":
-        limits["max_agents"] = 999999
-    else:
-        limits["max_agents"] = plan.limits.max_agents
-
-    if plan.limits.max_messages_per_day == "unlimited":
-        limits["max_messages_per_day"] = 999999
-    else:
-        limits["max_messages_per_day"] = plan.limits.max_messages_per_day
-
-    if plan.limits.storage_gb == "unlimited":
-        limits["max_storage_gb"] = 999999
-    else:
-        limits["max_storage_gb"] = plan.limits.storage_gb
-
-    return limits
 
 
 # Export pricing data for easy access

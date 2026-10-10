@@ -4242,6 +4242,7 @@ async def test_create_agent_runs_plugin_tool_hooks_for_agno_generated_functions(
         entry_config=PluginEntryConfig(path="gate"),
         plugin_order=0,
         discovered_hooks=(decline,),
+        discovered_automations=(),
     )
     config = _config_with_workspace_skill(tmp_path)
     config.agents["general"].learning_mode = "agentic"

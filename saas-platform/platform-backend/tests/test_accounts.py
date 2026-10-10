@@ -185,7 +185,7 @@ class TestAccountsEndpoints:
         assert data["is_admin"] is False
 
     def test_setup_account_new_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
-        """Test setting up free tier account for new user."""
+        """Test setting up an account without a plan for a new user."""
         # Setup
         # No existing subscription
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
@@ -196,8 +196,6 @@ class TestAccountsEndpoints:
             "account_id": "acc_test_123",
             "tier": "free",
             "status": "active",
-            "max_agents": 1,
-            "max_messages_per_day": 100,
             "created_at": datetime.now(UTC).isoformat(),
         }
         mock_supabase.table().insert().execute.return_value = Mock(data=[new_subscription])
@@ -208,22 +206,20 @@ class TestAccountsEndpoints:
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert "Free tier account created" in data["message"]
+        assert data["message"] == "Account created"
         assert data["account_id"] == "acc_test_123"
         assert data["subscription"]["tier"] == "free"
 
-    def test_setup_account_adds_storage_limit_when_database_row_omits_it(
+    def test_setup_account_returns_the_new_subscription_without_a_plan(
         self, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
-        """Test account setup returns pricing storage limits when Supabase omits the field."""
+        """Account setup stores only the no-plan state and returns it with the computed entitlement fields."""
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
         new_subscription = {
             "id": "sub_new_123",
             "account_id": "acc_test_123",
             "tier": "free",
             "status": "active",
-            "max_agents": 1,
-            "max_messages_per_day": 100,
             "created_at": datetime.now(UTC).isoformat(),
         }
         mock_supabase.table().insert().execute.return_value = Mock(data=[new_subscription])
@@ -233,9 +229,10 @@ class TestAccountsEndpoints:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["subscription"]["max_storage_gb"] == 1
+        assert data["subscription"]["can_run_instances"] is False
+        assert data["subscription"]["stripe_subscription_ended"] is True
         inserted_subscription = mock_supabase.table().insert.call_args.args[0]
-        assert "max_storage_gb" not in inserted_subscription
+        assert set(inserted_subscription) == {"account_id", "tier", "status", "created_at"}
 
     def test_setup_account_existing_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test setting up account when user already has subscription."""
@@ -262,8 +259,6 @@ class TestAccountsEndpoints:
                     "account_id": "acc_test_123",
                     "tier": "free",
                     "status": "active",
-                    "max_agents": 1,
-                    "max_messages_per_day": 100,
                 }
             ]
         )

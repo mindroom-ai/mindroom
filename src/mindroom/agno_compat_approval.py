@@ -47,9 +47,10 @@ def append_denied_tool_result(
 
 # AGNO_COMPAT: Continuation runs every confirmed call in the stored run, not only the supplied requirements.
 # Reason: Agent continuation keeps stored tool entries that the supplied requirements do not replace, and runs
-# each one that is confirmed without a result or that requires user input. A run continued by ID is re-read
-# from session storage first, so agent session storage that worker code can write could add calls nobody
-# approved; team runs are stored where no worker writes.
+# each one that is confirmed without a result or that requires user input, first copying a user-input entry's
+# stored input values into its arguments. A run continued by ID is re-read from session storage first, so agent
+# session storage that worker code can write could add calls nobody approved or change an approved call's
+# arguments after they were checked; team runs are stored where no worker writes.
 # Upstream issue: No matching issue identified; tracking gap for continuing exactly the supplied requirements.
 # Upstream PR: None identified.
 # Remove when: Agent continuation runs only the caller's supplied requirements, or exposes a public callback

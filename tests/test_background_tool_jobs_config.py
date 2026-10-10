@@ -47,9 +47,10 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
 from mindroom.turn_record import TurnRecord
-from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
+from tests.conftest import message_origin, test_runtime_paths, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
+from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
 from tests.tool_job_helpers import (
@@ -216,6 +217,7 @@ async def test_disabled_startup_parks_only_explicitly_marked_approvals(tmp_path:
             room_id="!room:localhost",
             thread_id="$thread",
             requester_id="@user:localhost",
+            origin=message_origin(),
             response_event_id=f"$response-{approval_id}",
             sources=ResponseSources((source_event_id,), (source_event_id,)),
             calls=(
@@ -231,7 +233,7 @@ async def test_disabled_startup_parks_only_explicitly_marked_approvals(tmp_path:
             state="ready",
             requires_background_tool_jobs=requires_background_tool_jobs,
         )
-        saved = await store.create_approval_continuation(continuation)
+        saved = await paused_for_approval(store, continuation)
         assert saved is not None
         return saved
 
@@ -490,15 +492,8 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     )
     try:
         await restarted.sync()
-        # Current grants no longer cover this parked job, so read it through the unauthorized ownership lookup.
-        [recovered] = await restarted.runtime.source_jobs(
-            "$saved",
-            transport_agent_name="general",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            session_id="!room:localhost_$thread",
-            requester_id="@human:localhost",
-        )
+        # Current grants no longer cover this parked job, so every authorized lookup hides it.
+        [recovered] = [entry.job for entry in restarted.runtime._entries.values()]
         assert recovered.result == "kept result"
         assert not recovered.consumed
         assert executions == 1

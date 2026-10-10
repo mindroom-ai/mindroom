@@ -110,7 +110,7 @@ It uses the installed `mindroom-nio` dependency from `uv.lock`; no separate sour
 The harness selects the locked Python environment with `uv`, then starts Python directly so a graceful group interrupt is delivered once, without a wrapper forwarding a second signal during shutdown.
 
 Generated fuzz and chaos traces append explicit follow-up probes for conversations with source redactions.
-The probes wait for durable tombstones, require deferred session cleanup, and check that redacted source markers are absent from the complete model request.
+The probes wait for durable tombstones and check that redacted source markers are absent from the complete model request.
 Probe operations are additional to `--steps` and appear in the saved trace.
 
 Use `--save-trace scenario.json` to save the logical workload and `--trace scenario.json` to replay it against a fresh disposable server.

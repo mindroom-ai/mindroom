@@ -37,6 +37,7 @@ _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {
         "google_calendar",
+        "google_cloud",
         "google_docs",
         "google_drive",
         "google_gmail",

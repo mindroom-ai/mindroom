@@ -128,9 +128,9 @@ get_average_order_value(group_by="day", created_after="2026-03-01", created_befo
 
 ## `homeassistant`
 
-<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/ae8bf099-0f11-4097-8de1-de17efbb7bc8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/01e6b9c7-db21-49e9-897c-d03ced90ee14#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%" poster="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-light="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-dark="https://github.com/user-attachments/assets/aac77c0a-6c51-4e8b-aaa6-e682ca08f228">
+  <source src="https://github.com/user-attachments/assets/51d85cfc-79de-4666-a3e2-aa2356f1c5ed" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/b5d7a6f2-11bb-45a5-b92e-03ab0d9c5ba0" type="video/mp4">
 </video>
 
 `homeassistant` provides `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.

@@ -23,6 +23,8 @@ from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.turn_record import TurnRecord
+from tests.conftest import message_origin
+from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot
 from tests.tool_job_helpers import (
     completed_delegation_job,
@@ -149,12 +151,13 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
             room_id=owner.room_id,
             thread_id=owner.thread_id,
             requester_id=owner.requester_id,
+            origin=message_origin(sender_id=owner.requester_id),
             response_event_id="$response",
             sources=ResponseSources(("$later",), ("$later",)),
             calls=(ApprovalCall("call", "tool", "general", 2**62, decision=ApprovalDecision.APPROVED),),
             state="ready",
         )
-        assert await principal.create_approval_continuation(continuation) is not None
+        assert await paused_for_approval(principal, continuation) is not None
     try:
         await coordinator._expire_consumed_results()
         expired = source_completed and not approval and not consumer_pending

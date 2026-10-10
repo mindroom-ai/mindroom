@@ -468,7 +468,7 @@ models:
     provider: ollama
   # --- Anthropic ---
   haiku:
-    id: claude-haiku-4-5
+    id: claude-haiku-5-5
     provider: anthropic
   fable:
     id: claude-fable-5-1
@@ -484,7 +484,7 @@ models:
     id: gpt-6-astra
     provider: openai
   sol:
-    id: gpt-6-sol
+    id: gpt-6.1-sol
     provider: openai
   # --- Google ---
   gemini_flash:

@@ -93,8 +93,10 @@ _UntrustedLoader.add_constructor("tag:yaml.org,2002:int", _UntrustedLoader.const
 def safe_load_without_aliases(stream: str) -> Any:  # noqa: ANN401
     """Parse like ``safe_load`` but refuse documents whose composed tree could exhaust memory or the C stack.
 
-    Directives are counted before parsing, because libyaml compares each ``%TAG`` directive with every earlier one.
-    Events are checked before any node is composed: aliases let a short document describe a larger tree,
+    Directives are counted before parsing, because libyaml compares each ``%TAG`` directive with every earlier one
+    before the document start that refuses them.
+    Events are checked before any node is composed: aliases and ``%TAG`` prefixes, which are copied into every node naming
+    their handle, let a short document describe a larger tree,
     the libyaml composer recurses in C once per nesting level, and each composed node costs a few hundred bytes.
     Construction refuses values whose cost grows faster than their length and reports every failure as ``yaml.YAMLError``.
     """
@@ -107,6 +109,9 @@ def safe_load_without_aliases(stream: str) -> Any:  # noqa: ANN401
     for event in yaml.parse(stream, Loader=SafeLoader):
         if isinstance(event, yaml.AliasEvent):
             msg = "YAML aliases are not allowed"
+            raise yaml.YAMLError(msg)
+        if isinstance(event, yaml.DocumentStartEvent) and event.tags:
+            msg = "YAML %TAG directives are not allowed"
             raise yaml.YAMLError(msg)
         if isinstance(event, yaml.CollectionEndEvent):
             depth -= 1

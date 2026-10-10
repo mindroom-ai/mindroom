@@ -215,7 +215,7 @@ See [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/#de
 
 Dedicated workers mount no config and resolve agents from the [live config snapshot](#live-config-snapshots).
 They never receive the credentials-encryption key, so tool settings reach them only through [credential leases](#credential-leases).
-Worker pods can reach the primary API over the pod network, so the runtime chart gives the primary a generated `MINDROOM_API_KEY` that workers never receive, unless the explicit opt-out is configured.
+Worker pods can reach the primary API over the pod network, so the runtime chart gives the primary a generated (or `apiAuth.existingSecret`) `MINDROOM_API_KEY` that workers never receive, unless the explicit opt-out is configured.
 
 ### Keeping worker versions matched
 
@@ -515,7 +515,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
-| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download | `16777216` (16 MiB) |
+| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |

@@ -466,6 +466,27 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
+    def _text_read_refusal(self, mime_type: str, metadata: dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
+                "file": metadata,
+            },
+        )
+
+    # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
+    # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
+    # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
+    # `google_drive_download_file` or disables it. This override decides text by content instead. It also
+    # refuses Office files, which Agno's MIME-based branch would extract without tables, grouped shapes, or
+    # line breaks, or reject with an install hint when the extraction packages are missing.
+    # Upstream issue: Tracking gap; no matching issue identified.
+    # Upstream PR: None identified; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
+    # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit name its
+    # download function, and extracts complete Office text with dependencies MindRoom ships or refuses it;
+    # keep MindRoom's function aliases.
+    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_without_nul_bytes.
     @authenticate
     def read_file(self, file_id: str) -> str:
         """Read a Drive file and return its text content, including files in Shared Drives."""
@@ -477,12 +498,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             if mime_type in self.TEXT_EXPORT_TYPES:
                 export_mime = self.TEXT_EXPORT_TYPES[mime_type]
             elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
-                return json.dumps(
-                    {
-                        "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
-                        "file": metadata,
-                    },
-                )
+                return self._text_read_refusal(mime_type, metadata)
             else:
                 export_mime = None
 
@@ -502,6 +518,12 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 content_bytes = self._download_bytes(request)
 
+            # Content with a NUL byte is binary, as git also judges files: images and zip-based Office files
+            # always contain NULs, and would reach the model as garbage, while 8-bit text in any encoding has
+            # none. A PDF can be NUL-free when its streams are uncompressed, so its signature counts too.
+            # UTF-16 text is refused as well.
+            if content_bytes.startswith(b"%PDF-") or b"\x00" in content_bytes:
+                return self._text_read_refusal(mime_type, metadata)
             content = content_bytes.decode("utf-8", errors="replace")
             return json.dumps(
                 {

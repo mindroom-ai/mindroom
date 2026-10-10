@@ -20,6 +20,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.timing import timed
+from mindroom.token_budget import estimate_char_tokens
 
 from ._policy import (
     allowed_scope_storage_paths,
@@ -319,7 +320,7 @@ def _read_listed_memory_file(scope_path: Path, relative_path: str) -> _ScopeMemo
     return _scope_memory_file(relative_path, payload) if payload is not None else None
 
 
-def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
+def read_scope_memory_files(scope_path: Path) -> list[_ScopeMemoryFile]:
     """Read every in-scope memory file under the per-file and per-scan byte caps."""
     try:
         with open_directory_within_root(scope_path) as scope_fd:
@@ -344,18 +345,15 @@ def _require_rewritable(memory_file: _ScopeMemoryFile) -> None:
         raise ValueError(msg)
 
 
-def _write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
-    """Publish one memory file descriptor-relative, never through a planted entry."""
+def write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
+    """Publish one memory file descriptor-relative, never through a planted entry, keeping its permissions."""
     with (
         open_directory_within_root(scope_path) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
     ):
-        atomic_write_bytes_at(
-            directory_fd,
-            relative_path.name,
-            payload,
-            file_mode=existing_file_mode(directory_fd, relative_path.name),
-        )
+        mode = existing_file_mode(directory_fd, relative_path.name)
+        # A new file is readable like a hand-written one, not left at the temp file's 0o600.
+        atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=0o644 if mode is None else mode)
 
 
 def _append_scope_markdown_line(scope_path: Path, relative_path: Path, line: str, *, initial_text: bytes) -> None:
@@ -412,7 +410,7 @@ def _load_scope_id_entries(
 
     results: list[MemoryResult] = []
     id_to_file: dict[str, _ScopeMemoryFile] = {}
-    for memory_file in _read_scope_markdown_files(scope_path):
+    for memory_file in read_scope_memory_files(scope_path):
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):
             match = FILE_MEMORY_ENTRY_PATTERN.match(raw_line.strip())
             if not match:
@@ -435,7 +433,7 @@ def _load_scope_id_entries(
 
 def _iter_scope_unstructured_lines(scope_path: Path) -> Iterator[tuple[str, int, str]]:
     """Yield relative paths, line numbers, and eligible snippets in file order."""
-    for memory_file in _read_scope_markdown_files(scope_path):
+    for memory_file in read_scope_memory_files(scope_path):
         if memory_file.relative_path == FILE_MEMORY_ENTRYPOINT:
             continue
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):
@@ -508,17 +506,40 @@ def _schedule_agent_semantic_refresh(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
+    _schedule_semantic_refresh_at(
+        agent_name,
+        scope_user_id,
+        _scope_dir(scope_user_id, resolution, config, create=False),
+        config,
+        runtime_paths,
+        execution_identity,
+    )
+
+
+def _schedule_semantic_refresh_at(
+    agent_name: str,
+    scope_user_id: str,
+    root: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> None:
     search_config = config.resolve_entity(agent_name).memory_search
     if search_config.mode != "semantic":
         return
     schedule_semantic_file_memory_refresh(
         scope_user_id=scope_user_id,
-        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        root=root,
         config=config,
         runtime_paths=runtime_paths,
         search_config=search_config,
         execution_identity=execution_identity,
     )
+
+
+def refresh_agent_memory_search(agent_name: str, root: Path, config: Config, runtime_paths: RuntimePaths) -> None:
+    """Re-index a shared agent's file memory at ``root`` after its files changed outside the memory tool."""
+    _schedule_semantic_refresh_at(agent_name, agent_scope_user_id(agent_name), root, config, runtime_paths, None)
 
 
 def _schedule_scope_semantic_refresh(
@@ -763,7 +784,7 @@ def _replace_scope_memory_entry(
 
     _require_rewritable(memory_file)
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    _write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
+    write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
     return True
 
 
@@ -789,12 +810,26 @@ def _replace_scope_path_memory_entry(
             f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
         )
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    _write_scope_markdown_file(
+    write_scope_markdown_file(
         scope_path,
         Path(path_memory_line.memory_file.relative_path),
         _memory_lines_payload(lines),
     )
     return True
+
+
+def _lines_within_token_cap(lines: list[str], max_tokens: int) -> list[str]:
+    """Keep the leading whole lines whose joined text stays within ``max_tokens``.
+
+    A long line is withheld whole rather than cut, so the preload never shows a
+    partial fact and the truncation marker accounts for every withheld line.
+    """
+    kept_chars = 0
+    for index, line in enumerate(lines):
+        kept_chars += len(line) + (1 if index else 0)
+        if estimate_char_tokens(kept_chars) > max_tokens:
+            return lines[:index]
+    return lines
 
 
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
@@ -803,13 +838,14 @@ def _load_scope_entrypoint_context(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> MemoryEntrypointContext:
-    """Load the scoped `MEMORY.md` entrypoint text and what the cap withheld."""
+    """Load the scoped `MEMORY.md` entrypoint text and what the caps withheld."""
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
     payload = _read_scope_entrypoint_payload(scope_path)
     if payload is None:
         return MemoryEntrypointContext()
     entrypoint_path = _scope_entrypoint_path(scope_path)
     max_lines = config.memory.file.max_entrypoint_lines
+    max_tokens = config.memory.file.max_entrypoint_tokens
     lines = _decode_capped_text(payload).splitlines()
     # An oversized entrypoint still reports at least one withheld line, so the
     # preamble tells the model to read the file instead of claiming completeness.
@@ -822,6 +858,7 @@ def _load_scope_entrypoint_context(
         )
     if max_lines < total_lines:
         lines = lines[:max_lines]
+    lines = _lines_within_token_cap(lines, max_tokens)
     return MemoryEntrypointContext(
         text="\n".join(lines).strip(),
         source_path=entrypoint_path,

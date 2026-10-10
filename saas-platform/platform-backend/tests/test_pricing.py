@@ -15,6 +15,7 @@ from backend.pricing import (
     load_pricing_config,
     load_pricing_config_model,
 )
+from backend.services.provisioner_service import _RESOURCE_PROFILE_HELM_VALUES
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +74,7 @@ class TestPricingConfig:
         """Test that plan prices are correct."""
         model = load_pricing_config_model()
 
-        # Free plan
+        # No-plan state for accounts without a subscription
         assert model.plans["free"].price_monthly == 0
         assert model.plans["free"].price_yearly == 0
 
@@ -117,40 +118,32 @@ class TestPricingConfig:
             assert plan.stripe_price_id_yearly_live is not None
             assert plan.stripe_price_id_yearly_live.startswith("price_")
 
-        # Free and Enterprise should not have Stripe IDs
+        # The no-plan state and Enterprise have no Stripe IDs
         assert model.plans["free"].stripe_price_id_monthly is None
         assert model.plans["enterprise"].stripe_price_id_monthly is None
 
-    def test_plan_features_and_limits(self) -> None:
-        """Test plan features and limits configuration."""
+    def test_plan_features(self) -> None:
+        """Test plan features configuration."""
         model = load_pricing_config_model()
 
-        # BYOK plan
-        byok = model.plans["byok"]
-        assert len(byok.features) == 7
-        assert byok.limits.max_agents == 100
-        assert byok.limits.max_messages_per_day == "unlimited"
-        assert byok.limits.storage_gb == 5
-        assert byok.limits.workflows is True
+        assert len(model.plans["byok"].features) == 4
+        assert model.plans["free"].features == []
 
-        # Hobby plan
         hobby = model.plans["hobby"]
         assert hobby.recommended is True
-        assert "$15 included monthly AI usage" in hobby.features
-        assert hobby.limits.storage_gb == 5
+        assert "$15 of AI credit every month" in hobby.features
 
-        # Pro plan
-        pro = model.plans["pro"]
-        assert "$150 included monthly AI usage" in pro.features
-        assert pro.limits.max_agents == "unlimited"
-        assert pro.limits.storage_gb == 25
-        assert pro.limits.sla is True
+        assert "$150 of AI credit every month" in model.plans["pro"].features
 
-        # Enterprise plan
-        enterprise = model.plans["enterprise"]
-        assert enterprise.limits.custom_development is True
-        assert enterprise.limits.on_premise is True
-        assert enterprise.limits.dedicated_infrastructure is True
+    def test_advertised_storage_matches_provisioned_volumes(self) -> None:
+        """Each self-serve plan's storage feature line names the volume its resource profile provisions."""
+        repository_root = Path(__file__).resolve().parents[3]
+        chart_storage = yaml.safe_load((repository_root / "cluster/k8s/instance/values.yaml").read_text())["storage"]
+        for plan_id in ("byok", "hobby", "pro"):
+            plan = load_pricing_config_model().plans[plan_id]
+            provisioned = _RESOURCE_PROFILE_HELM_VALUES.get(plan.resource_profile, {}).get("storage", chart_storage)
+            advertised = [feature for feature in plan.features if feature.endswith(" GB storage")]
+            assert advertised == [f"{provisioned.removesuffix('Gi')} GB storage"], plan_id
 
     def test_missing_config_file(self) -> None:
         """Test behavior when config file is missing."""
@@ -187,7 +180,7 @@ class TestPricingHelperFunctions:
         # BYOK yearly
         assert get_stripe_price_id("byok", "yearly") == "price_1TZQNK3GVsrZHuzXqbwHwhph"
 
-        # Free plan (no Stripe IDs)
+        # No-plan state (no Stripe IDs)
         assert get_stripe_price_id("free", "monthly") is None
         assert get_stripe_price_id("free", "yearly") is None
 
@@ -261,7 +254,7 @@ class TestPricingHelperFunctions:
         assert byok.name == "Bring Your Own Keys"
         assert byok.price_monthly == 1000
         assert byok.price_yearly == 9600
-        assert len(byok.features) == 7
+        assert len(byok.features) == 4
 
         # Hobby plan
         hobby = get_plan_details("hobby")
@@ -335,7 +328,6 @@ class TestPricingIntegration:
             assert "price_yearly" in plan_data
             assert "description" in plan_data
             assert "features" in plan_data
-            assert "limits" in plan_data
 
     def test_stripe_price_ids_populated(self) -> None:
         """Test that Stripe price IDs are populated for synced paid plans."""

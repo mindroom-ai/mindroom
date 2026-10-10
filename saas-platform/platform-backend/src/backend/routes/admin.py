@@ -1,11 +1,17 @@
 """Admin-only routes for platform management."""
 
-from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger
-from backend.deps import ACTIVE_ACCOUNT_STATUS, ensure_supabase, invalidate_account_auth_cache, limiter, verify_admin
+from backend.deps import (
+    ACTIVE_ACCOUNT_STATUS,
+    account_may_sign_in,
+    ensure_supabase,
+    invalidate_account_auth_cache,
+    limiter,
+    verify_admin,
+)
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -28,7 +34,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel
 
 router = APIRouter()
-ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
+ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs"}
 # The accounts.status CHECK constraint allows exactly these values.
 ACCOUNT_STATUSES = ("active", "suspended", "deleted", "pending_verification")
 
@@ -68,7 +74,9 @@ async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verif
 
     try:
         accounts = sb.table("accounts").select("*", count="exact").execute()
-        subscriptions = sb.table("subscriptions").select("*", count="exact").eq("status", "active").execute()
+        subscriptions = (
+            sb.table("subscriptions").select("*", count="exact").eq("status", "active").neq("tier", "free").execute()
+        )
         instances = sb.table("instances").select("*", count="exact").eq("status", "running").execute()
 
         # Get recent activity for dashboard
@@ -277,15 +285,17 @@ class UpdateAccountStatusRequest(BaseModel):
     reason: str | None = None
 
 
-def _update_account_auth_ban(sb: Any, account_id: str, status: str | None) -> None:
-    """Apply a saved account status to Auth; failed updates can be retried."""
-    if status is not None:
-        try:
-            sb.auth.admin.update_user_by_id(
-                account_id, {"ban_duration": "876000h" if status == "suspended" else "none"}
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail="Failed to update account authentication") from exc
+def _update_account_auth_ban(sb: Any, account: dict[str, Any]) -> None:
+    """Ban Auth sign-in for a saved account that every platform route refuses; failed updates can be retried.
+
+    An account awaiting deletion stays unbanned so its owner can still cancel the deletion.
+    """
+    try:
+        sb.auth.admin.update_user_by_id(
+            account["id"], {"ban_duration": "none" if account_may_sign_in(account) else "876000h"}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to update account authentication") from exc
 
 
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
@@ -330,7 +340,7 @@ async def update_account_status(
             resource_id=account_id,
             details={"status": request.status, "reason": request.reason},
         )
-        _update_account_auth_ban(sb, result.data[0]["id"], request.status)
+        _update_account_auth_ban(sb, result.data[0])
 
         return {"status": "success", "account_id": account_id, "new_status": request.status}  # noqa: TRY300
     except HTTPException:
@@ -352,30 +362,18 @@ async def get_dashboard_metrics(
 
     try:
         accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
-        active_subs = sb.table("subscriptions").select("*", count="exact", head=True).eq("status", "active").execute()
-        _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
-
-        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
-        tier_prices = _monthly_plan_prices_usd()
-        mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
-
-        seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
-        messages = (
-            sb.table("usage_metrics")
-            .select("metric_date, messages_sent")
-            .gte("metric_date", seven_days_ago)
-            .order("metric_date")
+        active_subs = (
+            sb.table("subscriptions")
+            .select("*", count="exact", head=True)
+            .eq("status", "active")
+            .neq("tier", "free")
             .execute()
         )
+        _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
 
-        if messages.data:
-            by_date = defaultdict(int)
-            for m in messages.data:
-                date = m["metric_date"][:10]
-                by_date[date] += m.get("messages_sent", 0)
-            _ = [  # noqa: F841
-                {"date": date, "messages_sent": count} for date, count in sorted(by_date.items())
-            ]
+        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").neq("tier", "free").execute()
+        tier_prices = _monthly_plan_prices_usd()
+        mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
 
         all_instances = instances_data.list_instances(sb, columns="status")
         status_counts: dict[str, int] = {}
@@ -459,8 +457,6 @@ async def admin_get_list(  # noqa: C901
             query = sb.table("subscriptions").select("*, accounts(email, full_name)", count="exact")
         elif resource == "audit_logs":
             query = sb.table("audit_logs").select("*, accounts(email)", count="exact")
-        elif resource == "usage_metrics":
-            query = sb.table("usage_metrics").select("*, accounts(email, full_name)", count="exact")
         else:
             query = sb.table(resource).select("*", count="exact")
 
@@ -573,7 +569,8 @@ async def admin_update(
         )
         if resource == "accounts" and result.data:
             invalidate_account_auth_cache(result.data[0]["id"])
-            _update_account_auth_ban(sb, result.data[0]["id"], data.get("status"))
+            if data.keys() & {"status", "deleted_at"}:
+                _update_account_auth_ban(sb, result.data[0])
 
         return {"data": result.data[0] if result.data else None}
     except HTTPException:

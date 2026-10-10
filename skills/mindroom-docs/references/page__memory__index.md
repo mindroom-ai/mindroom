@@ -9,9 +9,9 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
 
-<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/75a32c85-7528-4b72-b268-0de8ec17f794#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/c4b6f6e3-03a9-40fd-808b-0d18abdaf263#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-light="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-dark="https://github.com/user-attachments/assets/4ae62fd6-04fe-4dcc-aed6-d9b1de92b5f9">
+  <source src="https://github.com/user-attachments/assets/440c7742-da69-41e1-a131-788ca5307e31" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/a7ccca20-2047-4d8c-8bf5-a2251e0946f3" type="video/mp4">
 </video>
 
 ## Choosing a Backend
@@ -165,6 +165,7 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+    max_entrypoint_tokens: 50000
   search:
     mode: keyword
     include:
@@ -177,7 +178,9 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines; when it truncates, a marker reports the included and total line counts and the path to read for the rest.
+`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
+Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
+When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
 `memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
 ### File layout
@@ -210,7 +213,7 @@ Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not 
 
 In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage)).
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
-Writes through the `memory` tool and auto-flush refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
+Writes through the `memory` tool, auto-flush, and an applied [dreaming](https://docs.mindroom.chat/scheduling/#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
 
 ```yaml
@@ -240,6 +243,8 @@ It applies only to agents whose effective backend is `file`.
 3. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts.
 4. When the model answers with the `no_reply_token`, nothing is written.
 5. Results are appended to `memory/YYYY-MM-DD.md`.
+
+Turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start are not auto-flushed.
 
 ```yaml
 memory:
@@ -274,6 +279,34 @@ memory:
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 
+## Prompt Curation
+
+Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
+Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
+
+```yaml
+agents:
+  mind:
+    memory_backend: file
+    automations: [prompt_curation]
+```
+
+## Dreaming
+
+Facts in `memory/` go stale when a later conversation corrects them.
+Enable the [`dreaming`](https://docs.mindroom.chat/scheduling/#dreaming) automation to have the agent reconcile `memory/` nightly with new conversations and daily notes, through a proposal that a second run reviews before MindRoom applies it.
+
+```yaml
+memory:
+  auto_flush:
+    enabled: true           # writes the daily notes dreaming reviews
+agents:
+  mind:
+    memory_backend: file
+    thread_exports: true    # also reviews threaded conversations
+    automations: [dreaming]
+```
+
 ## [`memory`]
 
 The `memory` tool lets an agent deliberately remember, look up, correct, or forget something, alongside automatic memory.
@@ -302,7 +335,7 @@ Failures are returned as readable error messages rather than raised into the con
 
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.
 

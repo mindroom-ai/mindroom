@@ -121,7 +121,7 @@ class MatrixMessageOperations:
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
             extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         elif context.requester_id in context.config.bot_accounts:
-            # Trusted relays carry only humans, so name a bot-account requester the way ordinary replies do.
+            # Name a bot-account requester the way ordinary agent replies do, so the recipient checks its access.
             extra_content[ACTING_REQUESTER_KEY] = context.requester_id
         if attachment_ids:
             extra_content[ATTACHMENT_IDS_KEY] = attachment_ids

@@ -1,10 +1,11 @@
-"""Backend settings for boolean judgments and System One choices."""
+"""Backend settings for boolean and choice judgments."""
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.credentials import validate_service_name
 
 
 class LLMJudgmentConfig(BaseModel):
@@ -27,18 +28,17 @@ class LLMJudgmentConfig(BaseModel):
     )
 
 
-class TypeSafeJudgmentConfig(BaseModel):
-    """Use System One probabilities with a task-specific acceptance threshold."""
+class _ProbabilityBackendConfig(BaseModel):
+    """Accept a decision API's answer only at a task-specific probability."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    provider: Literal["typesafe"] = Field(description="Judge with System One; requires TYPESAFE_API_KEY")
     threshold: float = Field(
         default=0.8,
         ge=0.0,
         le=1.0,
         allow_inf_nan=False,
-        description="Minimum System One probability required to accept an answer",
+        description="Minimum probability required to accept an answer",
     )
     timeout_seconds: float = Field(
         default=1.5,
@@ -49,4 +49,38 @@ class TypeSafeJudgmentConfig(BaseModel):
     )
 
 
-type JudgmentConfig = Annotated[LLMJudgmentConfig | TypeSafeJudgmentConfig, Field(discriminator="provider")]
+class TypeSafeJudgmentConfig(_ProbabilityBackendConfig):
+    """Use System One probabilities."""
+
+    provider: Literal["typesafe"] = Field(description="Judge with System One; requires TYPESAFE_API_KEY")
+
+
+class OpenAIDecisionsJudgmentConfig(_ProbabilityBackendConfig):
+    """Use OpenAI Decisions API probabilities."""
+
+    provider: Literal["openai_decisions"] = Field(
+        description="Judge with the OpenAI Decisions API; uses the OpenAI API key",
+    )
+    credentials_service: str | None = Field(
+        default=None,
+        description=(
+            "Credential service holding the OpenAI API key; defaults to the OpenAI provider credential, "
+            "which may hold a proxy key that api.openai.com rejects"
+        ),
+    )
+
+    @field_validator("credentials_service")
+    @classmethod
+    def _validate_credentials_service(cls, value: str | None) -> str | None:
+        """Normalize an optional named credential reference."""
+        return None if value is None else validate_service_name(value)
+
+
+type ProbabilityJudgmentConfig = Annotated[
+    TypeSafeJudgmentConfig | OpenAIDecisionsJudgmentConfig,
+    Field(discriminator="provider"),
+]
+type JudgmentConfig = Annotated[
+    LLMJudgmentConfig | TypeSafeJudgmentConfig | OpenAIDecisionsJudgmentConfig,
+    Field(discriminator="provider"),
+]

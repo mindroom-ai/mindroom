@@ -65,6 +65,7 @@ async def test_reserved_controls_obey_approval_and_plugin_hooks(
             SimpleNamespace(
                 name="policy",
                 discovered_hooks=(before, after),
+                discovered_automations=(),
                 entry_config=PluginEntryConfig(path="./policy"),
                 plugin_order=0,
             ),

@@ -60,6 +60,7 @@ jobs:
           buildkitd-flags: --debug
           driver-opts: |
             network=host
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0

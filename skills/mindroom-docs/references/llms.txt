@@ -1,6 +1,6 @@
 # MindRoom
 
-> AI agents that live in Matrix and work everywhere via bridges
+> AI agents that know you and your work, in a chat app anyone can use. Open source, any model, self-host or hosted.
 
 ## MindRoom Docs
 

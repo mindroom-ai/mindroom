@@ -7,12 +7,12 @@ They find what you need, write what you ask for, run recurring jobs on their own
 It is open source, and you choose each agent's model: a local one that keeps your private life at home, or a frontier one for hard problems.
 You can run all of it yourself: the chat app, the server, and the AI backend.
 
-<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-light="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-dark="https://github.com/user-attachments/assets/e126d12b-5609-4c97-b69f-e2f9289a0008">
+  <source src="https://github.com/user-attachments/assets/6ec88440-9b9a-4319-b4e9-88d452819bb6" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/af51cf1e-840a-415e-ae97-df453d2afdda" type="video/mp4">
 </video>
 
-**[Get started](https://docs.mindroom.chat/getting-started/)** · **[See it in action](https://docs.mindroom.chat/showcase/)** · **[Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/)**
+**[Get started](https://docs.mindroom.chat/getting-started/)** · **[See it in action](https://docs.mindroom.chat/showcase/)** · **[Try hosted MindRoom](https://mindroom.chat/#hosted)** · **[Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/)**
 
 ## What People Use It For
 
@@ -24,7 +24,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     - Keep notes, a journal, and memories you can still find months later.
     - Track your budget, workouts, or anything else in files the agent keeps up to date.
     - Follow the topics you care about, with a digest that only arrives when there is something new.
-    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval rules for anything risky.
+    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval for the actions you choose.
     - Build quick tools and scripts in the agent's own workspace.
 
 === "Work"
@@ -66,21 +66,21 @@ Send a voice message from your phone ([Voice Messages](https://docs.mindroom.cha
 ### Safe to give real access
 
 - Sending or changing something can wait for your one-tap approval, which shows exactly what will be sent and to whom ([Tool Approval](https://docs.mindroom.chat/tool-approval/)).
-- Code runs in isolated workers ([Workers & Sandboxing](https://docs.mindroom.chat/deployment/sandbox-proxy/)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)).
+- Code can run in isolated workers ([Workers & Sandboxing](https://docs.mindroom.chat/deployment/sandbox-proxy/)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)).
 - Each agent answers only the people and rooms you allow ([Access Control](https://docs.mindroom.chat/authorization/)).
-- It all runs on [Matrix](https://docs.mindroom.chat/matrix/), an open, end-to-end encrypted messaging standard that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
+- It all runs on [Matrix](https://docs.mindroom.chat/matrix/), an open messaging standard, with optional end-to-end encryption, that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
 
 The [Security Model](https://docs.mindroom.chat/architecture/security-posture/) documents exactly which boundary protects what.
 
 ### A chat app built for agents
 
-MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), and on the [Mac](https://docs.mindroom.chat/installation/macos-app/), along with the server and the AI backend.
+MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), on the [Mac](https://docs.mindroom.chat/installation/macos-app/), and in beta on Android, along with the server and the AI backend.
 So agents are not limited to what Slack or WhatsApp can display:
 
 - Replies stream in with every tool call shown, and you can stop them at any time ([Streaming Responses](https://docs.mindroom.chat/streaming/)).
 - Approval cards and clickable questions sit right in the conversation ([Interactive Questions](https://docs.mindroom.chat/interactive/)).
 - An agent can work in its own browser that you watch live and take over, for example to log in ([Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#watch-take-control-and-resume)).
-- An agent can use the apps and folders you select on your own computer, and runs shell commands only after you approve them ([Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)).
+- An agent running on a server across the world can still use your laptop, or any computer you pair: the apps and folders you allow and the shell commands you approve, over end-to-end encrypted Matrix with no open ports ([Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)).
 - An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](https://docs.mindroom.chat/canvases/)).
 - You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](https://docs.mindroom.chat/configuration/models/#model-overrides-in-chat)).
 
@@ -98,6 +98,11 @@ Agents also answer any OpenAI-compatible client ([OpenAI-Compatible API](https:/
 
 ## How MindRoom Compares
 
+AI apps such as ChatGPT, Claude, and Gemini can connect to your email, calendar, and documents, but each one ties those connections to one company.
+Connect your inbox to ChatGPT, and OpenAI's servers process it for OpenAI's models only; using Claude or Gemini as well means connecting everything again, handing your data to another company, and teaching it about you from scratch.
+In MindRoom you connect once: your accounts, memory, and documents live in MindRoom, which can run on your own machine, and every agent uses them with the model that fits.
+A cloud model sees only what its agent sends it, and an agent on a local model, with local memory and your own server, keeps everything at home.
+
 Agents such as OpenClaw and Hermes Agent plug into existing messaging apps through one adapter per app.
 That lets them reach many apps, but each app decides what the agent can show.
 MindRoom takes the opposite approach.
@@ -107,7 +112,7 @@ MindRoom takes the opposite approach.
 | Who they serve | Usually one person's assistant | Personal agents for everyone and shared agents for teams, in rooms where people and agents work together, with access control |
 | What agents can show | Whatever each app allows, mostly text and simple buttons | Its own client: approval cards, live tool traces, voice calls, a browser you can take over, and interactive pages |
 | How they connect | One adapter per messaging app | One open, encrypted protocol, plus bridges for reach |
-| Where messages go | Through each messaging platform | End-to-end encrypted, on servers you can run yourself |
+| Where messages go | Through each messaging platform | On servers you can run yourself, where rooms can be end-to-end encrypted |
 
 Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [Import from OpenClaw](https://docs.mindroom.chat/openclaw/).
 

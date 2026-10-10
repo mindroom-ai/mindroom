@@ -66,9 +66,9 @@ MindRoom runs the whole OAuth flow for OAuth-backed tools and MCP servers: conne
 Each connection is stored for one credential scope, so the right person's account is used for each agent.
 Providers, built in or from plugins, supply only provider-specific details such as endpoints, scopes, and client configuration.
 
-<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/9c301417-f0ee-43d1-ac42-8c974d42888f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/4689c253-d026-4dee-afb8-7f178ea793df#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-light="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-dark="https://github.com/user-attachments/assets/9849b052-508e-409a-867c-cf155a640d31">
+  <source src="https://github.com/user-attachments/assets/c3a4166f-79a4-4ccb-a176-3a7c9922b828" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/62767b38-9729-4277-b615-e2b7b6863234" type="video/mp4">
 </video>
 
 ### Connect An Account
@@ -134,7 +134,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | --- | --- |
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](https://docs.mindroom.chat/tools/project-management/#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
-| Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
+| Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.

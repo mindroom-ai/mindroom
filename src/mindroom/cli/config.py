@@ -791,6 +791,17 @@ def config_validate(
         format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
 
+    from mindroom.automations.registry import automation_reference_errors, compile_automations  # noqa: PLC0415
+    from mindroom.tool_system.plugins import isolated_plugin_runtime  # noqa: PLC0415
+
+    with isolated_plugin_runtime(config, runtime_paths, skip_broken_plugins=True) as plugins:
+        automation_errors = automation_reference_errors(config, compile_automations(plugins))
+    if automation_errors:
+        console.print("[red]Issues found:[/red]")
+        for error in automation_errors:
+            console.print(f"  {error}")
+        raise typer.Exit(1)
+
     console.print("[green]Configuration is valid.[/green]\n")
     console.print(f"  Agents: {len(config.agents)} ({', '.join(config.agents.keys()) or 'none'})")
     console.print(f"  Teams:  {len(config.teams)} ({', '.join(config.teams.keys()) or 'none'})")
@@ -923,6 +934,24 @@ def validate_config_source_quiet(
         return config
 
     return _call_config_loader_quietly(validate)
+
+
+@config_app.command("use-local-model")
+def config_use_local_model(
+    model: str = typer.Option(..., help="Model ID served by the local inference engine."),
+    base_url: str = typer.Option(..., help="OpenAI-compatible local server URL."),
+    api_key: str = typer.Option(LOCAL_OPENAI_API_KEY_DEFAULT, help="Local server authentication key."),
+    path: Path | None = CONFIG_PATH_OPTION,
+) -> None:
+    """Use a local model as the default, keeping explicitly selected agent models.
+
+    A backup is saved before replacing YAML. Configurations composed with
+    !include must be edited in their authored source files instead.
+    """
+    # This module imports the CLI helpers above; defer it to avoid a circular import.
+    from mindroom.cli.local_model_config import apply_local_model  # noqa: PLC0415
+
+    apply_local_model(model=model, base_url=base_url, api_key=api_key, path=path)
 
 
 def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:

@@ -452,6 +452,7 @@ async def build_call_tools(
     reconcile_spoken_response: bool = True,
     voice_instructions: str | None = None,
     active_model_name: str | None = None,
+    origin_brief: str | None = None,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
@@ -500,6 +501,11 @@ async def build_call_tools(
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
             voice_enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
+        if origin_brief:
+            voice_enrichment_items = (
+                *voice_enrichment_items,
+                EnrichmentItem(key="call_origin", text=origin_brief, cache_policy="stable"),
+            )
         response_tracker = _CallResponseTracker(
             agent_name=agent_name,
             config=config,
@@ -880,6 +886,14 @@ def _function_requires_text_chat(function: Function, config: Config) -> bool:
         or function.approval_type == "required"
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
         or (not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name))
+    )
+
+
+def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
+    """Return whether the call agent can send Matrix messages; calls hide tools that may need approval."""
+    return "matrix_message" in config.resolve_entity(agent_name).available_tools and not tool_may_require_approval(
+        config,
+        "matrix_message",
     )
 
 

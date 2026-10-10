@@ -1,10 +1,12 @@
-"""Bounded direct HTTP adapter for TypeSafe System One boolean judgments."""
+"""Bounded direct HTTP client for probability judgments from a fixed provider endpoint."""
 
 from __future__ import annotations
 
 import json
 import math
-from typing import TYPE_CHECKING, cast
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -17,165 +19,180 @@ from mindroom.judgment.answers import (
     TokenUsage,
 )
 from mindroom.judgment.execution import SHARED_CAPACITY, JudgmentCapacity, run_judgment
-from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
-PINNED_MODEL = "jev-1.13.0"
+    from mindroom.judgment.state import JudgmentRequest
 
-_TYPE_SAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 _MAX_RESPONSE_BYTES = 64 * 1024
 
 
-class _InvalidJudgmentResponseError(ValueError):
+class InvalidJudgmentResponseError(ValueError):
     """The response did not match the requested judgment contract."""
+
+
+class JudgmentModelDriftError(InvalidJudgmentResponseError):
+    """The provider returned a model other than the configured pin."""
 
 
 class _ResponseTooLargeError(ValueError):
     """The decoded response crossed the configured byte ceiling."""
 
 
-class _JudgmentModelDriftError(_InvalidJudgmentResponseError):
-    """The provider returned a model other than the configured pin."""
+@dataclass(frozen=True, slots=True)
+class WireChoice:
+    """A provider's choice with its range-checked confidence and distribution."""
+
+    choice: str
+    confidence: float
+    probabilities: dict[str, float]
+
+
+@dataclass(frozen=True, slots=True)
+class WireAnswer[T]:
+    """One provider answer, or None when the provider declined to answer."""
+
+    model: str
+    usage: TokenUsage
+    answer: T | None
+
+
+@dataclass(frozen=True, slots=True)
+class JudgmentWire:
+    """One provider's endpoint and its request and answer shapes."""
+
+    endpoint: str
+    encode: Callable[[dict[str, Any]], dict[str, object]]
+    decode_probability: Callable[[object, str], WireAnswer[float]]
+    decode_choice: Callable[[object, str], WireAnswer[WireChoice]]
 
 
 def _reject_constant(_value: str) -> object:
     msg = "response contains a non-finite number"
-    raise _InvalidJudgmentResponseError(msg)
+    raise InvalidJudgmentResponseError(msg)
 
 
-def _exact_keys(value: object, expected: set[str], label: str) -> dict[str, object]:
-    if not isinstance(value, dict) or set(value) != expected:
-        msg = f"response {label} has unexpected keys"
-        raise _InvalidJudgmentResponseError(msg)
-    return cast("dict[str, object]", value)
-
-
-def _number(value: object, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        msg = f"response {label} must be a number"
-        raise _InvalidJudgmentResponseError(msg)
-    if not 0 <= value <= 1:
-        msg = f"response {label} is outside the allowed range"
-        raise _InvalidJudgmentResponseError(msg)
-    result = float(value)
-    if not math.isfinite(result):
-        msg = f"response {label} must be a finite number"
-        raise _InvalidJudgmentResponseError(msg)
-    return result
-
-
-def _token_count(value: object, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        msg = f"response {label} must be a nonnegative integer"
-        raise _InvalidJudgmentResponseError(msg)
-    return value
-
-
-def _decode_envelope(body: bytes, *, expected_model: str) -> tuple[dict[str, object], TokenUsage]:
-    """Validate JSON, model pin, and usage before reading the probability."""
+def _parse_json(body: bytes) -> object:
     if len(body) > _MAX_RESPONSE_BYTES:
         msg = "response exceeds the byte limit"
-        raise _InvalidJudgmentResponseError(msg)
+        raise InvalidJudgmentResponseError(msg)
     try:
-        parsed = json.loads(body, object_pairs_hook=object_with_unique_keys, parse_constant=_reject_constant)
-    except _InvalidJudgmentResponseError:
+        return json.loads(body, object_pairs_hook=object_with_unique_keys, parse_constant=_reject_constant)
+    except InvalidJudgmentResponseError:
         raise
     except DuplicateJSONKeyError as exc:
         msg = "response contains a duplicate JSON key"
-        raise _InvalidJudgmentResponseError(msg) from exc
+        raise InvalidJudgmentResponseError(msg) from exc
     except (ValueError, RecursionError) as exc:
         msg = "response is not valid JSON"
-        raise _InvalidJudgmentResponseError(msg) from exc
-
-    root = _exact_keys(parsed, {"model", "answers", "usage"}, "body")
-    model = root["model"]
-    if not isinstance(model, str) or model != expected_model:
-        msg = "response model does not match the pinned model"
-        raise _JudgmentModelDriftError(msg)
-
-    usage = _exact_keys(root["usage"], {"input_tokens", "output_tokens"}, "usage")
-    token_usage = TokenUsage(
-        input_tokens=_token_count(usage["input_tokens"], "input_tokens"),
-        output_tokens=_token_count(usage["output_tokens"], "output_tokens"),
-    )
-    return root, token_usage
+        raise InvalidJudgmentResponseError(msg) from exc
 
 
-def _decode_response(
-    body: bytes,
-    *,
-    expected_model: str,
-    expected_question: str,
-    threshold: float,
-) -> JudgmentResponse[bool]:
+def exact_keys(value: object, expected: set[str], label: str) -> dict[str, object]:
+    """Return a JSON object with exactly the expected keys."""
+    if not isinstance(value, dict) or set(value) != expected:
+        msg = f"response {label} has unexpected keys"
+        raise InvalidJudgmentResponseError(msg)
+    return cast("dict[str, object]", value)
+
+
+def probability(value: object, label: str) -> float:
+    """Return a finite JSON number between zero and one."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        msg = f"response {label} must be a number"
+        raise InvalidJudgmentResponseError(msg)
+    if not 0 <= value <= 1:
+        msg = f"response {label} is outside the allowed range"
+        raise InvalidJudgmentResponseError(msg)
+    result = float(value)
+    if not math.isfinite(result):
+        msg = f"response {label} must be a finite number"
+        raise InvalidJudgmentResponseError(msg)
+    return result
+
+
+def token_usage(usage: dict[str, object]) -> TokenUsage:
+    """Read the provider's nonnegative input and output token counters."""
+    counts = [usage.get(key) for key in ("input_tokens", "output_tokens")]
+    if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
+        msg = "response token usage must be nonnegative integers"
+        raise InvalidJudgmentResponseError(msg)
+    return TokenUsage(input_tokens=cast("int", counts[0]), output_tokens=cast("int", counts[1]))
+
+
+def _accept_probability(wire_answer: WireAnswer[float], threshold: float) -> JudgmentResponse[bool]:
     """Accept only the requested judgment probability, never a generated decision."""
-    root, usage = _decode_envelope(body, expected_model=expected_model)
-    answers = _exact_keys(root["answers"], {expected_question}, "question map")
-    answer = _exact_keys(answers[expected_question], {"type", "noul"}, "judgment answer")
-    if answer["type"] != "noul":
-        msg = "response answer type is not noul"
-        raise _InvalidJudgmentResponseError(msg)
-    probability = _number(answer["noul"], "judgment probability")
+    value = wire_answer.answer
     return JudgmentResponse(
-        model=expected_model,
-        decision=probability >= threshold,
-        probability=probability,
-        usage=usage,
+        model=wire_answer.model,
+        decision=None if value is None else value >= threshold,
+        probability=value,
+        usage=wire_answer.usage,
     )
 
 
-def _decode_choice_response(
-    body: bytes,
-    *,
-    expected_model: str,
-    expected_question: str,
+def _accept_choice(
+    wire_answer: WireAnswer[WireChoice],
     options: set[str],
     threshold: float,
 ) -> JudgmentResponse[ChoiceDecision]:
     """Validate the full distribution before accepting a unique, confident winner."""
-    root, usage = _decode_envelope(body, expected_model=expected_model)
-    answers = _exact_keys(root["answers"], {expected_question}, "question map")
-    answer = _exact_keys(answers[expected_question], {"type", "choice", "confidence", "probabilities"}, "choice answer")
-    choice = answer["choice"]
-    if answer["type"] != "choice" or not isinstance(choice, str) or choice not in options:
+    answer = wire_answer.answer
+    if answer is None:
+        return JudgmentResponse(model=wire_answer.model, decision=None, probability=None, usage=wire_answer.usage)
+    probabilities = answer.probabilities
+    if answer.choice not in options or set(probabilities) != options:
         msg = "response choice is not a requested option"
-        raise _InvalidJudgmentResponseError(msg)
-    confidence = _number(answer["confidence"], "confidence")
-    raw = _exact_keys(answer["probabilities"], options, "choice probabilities")
-    probabilities = {key: _number(value, "choice probability") for key, value in raw.items()}
-    probability = probabilities[choice]
-    if not math.isclose(sum(probabilities.values()), 1.0, abs_tol=0.01) or probability != max(probabilities.values()):
+        raise InvalidJudgmentResponseError(msg)
+    value = probabilities[answer.choice]
+    if not math.isclose(sum(probabilities.values()), 1.0, abs_tol=0.01) or value != max(probabilities.values()):
         msg = "response choice distribution is inconsistent"
-        raise _InvalidJudgmentResponseError(msg)
-    unique = sum(value == probability for value in probabilities.values()) == 1
+        raise InvalidJudgmentResponseError(msg)
+    unique = sum(other == value for other in probabilities.values()) == 1
     decision = (
-        ChoiceDecision(choice, confidence, tuple(probabilities.items()))
-        if unique and min(confidence, probability) >= threshold
+        ChoiceDecision(answer.choice, answer.confidence, tuple(probabilities.items()))
+        if unique and min(answer.confidence, value) >= threshold
         else None
     )
-    return JudgmentResponse(model=expected_model, decision=decision, probability=probability, usage=usage)
+    return JudgmentResponse(model=wire_answer.model, decision=decision, probability=value, usage=wire_answer.usage)
 
 
-class SystemOneClient:
-    """Call the one fixed TypeSafe endpoint under strict local budgets."""
+@contextmanager
+def _closed_failures() -> Iterator[None]:
+    """Expose transport and contract failures only as closed categories."""
+    try:
+        yield
+    except httpx.TimeoutException as error:
+        raise JudgmentError(failure="timeout") from error
+    except _ResponseTooLargeError as error:
+        raise JudgmentError(failure="response_too_large") from error
+    except httpx.HTTPStatusError as error:
+        failure = "rate_limited" if error.response.status_code in {429, 529} else "http_error"
+        raise JudgmentError(failure) from error
+    except httpx.HTTPError as error:
+        raise JudgmentError(failure="transport_error") from error
+    except JudgmentModelDriftError as error:
+        raise JudgmentError(failure="model_drift") from error
+    except InvalidJudgmentResponseError as error:
+        raise JudgmentError(failure="invalid_response") from error
+
+
+class JudgmentClient:
+    """Call one provider's fixed endpoint under strict local budgets."""
 
     def __init__(
         self,
         *,
         api_key: str,
-        model: str,
+        wire: JudgmentWire,
         timeout_seconds: float = 1.5,
         threshold: float = 0.8,
         transport: httpx.AsyncBaseTransport | None = None,
         capacity: JudgmentCapacity = SHARED_CAPACITY,
     ) -> None:
         if not api_key:
-            msg = "a TypeSafe API key is required"
-            raise ValueError(msg)
-        if model != PINNED_MODEL:
-            msg = "the judgment client requires the pinned model"
+            msg = "a judgment API key is required"
             raise ValueError(msg)
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             msg = "the judgment timeout must be finite and positive"
@@ -185,7 +202,7 @@ class SystemOneClient:
             raise ValueError(msg)
         self._threshold = threshold
         self._api_key = api_key
-        self._model = model
+        self._wire = wire
         self._timeout_seconds = timeout_seconds
         self._transport = transport
         self._capacity = capacity
@@ -198,7 +215,7 @@ class SystemOneClient:
         ) as client:
             outbound = client.build_request(
                 "POST",
-                _TYPE_SAFE_ENDPOINT,
+                self._wire.endpoint,
                 headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
                 content=body,
             )
@@ -217,63 +234,31 @@ class SystemOneClient:
             finally:
                 await response.aclose()
 
-    async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse[bool]:
-        return await self._evaluate_with_decoder(request, choice=False, decode=_decode_response)
-
-    async def _evaluate_choice(self, request: JudgmentRequest) -> JudgmentResponse[ChoiceDecision]:
-        return await self._evaluate_with_decoder(request, choice=True, decode=_decode_choice_response)
-
-    async def _evaluate_with_decoder[T](
-        self,
-        request: JudgmentRequest,
-        *,
-        choice: bool,
-        decode: Callable[..., JudgmentResponse[T]],
-    ) -> JudgmentResponse[T]:
+    def _wire_body(self, request: JudgmentRequest, *, choice: bool) -> tuple[dict[str, Any], bytes]:
         assert request.body is not None
         payload = json.loads(request.body)
         question = payload["question"]
         if (question.get("type") == "choice") != choice:
             raise JudgmentError(failure="invalid_request")
-        body = json.dumps(
-            {
-                "model": self._model,
-                "state": payload["state"],
-                "questions": {
-                    question["id"]: {
-                        "type": "choice" if choice else "noul",
-                        "instructions": {"question": question["instructions"], "guidance": payload["guidance"]},
-                        "criteria": question["criteria"],
-                    },
-                },
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode()
-        if len(body) > MAX_REQUEST_BYTES:
-            raise JudgmentError(failure="incomplete_state")
-        try:
-            response_body = await self._post(body)
-            return decode(
-                response_body,
-                expected_model=self._model,
-                expected_question=question["id"],
-                threshold=self._threshold,
-                **({"options": set(question["criteria"])} if choice else {}),
+        # The validated request bounds the wire, which only reframes the same rubric and messages.
+        body = json.dumps(self._wire.encode(payload), ensure_ascii=False, separators=(",", ":")).encode()
+        return question, body
+
+    async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse[bool]:
+        question, body = self._wire_body(request, choice=False)
+        with _closed_failures():
+            root = _parse_json(await self._post(body))
+            return _accept_probability(self._wire.decode_probability(root, question["id"]), self._threshold)
+
+    async def _evaluate_choice(self, request: JudgmentRequest) -> JudgmentResponse[ChoiceDecision]:
+        question, body = self._wire_body(request, choice=True)
+        with _closed_failures():
+            root = _parse_json(await self._post(body))
+            return _accept_choice(
+                self._wire.decode_choice(root, question["id"]),
+                set(question["criteria"]),
+                self._threshold,
             )
-        except httpx.TimeoutException as error:
-            raise JudgmentError(failure="timeout") from error
-        except _ResponseTooLargeError as error:
-            raise JudgmentError(failure="response_too_large") from error
-        except httpx.HTTPStatusError as error:
-            failure = "rate_limited" if error.response.status_code in {429, 529} else "http_error"
-            raise JudgmentError(failure) from error
-        except httpx.HTTPError as error:
-            raise JudgmentError(failure="transport_error") from error
-        except _JudgmentModelDriftError as error:
-            raise JudgmentError(failure="model_drift") from error
-        except _InvalidJudgmentResponseError as error:
-            raise JudgmentError(failure="invalid_response") from error
 
     async def judge(
         self,

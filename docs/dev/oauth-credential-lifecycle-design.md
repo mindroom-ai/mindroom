@@ -84,6 +84,7 @@ Requester-scoped actions require the original authenticated browser user, while 
 3. Read and validate the credential snapshot.
 4. Return before the provider adapter when the credential is missing or unusable.
 5. Call the provider adapter while retaining the transaction; the adapter may determine locally that refresh is unnecessary.
+   When a grant's response is lost after the request was sent, the adapter repeats it once, and both attempts share one deadline below the store's lock-wait timeout.
 6. Publish a rotation or atomically clear a terminally rejected credential.
 7. Commit once.
 

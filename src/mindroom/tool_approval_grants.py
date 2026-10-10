@@ -14,6 +14,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 AUTO_APPROVE_OPTIONS = (300, 600, 1800)
+# How much of a scheduled tool call a requester approves while scheduling it.
+EXACT_ARGUMENTS = "exact_arguments"
+ANY_ARGUMENTS = "any_arguments"
+SCHEDULED_SCOPE_OPTIONS = (EXACT_ARGUMENTS, ANY_ARGUMENTS)
 
 
 def valid_auto_approve_seconds(value: object) -> bool:
@@ -71,6 +75,29 @@ def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]
 def approval_timestamp(timestamp_ns: int) -> str:
     """Render one fixed journal deadline on the Matrix wire."""
     return datetime.fromtimestamp(timestamp_ns / 1_000_000_000, UTC).isoformat()
+
+
+def canonical_arguments(arguments: dict[str, object]) -> str:
+    """Encode arguments the way approval digests do, so equal arguments compare equal."""
+    return json.dumps(arguments, ensure_ascii=True, separators=(",", ":"), sort_keys=True, allow_nan=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledCallBinding:
+    """The call, task, and time one scheduled approval covers."""
+
+    task_id: str
+    room_id: str
+    thread_id: str
+    requester_id: str
+    agent_name: str
+    # The configured toolkit that owns the function, so a same-named function elsewhere never runs.
+    toolkit_name: str
+    tool_name: str
+    # Canonical JSON of the approved arguments, executed as stored.
+    arguments_json: str
+    workflow_digest: str
+    execute_at_ns: int
 
 
 @dataclass(frozen=True, slots=True)

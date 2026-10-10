@@ -36,26 +36,30 @@ None of the actions touches the user's own computer or browser:
 | Call | What the user sees | What it works on | What comes back to the agent |
 | --- | --- | --- | --- |
 | `open_panel(panel="computer")` or `show_computer()` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
-| `show_canvas(title, html=None, path=None, canvas_event_id=None)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `show_canvas(title=None, html=None, path=None, canvas_event_id=None, share_state=False)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `read_canvas_state(canvas_event_id)` | Nothing | A canvas shown with `share_state=True` | What the page last saved, as the user's Chat last shared it |
 | `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
 | `open_settings(section="general")` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |
 
 - `open_panel` accepts only `members` (the default) and `computer`; `show_computer()` is the same as `open_panel(panel="computer")`.
 - `open_settings` accepts `general` (the default), `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about`.
-- `show_canvas` exists only when canvases are turned on for the agent; [Interactive Canvases](../canvases.md) covers turning them on, answers, updates, and writing pages.
+- `show_canvas` and `read_canvas_state` exist only when canvases are turned on for the agent; [Interactive Canvases](../canvases.md) covers turning them on, answers, shared state, updates, and writing pages.
 
 The Computer, Canvas, and Members panels share one place on the screen, so opening one replaces whichever is open.
 Requests made in a thread are posted in that thread; requests made at room level stay at room level.
 A sent request returns `UI action request sent.`
 
-## Control the browser, then show it
+## Show the worker browser
 
 The [`browser`](web-scraping-and-browser.md#browser) toolkit controls the agent's worker browser when routed to that worker.
-Opening the Computer panel does not navigate or take control, so navigate first and then request the panel:
+The agent's first worker browser call in a conversation, `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
+The agent calls `show_computer()` or `open_panel(panel="computer")` only to show the panel again in a later reply, for example when the user should log in or after they closed it.
+One reply shows the panel once.
+Opening the Computer panel does not navigate or take control:
 
 ```python
-browser_control(action="open", target="host", targetUrl="https://example.org")
-chat_ui.open_panel(panel="computer")
+browser_control(action="open", target="host", targetUrl="https://example.org")  # shows the panel
+chat_ui.open_panel(panel="computer")  # shows it again, for example for a login
 ```
 
 To control the user's own local browser instead, use the `browser` tool's `desktop` target through the [Matrix Desktop Bridge](desktop.md).

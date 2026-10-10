@@ -17,7 +17,6 @@ from agno.run.base import RunStatus
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom import response_runner
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -55,6 +54,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.response_runner_helpers import _bot, _plain_request, _target
+from tests.test_response_runner_focused import _in_reply_span
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
 from tests.test_tool_job_turn_integration import _provider_tool_content, _wait_until_ready
 from tests.tool_job_helpers import (
@@ -412,7 +412,6 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
             source_event_id="$approval-source",
         )
         with (
-            patch("mindroom.delivery_gateway.DeliveryGateway.edit_text", new=AsyncMock(return_value=True)),
             patch(
                 "mindroom.approval_response.resolve_tool_approval_approver",
                 return_value=owner.requester_id,
@@ -423,16 +422,16 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
             ),
             patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
         ):
-            await runner._suspend_for_approval(
-                paused,
-                request=request,
-                target=request.response_envelope.target,
-                progress=response_runner._DeliveryProgress(tracked_event_id="$approval-response"),
-                execution_identity=owner,
-                entity_kind="agent",
-                history_scope=HistoryScope(kind="agent", scope_id="general"),
-                show_tool_calls=True,
-            )
+            async with _in_reply_span(runner, request, placeholder_event_id=None):
+                await runner._suspend_for_approval(
+                    paused,
+                    request=request,
+                    target=request.response_envelope.target,
+                    execution_identity=owner,
+                    entity_kind="agent",
+                    history_scope=HistoryScope(kind="agent", scope_id="general"),
+                    show_tool_calls=True,
+                )
 
         saved = await store.approval_continuation_for_source("$approval-source")
         assert saved is not None

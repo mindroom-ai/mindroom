@@ -29,6 +29,7 @@ from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system import agno_compat_tool_hooks
+from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -503,6 +504,28 @@ async def _call_tool(
     return result
 
 
+async def _call_recorded_tool(
+    func: Callable[..., Any],
+    args: dict[str, Any],
+    *,
+    tool_name: str,
+    agent_name: str | None,
+) -> _ToolHookResult:
+    """Run the tool, first recording the call where the work that makes it keeps its durable state."""
+    recorder = tool_call_recorder()
+    call_id = None if recorder is None else await recorder.started(tool_name, args)
+    if recorder is None or call_id is None:
+        return await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
+    try:
+        result = await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
+    except Exception as exc:
+        # It ran and failed. A cancelled call stays started, since it may have taken effect.
+        await recorder.finished(call_id, tool_name, args, exc)
+        raise
+    await recorder.finished(call_id, tool_name, args, result)
+    return result
+
+
 async def _emit_after_call(
     *,
     hook_registry: HookRegistry,
@@ -780,7 +803,7 @@ async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boun
         job_checkpoint()
         check_current_execution_authority(arguments=args)
         entered_body = True
-        result = await _call_tool(
+        result = await _call_recorded_tool(
             func,
             args,
             tool_name=tool_name,

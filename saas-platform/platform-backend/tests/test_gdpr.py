@@ -176,9 +176,6 @@ class TestGDPREndpoints:
         mock_instances = MagicMock()
         mock_instances.data = [{"id": "inst-1", "name": "test-instance"}]
 
-        mock_usage = MagicMock()
-        mock_usage.data = []
-
         mock_audit_logs = MagicMock()
         mock_audit_logs.data = [{"action": "login", "created_at": "2025-01-01T00:00:00Z"}]
 
@@ -190,12 +187,10 @@ class TestGDPREndpoints:
         mock_supabase.table.return_value = mock_table
         mock_table.select.return_value = mock_table
         mock_table.eq.return_value = mock_table
-        mock_table.in_.return_value = mock_table
         mock_table.execute.side_effect = [
             mock_account,
             mock_subscriptions,
             mock_instances,
-            mock_usage,
             mock_audit_logs,
             mock_payments,
         ]
@@ -512,7 +507,6 @@ class TestGDPREndpoints:
         mock_supabase.table.return_value = mock_table
         mock_table.select.return_value = mock_table
         mock_table.eq.return_value = mock_table
-        mock_table.in_.return_value = mock_table
         mock_table.execute.return_value = mock_empty
 
         response = client.get("/my/gdpr/export-data", headers={"Authorization": "Bearer test-token"})

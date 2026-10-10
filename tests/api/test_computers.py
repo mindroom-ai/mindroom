@@ -422,6 +422,41 @@ def test_periodic_authorization_revocation_disconnects_controller(
     assert client.get(path, headers=headers).status_code == 401
 
 
+def test_revoking_a_session_closes_its_stream_during_a_running_recheck(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting a viewer closes its stream at once, even while a periodic check is still running."""
+    client, _peer, _app = gateway
+    checked_status = computers._checked_status
+    calls = 0
+
+    async def hang_periodic_check(connection: WebSocket, session: computers.ComputerSession) -> object:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:  # stream ticket and stream upgrade
+            return await checked_status(connection, session)
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    monkeypatch.setattr(computers, "_checked_status", hang_periodic_check)
+    monkeypatch.setattr(computers, "_STREAM_RECHECK_TIMEOUT_SECONDS", 3600.0)
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    with client.websocket_connect(
+        path + "/stream",
+        subprotocols=["binary", "mindroom-ticket." + ticket],
+        headers={"Origin": "https://chat.example.org"},
+    ) as websocket:
+        assert websocket.receive_bytes() == b"screen"
+        assert client.delete(path, headers=headers).status_code == 204
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_bytes()
+    assert calls == 3
+
+
 def test_missing_stream_ticket_denies_upgrade_with_401(gateway: Gateway) -> None:
     """Websocket authentication failures retain the public HTTP error contract."""
     client, _, _ = gateway
@@ -535,7 +570,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
     monkeypatch: pytest.MonkeyPatch,
     slow_phase: str,
 ) -> None:
-    """A slow successful check fits, but a later overdue phase revokes at 30 seconds."""
+    """A nine-second check fits, but a later overdue phase revokes at 30 seconds."""
     loop = asyncio.get_running_loop()
     now = 0.0
     monkeypatch.setattr(loop, "time", lambda: now)
@@ -555,7 +590,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
         for phase in ("authorization", "manager", "status"):
             if phase == slow_phase and len(starts) > 1:
                 try:
-                    await asyncio.sleep(4 if len(starts) == 2 else 18)
+                    await asyncio.sleep(9 if len(starts) == 2 else 18)
                 except asyncio.CancelledError:
                     cancelled.append(phase)
                     raise
@@ -573,14 +608,14 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
 
     try:
         await advance(0)
-        await advance(25)
-        assert starts == [0, 25]
-        await advance(29)
-        assert completed == [0, 29]
+        await advance(15)
+        assert starts == [0, 15]
+        await advance(24)
+        assert completed == [0, 24]
         assert not task.done()
-        await advance(50)
-        assert starts == [0, 25, 50]
-        await advance(55)
+        await advance(30)
+        assert starts == [0, 15, 30]
+        await advance(45)
         assert task.done(), "Overdue authorization/worker check must close within 30 seconds"
         await task
         assert cancelled == [slow_phase]
@@ -603,6 +638,14 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
         "https://host/path",
         "https://host\n",
         "https://",
+        "null",
+        "capacitor://other-host",
+        "capacitor://localhost/",
+        "capacitor://localhost:443",
+        "capacitor://user@localhost",
+        "capacitor://localhost?secret=value",
+        "capacitor://localhost#fragment",
+        "CAPACITOR://localhost",
     ],
 )
 def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> None:
@@ -617,7 +660,13 @@ def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "origin",
-    ["https://chat.example.org", "http://localhost:4173", "http://127.0.0.2:4173", "http://[::1]:4173"],
+    [
+        "https://chat.example.org",
+        "http://localhost:4173",
+        "http://127.0.0.2:4173",
+        "http://[::1]:4173",
+        "capacitor://localhost",
+    ],
 )
 def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, tmp_path: Path) -> None:
     """Accepted origins retain exact matching, including the explicit port."""
@@ -627,6 +676,88 @@ def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, 
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
     )
     assert computer_origins(paths) == (origin,)
+
+
+def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
+    """The native literal coexists with exact HTTPS origins without granting other schemes."""
+    origins = ["https://chat.example.org", "capacitor://localhost"]
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(origins)},
+    )
+    assert computer_origins(paths) == tuple(origins)
+    invalid = replace(paths, process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([*origins, "null"])})
+    assert computer_origins(invalid) == ()
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_native_origin_cors_and_stream_require_explicit_allowlist(gateway: Gateway, allowed: bool) -> None:
+    """Native transport uses the same OpenID, bearer and single-use ticket checks as web Chat."""
+    client, _, app = gateway
+    state = config_lifecycle.require_api_state(app)
+    paths = state.snapshot.runtime_paths
+    origins = ["https://chat.example.org"]
+    if allowed:
+        origins.append("capacitor://localhost")
+    state.snapshot = replace(
+        state.snapshot,
+        runtime_paths=replace(
+            paths,
+            process_env={**paths.process_env, "MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(origins)},
+        ),
+    )
+    origin = "capacitor://localhost"
+    response = client.options(
+        "/api/computers/sessions",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert response.status_code == (200 if allowed else 400)
+    assert response.headers.get("access-control-allow-origin") == (origin if allowed else None)
+    client.headers["Origin"] = origin
+    created = create(client)
+    assert created.headers.get("access-control-allow-origin") == (origin if allowed else None)
+    session = created.json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket_response = client.post(path + "/stream-ticket", headers=headers)
+    assert ticket_response.headers.get("access-control-allow-origin") == (origin if allowed else None)
+    ticket = ticket_response.json()["ticket"]
+    protocols = ["binary", "mindroom-ticket." + ticket]
+    if not allowed:
+        with (
+            pytest.raises(WebSocketDenialResponse) as denied,
+            client.websocket_connect(path + "/stream", subprotocols=protocols, headers={"Origin": origin}),
+        ):
+            pass
+        assert denied.value.status_code == 403
+        return
+    with client.websocket_connect(path + "/stream", subprotocols=protocols, headers={"Origin": origin}) as websocket:
+        assert websocket.receive_bytes() == b"screen"
+        take = client.post(path + "/control", headers=headers, json={"action": "take"})
+        assert take.headers["access-control-allow-origin"] == origin
+        assert take.json()["mode"] == "control"
+        websocket.send_bytes(b"input")
+        assert websocket.receive_bytes() == b"control"
+        assert client.post(path + "/control", headers=headers, json={"action": "release"}).json()["mode"] == "view"
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_bytes()
+    for hostile in ["null", "capacitor://other-host", "https://evil.example.org"]:
+        next_ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+        with (
+            pytest.raises(WebSocketDenialResponse) as denied,
+            client.websocket_connect(
+                path + "/stream",
+                subprotocols=["binary", "mindroom-ticket." + next_ticket],
+                headers={"Origin": hostile},
+            ),
+        ):
+            pass
+        assert denied.value.status_code == 403
 
 
 def test_configured_remote_http_denied_at_cors_and_stream(gateway: Gateway) -> None:
@@ -918,6 +1049,7 @@ def test_public_stream_invalid_frames_close_and_unexpected_errors_are_sanitized(
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_bytes()
     assert peer.runtime.status()["controller_session_id"] is None
+    assert [entry["ended_by"] for entry in logs if entry["event"] == "Computer stream ended"] == [["viewer"]]
     if termination == "bug":
         assert any(entry.get("error_type") == "KeyError" for entry in logs)
     assert "credential-bearing-secret" not in str(logs)
@@ -947,6 +1079,24 @@ def test_requester_quota_rejects_before_allocating_worker(gateway: Gateway) -> N
     assert client.get(path, headers=headers).status_code == 200
     assert client.delete(path, headers=headers).status_code == 204
     peer.openid_subject = "@alice:example.org"
+    assert create(client).status_code == 200
+
+
+def test_abandoned_session_creation_does_not_hold_a_viewer_slot(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A viewer that gives up while its worker starts does not count against the requester quota."""
+    client, _peer, _app = gateway
+    disconnected = True
+
+    async def is_disconnected(_request: Request) -> bool:
+        return disconnected
+
+    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+    for _ in range(8):
+        assert create(client).status_code == 409
+    disconnected = False
     assert create(client).status_code == 200
 
 

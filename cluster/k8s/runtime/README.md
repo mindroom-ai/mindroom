@@ -256,6 +256,7 @@ Private registry access should use normal Kubernetes image pull credentials thro
 
 Each bundle image must be pinned by digest and must contain a POSIX shell, `cp`, and `mkdir`, because the chart runs the bundle image as a copy init container.
 Because `overwrite` defaults to true, bundle images also need `rm` unless every bundle sets `overwrite: false`.
+Images that also contain `find`, `stat`, `md5sum`, `awk`, `readlink`, `chmod`, `chown`, and `id`, as BusyBox does, are updated in place on restart; other images get a full copy on every start.
 Package content under `/bundle` by default:
 
 ```dockerfile
@@ -284,7 +285,11 @@ contentBundles:
 ```
 
 If `targetPath` is omitted, the chart copies to `/app/agent_data/content-bundles/<name>`.
-The init container removes the target path before copying unless `overwrite: false` is set.
+By default the init container makes the target path match the bundle: the same files, directories, symlinks, contents, and modes, as if it removed the path and copied the bundle again.
+It deletes entries the bundle no longer contains and rewrites only entries whose type, symlink target, content, mode, or owner changed, so a restart copies only what changed.
+It compares the trees with one `stat` and one `md5sum` batch per tree, so the number of processes a restart starts grows with the changes and symlinks, not with the files.
+Unchanged files keep their timestamps, and hard-link relationships between bundle files are not guaranteed to be preserved.
+With `overwrite: false`, it copies the bundle over the target path and removes nothing.
 `seed.command` runs after the copy and should point at a short script or executable supplied by the bundle instead of embedding deployment-specific shell in Helm values.
 The script runs in the same bundle image, with MindRoom storage mounted at `storage.mountPath`.
 Raw `initContainers`, `extraVolumes`, and `extraVolumeMounts` still work for deployments that need lower-level Kubernetes wiring.
@@ -750,7 +755,7 @@ workers:
 ```
 
 The chart renders no access-grant resources by default.
-When access grants are enabled and at least one grant is configured, the chart renders a ConfigMap plus a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
+When access grants are enabled and at least one grant is configured, the chart renders a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
 The helper resolves worker keys and vault names through MindRoom's worker-routing code, creates or joins the vault when needed, and grants the configured email the `admin` role.
 The helper is idempotent, so running it again with the same grants changes nothing.
 If an email has not registered and verified in Agent Vault yet, the helper reports a warning and the grant can be applied again after registration.
@@ -768,18 +773,20 @@ When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
 With the default `fixed`, both Jobs keep stable names and the access-grant Job is a Helm `post-install,post-upgrade` hook, so `helm install` and `helm upgrade` replace and rerun it.
 The bootstrap Job is not a hook, so changing its pod template requires deleting the finished Job first, even with `helm upgrade`.
 Workflows that apply rendered manifests, such as `kubectl kustomize --enable-helm` followed by `kubectl apply`, ignore Helm hook annotations, and Job pod templates are immutable.
-With `fixed`, those workflows do not rerun an existing access-grant Job for a changed grant list, and they fail to apply a changed pod template until the old Job is deleted.
+With `fixed`, those workflows fail to apply a changed grant list or pod template until the old Job is deleted, and do not rerun an existing Job otherwise.
 Set `jobNaming: contentHash` for those workflows.
-The chart then drops the hook and appends a hash of each Job's rendered pod spec, plus the grant config for the access-grant Job, to the Job name.
-The grants ConfigMap name gets a hash of its config too, so each access-grant Job reads the grants it was created for; `kubectl apply` leaves earlier grants ConfigMaps in place until you delete them or apply with `--prune`.
+The chart then drops the hook and appends a hash of each Job's rendered pod spec to the Job name.
+The access-grant Job's pod spec includes its grant config, so each access-grant Job applies the grants it was created for.
 Applying changed inputs creates a new Job, and applying unchanged inputs leaves the existing Job alone.
+In either mode, a chart upgrade that changes only the chart or app version keeps both Job names and pod templates, while changed inputs still get a new `contentHash` name.
 Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
 To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
+To remove grants ConfigMaps that older chart versions left in the namespace, run `kubectl delete configmap -l app.kubernetes.io/component=agent-vault-access-grants` once.
 
 ## Background Script Gateway
 
 Background scripts on Kubernetes workers call governed tools through the primary's capability-authenticated script gateway.
-MindRoom admits them only when workers reach that gateway through a listener that serves nothing else, because the general API port exposes more authority.
+MindRoom admits them only when workers reach that gateway through a listener that serves only the script gateway and capability-authenticated Agent CLI routes, because the general API port exposes more authority.
 Set `scriptGateway.enabled` to have the primary serve that listener on its own port:
 
 ```yaml
@@ -797,8 +804,9 @@ scriptGateway:
   port: 8767
 ```
 
-The primary container then exposes a `script-gateway` port where MindRoom serves only `/api/script-gateway` routes and returns 404 for every other API route.
+The primary container then exposes a `script-gateway` port where MindRoom serves only `/api/script-gateway` and `/api/agent-cli` routes and returns 404 for every other API route.
 The chart renders a `<fullname>-script-gateway` ClusterIP Service for that port and sets `MINDROOM_SCRIPT_GATEWAY_PORT`, `MINDROOM_SCRIPT_GATEWAY_URL`, and `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` on the primary.
+Unless `MINDROOM_AGENT_CLI_PRIMARY_URL` is set, [minimal-mode](../../../docs/tools/agent-cli.md#shell-in-a-worker) worker shells also call MindRoom through that Service, so they need no access to the general API port.
 Worker pods receive the Service's cluster-local host name in `NO_PROXY` so gateway calls bypass the egress proxy.
 If `workers.kubernetes.extraEnv` replaces `NO_PROXY` or `no_proxy`, include that host name yourself.
 A `<fullname>-script-gateway-workers` NetworkPolicy in the worker namespace adds egress from workers to the gateway port on the control-plane pod.
@@ -901,7 +909,10 @@ workers:
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
 - Worker tool code can reach the primary API, on `localhost` from the `static_runner` sidecar or over the pod network from dedicated Kubernetes workers, so the chart gives the primary a generated `MINDROOM_API_KEY` from the `<fullname>-api-key` Secret for either backend, and the dashboard and API then require it.
-  A `MINDROOM_API_KEY` from `env.extra` or `env.envFrom` takes precedence, which GitOps and `helm template` workflows should use because the generated key changes on every offline render.
+  GitOps and `helm template` workflows should set `apiAuth.existingSecret` (and `apiAuth.key` if the Secret's key is not `MINDROOM_API_KEY`) to read the key from an existing Secret instead, because the generated key changes on every offline render.
+  Point it at a Secret the chart does not manage; the chart rejects `<fullname>-api-key`, which it stops rendering once the option is set.
+  To keep the current key, copy it from `<fullname>-api-key` into that Secret before switching.
+  A `MINDROOM_API_KEY` from `env.extra` or `env.envFrom` also takes precedence over the generated key, but the chart then still renders the unused generated Secret.
   `apiAuth.allowUnauthenticatedPrimary: true` removes the key and is unsafe unless other primary API authentication is configured.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime receives the Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
@@ -917,7 +928,10 @@ workers:
 - With `workers.kubernetes.reconcilePodTemplates` (default `true`), each cleanup pass recreates scaled-down worker Deployments whose pod template (image, env, resources) drifted from the configured spec, so existing workers do not need manual recycling after upgrades.
   Running workers are recreated on their next provisioning after they scale down.
 - `workers.kubernetes.runtimeClassName` optionally applies one RuntimeClass to the entire generated worker pool, including background-script workers. Verify the RuntimeClass handler on every eligible node and validate that it supports the worker storage driver and access mode before enabling it. Changing the value can recreate existing workers when they are next ensured, so finish active work first.
+- Dedicated worker pods also get the chart's `imagePullSecrets`, so they can pull a worker image from a private registry.
+  Pod-level pull secrets replace the worker ServiceAccount's `imagePullSecrets`, so list every Secret workers need in `imagePullSecrets`.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
+  Create the `imagePullSecrets` Secrets in that namespace too, because the chart does not copy them and worker pods cannot pull without them.
   Kubernetes owner references are only set by default for same-namespace workers.
   The sandbox proxy token secret is only needed by the primary runtime; dedicated worker pods receive per-worker derived runner tokens.
 - Mount arbitrary platform-specific files, projected secrets, ConfigMaps, init containers, and sidecars through `extraVolumes`, `extraVolumeMounts`, `initContainers`, and `extraContainers`.

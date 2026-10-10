@@ -1,8 +1,8 @@
 # Tool Approval
 
-<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/6a2033ea-3354-4afd-9d58-fc617b18cd24#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d62d98e8-c066-4e1f-8a8f-d840da7b0bd1#t=0.1" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%" poster="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-light="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-dark="https://github.com/user-attachments/assets/94181525-4b2b-43b4-b366-d85aa18f59b8">
+  <source src="https://github.com/user-attachments/assets/f3792ec9-ea73-4169-97ee-d09146cd65cc" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/cf813bb1-5f9d-43b2-a197-b4749696a86e" type="video/mp4">
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
@@ -31,6 +31,7 @@ tool_approval:
 | `rules[].action` | `auto_approve` or `require_approval` | — | Fixed decision; set exactly one of `action` or `script` |
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
+| `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
 ## Approving and Denying
 
@@ -40,8 +41,10 @@ tool_approval:
   When an agent acts on a request relayed by another agent's reply, the original human is asked.
 - Tool calls requested by agents, the system, or configured bridge bots are denied instead of waiting for approval.
 - An unanswered card expires after its `timeout_days` and the call is denied.
+- A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 
-While approval is pending, the agent stops typing and the conversation can continue.
+While approval is pending, the agent stops typing and counts as still responding in that conversation: later messages to it there wait until the approval ends and get a ⏳ reaction, while other conversations and agents carry on.
+Stopping the reply with 🛑, or deleting the message it answers, cancels the approval and expires its card, and deleting the message also removes the reply; an edit that regenerates the reply cancels it too (see [Message Edits](https://docs.mindroom.chat/configuration/threads/#message-edits)).
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
 
@@ -49,7 +52,7 @@ The approved call runs only with the exact arguments shown on the card.
 
 Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
 It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments.
-It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves or for background-script approvals.
+It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
 ## Approval Card Contents

@@ -198,6 +198,8 @@ Create, view, edit, and validate `config.yaml`.
 │ validate          Validate config.yaml and check for common issues.                    │
 │ resolve           Print the fully merged config YAML with all !include tags resolved.  │
 │ path              Show the resolved config file path and search locations.             │
+│ use-local-model   Use a local model as the default, keeping explicitly selected agent  │
+│                   models.                                                              │
 │ migrate           Migrate config.yaml to membership access settings.                   │
 │ fingerprint       Print the config source SHA-256, including all transitively included │
 │                   files.                                                               │
@@ -278,6 +280,7 @@ Open `config.yaml` in your editor, chosen from `$EDITOR`, then `$VISUAL`, then `
 ### config validate
 
 Check `config.yaml` against the schema, report errors readably, and warn about missing provider API keys.
+It also loads the configured plugins and fails on [automation](https://docs.mindroom.chat/scheduling/#automations) names no loaded plugin provides or that two register.
 
 ### config path
 
@@ -557,6 +560,7 @@ Aggregate output never includes identities.
 
 `--wait SECONDS` polls every 5 seconds while busy and exits as soon as the runtime is idle.
 If work is still active at the deadline, it exits `1` with the last busy snapshot, and an unavailable result ends the wait immediately with exit `2`.
+A request that times out is retried until the deadline and exits `2` only if the last request also times out.
 Only the final snapshot is printed, and the total runtime can exceed `--wait` by up to one request timeout.
 
 The CLI reads the unauthenticated `GET /api/responses/activity` endpoint, or `GET /api/responses/activity/details` with a bearer token for `--details`.

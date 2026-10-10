@@ -88,8 +88,9 @@ class JournalCallbacks:
     on_approval_continuation: _ApprovalContinuationCallback
     source_has_live_owner: Callable[[str], bool]
     turn_has_live_claim: Callable[[str], bool]
+    # Delivers what replies left waiting to replay a settled source owe Matrix.
+    replies_ended: Callable[[tuple[str, ...]], None]
     on_rtc: _RtcCallback | None = None
-    on_held_reply_wake: Callable[[JournalEvent], Awaitable[bool]] | None = None
     event_is_parked: Callable[[JournalEvent], bool] = lambda _event: False
 
 
@@ -118,6 +119,7 @@ class JournalDispatcher:
             handle=self._run_event,
             runtime_generation=self.runtime_generation,
             deferral_is_live=self._deferral_is_live,
+            replies_ended=self.callbacks.replies_ended,
         )
 
     def start(self) -> None:
@@ -203,7 +205,7 @@ class JournalDispatcher:
             return True
         return self._has_live_owner(event.event_id)
 
-    async def _run_event(self, event: JournalEvent) -> bool:  # noqa: PLR0911 - Ordered dispatch ownership gates.
+    async def _run_event(self, event: JournalEvent) -> bool:
         """Run one journal event's callback and report whether it may settle.
 
         True means the event's semantic work is over. False means something in
@@ -239,9 +241,6 @@ class JournalDispatcher:
             # routing policy, either duplicating side effects or settling the
             # source before the continuation can resume.
             return approval_settled
-        if event.kind is EventKind.HELD_REPLY_WAKE:
-            callback = self.callbacks.on_held_reply_wake
-            return await callback(event) if callback is not None else False
         try:
             matrix_event = parse_journal_event(event)
         except JournalCorruptionError:
@@ -364,7 +363,7 @@ class JournalDispatcher:
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
         self._release_sources(event_ids)
-        await self.store.settle_many(event_ids)
+        self.callbacks.replies_ended(await self.store.settle_many(event_ids))
 
     async def settle_running_event_intentionally_ignored(self) -> None:
         """Settle the current callback's event before releasing an authorization fence."""

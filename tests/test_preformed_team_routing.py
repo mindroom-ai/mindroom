@@ -43,6 +43,7 @@ from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+    from contextvars import Context
     from pathlib import Path
 
     from mindroom.final_delivery import FinalDeliveryOutcome
@@ -170,7 +171,6 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     install_direct_response_admission(bot)
@@ -234,7 +234,6 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
@@ -256,9 +255,10 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         name: str | None = None,
         error_handler: object | None = None,  # noqa: ARG001
         owner: object | None = None,  # noqa: ARG001
+        context: Context | None = None,
     ) -> asyncio.Task[Any]:
         assert asyncio.iscoroutine(coro)
-        task = asyncio.create_task(coro, name=name)
+        task = asyncio.create_task(coro, name=name, context=context)
         scheduled_tasks.append(task)
         return task
 
@@ -322,7 +322,6 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     install_direct_response_admission(bot)
@@ -392,7 +391,6 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
@@ -463,7 +461,6 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_mode="coordinate",
         enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()

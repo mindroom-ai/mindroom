@@ -171,6 +171,7 @@ struct LocalAgentsView: View {
                     }.padding(.top, 8)
                 }
             }
+            LocalInferenceView(runner: runner)
             if !setup.runtimeReady { Text("Install or update the runtime in step 1 to prepare or pair configuration.").foregroundStyle(.secondary) }
             Button("Continue to Check") { show(.check) }
                 .buttonStyle(.borderedProminent).disabled(!setup.runtimeReady || !setup.configurationExists)

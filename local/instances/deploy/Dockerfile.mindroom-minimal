@@ -2,7 +2,7 @@
 # Tools auto-install their dependencies at runtime via tool_dependencies.py.
 # Good target for sandbox runners where image size matters.
 FROM ghcr.io/astral-sh/uv:latest AS uv
-FROM oven/bun:1 AS bun
+FROM mirror.gcr.io/oven/bun:1 AS bun
 
 # Builder stage with uv for dependencies
 FROM mirror.gcr.io/library/python:3.13-slim AS builder

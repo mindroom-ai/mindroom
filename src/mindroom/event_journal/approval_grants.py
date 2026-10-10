@@ -391,48 +391,12 @@ def revoke(
     return revocation
 
 
-def _retire_receipts(transaction: Transaction, principal_id: str) -> None:
-    """Release acknowledged terminal originals while retaining their action identity."""
-    transaction.execute(
-        """
-        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
-        SELECT initial.principal_id, initial.room_id, initial.acknowledged_event_id
-        FROM matrix_delivery_outbox AS initial
-        JOIN approval_grant_cards AS audit
-          ON audit.principal_id = initial.principal_id AND audit.delivery_id = initial.delivery_id
-        WHERE initial.principal_id = ? AND initial.stage = 'initial'
-          AND initial.acknowledged_event_id IS NOT NULL AND audit.grant_id IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_cards AS cards
-              WHERE cards.principal_id = initial.principal_id AND cards.delivery_id = initial.delivery_id
-          )
-        ON CONFLICT (principal_id, card_event_id) DO NOTHING
-        """,
-        (principal_id,),
-    )
-    transaction.execute(
-        """
-        DELETE FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND stage = 'initial'
-          AND EXISTS (
-              SELECT 1 FROM approval_grant_cards AS audit
-              WHERE audit.principal_id = matrix_delivery_outbox.principal_id
-                AND audit.delivery_id = matrix_delivery_outbox.delivery_id AND audit.grant_id IS NOT NULL
-          )
-          AND EXISTS (
-              SELECT 1 FROM approval_action_tombstones AS terminal
-              WHERE terminal.principal_id = matrix_delivery_outbox.principal_id
-                AND terminal.room_id = matrix_delivery_outbox.room_id
-                AND terminal.card_event_id = matrix_delivery_outbox.acknowledged_event_id
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_cards AS cards
-              WHERE cards.principal_id = matrix_delivery_outbox.principal_id
-                AND cards.delivery_id = matrix_delivery_outbox.delivery_id
-          )
-        """,
-        (principal_id,),
-    )
+# A grant applied to a call marks the receipt it published as an automatic terminal approval.
+GRANT_RECEIPT = """EXISTS (
+    SELECT 1 FROM approval_grant_cards AS audit
+    WHERE audit.principal_id = {initial}.principal_id AND audit.delivery_id = {initial}.delivery_id
+      AND audit.grant_id IS NOT NULL
+)"""
 
 
 def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | None = None) -> tuple[str, ...]:
@@ -445,7 +409,6 @@ def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | Non
     """
     lock(transaction, principal_id)
     if grant_id is None:
-        _retire_receipts(transaction, principal_id)
         transaction.execute(
             """
             DELETE FROM approval_grant_cards

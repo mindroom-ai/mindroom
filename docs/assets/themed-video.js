@@ -3,6 +3,13 @@
 function matchPalette() {
   const dark = document.body.getAttribute("data-md-color-scheme") === "slate"
   const systemDark = matchMedia("(prefers-color-scheme: dark)").matches
+  // A clip's poster, the frame shown until it plays, is an attribute that cannot follow the color scheme by itself.
+  for (const video of document.querySelectorAll("video[data-poster-dark]")) {
+    const poster = dark ? video.dataset.posterDark : video.dataset.posterLight
+    if (video.getAttribute("poster") !== poster) {
+      video.setAttribute("poster", poster)
+    }
+  }
   // Films are light and dark videos that themed-video.css shows by palette; clips are one video with two sources.
   for (const video of document.querySelectorAll("video:not(.only-light):not(.only-dark):not(.started)")) {
     // A clip's dark source carries media="(prefers-color-scheme: dark)", so without this the system scheme picks.

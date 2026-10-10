@@ -8,15 +8,15 @@ Backend filenames below are relative to `platform-backend/src/backend/routes/`; 
 
 ## Summary
 
-- **OpenAPI operations**: 53, counting each HTTP method and path template once.
+- **OpenAPI operations**: 52, counting each HTTP method and path template once.
 - **OpenAPI operations called by platform frontend code**: 32, including browser requests and server authentication checks.
-- **OpenAPI operations without a direct platform frontend caller**: 21, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and eight other routes.
+- **OpenAPI operations without a direct platform frontend caller**: 20, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and seven other routes.
 
 Ordinary browser requests go directly to the configured platform API through `src/lib/api.ts`.
 The frontend also makes server-side authentication checks in `src/lib/auth/admin.ts` and `src/app/auth/callback/route.ts`.
 An operation without a platform frontend caller can still serve an external integration or an API client.
 
-## Health, Accounts, Subscriptions, and Usage
+## Health, Accounts, and Subscriptions
 
 | Method | Path | Backend module | Frontend caller or purpose |
 | --- | --- | --- | --- |
@@ -26,8 +26,6 @@ An operation without a platform frontend caller can still serve an external inte
 | POST | `/my/account/setup` | `accounts.py` | `src/lib/api.ts` → `src/app/dashboard/page.tsx`: account setup |
 | GET | `/my/subscription` | `subscriptions.py` | `src/hooks/useSubscription.ts`: subscription details |
 | POST | `/my/subscription/cancel` | `subscriptions.py` | No current frontend caller; cancel a subscription |
-| POST | `/my/subscription/reactivate` | `subscriptions.py` | No current frontend caller; reactivate a subscription |
-| GET | `/my/usage` | `usage.py` | `src/hooks/useUsage.ts`: usage metrics with a days parameter |
 
 ## Customer Instances
 
@@ -45,6 +43,7 @@ An operation without a platform frontend caller can still serve an external inte
 | --- | --- | --- | --- |
 | GET | `/admin/stats` | `admin.py` | `src/app/admin/page.tsx`: platform statistics |
 | GET | `/admin/metrics/dashboard` | `admin.py` | `src/app/admin/page.tsx`: dashboard metrics |
+| GET | `/admin/instance-lifecycle` | `admin.py` | `src/app/admin/lifecycle/page.tsx`: instance lifecycle overview |
 | POST | `/admin/instances/{instance_id}/start` | `admin.py` | `src/components/admin/InstanceActions.tsx`: start |
 | POST | `/admin/instances/{instance_id}/stop` | `admin.py` | `src/components/admin/InstanceActions.tsx`: stop |
 | POST | `/admin/instances/{instance_id}/restart` | `admin.py` | `src/components/admin/InstanceActions.tsx`: restart |
@@ -54,13 +53,13 @@ An operation without a platform frontend caller can still serve an external inte
 | GET | `/admin/accounts/{account_id}` | `admin.py` | `src/app/admin/accounts/[id]/page.tsx`: account details |
 | PUT | `/admin/accounts/{account_id}/status` | `admin.py` | `src/app/admin/accounts/page.tsx`: status control |
 | DELETE | `/admin/accounts/{account_id}/complete` | `admin.py` | `src/app/admin/accounts/page.tsx`: complete account deletion |
-| GET | `/admin/{resource}` | `admin.py` | `src/app/admin/{accounts,subscriptions,instances,audit-logs,usage}/page.tsx`: list resources |
+| GET | `/admin/{resource}` | `admin.py` | `src/app/admin/{accounts,subscriptions,instances,audit-logs}/page.tsx`: list resources |
 | GET | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record lookup |
 | POST | `/admin/{resource}` | `admin.py` | No current frontend caller; generic record creation |
 | PUT | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record update |
 | DELETE | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record deletion |
 
-The generic list callers use `accounts`, `subscriptions`, `instances`, `audit_logs`, and `usage_metrics` as resource values.
+The generic list callers use `accounts`, `subscriptions`, `instances`, and `audit_logs` as resource values.
 Account detail requests use the specific `/admin/accounts/{account_id}` route, registered before generic record lookup.
 The generic CRUD API retains its React Admin-compatible response shapes; the current UI uses custom React components.
 
@@ -98,7 +97,8 @@ The shared service owns the Kubernetes and Helm lifecycle work.
 
 User routes accept only accounts whose `status` is `active` and whose `deleted_at` is unset, through `verify_user`.
 `GET /my/account`, `GET /my/gdpr/export-data`, and `POST /my/gdpr/cancel-deletion` use `verify_user_allow_deleted` instead, so an account awaiting deletion (`status` `deleted` with `deleted_at` set) can still see, export, and cancel it; every other inactive account stays rejected there too.
-Suspending an account through either admin update endpoint bans its Supabase Auth user and blocks platform API calls and new instance and Matrix sign-ins; reactivation lifts the ban.
+Setting any status other than `active` through either admin update endpoint bans the account's Supabase Auth user and blocks platform API calls and new instance and Matrix sign-ins; reactivation lifts the ban.
+An account awaiting deletion stays unbanned so its owner can still sign in and cancel the deletion.
 Running instances and existing instance-cookie and Matrix sessions continue, so stop instances separately.
 The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route answers with a 2xx status, including system and webhook routes.
 Rows hold the method, path, status, client IP, and the account and email that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified; the middleware never reads request bodies, and the admin routes record their request data in their own audit entries.

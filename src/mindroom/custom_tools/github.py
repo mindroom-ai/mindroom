@@ -60,6 +60,14 @@ logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
 _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE = "GitHub request failed"
+# Fixed hints stand in for provider-controlled error text, which never reaches the agent.
+_GITHUB_PROVIDER_STATUS_HINTS = {
+    403: "this GitHub connection lacks permission for the request, or GitHub rate-limited it",
+    404: (
+        "the requested repository, ref, path, issue, or other resource does not exist, "
+        "or this GitHub connection cannot access it"
+    ),
+}
 
 
 def _github_exception_status_code(exc: GithubException) -> int | None:
@@ -67,6 +75,16 @@ def _github_exception_status_code(exc: GithubException) -> int | None:
     if isinstance(status_code, int) and 100 <= status_code <= 599:
         return status_code
     return None
+
+
+def _github_provider_error_result(status_code: int | None) -> str:
+    if status_code is None:
+        return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
+    message = f"{_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE} with HTTP {status_code}"
+    hint = _GITHUB_PROVIDER_STATUS_HINTS.get(status_code)
+    if hint is not None:
+        message = f"{message}: {hint}"
+    return json.dumps({"error": message})
 
 
 def _record_github_provider_failure(exc: GithubException) -> None:
@@ -200,7 +218,7 @@ def _normalized_access_token(value: object) -> str | None:
 
 def _sanitized_github_exception_result(exc: GithubException) -> str:
     _record_github_provider_failure(exc)
-    return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
+    return _github_provider_error_result(_github_exception_status_code(exc))
 
 
 class GithubTools(AgnoGithubTools):
@@ -362,7 +380,7 @@ class GithubTools(AgnoGithubTools):
                             self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
                         ),
                     )
-                return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
+                return _github_provider_error_result(status_code)
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
@@ -516,7 +534,8 @@ class GithubTools(AgnoGithubTools):
         """Search for issues and pull requests while restoring escaped operators."""
         return super().search_issues_and_prs(
             query=unescape(query),
-            state=state,
+            # GitHub search has no state:all qualifier and returns nothing for it.
+            state=None if state == "all" else state,
             type_filter=type_filter,
             repo=repo,
             user=user,

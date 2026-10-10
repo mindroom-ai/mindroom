@@ -509,7 +509,7 @@ export interface paths {
         put?: never;
         /**
          * Setup Account
-         * @description Setup free tier account for new user.
+         * @description Set up an account without a plan for a new user.
          */
         post: operations["setup_account_my_account_setup_post"];
         delete?: never;
@@ -765,46 +765,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/my/subscription/reactivate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Reactivate Subscription
-         * @description Reactivate a cancelled subscription (if still in billing period).
-         */
-        post: operations["reactivate_subscription_my_subscription_reactivate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/my/usage": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get User Usage
-         * @description Get usage metrics for current user.
-         */
-        get: operations["get_user_usage_my_usage_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/pricing/config": {
         parameters: {
             query?: never;
@@ -816,7 +776,7 @@ export interface paths {
          * Get Pricing Config
          * @description Get the current pricing configuration.
          *
-         *     This returns the pricing plans, features, and limits.
+         *     This returns the pricing plans and their features.
          *     Stripe price IDs are only included if they are configured.
          */
         get: operations["get_pricing_config_pricing_config_get"];
@@ -1405,10 +1365,6 @@ export interface components {
             }[];
             /** Third Party Processors */
             third_party_processors: components["schemas"]["GdprThirdPartyProcessor"][];
-            /** Usage Metrics */
-            usage_metrics: {
-                [key: string]: unknown;
-            }[];
         };
         /**
          * GdprPersonalData
@@ -1531,38 +1487,6 @@ export interface components {
             teardown_after?: string | null;
         };
         /**
-         * PlanLimits
-         * @description Plan limits and capabilities.
-         */
-        PlanLimits: {
-            /** Analytics */
-            analytics: string;
-            /** Custom Development */
-            custom_development: boolean;
-            /** Dedicated Infrastructure */
-            dedicated_infrastructure: boolean;
-            /** Integrations */
-            integrations: string;
-            /** Max Agents */
-            max_agents: number | "unlimited";
-            /** Max Messages Per Day */
-            max_messages_per_day: number | "unlimited";
-            /** On Premise */
-            on_premise: boolean;
-            /** Sla */
-            sla: boolean;
-            /** Sso */
-            sso: boolean;
-            /** Storage Gb */
-            storage_gb: number | "unlimited";
-            /** Support */
-            support: string;
-            /** Training */
-            training: boolean;
-            /** Workflows */
-            workflows: boolean;
-        };
-        /**
          * PricingConfigResponse
          * @description Public pricing configuration response model.
          */
@@ -1625,7 +1549,6 @@ export interface components {
             features: string[];
             /** Included Ai Budget Usd */
             included_ai_budget_usd: number;
-            limits: components["schemas"]["PlanLimits"];
             /** Name */
             name: string;
             /** Price Monthly */
@@ -1701,12 +1624,6 @@ export interface components {
             current_period_start?: string | null;
             /** Id */
             id: string;
-            /** Max Agents */
-            max_agents: number;
-            /** Max Messages Per Day */
-            max_messages_per_day: number;
-            /** Max Storage Gb */
-            max_storage_gb: number;
             /**
              * Status
              * @enum {string}
@@ -1714,6 +1631,8 @@ export interface components {
             status: "active" | "cancelled" | "past_due" | "trialing" | "paused" | "incomplete" | "incomplete_expired" | "unpaid";
             /** Stripe Customer Id */
             stripe_customer_id?: string | null;
+            /** Stripe Subscription Ended */
+            stripe_subscription_ended: boolean;
             /** Stripe Subscription Id */
             stripe_subscription_id?: string | null;
             /**
@@ -1727,18 +1646,6 @@ export interface components {
             trial_ends_at?: string | null;
             /** Updated At */
             updated_at?: string | null;
-        };
-        /**
-         * SubscriptionReactivateResponse
-         * @description Subscription reactivation response model.
-         */
-        SubscriptionReactivateResponse: {
-            /** Message */
-            message: string;
-            /** Subscription Id */
-            subscription_id?: string | null;
-            /** Success */
-            success: boolean;
         };
         /**
          * SyncResult
@@ -1809,47 +1716,6 @@ export interface components {
         UrlResponse: {
             /** Url */
             url: string;
-        };
-        /**
-         * UsageAggregateOut
-         * @description Aggregated usage statistics model.
-         */
-        UsageAggregateOut: {
-            /** Totalagents */
-            totalAgents: number;
-            /** Totalmessages */
-            totalMessages: number;
-            /** Totalstorage */
-            totalStorage: number;
-        };
-        /**
-         * UsageMetricOut
-         * @description Usage metric output model.
-         */
-        UsageMetricOut: {
-            /** Agents Used */
-            agents_used: number;
-            /** Created At */
-            created_at?: string | null;
-            /** Id */
-            id?: string | null;
-            /** Messages Sent */
-            messages_sent: number;
-            /** Metric Date */
-            metric_date: string;
-            /** Storage Used Gb */
-            storage_used_gb: number;
-            /** Subscription Id */
-            subscription_id: string;
-        };
-        /**
-         * UsageResponse
-         * @description Response model for usage metrics.
-         */
-        UsageResponse: {
-            aggregated: components["schemas"]["UsageAggregateOut"];
-            /** Usage */
-            usage: components["schemas"]["UsageMetricOut"][];
         };
         /** ValidationError */
         ValidationError: {
@@ -3173,70 +3039,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubscriptionCancelResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reactivate_subscription_my_subscription_reactivate_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                authorization?: string;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SubscriptionReactivateResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_user_usage_my_usage_get: {
-        parameters: {
-            query?: {
-                days?: number;
-            };
-            header?: {
-                authorization?: string;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UsageResponse"];
                 };
             };
             /** @description Validation Error */

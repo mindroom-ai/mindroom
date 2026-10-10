@@ -2,22 +2,11 @@
 {{- $accessGrants := $av.accessGrants -}}
 {{- if and $accessGrants.enabled (gt (len $accessGrants.grants) 0) }}
 {{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
-{{- $config := include "mindroom-runtime.agentVaultAccessGrantsConfig" . -}}
 {{- $jobSpec := include "mindroom-runtime.agentVaultAccessGrantsJobSpec" . -}}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "mindroom-runtime.agentVaultAccessGrantsConfigMapName" . }}
-  labels:
-    {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
-data:
-  access-grants.yaml: |
-    {{- $config | nindent 4 }}
----
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "mindroom-runtime.agentVaultJobName" (list . $name (print $config $jobSpec)) }}
+  name: {{ include "mindroom-runtime.agentVaultJobName" (list . $name $jobSpec) }}
   labels:
     {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
   {{- if eq $av.jobNaming "fixed" }}
@@ -53,22 +42,23 @@ grants:
   {{- end }}
 {{- end }}
 
-{{- /* With jobNaming=contentHash, each grants config gets its own ConfigMap,
-     so each Job reads the grants it was created for, not a later apply's. */ -}}
-{{- define "mindroom-runtime.agentVaultAccessGrantsConfigMapName" -}}
-{{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
-{{- include "mindroom-runtime.agentVaultJobName" (list . $name (include "mindroom-runtime.agentVaultAccessGrantsConfig" .)) -}}
-{{- end }}
-
 {{- define "mindroom-runtime.agentVaultAccessGrantsJobSpec" -}}
 {{- $av := .Values.workers.kubernetes.agentVault -}}
 {{- $accessGrants := $av.accessGrants -}}
+{{- $configAnnotation := "mindroom.ai/access-grants-config" -}}
 spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
+      {{- /* Pod templates are immutable, so version labels stay on the Job and a version-only upgrade keeps the template. */}}
       labels:
-        {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 8 }}
+        {{- omit (include "mindroom-runtime.agentVaultAccessGrantsLabels" . | fromYaml) "helm.sh/chart" "app.kubernetes.io/version" | toYaml | nindent 8 }}
+      {{- /* The grants config lives in the pod template and reaches the container through a downward API volume,
+           so the Job name hash covers it, each Job applies the grants it was created for,
+           and no separate ConfigMap needs cleanup. */}}
+      annotations:
+        {{ $configAnnotation }}: |
+          {{- include "mindroom-runtime.agentVaultAccessGrantsConfig" . | nindent 10 }}
     spec:
       restartPolicy: OnFailure
       automountServiceAccountToken: false
@@ -104,8 +94,11 @@ spec:
               readOnly: true
       volumes:
         - name: access-grants-config
-          configMap:
-            name: {{ include "mindroom-runtime.agentVaultAccessGrantsConfigMapName" . }}
+          downwardAPI:
+            items:
+              - path: access-grants.yaml
+                fieldRef:
+                  fieldPath: {{ printf "metadata.annotations['%s']" $configAnnotation | quote }}
         - name: access-grants-admin-token
           secret:
             secretName: {{ $accessGrants.adminTokenSecret.name }}

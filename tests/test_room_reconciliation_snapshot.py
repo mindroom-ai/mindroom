@@ -105,6 +105,7 @@ async def test_snapshot_preserves_power_levels_and_existing_topic(tmp_path: Path
             ("m.room.topic", ""): {"topic": "Existing human topic"},
             ("m.room.encryption", ""): {"algorithm": "m.megolm.v1.aes-sha2"},
         },
+        frozenset(),
     )
     client.room_put_state.return_value = nio.RoomPutStateResponse("$power", room_id)
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -140,6 +141,7 @@ async def test_power_write_does_not_restore_revoked_admin_from_snapshot() -> Non
         {
             ("m.room.power_levels", ""): {"users": {"@revoked:example.com": 100}},
         },
+        frozenset(),
     )
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         {"users": {}, "new_custom": "preserve"},

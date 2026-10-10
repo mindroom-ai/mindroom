@@ -4,10 +4,12 @@ import InstancePage from '../page'
 import { listInstances, type Instance } from '@/lib/api'
 import { useInstance } from '@/hooks/useInstance'
 import { useAuth } from '@/hooks/useAuth'
+import { useSubscription } from '@/hooks/useSubscription'
 import { cache, instanceCache } from '@/lib/cache'
 import { cacheInstance, getCachedInstance, loadInstance } from '@/lib/instance-resource'
 
 jest.mock('@/hooks/useAuth', () => ({ useAuth: jest.fn() }))
+jest.mock('@/hooks/useSubscription', () => ({ useSubscription: jest.fn() }))
 jest.mock('@/lib/supabase/client', () => {
   const client = {}
   return { createClient: () => client }
@@ -48,6 +50,7 @@ describe('InstancePage', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: null, loading: false })
     window.__MINDROOM_CONFIG__ = {
       ...originalConfig!,
       platformDomain: 'mindroom.chat',
@@ -64,6 +67,58 @@ describe('InstancePage', () => {
     cache.clear()
     instanceCache.clear()
     jest.useRealTimers()
+  })
+
+  it('sends an entitled account without an instance back to the dashboard', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', can_run_instances: true, stripe_subscription_ended: false }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: 'Go to dashboard' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Choose a plan' })).not.toBeInTheDocument()
+  })
+
+  it('sends an account whose plan is not entitled to billing instead of choosing a plan', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'paused', can_run_instances: false, stripe_subscription_ended: false }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: 'Open billing' })).toBeInTheDocument()
+    expect(screen.getByText(/Add or restore billing to run a hosted instance\./)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Choose a plan' })).not.toBeInTheDocument()
+  })
+
+  it('offers billing instead of starting a stopped instance whose plan lapsed', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'cancelled', can_run_instances: false, stripe_subscription_ended: true }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [{ ...instanceWithMissingSubdomain, status: 'stopped', tier: 'hobby' }] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: 'Open billing' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Start Instance/ })).not.toBeInTheDocument()
+    expect(screen.getByText('Instance is stopped. Add or restore billing to start it again.')).toBeInTheDocument()
+  })
+
+  it('offers reprovisioning a deprovisioned instance while the plan runs', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'hobby', status: 'active', can_run_instances: true, stripe_subscription_ended: false }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [{ ...instanceWithMissingSubdomain, status: 'deprovisioned', tier: 'hobby' }] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: /Reprovision Instance/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Open billing' })).not.toBeInTheDocument()
+  })
+
+  it('asks an account without a plan to choose one', async () => {
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: { tier: 'free', can_run_instances: false, stripe_subscription_ended: true }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByRole('button', { name: 'Choose a plan' })).toBeInTheDocument()
+    expect(screen.getByText(/Choose a plan to run a hosted instance\./)).toBeInTheDocument()
   })
 
   it('does not stringify a missing subdomain in instance details or support mailto body', async () => {
@@ -170,6 +225,7 @@ describe('InstancePage', () => {
     expect(listInstances).not.toHaveBeenCalled()
 
     ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: null, loading: false })
     await act(async () => { hook.rerender() })
     expect(listInstances).toHaveBeenCalledTimes(1)
     expect(hook.result.current.loading).toBe(false)
@@ -240,6 +296,7 @@ describe('InstancePage', () => {
       new Promise((_, reject) => { failRefresh = reject })
     )
     ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: null, loading: false })
     await act(async () => { hook.rerender() })
 
     expect(hook.result.current.instance).toEqual(instanceWithMissingSubdomain)
@@ -259,6 +316,7 @@ describe('InstancePage', () => {
     expect(listInstances).not.toHaveBeenCalled()
 
     ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
+    ;(useSubscription as jest.Mock).mockReturnValue({ subscription: null, loading: false })
     await act(async () => { page.rerender(<InstancePage />) })
     expect(listInstances).toHaveBeenCalledTimes(1)
     await act(async () => { jest.advanceTimersByTime(5000) })

@@ -115,6 +115,8 @@ Each instance gets three hosts:
 
 ## Platform Deployment
 
+Run these commands from the repository root against the platform cluster; the repository's `.envrc` exports `KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml`, which the Terraform setup writes.
+
 ```bash
 # Create values file from example
 cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
@@ -331,6 +333,9 @@ For each subscription, decide with the customer which instance to keep, usually 
 For every other row, check `helm status instance-<instance_id> -n mindroom-instances`, because a `deprovisioned` row from an older release's soft delete can still have a live release.
 If the release exists, uninstall it with `DELETE /admin/instances/<instance_id>/uninstall`, which also deletes its PVCs, Secrets, and platform OpenRouter key.
 Then delete the row with `DELETE FROM instances WHERE instance_id = <instance_id>;` and run the query again until it returns nothing.
+
+Apply migration `009_drop_subscription_limits.sql` only after deploying the backend release that stops writing `max_agents` and `max_messages_per_day`, because older backends fail to create or update subscriptions once those columns are gone.
+Likewise, apply `010_drop_usage_metrics.sql` only after deploying the backend release that stops reading `usage_metrics`, because older backends then fail the GDPR export and mark every nightly cleanup run failed.
 
 ## Multi-Tenant Architecture
 
