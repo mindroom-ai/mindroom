@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_rooms import get_rooms_for_entity
@@ -247,7 +247,7 @@ def _call_agents_to_restart(
         for agent_name in old_agents - changed_agents
         if (bot := agent_bots.get(agent_name)) is not None and bot.active_call_requesters
     }
-    if agents_in_call and _call_tooling_snapshot(config) != _call_tooling_snapshot(new_config):
+    if agents_in_call and config.authored_model_dump() != new_config.authored_model_dump():
         logger.info(
             "call_agent_configuration_changed_during_call_restart_required",
             agents=sorted(agents_in_call),
@@ -255,18 +255,6 @@ def _call_agents_to_restart(
         )
         changed_agents |= agents_in_call
     return changed_agents
-
-
-def _call_tooling_snapshot(config: Config) -> dict[str, Any]:
-    """Return the authored config an active call's tooling depends on.
-
-    Budget caps and model prices are read at each spend refresh, so editing them leaves a call running.
-    """
-    snapshot = config.authored_model_dump()
-    snapshot.pop("budgets", None)
-    for model in snapshot.get("models", {}).values():
-        model.pop("pricing", None)
-    return snapshot
 
 
 def _call_manager_signature(config: Config, agent_name: str) -> object | None:

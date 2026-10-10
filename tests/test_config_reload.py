@@ -21,7 +21,6 @@ import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
-from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -2463,40 +2462,6 @@ def test_config_update_plan_keeps_call_agents_running_when_only_model_prices_cha
         configured_entities=running_entities,
         existing_entities=running_entities,
         agent_bots=_call_bots(running_entities),
-    )
-
-    assert plan.entities_to_restart == set()
-
-
-def test_config_update_plan_keeps_an_active_call_when_only_budget_settings_change() -> None:
-    """Saving caps or prices must not hang up a call that is in progress."""
-
-    def config_with(limit: float, input_price: float) -> Config:
-        return _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="General Agent")},
-                models={
-                    "default": ModelConfig(
-                        provider="openai",
-                        id="default-model",
-                        pricing=ModelPricing(input=input_price, output=30),
-                    ),
-                    "luna": ModelConfig(provider="openai", id="luna-model"),
-                },
-                calls=_calls_for("general"),
-                router=RouterConfig(model="default"),
-                budgets=BudgetsConfig(fallback_model="luna", monthly_limit_usd=limit),
-            ),
-        )
-
-    running_entities = {ROUTER_AGENT_NAME, "general"}
-
-    plan = build_config_update_plan(
-        current_config=config_with(20, 5),
-        new_config=config_with(50, 4),
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
     )
 
     assert plan.entities_to_restart == set()
