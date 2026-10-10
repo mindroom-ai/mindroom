@@ -37,11 +37,12 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.agno_execution import approval_can_run_as_job
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
-from mindroom.tool_jobs.settings import background_tool_jobs_enabled
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -1251,8 +1252,13 @@ def apply_tool_approval_capability(
     *,
     supports_native_tool_approval: bool,
     registered_tool_name: str | None = None,
+    approvals_as_jobs: bool = False,
 ) -> Toolkit | None:
-    """Expose gated functions only where an Agno paused run can be resumed."""
+    """Expose gated functions only where an Agno paused run can be resumed, or where their call's job asks first.
+
+    With ``approvals_as_jobs``, a gated function whose call can become a managed job asks for its approval as that
+    job's first phase instead of pausing the run.
+    """
     if toolkit is None:
         return None
 
@@ -1279,6 +1285,9 @@ def apply_tool_approval_capability(
                 function.requires_confirmation = False
                 continue
             if function_may_require_approval(function) and function.requires_confirmation is not True:
+                if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
+                    function.approval_type = JOB_APPROVAL_TYPE
+                    continue
                 function.requires_confirmation = True
                 function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         return toolkit
@@ -1458,6 +1467,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     minimal_mode: bool,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
+    approvals_as_jobs = (
+        background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
+    )
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
@@ -1567,6 +1579,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             config,
             supports_native_tool_approval=supports_native_tool_approval,
             registered_tool_name=tool_name,
+            # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
+            approvals_as_jobs=approvals_as_jobs
+            and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
         )
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)

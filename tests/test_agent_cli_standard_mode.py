@@ -16,6 +16,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -207,16 +208,20 @@ async def test_native_shell_calls_in_one_batch_run_at_the_same_time(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
 async def test_approval_gated_tools_stay_native_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+    *,
+    jobs: bool,
 ) -> None:
-    """A tool that may need approval keeps its native confirmation and is not offered to the CLI."""
+    """A tool that may need approval keeps its native confirmation, or asks as its job, and is not offered to the CLI."""
     runtime = _helper_runtime(tmp_path, running_api)
     runtime.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="add", action="require_approval")],
     )
+    runtime.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=jobs)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     provider.steps = [[("run_shell_command", {"args": "mindroom-agent tools list"})], "done"]

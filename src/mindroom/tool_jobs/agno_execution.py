@@ -9,6 +9,7 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from agno.exceptions import AgentRunException
@@ -31,12 +32,14 @@ from mindroom.background_tasks import (
 )
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
+from mindroom.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.tool_jobs.agno_compat_functions import (
     function_actor,
     function_run_context,
     isolated_function_call,
     uses_sdk_async_dispatch,
 )
+from mindroom.tool_jobs.approvals import ask_tool_call_approval
 from mindroom.tool_jobs.authorization import function_authority
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
@@ -62,13 +65,14 @@ from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_syn
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     from agno.tools.function import Function
 
     from mindroom.tool_jobs.resources import ExecutionResourceReference
     from mindroom.tool_jobs.results import ReplayItem
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -165,12 +169,25 @@ def _validate_wait_timeout_parameter(function: Function) -> None:
         raise ValueError(msg)
 
 
-def _holds_run_connection(function: Function) -> bool:
+def _connects_per_run(toolkit: Toolkit) -> bool:
     """Toolkits the SDK connects for one run, such as Postgres or Agno MCP, must finish inside that run."""
-    toolkit = function.source_toolkit
     # Agno recognizes its MCP toolkits by class name so the optional MCP SDK is never imported.
-    return isinstance(toolkit, Toolkit) and (
-        toolkit.requires_connect or any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__)
+    return toolkit.requires_connect or any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__)
+
+
+def _holds_run_connection(function: Function) -> bool:
+    toolkit = function.source_toolkit
+    return isinstance(toolkit, Toolkit) and _connects_per_run(toolkit)
+
+
+def approval_can_run_as_job(function: Function, toolkit: Toolkit) -> bool:
+    """Whether a policy-gated function's approval can be the first phase of the managed job its call runs as."""
+    return not (
+        is_job_function(function)
+        or function.external_execution
+        or function.stop_after_tool_call
+        or function.requires_user_input
+        or _connects_per_run(toolkit)
     )
 
 
@@ -312,14 +329,31 @@ async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> Too
             await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
 
 
+@dataclass(frozen=True)
+class _JobApproval:
+    """The approval a gated call asks for as the first phase of its job, and the recorded Stops it then checks."""
+
+    ask: Callable[[], Awaitable[tuple[bool, str | None]]]
+    stopped: Callable[[], Awaitable[bool]]
+
+
 async def _run_operation(
     original: _Execute,
     owned_call: FunctionCall,
     owner: ToolExecutionIdentity,
     baseline: dict[str, Any],
     reference: ExecutionResourceReference,
+    approval: _JobApproval | None = None,
 ) -> BackgroundOutcome:
     try:
+        if approval is not None:
+            approved, reason = await approval.ask()
+            if not approved:
+                return BackgroundOutcome("denied", reason or "The requester did not approve this call.")
+            job_checkpoint()
+            # A Stop recorded while the call waited for its approval wins over that approval.
+            if await approval.stopped():
+                return BackgroundOutcome("cancelled", "Stopped before the approved call ran.")
         with (
             tool_execution_identity(owner),
             authorized_tool_call(owner, owned_call),
@@ -373,7 +407,8 @@ async def _consume_result(
     value, payload = await consume_tool_job(runtime, job, claim, function_call=call)
     timer.elapsed_time = payload.elapsed
     call.result = value
-    call.error = payload.error or (job.result if job.status == "failed" else None)
+    # Every outcome but completion tells the model why, such as the reason an approval was denied.
+    call.error = payload.error or (None if job.status == "completed" else job.result)
     success = restore_control(payload.control) if payload.control is not None else job.status == "completed"
     result = FunctionExecutionResult(status="success" if success is True else "failure", result=value, error=call.error)
     if payload.replay:
@@ -398,6 +433,55 @@ async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolW
     return success, timer, call, result
 
 
+def _wait_budget(
+    call: FunctionCall,
+    *,
+    mode: ToolWaitMode,
+    depth: int,
+    job_approval: bool,
+    context: ToolRuntimeContext,
+) -> float | None:
+    """Return how long the caller waits for this call's job, or raise ValueError for an unusable budget."""
+    wait_timeout = None
+    if mode != "native":
+        _validate_wait_timeout_parameter(call.function)
+        wait_timeout = read_wait_timeout(call.arguments, owned_execution=job_owns_execution() or depth > 0)
+    if job_approval and wait_timeout is None:
+        # The reply waits this long for the decision, then goes on while the job waits for it.
+        wait_timeout = context.config.background_tool_jobs.approval_wait_timeout
+    if call.function.stop_after_tool_call and wait_timeout is not None:
+        msg = "wait_timeout is not supported for tools that stop the current model step"
+        raise ValueError(msg)
+    return wait_timeout
+
+
+def _job_approval(
+    runtime: ToolJobRuntime,
+    job_id: str,
+    owned_call: FunctionCall,
+    owner: ToolExecutionIdentity,
+    context: ToolRuntimeContext,
+) -> _JobApproval:
+    """Ask for a gated call's approval as its job, on the frozen call the job then runs."""
+    return _JobApproval(
+        ask=partial(
+            ask_tool_call_approval,
+            runtime,
+            job_id,
+            owned_call,
+            owner=owner,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+        ),
+        stopped=partial(runtime.stop_recorded, job_id),
+    )
+
+
+def _unaskable(call: FunctionCall) -> ToolCallResult:
+    """Refuse a gated call that can ask for its approval only as a managed job, which it cannot become here."""
+    return _failed_call(call, ValueError("This call needs approval, which it cannot ask for here, so it did not run."))
+
+
 def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
     """Expose invalid framework arguments through Agno's ordinary tool failure contract."""
     with Timer() as timer:
@@ -412,25 +496,23 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()
+        # A call that asks for its approval as its job never runs without becoming one.
+        job_approval = call.function.approval_type == JOB_APPROVAL_TYPE
         if runtime is None or context is None or resources is None:
-            return await original(call)
+            return _unaskable(call) if job_approval else await original(call)
         if _is_framework_function(call.function):
+            if job_approval:
+                return _unaskable(call)
             job_checkpoint()
             check_current_execution_authority()
             return await original(call)
         mode = wait_mode(call.function, depth=depth)
-        wait_timeout = None
-        if mode != "native":
-            try:
-                _validate_wait_timeout_parameter(call.function)
-                wait_timeout = read_wait_timeout(call.arguments, owned_execution=job_owns_execution() or depth > 0)
-            except ValueError as error:
-                return _failed_call(call, error)
-        if call.function.stop_after_tool_call and wait_timeout is not None:
-            return _failed_call(
-                call,
-                ValueError("wait_timeout is not supported for tools that stop the current model step"),
-            )
+        if job_approval and mode != "managed":
+            return _unaskable(call)
+        try:
+            wait_timeout = _wait_budget(call, mode=mode, depth=depth, job_approval=job_approval, context=context)
+        except ValueError as error:
+            return _failed_call(call, error)
         owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
         actor = function_actor(call.function)
         if actor is not None and actor.id:
@@ -457,6 +539,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         owned_call.arguments = application_arguments(owned_call.arguments)
         baseline = deepcopy(run_context.session_state or {})
         reference = resources.acquire()
+        approval = _job_approval(runtime, job_id, owned_call, owner, context) if job_approval else None
 
         claim = None
         retained = False
@@ -470,7 +553,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 source_kind=context.source_kind,
                 adapter=adapter,
                 owner=owner,
-                operation=lambda: _run_operation(original, owned_call, owner, baseline, reference),
+                operation=lambda: _run_operation(original, owned_call, owner, baseline, reference, approval),
                 reattach=True,
             )
             with Timer() as timer:

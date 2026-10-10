@@ -871,6 +871,7 @@ depends_on = [
     "mindroom.tool_approval",
     "mindroom.tool_call_budget",
     "mindroom.tool_jobs.agno_compat_execution",
+    "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.catalog",
@@ -1325,6 +1326,9 @@ visibility = [
     "mindroom.scheduling",
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
+    # Both tell a gated call that asks for its approval as its job from other calls.
+    "mindroom.cli_shell_agent",
+    "mindroom.tool_jobs.agno_execution",
 ]
 
 [[modules]]
@@ -6687,6 +6691,7 @@ from = ["mindroom.approval_transport"]
 [[interfaces]]
 expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "JOB_APPROVAL_TYPE",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "AutomationToolOrigin",
@@ -7856,7 +7861,9 @@ visibility = [
 path = "mindroom.tool_jobs.agno_execution"
 depends_on = [
     "mindroom.custom_tools.job",
+    "mindroom.tool_approval",
     "mindroom.tool_jobs.agno_compat_functions",
+    "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.control",
@@ -7874,6 +7881,8 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
+    # Agent assembly asks which gated functions can ask for their approval as their job.
+    "mindroom.agents",
     "mindroom.tool_jobs.agno_compat_execution",
 ]
 
@@ -8048,6 +8057,7 @@ depends_on = [
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_knowledge_descriptions",
     "mindroom.agno_compat_cli_checkpoint",
+    "mindroom.tool_approval",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",

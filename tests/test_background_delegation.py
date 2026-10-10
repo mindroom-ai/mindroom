@@ -30,7 +30,6 @@ from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.job_approvals import _approval_run_id
 from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
@@ -38,6 +37,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,

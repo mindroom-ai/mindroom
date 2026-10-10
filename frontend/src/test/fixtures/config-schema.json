@@ -821,6 +821,20 @@
           },
           "title": "Exclude Toolkits",
           "type": "array"
+        },
+        "approval_wait_timeout": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 300,
+          "description": "Seconds a reply waits for the approval of a gated call that runs as a job before continuing while the job waits; null waits until the decision or a newer message.",
+          "title": "Approval Wait Timeout"
         }
       },
       "title": "BackgroundToolJobsConfig",
@@ -4780,7 +4794,8 @@
         "enabled": false,
         "exclude_toolkits": [
           "shell"
-        ]
+        ],
+        "approval_wait_timeout": 300.0
       },
       "description": "Opt-in managed background tool execution, fixed at process startup."
     },

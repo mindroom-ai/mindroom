@@ -182,6 +182,7 @@ The behavior below follows from deliberate decisions; a change that would restor
 - An approval pauses and holds its reply and its conversation: later messages to that agent in that conversation wait, as behind a running reply, until the approval ends; no approval holds the room's event lane.
 - A reply that waits for background work does not hold its conversation, and a newer reply that reaches its boundary with that work outstanding takes it over.
 - A reply an approval holds never waits for background work; the key's next reply takes the work it leaves outstanding.
+- With background jobs on, a top-level agent's gated call that can become a managed job asks for its approval from that job instead of pausing its reply, so the approval holds neither the reply nor its conversation; after `approval_wait_timeout` the reply goes on and waits for the job like any other work, and a restart interrupts the job, so that approval does not survive a restart as a paused reply's does.
 - Deleting the message a reply answers while an approval holds it cancels that approval, as a Stop would, and removes the reply.
 - An edit regenerates only the reply to the latest message of its conversation, and only when that reply showed something and it is not `gone`; any other edit changes no reply.
 - An edit of a reply that still streams stops it, as a Stop reaction would, and regenerates it in place; a second edit during that regeneration does the same, so the newest edit wins.

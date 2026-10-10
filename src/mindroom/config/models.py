@@ -95,6 +95,15 @@ class BackgroundToolJobsConfig(BaseModel):
         default_factory=lambda: ["shell"],
         description="Registered toolkit names that keep their own waiting behavior; requires restart.",
     )
+    approval_wait_timeout: float | None = Field(
+        default=300,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Seconds a reply waits for the approval of a gated call that runs as a job before continuing while the job "
+            "waits; null waits until the decision or a newer message."
+        ),
+    )
 
 
 class DebugConfig(BaseModel):

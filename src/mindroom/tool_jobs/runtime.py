@@ -257,6 +257,7 @@ class ToolJobRuntime:
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: _Cleanup,
         denied: Callable[[BackgroundJob], bool] | None = None,
+        stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
     ) -> None:
         # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
@@ -266,6 +267,8 @@ class ToolJobRuntime:
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
         self.authorize_execution = authorize_execution
         self._cancel = cancel
+        # Whether a Stop recorded for the reply that owns a job still waits to be applied to it.
+        self._stopped = stopped
         self._entries: dict[str, _Entry] = {}
         # Per-turn lookups read these instead of scanning every entry; `_add_entry` and `_remove_entry` keep them.
         # Sources are keyed by a job's recipient and the turn that started it.
@@ -674,6 +677,15 @@ class ToolJobRuntime:
                 logger.exception(failure, job_id=entry.job.job_id)
                 failures.append(error)
         return failures
+
+    async def stop_recorded(self, job_id: str) -> bool:
+        """Return whether a Stop reached a job, applied or only recorded for the reply that owns it."""
+        async with self._lock:
+            entry = self._entries.get(job_id)
+            if entry is None:
+                return True
+            job = await self._snapshot(entry)
+        return job.user_stop_receipt_order is not None or (self._stopped is not None and await self._stopped(job))
 
     async def cancel_revoked(self, *, denied: Callable[[BackgroundJob], bool]) -> None:
         """Withdraw execution whose grant is proven revoked, retaining owned cleanup; a failed job retries next pass."""

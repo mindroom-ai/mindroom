@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent
-    from mindroom.tool_jobs.runtime import ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 pytestmark = pytest.mark.asyncio
@@ -238,6 +238,42 @@ async def test_a_stop_cancels_the_work_its_reply_started_and_waits_for(tmp_path:
         await wait_for_status(runtime, "held", "cancelled")
         assert user_stopped(runtime, "held")
         assert not user_stopped(runtime, "other")
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_recorded_stop_reaches_its_work_before_the_job_runtime_applies_it(tmp_path: Path) -> None:
+    """A call whose approval lands after its reply's Stop was recorded, but before it was applied, sees that Stop."""
+    owner = job_owner()
+    coordinators: list[ToolJobRuntimeCoordinator] = []
+
+    async def stopped(job: BackgroundJob) -> bool:
+        return await coordinators[0]._stop_recorded(job)
+
+    runtime = await tool_job_runtime(tmp_path, stopped=stopped)
+    coordinators.append(_coordinator(tmp_path, runtime, MagicMock()))
+    journal = coordinators[0]._journal
+    assert journal is not None
+    principal = journal.principal(_PRINCIPAL)
+    reply = await _waiting_reply(principal, _key(owner))
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(runtime, "held", tool_name="tool", depth=0, adapter={}, owner=owner, operation=forever)
+        elsewhere = replace(owner, room_id="!other:test")
+        await start_job(runtime, "other", tool_name="tool", depth=0, adapter={}, owner=elsewhere, operation=forever)
+        assert not await runtime.stop_recorded("held")
+
+        stop = rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=30)
+        await principal.replies.update(reply.reply_id, lambda _current: stop)
+
+        assert await runtime.stop_recorded("held")
+        assert not await runtime.stop_recorded("other")
+        # A job that is gone never runs its call either.
+        assert await runtime.stop_recorded("unknown")
     finally:
         await runtime.shutdown()
 

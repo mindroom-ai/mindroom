@@ -31,11 +31,11 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.job_approvals import _approval_run_id, settle_child_approvals
 from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.approvals import _approval_run_id, settle_job_approvals
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
@@ -214,7 +214,7 @@ class DelegationFuzzRunner:
             cleanup=partial(interrupt_stopped_child, config=self.config, runtime_paths=self.paths),
             runtime_paths=self.paths,
         )
-        await settle_child_approvals(self.runtime, job.job_id)
+        await settle_job_approvals(self.runtime, job.job_id)
         assert not self.runtime.unsettled_approvals
         return outcome
 

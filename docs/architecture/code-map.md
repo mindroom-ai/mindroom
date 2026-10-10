@@ -104,7 +104,7 @@ Matrix sync callback
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
-| `delegation/job_approvals.py` | Approval cards a background child's job posts and owns while the child waits for decisions |
+| `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
 | `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting, published runtime, and parked work |
 | `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
 | `tool_jobs/disabled.py` | Passive preservation of saved sources and approvals while the feature is off |
@@ -121,6 +121,7 @@ Matrix sync callback
 | `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
 | `tool_jobs/completion.py` | The response boundary: ready job results a reply continues with, or the key of the work its answer waits for |
+| `tool_jobs/approvals.py` | Approval cards a job posts and owns for its child's or its own gated call, denied when the job ends early |
 | `tool_jobs/wakes.py` | A waiting reply's wake: its journal source and identity, and the envelope of the turn that continues the reply |
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |

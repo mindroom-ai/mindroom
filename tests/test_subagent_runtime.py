@@ -737,7 +737,7 @@ async def test_interrupted_job_cards_are_denied_once_the_approval_runtime_can(
     run_id = f"tool-job:{job.job_id}"
     try:
         # No approval runtime yet, then one whose first settlement fails: both leave the job for the next pass.
-        await coordinator._interrupt_child(job)
+        await coordinator._interrupt(job)
         approvals = _Approvals()
         await coordinator._reconcile()
         assert coordinator.runtime.unsettled_approvals == {job.job_id}
@@ -775,7 +775,7 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
     coordinator._runtime = await tool_job_runtime(tmp_path)
     try:
         with job_control_context(control), patch.object(delegation_recovery, "interrupt_child", new=interrupt):
-            outcome = await coordinator._interrupt_child(job)
+            outcome = await coordinator._interrupt(job)
     finally:
         await coordinator.runtime.shutdown()
     assert outcome is not None

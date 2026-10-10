@@ -119,7 +119,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 ## Background jobs
 
 This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
-Hot reload saves a changed `background_tool_jobs` setting and reports that a restart is required.
+Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 Turning the option off parks unfinished jobs and their approvals without replaying their tools; re-enable it and restart to recover them.
 When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function, and shell tools keep their own background commands.
 
@@ -142,6 +142,7 @@ Exclude complete toolkits in YAML when they should retain native execution:
 background_tool_jobs:
   enabled: true
   exclude_toolkits: [shell, my_plugin_toolkit]
+  approval_wait_timeout: 120
 ```
 
 The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
@@ -202,10 +203,18 @@ Still-authorized deferred tools remain discoverable without loading them or conn
 Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
 Remote service availability alone does not revoke access to a saved result.
 
-A managed child that needs approval stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
-The job's cards show that it waits for approval; pressing **Stop** on the waiting message or cancelling the job denies its open cards.
+A managed tool call that needs approval asks for it from its job, so a pending approval never blocks the conversation.
+The job posts the approval card, reports `awaiting_approval`, and runs the call only once it is approved; a denied or expired approval becomes the job's `denied` outcome.
+The reply waits for the decision for `background_tool_jobs.approval_wait_timeout` seconds, then continues its answer while the job keeps waiting, and its message waits for that job.
+The setting is a non-negative number of seconds, defaulting to `300`; `0` continues at once, and `null` waits until the decision or a newer human message.
+A call's own `wait_timeout`, or a newer human message, releases the reply the same way.
+Pressing **Stop** before the decision cancels the call, even when it is approved afterwards.
+Calls that must finish inside the run keep pausing it for their approval: tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
+
+A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
+A job's cards show that it waits for approval; pressing **Stop** on the waiting message or cancelling the job denies its open cards.
 A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job; the waiting message then continues with that interrupted outcome.
-These cards offer no automatic approval option.
+Cards a job posts offer no automatic approval option, and automatic approvals granted on other cards do not apply to them.
 Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
 Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.

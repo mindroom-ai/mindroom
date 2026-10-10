@@ -13,11 +13,11 @@ from uuid import uuid4
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
-from mindroom.delegation.job_approvals import prune_child_approvals, settle_child_approvals
 from mindroom.delegation.lifecycle import active_delegation_edges
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.approvals import prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.completion import HoldKey, conversation_work
 from mindroom.tool_jobs.disabled import index_parked_work
@@ -98,8 +98,9 @@ class ToolJobRuntimeCoordinator:
                     store,
                     authorize=self._authorized,
                     authorize_execution=self._authorize_execution,
-                    cancel=self._interrupt_child,
+                    cancel=self._interrupt,
                     denied=self._denied,
+                    stopped=self._stop_recorded,
                 )
         else:
             instance.parked = await index_parked_work(journal)
@@ -113,8 +114,11 @@ class ToolJobRuntimeCoordinator:
             raise RuntimeError(msg)
         return self._runtime
 
-    async def _interrupt_child(self, job: BackgroundJob) -> BackgroundOutcome | None:
+    async def _interrupt(self, job: BackgroundJob) -> BackgroundOutcome | None:
+        """Settle a stopped job's own cleanup: deny the cards it waits on, and reconcile a subagent's child."""
         if job.kind != "delegation":
+            # A gated tool call that runs as a job may wait on its approval card.
+            await settle_job_approvals(self.runtime, job.job_id)
             return None
         config = self.config_provider()
         if config is None:
@@ -131,7 +135,7 @@ class ToolJobRuntimeCoordinator:
             runtime_paths=self.runtime_paths,
         )
         # A job interrupted while it waited for approvals leaves its cards answerable until they are denied.
-        await settle_child_approvals(self.runtime, job.job_id)
+        await settle_job_approvals(self.runtime, job.job_id)
         return outcome
 
     def _authorized(self, job: BackgroundJob) -> bool:
@@ -305,7 +309,7 @@ class ToolJobRuntimeCoordinator:
         """Stop revoked and stopped work, deny interrupted jobs' cards, and wake waiting replies; retry failures."""
         await self.runtime.cancel_revoked(denied=self._denied)
         for job_id in tuple(self.runtime.unsettled_approvals):
-            await settle_child_approvals(self.runtime, job_id)
+            await settle_job_approvals(self.runtime, job_id)
         await self._apply_job_stops()
         await self._admit_wakes(self.runtime)
 
@@ -321,6 +325,16 @@ class ToolJobRuntimeCoordinator:
                 matches=await self._stopped_work(principal, stop),
             )
             await principal.replies.forget_job_stop(stop.stop_id)
+
+    async def _stop_recorded(self, job: BackgroundJob) -> bool:
+        """Return whether a recorded Stop not applied yet names this job."""
+        journal = self._journal
+        if journal is None:
+            return False
+        for stop in await journal.reply_job_stops():
+            if await (await self._stopped_work(journal.principal(stop.principal_id), stop))(job):
+                return True
+        return False
 
     async def _stopped_work(
         self,
@@ -407,4 +421,4 @@ class ToolJobRuntimeCoordinator:
             before=datetime.now(UTC) - CONSUMED_RESULT_RETENTION,
             source_finished=source_finished,
         )
-        await prune_child_approvals(expired)
+        await prune_job_approvals(expired)

@@ -30,6 +30,10 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   Deleting the messages a reply answers, or editing a waiting reply's message, cancels that work too.
 - A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.
 - A background child that needs approval asks through cards its job posts, and the job stays `awaiting_approval` until the decisions arrive.
+  A gated call of a top-level agent that can become a managed job asks the same way, as its job's first phase: it is marked `mindroom_job` instead of pausing the run, the reply waits up to `approval_wait_timeout` for the decision and then goes on, and the call runs only once approved.
+  A Stop recorded for its reply before the approval lands wins over that approval.
+  Such a call never runs inline: one that cannot become a job fails, and the agent CLI never offers it.
+  Calls that must finish inside their run, excluded toolkits, subagents, and minimal mode keep the paused-run approval.
   Turning the feature off parks saved work.
 
 ## Ownership
@@ -42,7 +46,8 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 | `tool_jobs/agno_execution.py` and `consumption.py` | Exact call execution and acknowledgement after the SDK saves consumption |
 | `tool_jobs/resources.py` | Defer model and storage cleanup until the reply and its detached jobs release them |
 | `delegation/background.py` | Native child identity and cleanup inside the generic execution owner |
-| `delegation/job_approvals.py` | Approval cards a background child's job posts and denies when the job ends early |
+| `tool_jobs/approvals.py` | Approval cards a job posts for its child's or its own gated call, and denies when the job ends early |
+| `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
 | `tool_jobs/completion.py` | The response boundary: ready results to continue with, or the key of the work the span's answer waits for |
 | `tool_jobs/wakes.py` | A wake's journal source and identity, and the envelope of the turn that continues a waiting reply |
 | Reply records (`reply_lifecycle.py`, `event_journal/replies.py`) | Whether a reply waits and for which key, wake spans, takeover, and the job Stops a reply's Stop records |
@@ -109,4 +114,6 @@ A Stop on a reply whose work a newer reply already took over cancels nothing, si
 Removing an agent or team from the configuration ends its waiting replies, but their messages keep their waiting notice, since no bot remains to edit them.
 Turning the feature off ends waiting replies at startup, keeping their answers.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
+A restart interrupts a job that waits for its own call's approval, so that call never runs; the model is told to ask again only for a read-only call.
+Job cards offer no timed automatic approvals, and automatic approvals granted on paused-run cards do not apply to them.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
