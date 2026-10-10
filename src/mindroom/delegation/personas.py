@@ -220,7 +220,7 @@ def load_profile(workspace_root: Path | None, name: str) -> _PersonaProfile:
 
 
 def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaProfile]) -> str:
-    """Render profiles for the delegate instructions, bounded to 2,000 characters."""
+    """Render profiles for the `run_subagent` description, bounded to 2,000 characters."""
     lines = [
         f"- {entry.name}: {entry.description}"
         if isinstance(entry, _PersonaProfile)

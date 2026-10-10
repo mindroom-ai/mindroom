@@ -291,6 +291,8 @@ agents:
   builder:
     display_name: Workflow Builder
     tools:
+      - duckduckgo
+      - website
       - dynamic_workflow:
           allowed_tools: [duckduckgo, website]
 ```

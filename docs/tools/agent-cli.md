@@ -72,7 +72,7 @@ It can still read the caller's configured instructions on demand with `mindroom-
 
 A standard-mode agent with the `shell` tool can use `mindroom-agent` inside its shell commands, so one script can combine many tool calls, loop over results, or filter them before anything returns to the model.
 It is available automatically when the agent answers a Matrix conversation itself and its shell meets the [deployment requirements](#deployment-requirements); the agent's instructions then mention it.
-Team members, call agents, workflow participants, and OpenAI-compatible requests do not get it.
+Team members, call agents, `room_agent` workflow participants, and OpenAI-compatible requests do not get it.
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
 The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.

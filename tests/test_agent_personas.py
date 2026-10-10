@@ -217,6 +217,13 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
 
     assert isinstance(agent, MinimalAgent)
     assert [deferred.name for deferred in agent.deferred_toolkits] == []
+    built = {
+        name
+        for tool in agent.tools or []
+        if isinstance(tool, Toolkit)
+        for name in (*tool.functions, *tool.get_async_functions())
+    }
+    assert "read_file" not in built
 
 
 def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
