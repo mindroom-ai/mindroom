@@ -18,6 +18,7 @@ from anthropic import AsyncAnthropic
 
 from mindroom.agent_storage import create_state_storage
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -143,6 +144,54 @@ async def test_completed_claude_stream_counts_its_usage_once(tmp_path: Path) -> 
             "output_tokens": 50,
             "cache_read_tokens": 48000,
             "cache_write_tokens": 800,
+        }
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_still_retries_an_overload_after_it_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start usage alone must not stop a retry; both attempts started, so both report their usage."""
+    monkeypatch.setattr("mindroom.provider_stream_retry._retry_delay_seconds", lambda _attempt: 0)
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    overloaded = _start_and_text() + _event("error", error={"type": "overloaded_error", "message": "Overloaded"})
+    completed = _start_and_text("Ready") + _event("content_block_stop", index=0)
+    completed += _event("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None}, usage=_FINAL_USAGE)
+    completed += _event("message_stop")
+    responses = iter([overloaded, completed])
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=next(responses))
+
+    client = AsyncAnthropic(
+        api_key="test-key",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", async_client=client, max_tokens=1024)
+    install_provider_stream_retry_hook(model)
+    try:
+        agent = Agent(id="status", model=model, db=storage, telemetry=False)
+        content = "".join(
+            [
+                event.content
+                async for event in agent.arun("Check status", session_id="session", stream=True)
+                if isinstance(event, RunContentEvent) and event.content
+            ],
+        )
+
+        assert content == "Ready"
+        assert len(requests) == 2
+        assert _session_usage(storage) == {
+            "input_tokens": 2400,
+            "output_tokens": 51,
+            "cache_read_tokens": 96000,
+            "cache_write_tokens": 1600,
         }
     finally:
         storage.close()

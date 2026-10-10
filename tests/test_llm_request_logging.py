@@ -668,6 +668,47 @@ async def test_llm_usage_telemetry_normalizes_anthropic_cache_tokens(tmp_path: P
     assert usage_log["cache_read_ratio"] == 0.727273
 
 
+@dataclass
+class _SplitUsageStreamModel(_FakeModel):
+    """Stream that reports usage when it starts and the remainder when it ends, as Claude streams do."""
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        yield ModelResponse(
+            response_usage=MessageMetrics(
+                input_tokens=1200,
+                cache_read_tokens=48000,
+                cache_write_tokens=800,
+                output_tokens=1,
+            ),
+        )
+        yield ModelResponse(content="ok")
+        yield ModelResponse(response_usage=MessageMetrics(output_tokens=49))
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_telemetry_adds_up_usage_reported_across_a_stream(tmp_path: Path) -> None:
+    """Agno adds up stream usage chunks, so telemetry must report their sum, not the last chunk."""
+    model = _SplitUsageStreamModel(provider="Anthropic")
+    with capture_logs() as logs:
+        install_llm_request_logging(
+            model,
+            agent_name="claude",
+            debug_config=DebugConfig(),
+            default_log_dir=tmp_path,
+            configured_provider="anthropic",
+        )
+        async for _ in model.ainvoke_stream(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        ):
+            pass
+
+    usage_log = logs[0]
+    assert (usage_log["input_tokens"], usage_log["output_tokens"]) == (1200, 50)
+    assert (usage_log["cache_read_tokens"], usage_log["cache_write_tokens"]) == (48000, 800)
+
+
 @pytest.mark.asyncio
 async def test_llm_usage_telemetry_reports_missing_provider_metrics(tmp_path: Path) -> None:
     """Completed calls without provider metrics should remain visible in telemetry."""

@@ -21,17 +21,6 @@ if TYPE_CHECKING:
     from anthropic.types.beta import BetaMessage
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
-_TOKEN_COUNTERS = (
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-    "audio_input_tokens",
-    "audio_output_tokens",
-    "audio_total_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-)
 # Usage from message_start of the Claude stream this task is reading; a task reads one stream at a time.
 _STREAM_START_USAGE: ContextVar[MessageMetrics | None] = ContextVar("claude_stream_start_usage", default=None)
 
@@ -58,7 +47,9 @@ _STREAM_START_USAGE: ContextVar[MessageMetrics | None] = ContextVar("claude_stre
 # Reason: Agno 3.0.9 reads stream usage only from the final message_stop snapshot, although
 # Anthropic reports input and cache usage in message_start. A reply stopped before message_stop
 # records no usage for that request, though Anthropic bills the input and cache tokens it reported.
-# Upstream issue: Tracking gap; no issue identified.
+# Upstream issue: Tracking gap; no issue tracks stopped streams. Agno moved Claude stream usage to
+# message_stop to fix double counting in https://github.com/agno-agi/agno/issues/6537, so a fix must still
+# count completed streams once.
 # Upstream PR: None identified.
 # Remove when: The pinned Agno parser reports message_start usage and counts only the remainder
 # when the final usage arrives.
@@ -129,7 +120,11 @@ class ClaudeProviderSDKCompat:
             _STREAM_START_USAGE.set(None)
             parsed.response_usage = replace(
                 final,
-                **{name: getattr(final, name) - getattr(start, name) for name in _TOKEN_COUNTERS},
+                input_tokens=final.input_tokens - start.input_tokens,
+                output_tokens=final.output_tokens - start.output_tokens,
+                total_tokens=final.total_tokens - start.total_tokens,
+                cache_read_tokens=final.cache_read_tokens - start.cache_read_tokens,
+                cache_write_tokens=final.cache_write_tokens - start.cache_write_tokens,
             )
         return parsed
 
