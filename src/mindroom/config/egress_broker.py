@@ -278,7 +278,7 @@ class EgressService(BaseModel):
 
         for name in value:
             # Must match pattern
-            if not pattern.match(name):
+            if not pattern.fullmatch(name):
                 msg = f"placeholder_env name '{name}' must match ^[A-Z_][A-Z0-9_]*$"
                 raise ValueError(msg)
 

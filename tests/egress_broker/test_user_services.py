@@ -536,3 +536,65 @@ def test_equal_config_copies_share_a_cache_entry(manager: CredentialsManager, mo
     assert effective_config(changed, manager, _target()).unmatched_hosts == "passthrough"
 
     assert len(reads) == 2
+
+
+def test_reordered_config_is_merged_again_so_ties_follow_the_new_order(manager: CredentialsManager) -> None:
+    """Equal services in another order break rule ties differently, so the cache never serves the old order."""
+    _save(manager, _target(), "mine", _service("mine.example.com"))
+    tied = {"rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]}
+    first = EgressBrokerConfig.model_validate({"services": {"alpha": tied, "beta": tied}})
+    reordered = EgressBrokerConfig.model_validate({"services": {"beta": tied, "alpha": tied}})
+    # Pydantic equality ignores dict order, which is what made the cache reuse the old merge.
+    assert first == reordered
+
+    def picked(config: EgressBrokerConfig, target: ResolvedWorkerTarget) -> str:
+        rules = EgressRules(operator=config, effective=effective_config(config, manager, target))
+        match = route_request(rules, "api.example.com", 443, "/")
+        assert match.match is not None
+        return match.match.service
+
+    for target in (_target(), _target(_BOB)):  # with and without services of the scope's own
+        assert picked(first, target) == "alpha"
+        assert picked(reordered, target) == "beta"
+        assert picked(first, target) == "alpha"
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "ANSIBLE_VAULT_PASSWORD_FILE",
+        "SOPS_AGE_KEY_CMD",
+        "RESTIC_PASSWORD_COMMAND",
+        "PASSWORD_STORE_EXTENSIONS_DIR",
+        "PASSWORD_STORE_ENABLE_EXTENSIONS",
+        "PASSWORD_STORE_GPG_OPTS",
+        "CARGO_REGISTRY_CREDENTIAL_PROVIDER",
+        "SSH_AUTH_SOCK",
+        "GIT_CREDENTIAL_HELPER",
+        "GH_TOKEN_OPTIONS",
+    ],
+)
+def test_placeholder_names_that_tools_run_or_load_are_refused(manager: CredentialsManager, variable: str) -> None:
+    """Credential-looking names that tools read as a program, path, or options are refused, and so is SSH_*."""
+    with pytest.raises(ValueError, match=f"placeholder_env name '{variable}' may not"):
+        _save(manager, _target(), "mine", _service(placeholder_env={variable: "mindroom-brokered"}))
+
+    assert load_user_services(manager, _target()) == {}
+
+
+def test_stored_placeholders_that_tools_run_or_load_are_dropped(manager: CredentialsManager) -> None:
+    """The same names are dropped from stored services on load, by name only."""
+    store = manager.for_primary_runtime_scope(_ALICE, "code")
+    placeholders = {"GH_TOKEN": "mindroom-brokered", "SSH_AUTH_SOCK": "agent.sock", "SOPS_AGE_KEY_CMD": "age"}
+    authored = {**_service().authored_model_dump(), "placeholder_env": placeholders}
+    store.save_credentials(USER_SERVICES_CREDENTIAL_SERVICE, {"services": {"mine": authored}})
+
+    with capture_logs() as logs:
+        loaded = load_user_services(manager, _target())
+
+    assert loaded["mine"].placeholder_env == {"GH_TOKEN": "mindroom-brokered"}
+    dropped = [
+        entry["variable"] for entry in logs if entry["event"] == "egress_broker_user_service_placeholder_ignored"
+    ]
+    assert dropped == ["SSH_AUTH_SOCK", "SOPS_AGE_KEY_CMD"]
+    assert "agent.sock" not in str(logs)

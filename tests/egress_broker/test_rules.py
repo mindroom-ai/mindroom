@@ -676,6 +676,7 @@ def test_invalid_host_rejected(host: str) -> None:
         "all_proxy",
         "NODE_USE_ENV_PROXY",
         "lower",  # Must start with uppercase
+        "GH_TOKEN\n",  # The whole name must match, not just up to a trailing newline
     ],
 )
 def test_invalid_placeholder_env_rejected(name: str) -> None:

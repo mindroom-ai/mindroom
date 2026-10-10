@@ -65,9 +65,15 @@ MAX_SERVICE_BYTES = 16 * 1024
 MAX_DOCUMENT_BYTES = 256 * 1024
 
 # User placeholder names: one underscore-separated word must be a credential word, so names such as LD_PRELOAD,
-# NODE_OPTIONS, BASH_ENV, or PYTHONPATH (which only contains PAT inside a word) never qualify.
+# NODE_OPTIONS, BASH_ENV, or PYTHONPATH (which only contains PAT inside a word) never qualify. No word may name a
+# command, file, directory, helper, provider, or options setting, and no name may start with SSH_, because tools read
+# such variables as programs or paths to run or load (RESTIC_PASSWORD_COMMAND, SOPS_AGE_KEY_CMD, SSH_AUTH_SOCK).
 _PLACEHOLDER_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _PLACEHOLDER_NAME_WORDS = frozenset({"TOKEN", "KEY", "SECRET", "PASSWORD", "PAT", "AUTH", "CREDENTIAL"})
+_PLACEHOLDER_REFUSED_WORDS = frozenset(
+    {"COMMAND", "CMD", "FILE", "DIR", "PROVIDER", "HELPER", "OPTS", "OPTIONS", "EXTENSIONS"},
+)
+_PLACEHOLDER_REFUSED_PREFIX = "SSH_"
 _PLACEHOLDER_VALUE = re.compile(r"[A-Za-z0-9._:-]{1,256}")
 
 type _ScopeKey = tuple[object, ...]
@@ -245,6 +251,12 @@ def _placeholder_error(variable: str, value: str) -> str | None:
             f"placeholder_env name '{variable}' must match ^[A-Z][A-Z0-9_]*$ and have one of these words "
             f"between underscores: {allowed}"
         )
+    if variable.startswith(_PLACEHOLDER_REFUSED_PREFIX) or not _PLACEHOLDER_REFUSED_WORDS.isdisjoint(words):
+        refused = ", ".join(sorted(_PLACEHOLDER_REFUSED_WORDS))
+        return (
+            f"placeholder_env name '{variable}' may not start with {_PLACEHOLDER_REFUSED_PREFIX} or have any of "
+            f"these words between underscores, which tools read as programs or paths: {refused}"
+        )
     if not _PLACEHOLDER_VALUE.fullmatch(value):
         return f"placeholder_env value of '{variable}' must be 1 to 256 characters from A-Z, a-z, 0-9, and . _ : -"
     return None
@@ -299,6 +311,15 @@ def _scope_key(manager: CredentialsManager, target: ResolvedWorkerTarget | None)
     return (*stores, "target", target.worker_scope, target.routing_agent_name, requester_id)
 
 
+def _same_config(cached: EgressBrokerConfig, config: EgressBrokerConfig) -> bool:
+    """Return whether two configs route alike: equal, with their services in the same order.
+
+    Pydantic equality ignores dict order, but rule ties are broken by declaration order across services. Rules sit in
+    lists, which compare in order already.
+    """
+    return cached == config and list(cached.services) == list(config.services)
+
+
 @dataclass(frozen=True)
 class _Merged:
     config: EgressBrokerConfig
@@ -309,9 +330,9 @@ class _EffectiveConfigCache:
     """Merged configs per scope, shared by the broker thread, the API, and the OAuth lookup pool.
 
     Every write bumps the generation and drops all entries. A merge is stored only while the generation it was read
-    under is still current, so a read that a write overtook is never kept. An entry serves an equal config too: the
-    broker reads the API's config object and tool calls the orchestrator's, which are separate but equal copies
-    until a reload publishes the orchestrator's object to the API.
+    under is still current, so a read that a write overtook is never kept. An entry also serves an equal config with
+    its services in the same order (`_same_config`): the broker reads the API's config object and tool calls the
+    orchestrator's, which are separate but equal copies until a reload publishes the orchestrator's object to the API.
     """
 
     def __init__(self) -> None:
@@ -324,7 +345,7 @@ class _EffectiveConfigCache:
         """Return the current generation and the cached merge of `config` for `key`, if there is one."""
         with self._lock:
             entry = self._entries.get(key)
-            if entry is None or not (entry.config is config or entry.config == config):
+            if entry is None or not (entry.config is config or _same_config(entry.config, config)):
                 return self._generation, None
             return self._generation, entry.effective
 
