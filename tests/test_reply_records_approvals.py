@@ -15,8 +15,9 @@ from agno.run.requirement import RunRequirement
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval_manager import initialize_approval_store
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -245,6 +246,73 @@ async def test_a_pending_approval_keeps_its_conversation_busy_until_it_ends(tmp_
         # The approval's end lets the conversation answer what waited.
         assert not runner.is_held_for_approval(target)
         await asyncio.wait_for(idle, timeout=5)
+
+
+async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_ends(tmp_path: Path) -> None:
+    """A follow-up to a conversation an approval holds gets ⏳, starts no turn of its own, and is answered after the decision.
+
+    A turn started beside the paused one would not see the paused request answered and could ask for the same tool again.
+    """
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        # The paused reply answers in room mode, so a later top-level message is part of its conversation.
+        bot.config.agents["general"].thread_mode = "room"
+        await _respond(bot)
+        room = nio.MatrixRoom(_target().room_id, bot.matrix_id.full_id)
+        room.add_member("@user:localhost", "User", None)
+        follow_up = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "thanks", "msgtype": "m.text"},
+                "event_id": "$followup",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        await bot.journal_principal().admit(
+            InboundEvent(
+                event_id="$followup",
+                room_id=room.room_id,
+                thread_id=None,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=3,
+                source={},
+            ),
+        )
+        model = AsyncMock(return_value="Follow-up answer.")
+        with patch_response_runner_module(
+            ai_response=model,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await bot._turn_controller.handle_text_event(room, follow_up)
+            await wait_for_background_tasks(timeout=5.0, owner=bot._turn_controller.deps.runtime)
+
+            reactions = [
+                call.kwargs["content"]["m.relates_to"]
+                for call in bot.client.room_send.await_args_list
+                if call.kwargs["message_type"] == "m.reaction"
+            ]
+            assert reactions == [{"rel_type": "m.annotation", "event_id": "$followup", "key": "⏳"}]
+            # The follow-up waits behind the approval: no second turn runs beside the paused one.
+            model.assert_not_awaited()
+            assert bot._response_runner.is_held_for_approval(_target())
+
+            with _journal_wakes(bot) as wakes:
+                assert await asyncio.wait_for(await _stop(bot, "$sent1", 5), timeout=5)
+            await _run_approval_wakes(bot, wakes)
+
+            async def answered() -> None:
+                while "Follow-up answer." not in _sent_bodies(bot):  # noqa: ASYNC110
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(answered(), timeout=5)
+
+        model.assert_awaited_once()
+        assert await bot.journal_principal().approval_continuation_for_source("$followup") is None
+        assert not await bot._reply_runtime.store.is_pending("$followup")
 
 
 async def test_a_hold_whose_approval_is_gone_does_not_keep_its_conversation_waiting(tmp_path: Path) -> None:
