@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
@@ -196,12 +196,10 @@ class BudgetMonitor:
         user_ids = set(spend) | {config.authorization.resolve_alias(user_id) for user_id in config.budgets.users}
         users = []
         for user_id in user_ids:
-            # Replies for agents and bridge bots are never swapped, so they have no cap to be over.
-            limit = (
-                _budget_limit_usd(config, user_id)
-                if is_human_requester_id(user_id, config, self.runtime_paths)
-                else None
-            )
+            # Replies for agents and bridge bots are never swapped, so they have no budget to show.
+            if not is_human_requester_id(user_id, config, self.runtime_paths):
+                continue
+            limit = _budget_limit_usd(config, user_id)
             user_spend = spend.get(user_id, 0.0)
             users.append(
                 _BudgetUserStatus(
@@ -254,10 +252,20 @@ class BudgetMonitor:
         if config is None:
             return
         try:
-            self._snapshot = await asyncio.to_thread(self._collect, config, self.clock())
-        except Exception as error:
+            snapshot = await asyncio.to_thread(self._collect, config, self.clock())
+        except Exception:
             # Usage storage is external state; keep enforcing the last good scan.
-            logger.warning("budget_scan_failed", error=str(error))
+            logger.warning("budget_scan_failed", exc_info=True)
+            return
+        previous = self._current_snapshot()
+        if snapshot.unavailable_sources and previous is not None and previous.period_start == snapshot.period_start:
+            # A store that could not be read hides its spend, which must not lift anyone's cap.
+            spend = {
+                user_id: max(previous.spend_usd.get(user_id, 0.0), snapshot.spend_usd.get(user_id, 0.0))
+                for user_id in previous.spend_usd.keys() | snapshot.spend_usd.keys()
+            }
+            snapshot = replace(snapshot, spend_usd=spend)
+        self._snapshot = snapshot
 
     def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
         if self._prices is None or self._prices[0] is not config:

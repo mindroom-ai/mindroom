@@ -50,7 +50,7 @@ def _paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-def _snapshot(spend: Mapping[str, float], *, start: date = date(2026, 10, 1)) -> SpendSnapshot:
+def _snapshot(spend: Mapping[str, float], *, start: date = date(2026, 10, 1), unavailable: int = 0) -> SpendSnapshot:
     end = date(start.year + (start.month == 12), start.month % 12 + 1, 1)
     return SpendSnapshot(
         period_start=start,
@@ -59,7 +59,7 @@ def _snapshot(spend: Mapping[str, float], *, start: date = date(2026, 10, 1)) ->
         spend_usd=dict(spend),
         unpriced_models=(_UnpricedModelUsage(provider="Ollama", model="qwen3.8:27b", total_tokens=5),),
         scanned_sources=2,
-        unavailable_sources=0,
+        unavailable_sources=unavailable,
     )
 
 
@@ -80,6 +80,7 @@ class _Scans:
         self.release = threading.Event()
         self.release.set()
         self.error: Exception | None = None
+        self.unavailable = 0
         monkeypatch.setattr(monitor_module, "price_table", lambda _config, _paths: {})
         monkeypatch.setattr(monitor_module, "collect_monthly_spend", self._collect)
 
@@ -89,7 +90,7 @@ class _Scans:
         if self.error is not None:
             raise self.error
         start = now.date().replace(day=1)
-        return _snapshot(self.spend, start=start)
+        return _snapshot(self.spend, start=start, unavailable=self.unavailable)
 
 
 def _monitor(tmp_path: Path, config: Config, clock: _Clock | None = None) -> tuple[BudgetMonitor, list[Config]]:
@@ -396,18 +397,34 @@ async def test_idle_tick_rescans_usage_no_reply_reported(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_status_never_marks_bots_over_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_status_lists_only_people(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replies for bridge bots are never swapped, so the budget list leaves them out."""
     config = _config().model_copy(update={"bot_accounts": ["@bridgebot:example.test"]})
-    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {"@bridgebot:example.test": 50.0}, config)
-
-    (bot,) = monitor.status().users
-
-    assert bot == _BudgetUserStatus(
-        user_id="@bridgebot:example.test",
-        spend_usd=50.0,
-        limit_usd=None,
-        over_budget=False,
+    monitor, _scans, _current = await _started(
+        tmp_path,
+        monkeypatch,
+        {"@bridgebot:example.test": 50.0, BOB: 3.0},
+        config,
     )
+
+    assert [user.user_id for user in monitor.status().users] == [BOB]
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_scan_missing_a_store_never_lowers_spend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locked or unreadable usage store must not lift a cap by hiding spend."""
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
+    scans.spend, scans.unavailable = {ALICE: 3.0, BOB: 1.0}, 1
+
+    monitor.response_finished()
+    await _until(lambda: scans.calls == 2)
+    await _until(lambda: monitor._spend_usd(BOB) == 1.0)
+
+    assert monitor._spend_usd(ALICE) == 12.0
+    scans.unavailable = 0
+    monitor.response_finished()
+    await _until(lambda: monitor._spend_usd(ALICE) == 3.0)
     await monitor.stop()
 
 
