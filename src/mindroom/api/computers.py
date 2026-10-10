@@ -227,6 +227,9 @@ async def create_session(payload: _CreateSession, request: Request) -> dict[str,
         session.generation = status["generation"]
         await _authorize(request, target)
         store.get(session.session_id)
+        if await request.is_disconnected():
+            # Starting a cold worker can outlast the viewer's request; its slot must not outlive it.
+            raise ComputerError(409, "Computer viewer left before the session was ready.")  # noqa: TRY301 - revoke below
     except BaseException:
         store.close(session.session_id)
         raise

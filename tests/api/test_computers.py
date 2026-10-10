@@ -1046,6 +1046,24 @@ def test_requester_quota_rejects_before_allocating_worker(gateway: Gateway) -> N
     assert create(client).status_code == 200
 
 
+def test_abandoned_session_creation_does_not_hold_a_viewer_slot(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A viewer that gives up while its worker starts does not count against the requester quota."""
+    client, _peer, _app = gateway
+    disconnected = True
+
+    async def is_disconnected(_request: Request) -> bool:
+        return disconnected
+
+    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+    for _ in range(8):
+        assert create(client).status_code == 409
+    disconnected = False
+    assert create(client).status_code == 200
+
+
 @pytest.mark.parametrize("combined", [False, True])
 @pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_binary", "missing_ticket"])
 def test_stream_ticket_scope_representations(gateway: Gateway, offer: str, *, combined: bool) -> None:
