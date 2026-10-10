@@ -16,6 +16,8 @@ from mindroom.interactive_models import InteractiveSelection
 
 from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
 from .approval_continuations import (
+    INTERRUPTED_FAILURE_REASON,
+    ApprovalAdvance,
     ApprovalCall,
     ApprovalContinuation,
     ApprovalDecision,
@@ -55,6 +57,7 @@ from .models import (
     JournalEvent,
     MatrixDelivery,
     PendingPage,
+    PermanentDeliveryFailure,
     RefreshRequest,
     RoomMembershipPosition,
     SemanticConsumer,
@@ -89,11 +92,13 @@ from .views import (
 )
 
 __all__ = [
+    "INTERRUPTED_FAILURE_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TURN_BACKED_KINDS",
     "AdmissionFacts",
     "AdmissionResult",
     "AdmissionView",
+    "ApprovalAdvance",
     "ApprovalCall",
     "ApprovalCardReservation",
     "ApprovalContinuation",
@@ -134,6 +139,7 @@ __all__ = [
     "MatrixDeliveryView",
     "PendingPage",
     "PendingTurnView",
+    "PermanentDeliveryFailure",
     "PrincipalStore",
     "ProjectedEvent",
     "RecordedApprovalDecision",

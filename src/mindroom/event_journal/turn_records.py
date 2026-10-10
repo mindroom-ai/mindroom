@@ -33,16 +33,17 @@ from typing import TYPE_CHECKING
 
 from mindroom.handled_turns import TurnRecordCodec, resolve_turn_record
 from mindroom.turn_record import (
+    TurnRecord,
     canonicalize_turn_record,
     completed_response_record,
     merge_committed_response,
     same_turn_identity,
 )
 
+from . import journal
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from mindroom.turn_record import TurnRecord
 
     from .backend import Transaction
     from .models import TerminalTurnWrite
@@ -103,7 +104,7 @@ def write_record(
     anchor_event_id: str,
     record_json: str,
 ) -> str | None:
-    """Keep already-committed delivery proof when a cached ledger write arrives late."""
+    """Keep an answered turn's committed facts, such as a regeneration's edit, when a cached write arrives late."""
     candidate = TurnRecordCodec._from_ledger_record(index_event_ids[0], json.loads(record_json))
     assert candidate is not None, "Corrupt turn record"
     assert candidate.anchor_event_id == anchor_event_id, "Mismatched turn anchor"
@@ -112,51 +113,10 @@ def write_record(
     if candidate is None:
         return None
     current = next((records[event_id] for event_id in candidate.source_event_ids if event_id in records), None)
-    if (
-        current is not None
-        and current.completed
-        and current.response_event_id
-        and same_turn_identity(current, candidate)
-        and not (
-            candidate.response_event_id is None
-            and candidate.user_stop_receipt_order is not None
-            and candidate.user_stop_settled_receipt_order == candidate.user_stop_receipt_order
-            and set(candidate.source_event_ids).issubset(candidate.redacted_source_event_ids)
-        )
-    ):
+    if current is not None and current.completed and same_turn_identity(current, candidate):
         candidate = merge_committed_response(candidate, current)
         if candidate is None:
             return None
-    if candidate.response_event_id is not None and set(candidate.source_event_ids).issubset(
-        candidate.redacted_source_event_ids,
-    ):
-        cleaned = transaction.fetchone(
-            """SELECT 1 FROM matrix_delivery_outbox AS initial
-            WHERE initial.delivery_id = ? AND initial.stage = 'initial'
-              AND initial.acknowledged_event_id = ? AND (initial.retired = 1 OR ?)
-              AND NOT EXISTS (
-                SELECT 1 FROM matrix_delivery_outbox AS final
-                WHERE final.principal_id = initial.principal_id AND final.delivery_id = initial.delivery_id
-                  AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
-                    OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
-              )""",
-            (
-                candidate.anchor_event_id,
-                candidate.response_event_id,
-                candidate.completed
-                and candidate.user_stop_receipt_order is None
-                and (current is None or not current.completed),
-            ),
-        )
-        if cleaned is not None:
-            # A completed candidate can arrive after Matrix redaction but before
-            # detachment/retirement. Only FINAL proves this deleted INITIAL answered.
-            candidate = replace(
-                candidate,
-                response_event_id=None,
-                completed=candidate.user_stop_receipt_order is not None,
-                user_stop_settled_receipt_order=candidate.user_stop_receipt_order,
-            )
     assert candidate.anchor_event_id is not None
     record_json = json.dumps(TurnRecordCodec._to_ledger_record(candidate))
     upsert(
@@ -187,22 +147,12 @@ def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> Te
     )
     if current is not None:
         candidate = canonicalize_turn_record(candidate, redacted_source_event_ids=current.redacted_source_event_ids)
-    if (
-        current is not None
-        and candidate.latest_edit_receipt_order is not None
-        and (
-            current.user_stop_receipt_order is not None
-            and current.user_stop_receipt_order >= candidate.latest_edit_receipt_order
-        )
-    ):
-        committed = current
-    else:
-        assert candidate.response_event_id is not None
-        committed = merge_committed_response(
-            current,
-            completed_response_record(candidate, candidate.response_event_id),
-            tombstoned_event_ids=tombstones,
-        )
+    assert candidate.response_event_id is not None
+    committed = merge_committed_response(
+        current,
+        completed_response_record(candidate, candidate.response_event_id),
+        tombstoned_event_ids=tombstones,
+    )
     if committed is None or committed.anchor_event_id is None:
         return None
     write = replace(
@@ -219,6 +169,50 @@ def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> Te
         record_json=write.record_json,
     )
     return write
+
+
+def settle_turn(
+    transaction: Transaction,
+    principal_id: str,
+    agent_name: str,
+    *,
+    pending: tuple[str, ...],
+    logical: tuple[str, ...],
+) -> TurnRecord | None:
+    """Settle the sources an AI reply answers and record their turn answered, in one transaction.
+
+    A reply rule's ``SettleSources`` is its only caller.
+    """
+    journal.settle_many(transaction, principal_id, pending)
+    return _complete_turn(transaction, agent_name, logical_event_ids=logical)
+
+
+def _complete_turn(
+    transaction: Transaction,
+    agent_name: str,
+    *,
+    logical_event_ids: tuple[str, ...],
+) -> TurnRecord | None:
+    """Record that this agent answered the turn these sources name.
+
+    Returns the record written, or ``None`` when nothing changed: the turn was
+    already answered, or it has no record, which only the crash window before
+    ingress persisted it leaves.
+    """
+    records = _claim_turn_records(transaction, agent_name, TurnRecord.create(list(logical_event_ids)))
+    current = next((records[event_id] for event_id in logical_event_ids if event_id in records), None)
+    if current is None or current.completed:
+        return None
+    completed = canonicalize_turn_record(current, completed=True)
+    assert completed.anchor_event_id is not None
+    upsert(
+        transaction,
+        agent_name,
+        index_event_ids=completed.indexed_event_ids,
+        anchor_event_id=completed.anchor_event_id,
+        record_json=json.dumps(TurnRecordCodec._to_ledger_record(completed)),
+    )
+    return completed
 
 
 def upsert(
@@ -329,4 +323,12 @@ def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequen
     )
 
 
-__all__ = ["commit_terminal", "forget", "load_all", "load_record", "upsert", "write_record"]
+__all__ = [
+    "commit_terminal",
+    "forget",
+    "load_all",
+    "load_record",
+    "settle_turn",
+    "upsert",
+    "write_record",
+]

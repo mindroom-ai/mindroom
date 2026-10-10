@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import constants
 from mindroom.event_journal.store import TurnRecordStore
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -224,9 +223,6 @@ async def _seed_records(
             if isinstance(raw_record.get("response_owner"), str)
             else None,
             requester_id=raw_record.get("requester_id") if isinstance(raw_record.get("requester_id"), str) else None,
-            correlation_id=raw_record.get("correlation_id")
-            if isinstance(raw_record.get("correlation_id"), str)
-            else None,
             history_scope=HistoryScope.from_metadata(raw_record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(raw_record.get("conversation_target")),
             timestamp=float(raw_record.get("timestamp", 0.0)),
@@ -252,7 +248,6 @@ async def _record_handled_turn(
     source_event_prompts: dict[str, str] | None = None,
     response_owner: str | None = None,
     requester_id: str | None = None,
-    correlation_id: str | None = None,
     history_scope: HistoryScope | None = None,
     conversation_target: MessageTarget | None = None,
 ) -> None:
@@ -264,7 +259,6 @@ async def _record_handled_turn(
             source_event_prompts=source_event_prompts,
             response_owner=response_owner,
             requester_id=requester_id,
-            correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         ),
@@ -427,18 +421,16 @@ def test_turn_record_preserves_response_context() -> None:
     assert handled_turn.conversation_target == conversation_target
 
 
-def test_turn_record_preserves_requester_and_correlation() -> None:
-    """The handled-turn carrier should keep requester and correlation ids intact."""
+def test_turn_record_preserves_requester() -> None:
+    """The handled-turn carrier should keep the requester intact."""
     handled_turn = TurnRecord.create(
         ["$event:example.com"],
         requester_id="@user:example.com",
-        correlation_id="corr-123",
     )
 
     updated = replace(handled_turn, response_owner="agent")
 
     assert updated.requester_id == "@user:example.com"
-    assert updated.correlation_id == "corr-123"
 
 
 @pytest.mark.asyncio
@@ -793,15 +785,6 @@ async def test_source_event_revisions_persist_across_restart_and_run_recovery(
     assert reloaded is not None
     assert reloaded.source_event_revisions == revisions
 
-    run_metadata = TurnRecordCodec.to_run_metadata(record)
-    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = "$second"
-    run_metadata[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = "$response"
-    recovered = TurnRecordCodec.from_run_metadata(run_metadata)
-
-    assert recovered is not None
-    assert recovered.source_event_revisions == revisions
-    assert recovered.requester_id == "@user:example.com"
-
 
 @pytest.mark.asyncio
 async def test_v2026_9_42_turn_record_restores_revision_replay_through_store_reopen(
@@ -846,29 +829,6 @@ async def test_v2026_9_42_turn_record_restores_revision_replay_through_store_reo
     assert reopened_record is not None
     assert reopened_record.revision_replay == first_record.revision_replay
     assert reopened_record.suppressed_source_event_revisions == first_record.suppressed_source_event_revisions
-
-
-@pytest.mark.asyncio
-async def test_user_stop_state_persists_across_restart(journal_store: EventJournalStore) -> None:
-    """Durable STOP order and visible completion survive outside run metadata."""
-    tracker = await _open_ledger(journal_store, "test_user_stop_cutoff")
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$source"],
-            response_event_id="$response",
-            latest_edit_receipt_order=6,
-            user_stop_receipt_order=7,
-            user_stop_settled_receipt_order=7,
-        ),
-    )
-
-    reloaded = await _reload_ledger(journal_store, "test_user_stop_cutoff")
-    recovered = reloaded.get_turn_record("$source")
-
-    assert recovered is not None
-    assert recovered.latest_edit_receipt_order == 6
-    assert recovered.user_stop_receipt_order == 7
-    assert recovered.user_stop_settled_receipt_order == 7
 
 
 @pytest.mark.asyncio
@@ -1654,6 +1614,32 @@ async def test_stored_cleanup_obligations_are_ignored_on_read(journal_store: Eve
 
 
 @pytest.mark.asyncio
+async def test_stored_stop_and_edit_order_keys_are_ignored_on_read(journal_store: EventJournalStore) -> None:
+    """Stop, edit order, and correlation keys an earlier release stored load as nothing and go on the next write."""
+    record = TurnRecord.create(["$source"], response_event_id="$answer", completed=True)
+    raw = TurnRecordCodec._to_ledger_record(record)
+    legacy_keys = {
+        "user_stop_receipt_order": 3,
+        "user_stop_settled_receipt_order": 3,
+        "latest_edit_receipt_order": 2,
+        "correlation_id": "$source",
+    }
+    raw.update(legacy_keys)
+    await journal_store.turn_records("legacy_stop_keys").upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id="$source",
+        record_json=json.dumps(raw),
+    )
+
+    ledger = await _reload_ledger(journal_store, "legacy_stop_keys")
+    loaded = ledger.get_turn_record("$source")
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$answer"
+    assert legacy_keys.keys().isdisjoint(TurnRecordCodec._to_ledger_record(loaded))
+
+
+@pytest.mark.asyncio
 async def test_discovery_alias_redaction_persists(journal_store: EventJournalStore) -> None:
     """Selection aliases must retain their tombstone across restart."""
     tracker = await _open_ledger(journal_store, "test_discovery_redaction")
@@ -1711,17 +1697,16 @@ async def test_persistence_round_trip_preserves_response_context(journal_store: 
 
 
 @pytest.mark.asyncio
-async def test_persistence_round_trip_preserves_requester_and_correlation(
+async def test_persistence_round_trip_preserves_requester(
     journal_store: EventJournalStore,
 ) -> None:
-    """Reloaded ledgers should preserve requester and correlation ids."""
+    """Reloaded ledgers should preserve the requester."""
     tracker1 = await _open_ledger(journal_store, "test_persist_request_context")
     await _record_handled_turn(
         tracker1,
         ["$original", "$reply"],
         response_event_id="$response",
         requester_id="@user:example.com",
-        correlation_id="corr-123",
     )
 
     tracker2 = await _reload_ledger(journal_store, "test_persist_request_context")
@@ -1729,12 +1714,11 @@ async def test_persistence_round_trip_preserves_requester_and_correlation(
     turn_record = tracker2.get_turn_record("$reply")
     assert turn_record is not None
     assert turn_record.requester_id == "@user:example.com"
-    assert turn_record.correlation_id == "corr-123"
 
 
 @pytest.mark.asyncio
-async def test_record_without_requester_or_correlation_loads_cleanly(journal_store: EventJournalStore) -> None:
-    """Requester and correlation IDs remain optional record context."""
+async def test_record_without_requester_loads_cleanly(journal_store: EventJournalStore) -> None:
+    """The requester remains optional record context."""
     await _seed_records(
         journal_store,
         "missing_request_context",
@@ -1752,7 +1736,6 @@ async def test_record_without_requester_or_correlation_loads_cleanly(journal_sto
     assert turn_record is not None
     assert turn_record.response_event_id == "$response"
     assert turn_record.requester_id is None
-    assert turn_record.correlation_id is None
 
 
 def test_current_codec_rejects_incomplete_ledger_records() -> None:
@@ -1953,35 +1936,6 @@ async def test_cleanup_by_age_retains_terminal_turn_for_unsettled_source(
     await tracker.cleanup()
 
     assert tracker.get_turn_record("$terminal") is None
-
-
-@pytest.mark.asyncio
-async def test_cleanup_by_age_retains_only_unsettled_user_stop(journal_store: EventJournalStore) -> None:
-    """A STOP-owned turn remains until its visible terminal edit is settled."""
-    tracker = await _open_ledger(journal_store, "test_unsettled_stop_age_cleanup")
-    old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$unsettled-stop"],
-            response_event_id="$unsettled-response",
-            user_stop_receipt_order=2,
-            timestamp=old_timestamp,
-        ),
-    )
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$settled-stop"],
-            response_event_id="$settled-response",
-            user_stop_receipt_order=3,
-            user_stop_settled_receipt_order=3,
-            timestamp=old_timestamp,
-        ),
-    )
-
-    await tracker.cleanup()
-
-    assert tracker.get_turn_record("$unsettled-stop") is not None
-    assert tracker.get_turn_record("$settled-stop") is None
 
 
 @pytest.mark.asyncio

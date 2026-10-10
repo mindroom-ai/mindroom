@@ -17,7 +17,10 @@ from mindroom.matrix.client_delivery import (
     MatrixSendOutcome,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.reply_lifecycle import ReplyState, SpanOutcome
+from mindroom.reply_presentation import decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
+from mindroom.response_sources import ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config_with_team,
@@ -27,8 +30,15 @@ from tests.ai_user_id_helpers import (
     _set_gateway_method,
     _team_orchestrator,
 )
-from tests.conftest import bind_runtime_paths, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.bot_helpers import unique_room_send_responses
+from tests.conftest import (
+    _make_room_get_event_response,
+    bind_runtime_paths,
+    patch_response_runner_module,
+    unwrap_extracted_collaborator,
+)
 from tests.identity_helpers import fixture_entity_matrix_id
+from tests.reply_span_helpers import seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
@@ -156,18 +166,11 @@ async def test_one_turn_never_shows_two_placeholders(
 
 
 def test_delivery_progress_transitions() -> None:
-    """The delivery-progress state machine tracks events and terminal reasons."""
-    progress = _DeliveryProgress(tracked_event_id=None)
-
-    progress.track_event(None)
-    assert progress.tracked_event_id is None
-    progress.track_event("$first")
-    progress.track_event("$second")
-    assert progress.tracked_event_id == "$second"
+    """The delivery-progress state machine tracks delivery start and terminal reasons."""
+    progress = _DeliveryProgress()
 
     progress.note_delivery_started(None)
     assert progress.stage_started is True
-    assert progress.tracked_event_id == "$second"
 
     progress.note_task_cancelled("cancelled_by_user")
     assert progress.cancelled is True
@@ -178,11 +181,12 @@ def test_delivery_progress_transitions() -> None:
 async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path) -> None:
     """A failure after delivery started settles a terminal error instead of asserting.
 
-    The tracked event must not be touched: with an adopted thinking-message
-    stream it can already carry the full streamed reply, and the
-    placeholder-only cleanup in finalize would redact it.
+    The reply ends failed with its error note below what it recorded, rather
+    than the streamer's finalize, whose placeholder-only cleanup could redact
+    an adopted thinking message that already carries the full streamed reply.
     """
     bot = _bot(tmp_path)
+    unique_room_send_responses(bot.client)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     effect_outcomes: list[object] = []
     effect_response_outcomes: list[object] = []
@@ -200,7 +204,6 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
         raise RuntimeError(msg)
 
     with (
-        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock()) as mock_finalize,
         patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
         patch_response_runner_module(
@@ -212,7 +215,12 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
         result = await coordinator.generate_response(_plain_request(_target()))
 
     # Previously this path tripped `assert final_delivery_outcome is not None`.
-    assert result is None
+    reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+    assert reply is not None
+    assert reply.state is ReplyState.FAILED
+    assert result == reply.event_id == "$sent1"
+    final = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]["body"]
+    assert final == "**[Response interrupted by an error: delivery pipe burst]**"
     mock_finalize.assert_not_awaited()
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
@@ -243,9 +251,21 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
 
     request = _plain_request(_target())
     regen_request: ResponseRequest = request.__class__(
-        **{**request.__dict__, "existing_event_id": "$prior_answer", "existing_event_is_placeholder": False},
+        **{
+            **request.__dict__,
+            "existing_event_id": "$prior_answer",
+            "edit_regeneration": True,
+        },
     )
 
+    await seed_finished_reply(
+        bot.journal_principal(),
+        "$prior_answer",
+        sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
+        room_id=regen_request.room_id,
+        thread_id=regen_request.thread_id,
+        entity_name=bot.agent_name,
+    )
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
         patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
@@ -258,12 +278,20 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
     ):
         await coordinator.generate_response(regen_request)
 
-    # The prior answer event survives as the visible outcome target; a
-    # placeholder-only cleanup would have redacted it instead.
+    # The regeneration ended before its first write, so the old answer stays
+    # shown and the edit is done: nothing is redacted or edited.
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
-    assert effect_outcomes[0].event_id == "$prior_answer"
-    assert effect_outcomes[0].is_visible_response is True
+    reply = await bot._reply_runtime.store.replies.for_event("$prior_answer")
+    assert reply is not None
+    assert reply.state is ReplyState.COMPLETED
+    assert reply.current_span_id is None
+    bot.client.room_redact.assert_not_awaited()
+    assert not [
+        call
+        for call in bot.client.room_send.await_args_list
+        if call.kwargs["content"].get("m.relates_to", {}).get("event_id") == "$prior_answer"
+    ]
 
 
 @pytest.mark.asyncio
@@ -279,8 +307,6 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path
@@ -342,20 +368,12 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
 
 
 @pytest.mark.asyncio
-async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tmp_path: Path) -> None:
-    """A team failure before delivery cleans the thinking placeholder and re-raises.
-
-    The attempt runner already sent the thinking message but the local
-    run_message_id was never assigned (the attempt raised), so the transport
-    outcome must classify the tracked thinking event as placeholder-only —
-    otherwise the gateway leaves "Thinking..." dangling with no cleanup.
-    """
+async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_path: Path) -> None:
+    """A team failure before delivery shows its error on the placeholder, settles the turn, and re-raises."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.agent_name = "ultimate"
     bot.storage_path = tmp_path
@@ -396,7 +414,13 @@ async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tm
             "finalize_streamed_response",
             AsyncMock(side_effect=fake_finalize),
         )
-        _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
+        # The error note is a real edit of the placeholder.
+        object.__delattr__(coordinator.deps.delivery_gateway, "edit_text")
+        bot.client.user_id = "@mindroom_ultimate:localhost"
+        bot.client.device_id = "DEVICE"
+        bot.client.room_get_event = AsyncMock(
+            side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id, sender=bot.client.user_id),
+        )
         with (
             patch.object(
                 ResponseRunner,
@@ -411,15 +435,16 @@ async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tm
                 team_mode="coordinate",
             )
 
-    # Previously the exception propagated raw with no terminal note or finalize.
-    assert len(finalize_requests) == 1
-    transport_outcome = finalize_requests[0].stream_transport_outcome
-    assert transport_outcome.terminal_status == "error"
-    assert "team prep exploded" in str(transport_outcome.failure_reason)
-    # The dangling thinking placeholder must be classified for cleanup; a
-    # "none"-shaped outcome would leave "Thinking..." dangling forever.
-    assert transport_outcome.last_physical_stream_event_id == "$thinking"
-    assert transport_outcome.visible_body_state == "placeholder_only"
+    # The failure came before any delivery: the placeholder shows the error,
+    # the turn is settled without a retry, and nothing is finalized.
+    assert finalize_requests == []
+    reply = await coordinator.deps.replies.store.replies.for_sources(("$user_msg",))
+    assert reply is not None
+    assert reply.state is ReplyState.FAILED
+    assert reply.event_id == "$thinking"
+    assert "team prep exploded" in render_body(decode_presentation(reply.presentation))[0]
+    spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
+    assert spans[-1].outcome is SpanOutcome.FAILED
 
 
 async def _run_response_function_directly(**kwargs: object) -> str:

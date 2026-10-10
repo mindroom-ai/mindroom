@@ -4761,7 +4761,6 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
     assert bot._turn_store.is_handled("$m2")
     turn_record = bot._turn_store.get_turn_record("$m1")
     assert turn_record is not None
-    assert turn_record.response_event_id == "$response"
     assert turn_record.source_event_ids == ("$m1", "$m2")
     assert turn_record.anchor_event_id == "$m2"
 

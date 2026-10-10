@@ -702,7 +702,7 @@ class TestTheHandoffIsOneTransaction:
 
         with (
             patch(
-                "mindroom.event_journal.store.journal.settle",
+                "mindroom.event_journal.journal._settle",
                 side_effect=CrashError("the settlement could not be written"),
             ),
             pytest.raises(CrashError),

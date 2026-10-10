@@ -1,4 +1,4 @@
-"""Consumed edit proof follows durable final delivery across process boundaries."""
+"""A regeneration's edited text and answer survive a process boundary after its answer was delivered."""
 
 from __future__ import annotations
 
@@ -13,45 +13,39 @@ import pytest
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import FinalDeliveryRequest
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
-from mindroom.turn_record import canonicalize_turn_record
-from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
-from tests.journal_helpers import admit_room_event
-from tests.journal_membership_helpers import admit_room_membership
+from tests.conftest import (
+    journal_edit_regenerator_deps,
+    patch_response_runner_module,
+    unwrap_extracted_collaborator,
+)
+from tests.reply_span_helpers import seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing
-from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTests
-from tests.test_response_delivery_gateway import _gateway, _identity
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
-    from typing import Any
 
     from mindroom.event_journal import EventJournalStore
-    from mindroom.event_journal.store import TurnRecordStore
 
 
 @pytest.mark.asyncio
 @pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("completed", [False, True])
 async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: PLR0915
     tmp_path: Path,
     journal_store: EventJournalStore,
     streaming: bool,
-    completed: bool,
 ) -> None:
-    """Successful final edit consumption cannot depend on post-response work returning."""
+    """An edit's delivered answer and edited text stay recorded when post-response work never returns."""
     bot = _bot(tmp_path)
     room_id, source_id, edit_id, answer_id = "!room:localhost", "$source", "$edit", "$answer"
     bot.client.rooms[room_id] = nio.MatrixRoom(room_id, bot.matrix_id.full_id)
@@ -112,17 +106,32 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             gateway.deps,
             outbox=principal,
             terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_committed_response,
+            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    runner.deps = replace(runner.deps, delivery_gateway=gateway)
+    assert runner.deps.replies is not None
+    # Replies are recorded where their rows are delivered.
+    runner.deps = replace(
+        runner.deps,
+        delivery_gateway=gateway,
+        approval_store=principal,
+        replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
+    )
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=1),
-        generate_response=runner.generate_response,
+        **journal_edit_regenerator_deps(bot, principal),
+    )
+    await seed_finished_reply(
+        principal,
+        answer_id,
+        sources=ResponseSources(pending_event_ids=(source_id,), logical_source_event_ids=(source_id,)),
+        room_id=room_id,
+        thread_id=None,
+        entity_name="general",
     )
     effects_started = asyncio.Event()
     never_finish = asyncio.Event()
@@ -133,10 +142,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         generated.append("answer")
         recorder = _kwargs["turn_recorder"]
         assert isinstance(recorder, TurnRecorder)
-        if completed:
-            recorder.mark_completed()
-        else:
-            recorder.mark_interrupted()
+        recorder.mark_completed()
         return "edited answer"
 
     async def stream_model(*args: object, **kwargs: object) -> AsyncIterator[str]:
@@ -159,14 +165,13 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             apply_post_response_effects=post_response,
         ),
     ):
-        task = asyncio.create_task(
-            regenerator.handle_message_edit(
-                nio.MatrixRoom(room_id, bot.matrix_id.full_id),
-                event,
-                EventInfo.from_event(event.source),
-                "@user:localhost",
-            ),
+        assert await regenerator.handle_message_edit(
+            nio.MatrixRoom(room_id, bot.matrix_id.full_id),
+            event,
+            EventInfo.from_event(event.source),
+            "@user:localhost",
         )
+        (task,) = runner._inbox_response_tasks
         try:
             async with asyncio.timeout(10):
                 await effects_started.wait()
@@ -187,372 +192,9 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
     reopened = await _store(journal_store, agent_name="general")
     persisted = reopened.get_turn_record(source_id)
     assert persisted is not None
-    assert persisted.source_event_revisions == ({source_id: (20, edit_id)} if completed else None)
-    assert persisted.revision_replay[edit_id].response_event_id == (answer_id if completed else None)
-    assert persisted.source_event_prompts == {source_id: "selected edit" if completed else "original"}
+    assert persisted.completed
+    assert persisted.source_event_revisions == {source_id: (20, edit_id)}
+    assert persisted.source_event_prompts == {source_id: "selected edit"}
     assert persisted.response_event_id == answer_id
     assert persisted.source_event_ids == (source_id,)
     assert generated == ["answer"]
-
-
-class _ProcessLost(BaseException):
-    """Stop at one durable boundary without running response cleanup."""
-
-
-@pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
-@pytest.mark.parametrize("anchor_event_id", ["$source", "$thread"])
-async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publication(
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-    anchor_event_id: str,
-) -> None:
-    """A cached pre-ACK mutation cannot overwrite proof before cache repair runs."""
-    store = await _store(journal_store)
-    principal = journal_store.principal("agent@alice")
-    await principal.admit(
-        InboundEvent(
-            event_id="$edit",
-            room_id="!room:localhost",
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=20,
-            source={},
-        ),
-    )
-    await store.record_responded_turn(
-        TurnRecord.create(
-            ["$source"],
-            anchor_event_id=anchor_event_id,
-            completed=True,
-            response_event_id="$answer",
-            source_event_prompts={"$source": "original"},
-            latest_edit_receipt_order=1,
-        ),
-    )
-    registered = await store.register_edit_revision("$source", (20, "$edit"))
-    selected = canonicalize_turn_record(
-        registered,
-        source_event_prompts={"$source": "selected edit"},
-        source_event_revisions={"$source": (20, "$edit")},
-    )
-    write_started = asyncio.Event()
-    release_write = asyncio.Event()
-    publication_started = asyncio.Event()
-    lose_process = asyncio.Event()
-    upsert = type(store.deps.turn_records).upsert
-
-    async def paused_upsert(owner: TurnRecordStore, **kwargs: object) -> str | None:
-        write_started.set()
-        await release_write.wait()
-        return await upsert(owner, **kwargs)
-
-    async def publish(_turn_id: str, _event_id: str, _committed: TurnRecord | None) -> None:
-        publication_started.set()
-        await lose_process.wait()
-        raise _ProcessLost
-
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=publish,
-    )
-    gateway.deps.response_hooks._apply_before_response = _DeliveryTests._hooks()._apply_before_response
-
-    async def send(
-        _client: nio.AsyncClient,
-        _room: str,
-        content: dict[str, Any],
-        **_kwargs: object,
-    ) -> DeliveredMatrixEvent:
-        return DeliveredMatrixEvent("$physical-edit", content)
-
-    with (
-        patch.object(type(store.deps.turn_records), "upsert", paused_upsert),
-        patch("mindroom.delivery_gateway.send_message_outcome", send),
-    ):
-        stale = asyncio.create_task(store.record_visible_echo("$source", "$echo"))
-        await write_started.wait()
-        final = asyncio.create_task(
-            gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True),
-                    existing_event_id="$answer",
-                    response_text="answer",
-                    identity=replace(
-                        _identity("$edit"),
-                        sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1),
-                    ),
-                    tool_trace=None,
-                    extra_content=None,
-                    prepared_edit_record=selected,
-                ),
-            ),
-        )
-        try:
-            async with asyncio.timeout(5):
-                await publication_started.wait()
-            release_write.set()
-            await stale
-            _reset_handled_turn_ledger_runtime()
-            restarted = (await _store(journal_store)).get_turn_record("$source")
-        finally:
-            release_write.set()
-            lose_process.set()
-            await stale
-            with pytest.raises(_ProcessLost):
-                await final
-    assert restarted is not None
-    assert restarted.visible_echo_event_id == "$echo"
-    assert restarted.source_event_revisions == {"$source": (20, "$edit")}
-    assert restarted.revision_replay["$edit"].response_event_id == "$answer"
-
-
-@pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
-@pytest.mark.parametrize("boundary", ["enqueue", "ack", "failed", "losing", "retired"])
-async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-    boundary: str,
-) -> None:
-    """Only the winning active acknowledgement can consume its frozen selected edit."""
-    store = await _store(journal_store)
-    principal = journal_store.principal("agent@alice")
-    await principal.admit(
-        InboundEvent(
-            event_id="$edit",
-            room_id="!room:localhost",
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=20,
-            source={},
-        ),
-    )
-    target = MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True)
-    original = TurnRecord.create(
-        ["$source"],
-        completed=True,
-        response_event_id="$answer",
-        source_event_prompts={"$source": "original"},
-        latest_edit_receipt_order=1,
-    )
-    await store.record_responded_turn(original)
-    registered = await store.register_edit_revision("$source", (20, "$edit"))
-    assert registered is not None
-    selected = canonicalize_turn_record(
-        registered,
-        source_event_prompts={"$source": "selected edit"},
-        source_event_revisions={"$source": (20, "$edit")},
-    )
-
-    async def publish(turn_id: str, event_id: str, committed: TurnRecord | None) -> None:
-        if boundary == "ack":
-            raise _ProcessLost
-        await store.publish_committed_response(turn_id, event_id, committed)
-
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=publish,
-    )
-    gateway.deps.response_hooks._apply_before_response = _DeliveryTests._hooks()._apply_before_response
-
-    async def send(
-        _client: nio.AsyncClient,
-        _room: str,
-        content: dict[str, Any],
-        **_kwargs: object,
-    ) -> DeliveredMatrixEvent:
-        if boundary == "enqueue":
-            raise _ProcessLost
-        if boundary == "failed":
-            msg = "send failed"
-            raise RuntimeError(msg)
-        if boundary == "losing":
-            await principal.acknowledge_matrix_delivery(
-                delivery_id="$edit",
-                stage=DeliveryStage.FINAL,
-                event_id="$winner",
-                delivered_projections=(),
-            )
-        if boundary == "retired":
-            await admit_room_membership(principal, "!room:localhost", "leave")
-        return DeliveredMatrixEvent("$physical-edit", content)
-
-    request = FinalDeliveryRequest(
-        target=target,
-        existing_event_id="$answer",
-        response_text="generated answer",
-        identity=replace(_identity("$edit"), sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1)),
-        tool_trace=None,
-        extra_content=None,
-        prepared_edit_record=selected,
-    )
-    with patch("mindroom.delivery_gateway.send_message_outcome", send):
-        if boundary in {"enqueue", "ack"}:
-            with pytest.raises(_ProcessLost):
-                await gateway.deliver_final(request)
-        elif boundary == "failed":
-            with pytest.raises(RuntimeError, match="send failed"):
-                await gateway.deliver_final(request)
-        else:
-            await gateway.deliver_final(request)
-    _reset_handled_turn_ledger_runtime()
-    reopened = await _store(journal_store)
-    owner = reopened.get_turn_record("$source")
-    assert owner is not None
-    delivery = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
-    assert delivery is not None
-    assert "selected edit" not in json.dumps(dict(delivery.payload))
-    assert delivery.result["prepared_edit_record"]["source_event_prompts"] == {"$source": "selected edit"}
-    if boundary == "ack":
-        assert owner.source_event_revisions == {"$source": (20, "$edit")}
-        assert owner.revision_replay["$edit"].response_event_id == "$answer"
-    else:
-        assert owner.source_event_revisions is None
-        assert owner.revision_replay["$edit"].response_event_id is None
-    if boundary == "enqueue":
-        # Newer live registration cannot replace the claimed row's generated snapshot.
-        await reopened.register_edit_revision("$source", (30, "$newer"))
-        gateway = _gateway(
-            tmp_path,
-            principal,
-            terminal_turn_for=reopened.terminal_turn_record,
-            terminal_turn_committed=reopened.publish_committed_response,
-        )
-
-        async def recovered_send(
-            _client: nio.AsyncClient,
-            _room: str,
-            content: dict[str, Any],
-            **_kwargs: object,
-        ) -> DeliveredMatrixEvent:
-            return DeliveredMatrixEvent("$recovered-physical-edit", content)
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", recovered_send):
-            assert (await gateway.recover_deliveries()).recovered == 1
-        _reset_handled_turn_ledger_runtime()
-        final = (await _store(journal_store)).get_turn_record("$source")
-        assert final.source_event_revisions == {"$source": (20, "$edit")}
-        assert final.revision_replay["$edit"].response_event_id == "$answer"
-        assert final.revision_replay["$newer"].response_event_id is None
-        assert final.revision_watermark("$source") == (30, "$newer")
-
-
-@pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
-@pytest.mark.parametrize("mutation", ["revision_redaction", "source_redaction", "newer", "stop"])
-@pytest.mark.parametrize("timing", ["before_ack", "publication"])
-async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C901
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-    mutation: str,
-    timing: str,
-) -> None:
-    """Durable acknowledgement and cache publication preserve current revision and STOP owners."""
-    store = await _store(journal_store)
-    principal = journal_store.principal("agent@alice")
-    await principal.admit(
-        InboundEvent(
-            event_id="$edit",
-            room_id="!room:localhost",
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=20,
-            source={},
-        ),
-    )
-    await admit_room_event(principal, "!room:localhost", "$source")
-    await store.record_responded_turn(
-        TurnRecord.create(
-            ["$source"],
-            completed=True,
-            response_event_id="$answer",
-            source_event_prompts={"$source": "original"},
-            latest_edit_receipt_order=1,
-        ),
-    )
-    registered = await store.register_edit_revision("$source", (20, "$edit"))
-    selected = canonicalize_turn_record(
-        registered,
-        source_event_prompts={"$source": "selected edit"},
-        source_event_revisions={"$source": (20, "$edit")},
-    )
-
-    async def mutate() -> None:
-        if mutation == "revision_redaction":
-            await store.mark_source_redacted("$edit", room_id="!room:localhost")
-        elif mutation == "source_redaction":
-            await store.mark_source_redacted("$source", room_id="!room:localhost")
-        elif mutation == "newer":
-            await store.register_edit_revision("$source", (30, "$newer"))
-        else:
-            await store.record_user_stopped_response("$answer", 2)
-
-    async def publish(turn_id: str, event_id: str, committed: TurnRecord | None) -> None:
-        if timing == "publication":
-            await mutate()
-        await store.publish_committed_response(turn_id, event_id, committed)
-
-    gateway = _gateway(
-        tmp_path,
-        principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=publish,
-    )
-    gateway.deps.response_hooks._apply_before_response = _DeliveryTests._hooks()._apply_before_response
-
-    async def send(
-        _client: nio.AsyncClient,
-        _room: str,
-        content: dict[str, Any],
-        **_kwargs: object,
-    ) -> DeliveredMatrixEvent:
-        if timing == "before_ack":
-            await mutate()
-        return DeliveredMatrixEvent("$physical-edit", content)
-
-    with patch("mindroom.delivery_gateway.send_message_outcome", send):
-        await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True),
-                existing_event_id="$answer",
-                response_text="answer",
-                identity=replace(
-                    _identity("$edit"),
-                    sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1),
-                ),
-                tool_trace=None,
-                extra_content=None,
-                prepared_edit_record=selected,
-            ),
-        )
-    _reset_handled_turn_ledger_runtime()
-    owner = (await _store(journal_store)).get_turn_record("$source")
-    assert owner is not None
-    assert owner.response_event_id == "$answer"
-    if mutation == "revision_redaction":
-        assert owner.revision_replay["$edit"].redacted
-        assert "$source" not in (owner.source_event_prompts or {})
-    elif mutation == "source_redaction":
-        assert owner.redacted_source_event_ids == ("$source",)
-        assert "$source" not in (owner.source_event_prompts or {})
-    elif mutation == "newer":
-        assert owner.revision_watermark("$source") == (30, "$newer")
-        assert owner.revision_replay["$newer"].response_event_id is None
-        assert owner.source_event_revisions == {"$source": (20, "$edit")}
-    else:
-        assert owner.user_stop_receipt_order == 2
-    if timing == "publication" or mutation in {"newer", "revision_redaction"}:
-        assert owner.revision_replay["$edit"].response_event_id == "$answer"
-    else:
-        assert owner.revision_replay["$edit"].response_event_id is None

@@ -49,6 +49,7 @@ from mindroom.minimal_agent import MinimalAgent
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
+    PausedAnswer,
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
@@ -56,7 +57,7 @@ from mindroom.response_turn import (
     apply_local_approval_decisions,
     paused_attempt_from_response,
 )
-from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
+from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
     runtime_context_from_dispatch_context,
@@ -169,6 +170,7 @@ async def _continue_persisted_agent(
     persisted: RunOutput,
     requirements: list[RunRequirement],
     *,
+    paused_answer: PausedAnswer,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
@@ -216,8 +218,8 @@ async def _continue_persisted_agent(
     )
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
-        response_text=continuation.response_text,
-        tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+        response_text=paused_answer.text,
+        tool_trace=list(paused_answer.tool_trace),
         track_hidden_tools=True,
     )
     collected = await _collect_agent_continuation(events, presentation, progress=progress)
@@ -386,6 +388,7 @@ class AgentApprovalExecution:
         self,
         continuation: ApprovalContinuation,
         *,
+        paused_answer: PausedAnswer,
         execution_identity: ToolExecutionIdentity,
         tool_dispatch: ToolDispatchContext,
         decisions: dict[str, bool],
@@ -512,6 +515,7 @@ class AgentApprovalExecution:
                                 cli_call,
                                 persisted,
                                 cast("AgentSession", session),
+                                paused_answer=paused_answer,
                                 runtime_context=runtime_context,
                                 decisions=decisions,
                                 denial_reasons=denial_reasons,
@@ -579,6 +583,7 @@ class AgentApprovalExecution:
                                     continuation,
                                     persisted,
                                     requirements,
+                                    paused_answer=paused_answer,
                                     config=config,
                                     runtime_paths=self.runtime_paths,
                                     execution_identity=execution_identity,

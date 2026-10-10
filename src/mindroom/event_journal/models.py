@@ -7,14 +7,17 @@ from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
+from mindroom.reply_lifecycle import WriteStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
+    from mindroom.reply_lifecycle import Reply
     from mindroom.turn_record import TurnRecord
 
     from .projection import ProjectedEvent
+    from .replies import PostCommitEffect
 
 
 class IngestionConsumerBindingError(RuntimeError):
@@ -132,11 +135,8 @@ class DeliveryProjectionPendingError(RuntimeError):
     """An interactive source arrived before a visible delivery was projected."""
 
 
-class DeliveryStage(StrEnum):
-    """The delivery points that must survive a crash."""
-
-    INITIAL = "initial"
-    FINAL = "final"
+# The delivery points that must survive a crash: one durable write's stage, as the reply rules name it.
+DeliveryStage = WriteStage
 
 
 class DepartureSource(StrEnum):
@@ -382,6 +382,16 @@ class ConversationPage:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyRowFacts:
+    """What a reply row's acknowledgement and late edit target need, recorded beside its payload."""
+
+    # Whether the row shows only the reply's placeholder.
+    placeholder_only: bool
+    # The body an edit carries when its target was bound after the row was prepared.
+    new_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MatrixDelivery:
     """One claimed, immutable Matrix delivery."""
 
@@ -417,6 +427,13 @@ class MatrixDelivery:
     # device this process is no longer logged in as carries an ID the
     # homeserver would accept as new.
     sending_device_id: str | None = None
+    # Set on rows that write an agent or team reply: the rows of one reply
+    # are sent in ``reply_sequence`` order, across all of its delivery ids.
+    reply_id: str | None = None
+    span_id: str | None = None
+    reply_sequence: int | None = None
+    # What the row's acknowledgement and late edit target need; never sent.
+    reply_row: ReplyRowFacts | None = None
 
     @property
     def permanently_failed(self) -> bool:
@@ -449,30 +466,41 @@ class ResponseRecoveryState:
     sources_settled_by_departure: bool
     redacted_sources: tuple[bool, ...]
     turn_records: tuple[TurnRecord | None, ...]
-    source_tombstones: tuple[bool, ...] = ()
-    approval_owned: bool = False
+    # The newest reply answering the sources, which owns an AI turn's outcome.
+    reply: Reply | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class DeliveryAcknowledgement:
-    """What one delivery's row names afterwards, and who put it there.
+    """What one delivery's row names afterwards, and what binding it committed.
 
-    The two are separate facts and cannot be recovered from each other. Two
-    processes can send the same frozen transaction ID from the same device;
-    Matrix deduplicates and hands both callers the *same* event ID, while only
-    one conditional update binds the row. Comparing the settled event to the
-    one just sent therefore tells a loser it won, which is precisely when it
-    goes on to publish a record the database does not hold.
+    Two processes can send the same frozen transaction ID from the same
+    device; Matrix deduplicates and hands both callers the *same* event ID,
+    while only one conditional update binds the row. The settled event
+    therefore cannot tell a loser it lost: only the caller that bound the row
+    gets the terminal turn record its transaction committed, and so only it
+    publishes one.
     """
 
     # The event the row names now: this call's if it bound the row, the
     # winner's if it did not, and ``None`` when there is no row left to name
     # one. Membership fences retain rows as retired identity tombstones.
     settled_event_id: str | None
-    # Whether this call's conditional update is the one that bound the row.
-    # The only thing that licenses writing anything beside the row.
-    bound: bool
+    # The terminal turn record this call's binding of a FINAL row committed.
     terminal_turn: TerminalTurnWrite | None = None
+    # Work a reply row's acknowledgement left for after the commit, such as
+    # cancelling a span a Stop that waited for this event now reaches.
+    reply_effects: tuple[PostCommitEffect, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PermanentDeliveryFailure:
+    """What recording one definitive refusal of a delivery decided."""
+
+    # The event a concurrent acknowledgement bound, which wins over the refusal.
+    acknowledged_event_id: str | None = None
+    # Work refused reply rows left for after the commit.
+    reply_effects: tuple[PostCommitEffect, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

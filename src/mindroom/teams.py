@@ -439,7 +439,6 @@ class _TeamStreamPresentation:
         show_tool_calls: bool,
         state: Mapping[str, object] | None,
         tool_trace: Sequence[ToolTraceEntry],
-        prior_response_text: str,
     ) -> _TeamStreamPresentation:
         """Restore a durable structured snapshot without interpreting its rendered Markdown."""
         if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
@@ -511,9 +510,6 @@ class _TeamStreamPresentation:
             tool_trace=list(deepcopy(tool_trace)),
         )
         restored.separate_next_scopes.update(restored_separators)
-        if restored.render_body() != prior_response_text:
-            msg = "Team continuation presentation snapshot does not match its response text"
-            raise RuntimeError(msg)
         return restored
 
     def to_state(self) -> dict[str, object]:
@@ -2667,7 +2663,6 @@ async def continue_paused_team_run(
     member_model_names: Mapping[str, str] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
     history_scope: HistoryScope | None = None,
-    prior_response_text: str = "",
     prior_tool_trace: Sequence[ToolTraceEntry] = (),
     prior_presentation_state: Mapping[str, object] | None = None,
     show_tool_calls: bool = True,
@@ -2784,7 +2779,6 @@ async def continue_paused_team_run(
             show_tool_calls=show_tool_calls,
             state=prior_presentation_state,
             tool_trace=prior_tool_trace,
-            prior_response_text=prior_response_text,
         )
         record_approval_denials(
             team,

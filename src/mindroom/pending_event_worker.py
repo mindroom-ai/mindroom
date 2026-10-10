@@ -39,6 +39,11 @@ def _assume_owner_is_live(event: JournalEvent) -> bool:
     return True
 
 
+def _no_reply_owner(reply_ids: tuple[str, ...]) -> None:
+    """A worker without a reply runtime has no reply debt to deliver."""
+    del reply_ids
+
+
 @dataclass
 class _RoomProgress:
     """The lane advances its cursor; outside notifications only request rewinds."""
@@ -75,6 +80,8 @@ class PendingEventWorker:
     handle: _EventHandler
     runtime_generation: str = "unmanaged"
     deferral_is_live: _DeferralLivenessProbe = _assume_owner_is_live
+    # Delivers what the replies a settlement ended owe Matrix.
+    replies_ended: Callable[[tuple[str, ...]], None] = _no_reply_owner
     deferral_scan_seconds: float = _DEFERRAL_SCAN_SECONDS
     _lanes: dict[str, asyncio.Task[_RoomPass]] = field(default_factory=dict, init=False, repr=False)
     _rooms: dict[str, _RoomProgress] = field(default_factory=dict, init=False, repr=False)
@@ -443,7 +450,7 @@ class PendingEventWorker:
                     self._reclaim_deferral(event)
             else:
                 self.release((event.event_id,))
-                await self.store.settle(event.event_id)
+                self.replies_ended(await self.store.settle(event.event_id))
                 self._record_room_progress(room_id, event.receipt_order)
         progress.cursor = event.receipt_order
         return True

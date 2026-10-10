@@ -53,6 +53,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.heap_probe import start_heap_type_probe
 from mindroom.hooks import (
     ConfigReloadedContext,
@@ -82,6 +83,7 @@ from mindroom.orchestrator import (
     _SignalAwareUvicornServer,
     _wait_for_runtime_completion,
     _wait_for_runtime_shutdown_cleanup,
+    _watch_event_journal_hold,
     main,
 )
 from mindroom.runtime_state import (
@@ -91,7 +93,7 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
-from mindroom.startup_errors import PermanentStartupError
+from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -407,15 +409,78 @@ async def test_entity_removal_recovers_original_final_before_bot_cleanup(tmp_pat
     orchestrator._approval_recovery.reconcile_unavailable_entities = AsyncMock(
         side_effect=lambda _names: order.append("recover"),
     )
+    journal = MagicMock()
+    journal.end_entity_replies = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("end_replies"))
 
     try:
-        await orchestrator._remove_deleted_entities({"removed"})
+        with patch.object(orchestrator, "_shared_journal_store", return_value=journal):
+            await orchestrator._remove_deleted_entities({"removed"})
     finally:
         sync.cancel()
         await asyncio.gather(sync, return_exceptions=True)
 
-    assert order == ["quiesce", "recover", "cleanup", "cancel_sync", "stop"]
+    # With no bot left to finish them, the removed entity's replies end last.
+    assert order == ["quiesce", "recover", "cleanup", "cancel_sync", "stop", "end_replies"]
+    ((ends,), _kwargs) = journal.end_entity_replies.call_args
+    assert ends("removed")
+    assert not ends("kept")
     assert "removed" not in orchestrator.agent_bots
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_refuses_a_journal_another_runtime_holds(tmp_path: Path) -> None:
+    """Binding succeeds, but a journal another runtime claimed stops this one before any bot exists."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = MagicMock()
+    journal = MagicMock()
+    journal.hold_exclusively = AsyncMock(return_value=False)
+
+    with (
+        patch.object(orchestrator, "_shared_journal_store", return_value=journal),
+        patch("mindroom.orchestrator.bind_event_journal", new=AsyncMock(return_value="journal-identity")),
+        pytest.raises(PermanentStartupError, match="already using this event journal"),
+    ):
+        await orchestrator._bind_event_journal()
+
+    journal.hold_exclusively.assert_awaited_once_with("journal-identity")
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_loses_its_journal_stops() -> None:
+    """Once the journal's claim lapses, another runtime could take it over, so this one shuts down."""
+    orchestrator = MagicMock()
+    orchestrator.event_journal_still_held = AsyncMock(side_effect=[True, False])
+    shutdown_requested = asyncio.Event()
+    hold_lost = asyncio.Event()
+
+    with patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0):
+        await asyncio.wait_for(_watch_event_journal_hold(orchestrator, shutdown_requested, hold_lost), timeout=5)
+
+    assert shutdown_requested.is_set()
+    assert hold_lost.is_set()
+    assert orchestrator.event_journal_still_held.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_startup_ends_the_replies_of_entities_no_longer_configured(tmp_path: Path) -> None:
+    """An entity removed while MindRoom was stopped has no bot, so its open replies end at startup."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    journal = MagicMock()
+    journal.end_entity_replies = AsyncMock(return_value=1)
+    config = MagicMock(agents={"general": object()}, teams={"crew": object()})
+
+    with patch.object(orchestrator, "_shared_journal_store", return_value=journal):
+        await orchestrator._end_unconfigured_entity_replies(config)
+
+    ((ends,), _kwargs) = journal.end_entity_replies.call_args
+    assert ends("removed")
+    assert not any(ends(name) for name in ("general", "crew", ROUTER_AGENT_NAME))
 
 
 @pytest.mark.asyncio
@@ -458,6 +523,35 @@ class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_fails_after_losing_its_event_journal(self, tmp_path: Path) -> None:
+        """A runtime that stopped because it lost its journal exits with a failure, so a supervisor restarts it."""
+        reset_runtime_state()
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.start = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.running = False
+        mock_orchestrator.event_journal_still_held = AsyncMock(return_value=False)
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0),
+            pytest.raises(EventJournalHoldLostError),
+        ):
+            await asyncio.wait_for(
+                main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False),
+                timeout=10,
+            )
+
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_reraises_permanent_startup_error(self, tmp_path: Path) -> None:
         """Permanent startup errors should stop the process and surface the failure."""
         reset_runtime_state()
@@ -484,6 +578,30 @@ class TestAgentBot(AgentBotTestBase):
         state = get_runtime_state()
         assert state.phase == "idle"
         assert state.detail is None
+
+    @pytest.mark.asyncio
+    async def test_a_second_runtime_on_one_storage_root_refuses_to_start(self, tmp_path: Path) -> None:
+        """Only one runtime may own a storage root; the second stops before touching it, and the first releases it."""
+        runtime_paths = self._runtime_paths(tmp_path)
+        lock_path = runtime_paths.storage_root / "tracking" / "runtime.lock"
+        running = try_exclusive_file_lock(lock_path)
+        assert running is not None
+        try:
+            with (
+                patch("mindroom.orchestrator.migrate_private_storage", new=AsyncMock()) as migrate,
+                pytest.raises(PermanentStartupError, match="Another MindRoom is already running"),
+            ):
+                await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+            migrate.assert_not_awaited()
+        finally:
+            release_file_lock(running)
+
+        with patch("mindroom.orchestrator._run_runtime", new=AsyncMock()) as run_runtime:
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+        run_runtime.assert_awaited_once()
+        released = try_exclusive_file_lock(lock_path)
+        assert released is not None
+        release_file_lock(released)
 
     @pytest.mark.asyncio
     async def test_embedded_uvicorn_signal_handler_requests_application_shutdown(self) -> None:
@@ -2772,7 +2890,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
-            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
@@ -2806,7 +2923,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
             patch.object(
                 orchestrator,
@@ -2874,7 +2990,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
-            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             _mock_approval_recovery(
                 orchestrator,

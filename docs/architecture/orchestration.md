@@ -200,7 +200,7 @@ Downloads and decrypts media data, then processes it through the selected respon
 - Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
 - Admitted callbacks are dispatched as background work and remain durably retryable until settled
 - `TurnStore`, backed by the durable handled-turn ledger, prevents duplicate replies
-- `StopManager` handles cancellation of in-progress responses
+- Reply records own each in-progress response, and the span registry cancels exactly the span a Stop reaches (see [Reply Messages](reply-messages.md))
 
 ### Graceful Shutdown
 

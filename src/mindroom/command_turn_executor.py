@@ -126,7 +126,6 @@ class CommandTurnExecutor:
         command_turn, recovered_response_event_id = await self.deps.visible_responses.prepare_visible_delivery_turn(
             handled_turn,
             requester_id=requester_user_id,
-            correlation_id=event.event_id,
             target=target,
         )
         if command_turn is None:

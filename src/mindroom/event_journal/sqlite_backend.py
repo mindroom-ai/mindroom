@@ -1,11 +1,12 @@
 """SQLite backend: one queued writer per backend, readers in WAL.
 
 The runtime shares its backend across bots and thread exports, so their writes
-are serialized by one writer task. ``mindroom threads export`` calls the running
-API and uses that same writer. Separate processes have separate queues and rely
-on SQLite's busy timeout to wait for the database write lock.
+are serialized by one writer task, which commits the writes queued at once in
+one transaction. ``mindroom threads export`` calls the running API and uses
+that same writer. Separate processes have separate queues and rely on SQLite's
+busy timeout to wait for the database write lock.
 
-If batch admission fails, its transaction rolls back and the Nio batch remains
+If batch admission fails, its writes roll back and the Nio batch remains
 unacknowledged for retry. A successful application commit must reach disk before
 Nio is told it can release the batch.
 """
@@ -13,23 +14,28 @@ Nio is told it can release the batch.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
-from .legacy_response_attempts import migrate_response_attempts
-from .legacy_schema import upgrade_approval_argument_digests, upgrade_approval_toolkit_origins, upgrade_legacy_journal
+from .legacy_response_attempts import upgrade_continuation_identity
+from .legacy_schema import (
+    upgrade_legacy_journal,
+    upgrade_outbox_reply_rows,
+)
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, render, schema_statements
+from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
+from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+    from typing import TextIO
 
     from .backend import Operation, Row
 
@@ -37,8 +43,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _BUSY_TIMEOUT_MILLISECONDS = 10_000
-_CLOSED_MESSAGE = "The event-journal store is closed"
-_WRITER_STOPPED_MESSAGE = "The event-journal writer stopped before running this write"
 # How long to wait between attempts at the one statement SQLite's own busy
 # handler will not retry. Short enough that a contended open is not noticeably
 # slower than an uncontended one, long enough not to spin.
@@ -134,25 +138,11 @@ class SqliteBackend:
     database_path: Path
     _writer: sqlite3.Connection = field(init=False, repr=False)
     _readers: threading.local = field(init=False, repr=False)
-    # Absent until the first write, because the queue belongs to the loop that
-    # drains it and `open()` runs before there is one. Typed as such rather
-    # than declared non-optional and probed for, which is the same fiction with
-    # the type checker on the wrong side of it.
-    _queue: asyncio.Queue[_QueuedWrite] | None = field(default=None, init=False, repr=False)
-    _writer_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
-    # The loop the writer task drains on, remembered because a caller on any
-    # other loop can neither enqueue onto that queue nor be woken by it
-    # without being handed across deliberately.
-    _writer_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
-    _admission_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _pending_admissions: dict[asyncio.Future[Any], _QueuedWrite] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-    )
-    _closed: bool = field(default=False, init=False, repr=False)
+    _writes: WriteQueue = field(init=False, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
+    # The claim of one runtime on this database file, held by an open descriptor.
+    _hold: TextIO | None = field(default=None, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
     _recovery_offload: ThreadOffload = field(
@@ -175,30 +165,12 @@ class SqliteBackend:
         backend.database_path.parent.mkdir(parents=True, exist_ok=True)
         backend._readers = threading.local()
         backend._writer = backend._connect_writer()
+        backend._writes = WriteQueue(
+            apply=backend._apply,
+            offload=backend._offload,
+            task_name=f"event_journal_sqlite_writer_{database_path.name}",
+        )
         return backend
-
-    def _ensure_writer_task(self) -> asyncio.Queue[_QueuedWrite]:
-        """Start the single writer task on the loop that first writes."""
-        queue = self._queue
-        if queue is None or self._writer_task is None or self._writer_task.done():
-            queue = asyncio.Queue()
-            self._queue = queue
-            self._writer_loop = asyncio.get_running_loop()
-            self._writer_task = asyncio.create_task(
-                # Handed the queue it drains rather than reading the field,
-                # so a task can only ever settle writes that were admitted to
-                # its own queue.
-                self._drain_writes(queue),
-                name=f"event_journal_sqlite_writer_{self.database_path.name}",
-            )
-            # Nothing else will run what the task leaves queued, and ``close()``
-            # is not its only canceller: a loop shutting down cancels every task
-            # at once. A write left queued holds its caller forever, because
-            # ``settled`` outlives the caller's own cancellation. A callback
-            # rather than a ``finally``, since a task cancelled before its first
-            # step never enters its coroutine.
-            self._writer_task.add_done_callback(lambda _task: self._refuse_queued_writes(queue))
-        return queue
 
     def _connect_writer(self) -> sqlite3.Connection:
         # The writer runs on whichever owned-pool thread is free, so the
@@ -221,14 +193,21 @@ class SqliteBackend:
                 str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             )
             upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
+            outbox_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
+            )
+            upgrade_outbox_reply_rows(
+                _SqliteTransaction(connection),
+                outbox_columns,
+                outbox_table_ddl=OUTBOX_TABLE,
+                sqlite=True,
+            )
+            continuation_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuations)")
+            )
+            upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
-            call_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")
-            )
-            upgrade_approval_toolkit_origins(_SqliteTransaction(connection), call_columns)
-            upgrade_approval_argument_digests(_SqliteTransaction(connection), call_columns)
-            migrate_response_attempts(_SqliteTransaction(connection), existing_tables)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()
@@ -252,122 +231,41 @@ class SqliteBackend:
                 self._open_readers.append(connection)
         return connection
 
-    def _refuse_queued_writes(self, queue: asyncio.Queue[_QueuedWrite]) -> None:
-        """Answer every write a stopped writer task will never run."""
-        message = _CLOSED_MESSAGE if self._closed else _WRITER_STOPPED_MESSAGE
-        while not queue.empty():
-            _deliver(queue.get_nowait().future, _WriteOutcome(error=RuntimeError(message)))
-            queue.task_done()
-
-    async def _drain_writes(self, queue: asyncio.Queue[_QueuedWrite]) -> None:
-        while True:
-            queued = await queue.get()
-            try:
-                await self._settle(queued)
-            finally:
-                queue.task_done()
-
-    async def _settle(self, queued: _QueuedWrite) -> None:
-        """Run one queued write and hand its caller what the statement did.
-
-        The outcome is reported from the worker's own future rather than from
-        how this await ended, because those are different questions: a
-        cancellation reaches the await and never reaches the thread.
-        """
-        work = self._offload.submit(lambda: self._apply(queued.operation))
-        try:
-            # A failed write belongs to its caller's future, not to the writer
-            # task, which has to survive it to run the write after it.
-            with contextlib.suppress(Exception):
-                await settled(work)
-        finally:
-            _report(queued.future, work)
-
-    def _apply[T](self, operation: Operation[T]) -> T:
+    def _apply(self, operations: list[Operation[Any]]) -> list[WriteOutcome]:
+        """Commit queued writes in one transaction, each in a savepoint so one that fails rolls back alone."""
         self._writer.execute("BEGIN IMMEDIATE")
         try:
-            result = operation(_SqliteTransaction(self._writer))
+            outcomes = [self._apply_one(operation) for operation in operations]
+            self._writer.execute("COMMIT")
         except BaseException:
-            self._writer.execute("ROLLBACK")
+            # SQLite rolls the whole transaction back itself on some errors.
+            if self._writer.in_transaction:
+                self._writer.execute("ROLLBACK")
             raise
-        self._writer.execute("COMMIT")
-        return result
+        return outcomes
+
+    def _apply_one(self, operation: Operation[Any]) -> WriteOutcome:
+        self._writer.execute("SAVEPOINT journal_write")
+        try:
+            result = operation(_SqliteTransaction(self._writer))
+        except Exception as error:
+            if not self._writer.in_transaction:
+                # The error took the whole transaction, and the batch with it.
+                raise
+            self._writer.execute("ROLLBACK TO journal_write")
+            self._writer.execute("RELEASE journal_write")
+            return WriteOutcome(error=error)
+        self._writer.execute("RELEASE journal_write")
+        return WriteOutcome(result=result)
 
     async def write[T](self, operation: Operation[T]) -> T:
-        """Queue one operation for the writer task and await its commit.
-
-        Admission is coordinated with ``close()`` under the admission lock. A
-        caller already on the writer's loop enqueues synchronously; one on
-        another loop registers its handoff before scheduling the admission
-        callback. The callback enqueues only while it still owns that handoff.
-
-        That is what the queue being unbounded buys. A bounded one parked the
-        producer in ``put`` instead, and ``close()`` frees a slot per entry it
-        drains: parked producers woke afterwards, enqueued onto a queue whose
-        consumer was already cancelled, and waited on it forever -- and any
-        producer past the queue's size was never woken at all. Re-checking
-        ``_closed`` after the ``put`` narrows that window without closing it,
-        because it cannot reach a producer that is still parked.
-
-        The bound was not paying for itself either. Every caller awaits its own
-        write, so an entry exists only while a caller is suspended on it, and
-        suspending that caller one await earlier holds the same operation in
-        memory plus the machinery to park it.
-        """
-        if self._closed:
-            raise RuntimeError(_CLOSED_MESSAGE)
-        caller_loop = asyncio.get_running_loop()
-        future: asyncio.Future[T] = caller_loop.create_future()
-        queued = _QueuedWrite(operation=operation, future=future)
-        # A queue belongs to the loop that drains it. Putting to one from
-        # another loop wakes its consumer through a callback scheduled on the
-        # wrong loop, which arrives whenever that loop happens to run next and
-        # not because anything told it to.
-        with self._admission_lock:
-            if self._closed:
-                raise RuntimeError(_CLOSED_MESSAGE)
-            writer_loop = self._writer_loop
-            if writer_loop is None or writer_loop is caller_loop:
-                queue = self._ensure_writer_task()
-                queue.put_nowait(queued)
-            else:
-                # Shutdown must own this handoff before it is scheduled. A
-                # stopped-but-open loop accepts call_soon_threadsafe() without
-                # ever running its callback, so the callback itself cannot be
-                # the first place the write becomes visible to close().
-                self._pending_admissions[future] = queued
-        if writer_loop is not None and writer_loop is not caller_loop:
-            try:
-                writer_loop.call_soon_threadsafe(self._admit, queued)
-            except RuntimeError:
-                with self._admission_lock:
-                    still_pending = self._pending_admissions.pop(future, None) is not None
-                if still_pending and not writer_loop.is_closed():
-                    raise
-                if still_pending:
-                    _deliver(future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
-        # Cancelling this await must not report an outcome the writer has not
-        # reached yet: the statement runs on a thread regardless, so the caller
-        # learns how it ended before its cancellation propagates.
-        return await settled(future)
-
-    def _admit(self, queued: _QueuedWrite) -> None:
-        """Put one still-pending handed-across write in the writer queue.
-
-        A write from another loop cannot be admitted or inspect the writer task
-        where it is decided, so both happen here, on the writer's own loop,
-        under the lock that lets ``close()`` claim pending handoffs first.
-        """
-        with self._admission_lock:
-            if self._pending_admissions.pop(queued.future, None) is None:
-                return
-            queue = self._ensure_writer_task()
-            queue.put_nowait(queued)
+        """Queue one operation for the writer task and await its commit."""
+        return await self._writes.write(operation)
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
-        if self._closed:
-            raise RuntimeError(_CLOSED_MESSAGE)
+        if self._writes.closed:
+            raise RuntimeError(CLOSED_MESSAGE)
 
         def apply() -> T:
             return self._apply_read(operation)
@@ -376,8 +274,8 @@ class SqliteBackend:
 
     async def recovery_read[T](self, operation: Operation[T]) -> T:
         """Run a committed-state handoff proof on its reserved WAL reader."""
-        if self._closed:
-            raise RuntimeError(_CLOSED_MESSAGE)
+        if self._writes.closed:
+            raise RuntimeError(CLOSED_MESSAGE)
 
         def apply() -> T:
             connection = self._reader()
@@ -395,30 +293,16 @@ class SqliteBackend:
     async def close(self) -> None:
         """Close admission once and await the one owned connection teardown.
 
-        Cancelling the writer task is safe only because ``_settle`` refuses to
-        return while its worker thread is still executing: the cancellation
-        ends the task after that statement, not during it. Awaiting the task is
-        therefore also how this waits for the write in flight, and closing the
+        Stopping the writer task waits for the write in flight, so closing the
         connection cannot land underneath a live ``BEGIN IMMEDIATE`` -- which
         SQLite answers with a segmentation fault rather than an exception.
 
         Reads are not the writer task's to finish, so they are drained
         separately before the connections they run on are closed.
-
-        The writer task refuses what is still queued as it exits, and that is
-        enough because raising ``_closed`` under the admission lock also claims
-        and refuses every pending handoff. Every write already admitted is in
-        the queue, and callbacks for claimed handoffs later see that they no
-        longer own an admission and do nothing.
         """
         close_task = self._close_task
         if close_task is None:
-            with self._admission_lock:
-                self._closed = True
-                pending_admissions = tuple(self._pending_admissions.values())
-                self._pending_admissions.clear()
-            for queued in pending_admissions:
-                _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+            self._writes.close()
             close_task = asyncio.create_task(
                 self._finish_close(),
                 name="event_journal_sqlite_close",
@@ -426,17 +310,22 @@ class SqliteBackend:
             self._close_task = close_task
         await settled(close_task)
 
+    async def hold_exclusively(self, identity: str) -> bool:
+        """Claim this database file for one runtime; the operating system withdraws it if the process dies."""
+        del identity
+        if self._hold is None:
+            self._hold = try_exclusive_file_lock(
+                self.database_path.with_name(f"{self.database_path.name}.runtime.lock"),
+            )
+        return self._hold is not None
+
+    async def still_held(self) -> bool:
+        """Return whether this runtime holds the database; an open descriptor holds it until close."""
+        return self._hold is not None
+
     async def _finish_close(self) -> None:
-        """Finish the teardown every close waiter shares."""
-        writer_task = self._writer_task
-        self._writer_task = None
-        if writer_task is not None:
-            # Its exit refuses every write still queued.
-            writer_task.cancel()
-            try:  # noqa: SIM105 - the task may already be finished
-                await writer_task
-            except asyncio.CancelledError:
-                pass
+        """Finish the teardown every close waiter shares; the hold goes last, once nothing can write."""
+        await self._writes.stop()
         try:
             await asyncio.gather(
                 self._offload.drain(),
@@ -451,61 +340,6 @@ class SqliteBackend:
         finally:
             self._offload.shutdown()
             self._recovery_offload.shutdown()
-
-
-def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
-    """Snapshot the worker's outcome and give it to the waiting caller.
-
-    Completing a future belonging to another loop sets its result but schedules
-    its callbacks with a plain ``call_soon``, which does not wake that loop. A
-    loop with nothing else pending -- the synchronous tool bridge's own loop,
-    between the write it issued and the answer it is waiting for -- then sleeps
-    in its selector with the result already sitting there, and the caller never
-    resumes. Handing the completion across deliberately is what wakes it.
-    """
-    if work.cancelled():
-        outcome = _WriteOutcome(cancelled=True)
-    elif (error := work.exception()) is not None:
-        outcome = _WriteOutcome(error=error)
-    else:
-        outcome = _WriteOutcome(result=work.result())
-    _deliver(future, outcome)
-
-
-def _deliver(future: asyncio.Future[Any], outcome: _WriteOutcome) -> None:
-    """Apply a plain write outcome on the caller future's own loop."""
-    caller_loop = future.get_loop()
-    if caller_loop is not _running_loop():
-        if not caller_loop.is_closed():
-            with contextlib.suppress(RuntimeError):
-                caller_loop.call_soon_threadsafe(_deliver, future, outcome)
-        return
-    if future.done():
-        return
-    if outcome.cancelled:
-        future.cancel()
-    elif outcome.error is not None:
-        future.set_exception(outcome.error)
-    else:
-        future.set_result(outcome.result)
-
-
-def _running_loop() -> asyncio.AbstractEventLoop | None:
-    """Return the loop this call is running on, if it is running on one."""
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return None
-
-
-@dataclass(slots=True)
-class _QueuedWrite:
-    operation: Operation[Any]
-    future: asyncio.Future[Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _WriteOutcome:
-    result: Any = None
-    error: BaseException | None = None
-    cancelled: bool = False
+            hold, self._hold = self._hold, None
+            if hold is not None:
+                release_file_lock(hold)

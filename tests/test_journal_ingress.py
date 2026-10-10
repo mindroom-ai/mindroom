@@ -50,8 +50,10 @@ from mindroom.matrix.journal_ingress import (
 )
 from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS, PendingEventWorker
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
+from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
+from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import corrupt
 
@@ -1037,16 +1039,17 @@ class TestStreamingProgressIsTransport:
         assert visible.content["body"] == "first question"
         assert visible.revision_event_id == "$fix"
 
-    async def test_a_crash_mid_stream_leaves_the_placeholder_until_cleanup_speaks(
+    async def test_a_crash_mid_stream_leaves_the_placeholder_until_a_terminal_edit_lands(
         self,
         alice: PrincipalStore,
     ) -> None:
         """The row a crash leaves behind is the placeholder, and that is correct.
 
         No intermediate body was durable, so there is nothing to half-restore.
-        Startup stale-stream cleanup rewrites the visible message with a
-        terminal status, and that echo reduces like any other terminal edit —
-        which is what makes skipping progress safe rather than lossy.
+        The replay that continues the reply, or the restart note that ends it,
+        rewrites the visible message with a terminal status, and that echo
+        reduces like any other terminal edit — which is what makes skipping
+        progress safe rather than lossy.
         """
         progress = [
             stream_event(
@@ -1655,8 +1658,8 @@ class TestPendingEventWorker:
             async def is_pending(self, event_id: str) -> bool:
                 return await self.inner.is_pending(event_id)
 
-            async def settle(self, event_id: str) -> None:
-                await self.inner.settle(event_id)
+            async def settle(self, event_id: str) -> tuple[str, ...]:
+                return await self.inner.settle(event_id)
 
         async def handle(event: JournalEvent) -> bool:
             del event
@@ -2490,7 +2493,7 @@ class TestRoomRetryBackoff:
                 )
                 if not approval_created:
                     approval_created = True
-                    await alice.create_approval_continuation(_ApprovalContinuations.continuation(state="waiting"))
+                    await paused_for_approval(alice, _ApprovalContinuations.continuation(state="waiting"))
                 return page
 
         handled: list[str] = []
@@ -2528,13 +2531,14 @@ class TestRoomRetryBackoff:
             if event.event_id != "$source-1":
                 return True
             if attempts.count("$source-1") == 1:
-                created = await alice.create_approval_continuation(
+                created = await paused_for_approval(
+                    alice,
                     replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation=generation),
                 )
                 assert created is not None
                 await _ApprovalContinuations.remember_card(alice)
             else:
-                claimed = await alice.claim_approval_continuation("approval-1", runtime_generation=generation)
+                claimed = await claim_continuation(alice, "approval-1", runtime_generation=generation)
                 assert claimed is not None
                 assert claimed.state == "claimed"
             return False
@@ -3163,6 +3167,7 @@ class TestOutOfBandDispatch:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3244,6 +3249,7 @@ class TestDeferralOwnership:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda _event_id: turn_claimed,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3698,12 +3704,12 @@ class _FlakyReplayView:
             raise RuntimeError(msg)
         return await self.inner.is_pending(event_id)
 
-    async def settle(self, event_id: str) -> None:
+    async def settle(self, event_id: str) -> tuple[str, ...]:
         if event_id in self.fail_settle:
             self.fail_settle.discard(event_id)
             msg = "the journal is unwritable"
             raise RuntimeError(msg)
-        await self.inner.settle(event_id)
+        return await self.inner.settle(event_id)
 
 
 @dataclass
@@ -3872,6 +3878,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -4107,6 +4114,7 @@ class TestAdmittedWorkReachesItsCallback:
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
             schedule_trigger_sender_is_managed=lambda sender: sender == BOT,

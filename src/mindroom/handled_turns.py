@@ -72,47 +72,11 @@ __all__ = [
     "canonicalize_turn_record",
     "merge_edit_facts",
     "resolve_turn_record",
-    "with_user_stop",
 ]
-
-_TURN_RECORD_SCHEMA_VERSION = 1
-
-
-def with_user_stop(
-    turn_record: TurnRecord,
-    response_event_id: str,
-    stop_receipt_order: int,
-    *,
-    delivery_settled: bool = False,
-) -> TurnRecord:
-    """Return the monotonic durable state for one admitted STOP callback."""
-    if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
-        msg = "User-stop receipt order must be positive"
-        raise ValueError(msg)
-    return canonicalize_turn_record(
-        turn_record,
-        response_event_id=response_event_id,
-        completed=True,
-        user_stop_receipt_order=max(
-            stop_receipt_order,
-            turn_record.user_stop_receipt_order or stop_receipt_order,
-        ),
-        user_stop_settled_receipt_order=max(
-            turn_record.user_stop_settled_receipt_order or 0,
-            stop_receipt_order if delivery_settled else 0,
-        )
-        or None,
-        timestamp=0.0,
-    )
 
 
 class TurnRecordCodec:
     """Encode the canonical record into its two intentional physical projections."""
-
-    @staticmethod
-    def schema_version() -> int:
-        """Return the persisted schema version emitted by this codec."""
-        return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
     def _to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901, PLR0912
@@ -148,12 +112,6 @@ class TurnRecordCodec:
             payload["suppressed_source_event_revisions"] = {
                 event_id: list(revision) for event_id, revision in record.suppressed_source_event_revisions.items()
             }
-        if record.latest_edit_receipt_order is not None:
-            payload["latest_edit_receipt_order"] = record.latest_edit_receipt_order
-        if record.user_stop_receipt_order is not None:
-            payload["user_stop_receipt_order"] = record.user_stop_receipt_order
-        if record.user_stop_settled_receipt_order is not None:
-            payload["user_stop_settled_receipt_order"] = record.user_stop_settled_receipt_order
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata._to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -162,8 +120,6 @@ class TurnRecordCodec:
             payload["response_owner"] = record.response_owner
         if record.requester_id is not None:
             payload["requester_id"] = record.requester_id
-        if record.correlation_id is not None:
-            payload["correlation_id"] = record.correlation_id
         if record.command_execution_started:
             payload["command_execution_started"] = True
         if record.command_result_text is not None:
@@ -202,6 +158,15 @@ class TurnRecordCodec:
         # Handling: Both keys are ignored on read and dropped on the next write; every owed event is
         # also a ledger tombstone, so the next response of each affected history finds and removes it.
         # Coverage: tests/test_handled_turns.py::test_stored_cleanup_obligations_are_ignored_on_read.
+        # LEGACY_COMPAT: Turn records carrying Stop, edit order, and correlation state.
+        # Legacy format: A stored record with user_stop_receipt_order, user_stop_settled_receipt_order,
+        # latest_edit_receipt_order, or correlation_id.
+        # Last legacy release: v2026.10.227; replacement: the unreleased durable reply messages own Stop and edit
+        # state in reply_messages and reply_spans.
+        # Handling: The keys are ignored on read and dropped on the next write; an edit of an answer that has no
+        # reply record regenerates nothing.
+        # Coverage: tests/test_handled_turns.py::test_stored_stop_and_edit_order_keys_are_ignored_on_read,
+        # tests/test_edit_regenerator.py::test_edit_without_previous_response_event_is_skipped.
         anchor_event_id = record.get("anchor_event_id")
         completed = record.get("completed")
         timestamp = record.get("timestamp")
@@ -236,16 +201,10 @@ class TurnRecordCodec:
             suppressed_source_event_revisions=_mapping_or_none(
                 record.get("suppressed_source_event_revisions"),
             ),
-            latest_edit_receipt_order=_positive_int_or_none(record.get("latest_edit_receipt_order")),
-            user_stop_receipt_order=_positive_int_or_none(record.get("user_stop_receipt_order")),
-            user_stop_settled_receipt_order=_positive_int_or_none(
-                record.get("user_stop_settled_receipt_order"),
-            ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
             prepared_voice_sources=_mapping_or_none(record.get("prepared_voice_sources")),
             response_owner=canonical_optional_string(record.get("response_owner")),
             requester_id=canonical_optional_string(record.get("requester_id")),
-            correlation_id=canonical_optional_string(record.get("correlation_id")),
             command_execution_started=record.get("command_execution_started") is True,
             command_result_text=canonical_optional_string(record.get("command_result_text")),
             command_result_extra_content=freeze_command_result_content(record.get("command_result_extra_content")),
@@ -258,86 +217,24 @@ class TurnRecordCodec:
         return restore_legacy_revision_replay(turn_record, record)
 
     @staticmethod
-    def to_run_metadata(record: TurnRecord) -> dict[str, object]:  # noqa: C901
-        """Project one record into the recoverable subset stored with an Agno run."""
+    def to_run_metadata(record: TurnRecord) -> dict[str, object]:
+        """Project the record's sources, prompts, and revisions that history and request logs read from an Agno run."""
         if not record.source_event_ids:
             return {}
         metadata: dict[str, object] = {
-            constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
             constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(record.source_event_ids),
         }
         if record.discovery_event_ids:
             metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] = list(record.discovery_event_ids)
-        if record.redacted_source_event_ids:
-            metadata[constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY] = list(
-                record.redacted_source_event_ids,
-            )
         if record.source_event_prompts is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(record.source_event_prompts)
         if record.source_event_revisions is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY] = {
                 event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
             }
-        if record.source_event_metadata is not None:
-            metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
-                event_id: source_metadata._to_record()
-                for event_id, source_metadata in record.source_event_metadata.items()
-            }
-        if record.response_owner is not None:
-            metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = record.response_owner
         if record.requester_id is not None:
             metadata["requester_id"] = record.requester_id
-        if record.history_scope is not None:
-            metadata[constants.MATRIX_HISTORY_SCOPE_METADATA_KEY] = record.history_scope.to_metadata()
-        if record.conversation_target is not None:
-            metadata[constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY] = record.conversation_target.to_metadata()
         return metadata
-
-    @staticmethod
-    def from_run_metadata(metadata: Mapping[str, object]) -> TurnRecord | None:
-        """Parse current Agno metadata, using response linkage as terminal-delivery evidence."""
-        if metadata.get(constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY) != TurnRecordCodec.schema_version():
-            return None
-        anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
-        if not isinstance(anchor_event_id, str) or not anchor_event_id:
-            return None
-        raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-        raw_discovery_event_ids = metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
-        raw_redacted_source_event_ids = metadata.get(
-            constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY,
-        )
-        source_event_ids = (
-            canonical_source_event_ids(raw_source_event_ids)
-            if isinstance(raw_source_event_ids, list)
-            else (anchor_event_id,)
-        ) or (anchor_event_id,)
-        response_event_id = canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
-        return TurnRecord.create(
-            source_event_ids,
-            discovery_event_ids=(
-                canonical_source_event_ids(raw_discovery_event_ids) if isinstance(raw_discovery_event_ids, list) else ()
-            ),
-            redacted_source_event_ids=(
-                canonical_source_event_ids(raw_redacted_source_event_ids)
-                if isinstance(raw_redacted_source_event_ids, list)
-                else ()
-            ),
-            anchor_event_id=anchor_event_id,
-            response_event_id=response_event_id,
-            completed=response_event_id is not None,
-            source_event_prompts=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)),
-            source_event_revisions=_mapping_or_none(
-                metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY),
-            ),
-            source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
-            response_owner=canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
-            requester_id=canonical_optional_string(metadata.get("requester_id")),
-            correlation_id=canonical_optional_string(metadata.get("correlation_id")),
-            history_scope=HistoryScope.from_metadata(metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY)),
-            conversation_target=MessageTarget.from_metadata(
-                metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
-            ),
-        )
 
 
 @dataclass(frozen=True)
@@ -986,32 +883,12 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
             if newer.command_result_text is not None
             else older.command_result_extra_content
         ),
-        latest_edit_receipt_order=max(
-            newer.latest_edit_receipt_order or 0,
-            older.latest_edit_receipt_order or 0,
-        )
-        or None,
-        user_stop_receipt_order=max(
-            newer.user_stop_receipt_order or 0,
-            older.user_stop_receipt_order or 0,
-        )
-        or None,
-        user_stop_settled_receipt_order=max(
-            newer.user_stop_settled_receipt_order or 0,
-            older.user_stop_settled_receipt_order or 0,
-        )
-        or None,
     )
 
 
 def _bool_or_none(value: object) -> bool | None:
     """Return a strict boolean or None."""
     return value if isinstance(value, bool) else None
-
-
-def _positive_int_or_none(value: object) -> int | None:
-    """Return one positive non-boolean integer or None."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
@@ -1062,11 +939,6 @@ def _response_group_requires_retention(
         )
         or any(
             not record.completed and record.replay_source_event_ids and not _is_prepared_voice_checkpoint_only(record)
-            for record in group.records.values()
-        )
-        or any(
-            record.user_stop_receipt_order is not None
-            and (record.user_stop_settled_receipt_order or 0) < record.user_stop_receipt_order
             for record in group.records.values()
         )
     )

@@ -85,7 +85,7 @@ import scripts.testing.fuzz_live_matrix as live_fuzz
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.turn_record import RevisionReplay
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from scripts.testing.fuzz_live_matrix import (
@@ -4743,8 +4743,6 @@ def test_startup_maintenance_wait_uses_only_current_process_generation(tmp_path:
     phases = {
         "startup_maintenance.rooms_and_memberships",
         "startup_maintenance.runtime_support",
-        "startup_maintenance.stale_stream_recovery.initial",
-        "startup_maintenance.stale_stream_recovery.joined_room_delta",
     }
     assert phases == live_fuzz._STARTUP_MAINTENANCE_PHASES
 
@@ -4781,7 +4779,7 @@ def test_startup_maintenance_wait_rejects_failed_current_phase(tmp_path: Path) -
 
     log_path = tmp_path / "mindroom.log"
     log_path.write_text(
-        "startup_phase_finished phase=startup_maintenance.stale_stream_recovery.initial status=failed\n",
+        "startup_phase_finished phase=startup_maintenance.runtime_support status=failed\n",
         encoding="utf-8",
     )
     stack = object.__new__(ManagedTuwunelStack)
@@ -5521,6 +5519,21 @@ async def test_final_state_auditor_enforces_redaction_and_reaction_semantics() -
 
         with pytest.raises(AssertionError, match="missing from /messages"):
             auditor._assert_sent_events_canonical({}, records, set())
+
+        # A homeserver may redact an edit along with the message it edits, and only then.
+        edit_content = {
+            "body": "* edited",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "edited", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$gone"},
+        }
+        edit = _SentRecord("$edit", "!room:example", "m.room.message", content=edit_content)
+        edit_shell = {"event_id": "$edit", "type": "m.room.message", "content": {}, "_audit_room_id": "!room:example"}
+        auditor._assert_sent_events_canonical({**events, "$edit": edit_shell}, [*records, edit], {"$gone"})
+        kept_edit = {**edit_shell, "content": dict(edit_content)}
+        auditor._assert_sent_events_canonical({**events, "$edit": kept_edit}, [*records, edit], {"$gone"})
+        with pytest.raises(AssertionError, match="content diverged"):
+            auditor._assert_sent_events_canonical({**events, "$edit": edit_shell}, [*records, edit], set())
     finally:
         await client.close()
 
@@ -6058,7 +6071,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         await admit_room_event(journal.principal("agent@alice"), "!room:example", "$edit")
         await store.mark_source_redacted("$edit", room_id="!room:example")
         # Runtime exact-event invalidation establishes the expectation independently of the harness.
-        assert store.is_revision_redacted("$edit")
+        assert store._is_revision_redacted("$edit")
     finally:
         await journal.close()
 
@@ -6753,6 +6766,111 @@ def test_strict_ledger_read_rejects_incomplete_record(tmp_path: Path) -> None:
         live_fuzz.read_ledger_records(ledger_path, strict=True)
 
 
+def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) -> None:
+    """An AI turn's answer, and the edits it consumed, come from the reply records that own them."""
+    ledger_path = tmp_path / "event_journal.db"
+    _write_ledger(
+        ledger_path,
+        {
+            "$root": TurnRecord.create(
+                source_event_ids=("$root",),
+                completed=True,
+                source_event_revisions={"$root": (200, "$b")},
+                revision_replay={
+                    "$a": RevisionReplay("$root", 100, redacted=True),
+                    "$b": RevisionReplay("$root", 200),
+                    "$c": RevisionReplay("$root", 300),
+                },
+            ),
+            "$unanswered": TurnRecord.create(source_event_ids=("$unanswered",), completed=True),
+        },
+    )
+    with closing(sqlite3.connect(ledger_path)) as database:
+        database.executemany(
+            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
+            "state, last_span_id, presentation_json, revision, placeholder_only, reply_sequence, created_at_ns, "
+            "updated_at_ns) VALUES ('p', ?, 'general', '!room', 0, ?, ?, ?, '{}', 1, ?, 1, 1, 1)",
+            [("answer", "$reply", "completed", "regenerated", False), ("stopped", "$stopped", "gone", "early", True)],
+        )
+        database.executemany(
+            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
+            "base_sequence, outcome, claimed_at_ns) VALUES ('p', ?, ?, ?, ?, 'g', 0, ?, ?)",
+            [
+                ("turn", "answer", "turn", "$root", "completed", 1),
+                ("regenerated", "answer", "regeneration", "$a", "completed", 2),
+                ("early", "stopped", "turn", "$unanswered", "cancelled", 3),
+            ],
+        )
+        database.executemany(
+            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+            "VALUES ('p', ?, ?, 'logical', 0)",
+            [("turn", "$root"), ("regenerated", "$root"), ("early", "$unanswered")],
+        )
+        database.commit()
+
+    records = live_fuzz.read_ledger_records(ledger_path, strict=True)
+
+    assert records["$root"].response_event_id == "$reply"
+    assert {edit: revision.response_event_id for edit, revision in records["$root"].revision_replay.items()} == {
+        "$a": "$reply",
+        "$b": "$reply",
+        "$c": None,
+    }
+    assert records["$unanswered"].response_event_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note", [INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE])
+async def test_supersession_proof_reads_the_interrupted_reply_of_an_unanswered_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    note: str,
+) -> None:
+    """Only reply records name an unanswered turn's interrupted reply; a superseded replay ends it interrupted."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = FinalStateAuditor(
+        client,
+        ExactReplyOracle(client, "@agent:example"),
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=tmp_path / "event_journal.db",
+    )
+    monkeypatch.setattr(auditor, "_supersession_source_pair", lambda *_args, **_kwargs: "$root")
+    monkeypatch.setattr(auditor, "_completed_supersession_anchor", lambda *_args, **_kwargs: ("$newer", "$anchor"))
+    interrupted = _agent_reply_event("$source", "$reply", f"partial\n\n{note}")
+    interrupted["content"]["io.mindroom.stream_status"] = "error"
+    snapshot = live_fuzz._SupersessionSnapshot(
+        records={"$source": TurnRecord.create(source_event_ids=("$source",), completed=False)},
+        sources={
+            "$source": live_fuzz._SettledJournalSource(
+                "$source",
+                "!room:example",
+                "$root",
+                "@user:example",
+                1,
+                "settled",
+                "message",
+            ),
+        },
+        pending_deliveries=(),
+    )
+    try:
+        proof = auditor._prove_supersession(
+            "$source",
+            "$newer",
+            snapshot,
+            {"$reply": interrupted},
+            {"$source": {"$reply"}},
+            {},
+            sent_records={},
+        )
+    finally:
+        await client.close()
+
+    assert proof is not None
+    assert proof.interrupted_response_event_id == "$reply"
+
+
 @pytest.mark.asyncio
 async def test_final_audit_reuses_one_ledger_snapshot(
     tmp_path: Path,
@@ -7431,6 +7549,74 @@ async def test_model_source_audit_rejects_pre_edit_revision(tmp_path: Path) -> N
         # Observing the edited revision instead passes.
         auditor.observed_markers_for = lambda call_id: {4: frozenset({edited})}.get(call_id, frozenset())
         auditor._assert_model_saw_current_sources(events)
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_accepts_a_declined_edit_only_after_a_later_message(tmp_path: Path) -> None:
+    """An edit MindRoom declined leaves the answer on its old revision, which is right once another message followed."""
+    ledger_path = tmp_path / "event_journal.db"
+    orig = _source_marker("op:1", ORIGINAL_REVISION)
+    edited = _source_marker("op:1", "edit:5")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        source_current_markers={"$a": edited},
+        observed={4: frozenset({orig})},
+    )
+    auditor.source_revision_markers = {"$a": {"$edit": edited}}
+    # MindRoom settled the edit without a regeneration span.
+    auditor.declined_edits = lambda: frozenset({"$edit"})  # type: ignore[method-assign]
+    try:
+        record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        _write_ledger(ledger_path, {"$a": record})
+        thread = {"rel_type": "m.thread", "event_id": "$a", "m.in_reply_to": {"event_id": "$a"}}
+        source = {"event_id": "$a", "sender": "@user:example", "type": "m.room.message", "origin_server_ts": 10}
+        later = {
+            "event_id": "$b",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 20,
+            "content": {"body": "next", "msgtype": "m.text", "m.relates_to": thread},
+        }
+        events = {
+            "$a": {**source, "content": {"body": "original", "msgtype": "m.text"}},
+            "$edit": {
+                "event_id": "$edit",
+                "sender": "@user:example",
+                "type": "m.room.message",
+                "origin_server_ts": 30,
+                "content": {"m.relates_to": {"rel_type": "m.replace", "event_id": "$a"}},
+            },
+            "$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4)),
+        }
+        sent = [
+            _SentRecord(
+                "$a",
+                "!room:example",
+                "m.room.message",
+                sender="@user:example",
+                content=events["$a"]["content"],
+            ),
+            _SentRecord(
+                "$edit",
+                "!room:example",
+                "m.room.message",
+                sender="@user:example",
+                content=events["$edit"]["content"],
+            ),
+        ]
+        with pytest.raises(AssertionError, match="no later message followed it"):
+            auditor._assert_model_saw_current_sources(events, sent_records=sent)
+
+        auditor._assert_model_saw_current_sources(
+            {**events, "$b": later},
+            sent_records=[
+                *sent,
+                _SentRecord("$b", "!room:example", "m.room.message", sender="@user:example", content=later["content"]),
+            ],
+        )
     finally:
         await auditor.client.close()
 

@@ -14,12 +14,13 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom import reply_lifecycle as rl
 from mindroom import streaming as streaming_mod
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
@@ -36,9 +37,12 @@ from mindroom.constants import (
 from mindroom.matrix import message_builder
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
+from mindroom.reply_presentation import Presentation, encode_presentation
+from mindroom.reply_scope import SpanHandle
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import (
-    _CANCELLED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
+    CANCELLED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
@@ -49,7 +53,7 @@ from mindroom.streaming import (
     stream_progress_edits,
 )
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry, tool_trace_from_content
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
@@ -588,7 +592,7 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
     ("stream_status", "terminal_note"),
     [
         (STREAM_STATUS_ERROR, "**[Response interrupted by an error: boom]**"),
-        (STREAM_STATUS_CANCELLED, _CANCELLED_RESPONSE_NOTE),
+        (STREAM_STATUS_CANCELLED, CANCELLED_RESPONSE_NOTE),
     ],
 )
 @pytest.mark.asyncio
@@ -828,7 +832,7 @@ async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) ->
     partial, cancelled = gateway.ops
     assert partial.content["body"] == "Partial answer"
     assert partial.content["msgtype"] == "m.notice"
-    assert cancelled.display_text == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
+    assert cancelled.display_text == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
     assert cancelled.content["msgtype"] == "m.text"
     assert cancelled.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
 
@@ -1085,7 +1089,7 @@ async def _run_resumed_stream(
 
 
 def _trace_names(content: dict[str, Any]) -> list[str]:
-    return [entry.tool_name for entry in tool_trace_from_content(content)]
+    return [str(event["tool_name"]) for event in content[_TOOL_TRACE_KEY]["events"]]
 
 
 @pytest.mark.asyncio
@@ -1154,7 +1158,7 @@ async def test_stopping_a_resumed_stream_keeps_the_stopped_text(config: Config) 
 
     final = gateway.ops[-1]
     assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
-    assert final.display_text == f"{_RESUMED_PREFIX}The second\n\n{_CANCELLED_RESPONSE_NOTE}"
+    assert final.display_text == f"{_RESUMED_PREFIX}The second\n\n{CANCELLED_RESPONSE_NOTE}"
     assert _trace_names(final.content) == ["counter"]
     assert raised.value.accumulated_text.startswith(_RESUMED_PREFIX)
 
@@ -1192,8 +1196,8 @@ async def test_a_failed_first_resumed_edit_keeps_the_stopped_text(config: Config
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
-async def test_a_resumed_team_pause_hands_off_the_teams_own_presentation(config: Config) -> None:
-    """The team's approval snapshot must reproduce its own document, so the stopped part stays out of it."""
+async def test_a_resumed_team_pause_keeps_its_pending_tool_in_the_reply(config: Config) -> None:
+    """The pause snapshot is the whole document; the reply's span takes the stopped part off once, keeping the new tool."""
     gateway = _FakeGateway()
     suspension = StreamingLifecycleSuspensionError("paused")
     lookup = ToolTraceEntry(type="tool_call_started", tool_name="lookup", args_preview="{}")
@@ -1217,10 +1221,38 @@ async def test_a_resumed_team_pause_hands_off_the_teams_own_presentation(config:
     assert gateway.ops[0].display_text.startswith(_RESUMED_PREFIX)
     presentation = raised.value.presentation
     assert presentation is not None
-    assert presentation.response_text == "**GeneralAgent**: Checking.\n\n🔧 `lookup` [1] ⏳"
-    assert presentation.rendered_response_text is None
-    assert [entry.tool_name for entry in presentation.tool_trace] == ["lookup"]
+    assert presentation.response_text == f"{_RESUMED_PREFIX}**GeneralAgent**: Checking.\n\n🔧 `lookup` [2] ⏳"
+    assert [entry.tool_name for entry in presentation.tool_trace] == ["counter", "lookup"]
     assert presentation.state == state
+
+    claim = rl.claim(
+        rl.ClaimRequest(
+            span_id="span-1",
+            delivery_id="$source",
+            sources=ResponseSources(pending_event_ids=("$source",), logical_source_event_ids=("$source",)),
+            bot_generation="gen",
+            now_ns=1,
+            new_reply_id="reply-1",
+            entity_name="team",
+            room_id="!test:localhost",
+            thread_id="$thread",
+            membership_epoch=0,
+            empty_presentation=encode_presentation(Presentation()),
+        ),
+        rl.ClaimContext(None, None, None, None, durable_write_debt=False, active_generation="gen"),
+    )
+    assert claim.reply is not None
+    assert claim.claimed is not None
+    handle = SpanHandle(
+        runtime=MagicMock(),
+        span=claim.claimed,
+        reply=claim.reply,
+        base=Presentation(),
+        resumed=_STOPPED_REPLY,
+    )
+    (answer,) = handle.presentation(presentation.response_text, presentation.tool_trace, team_state=state).segments
+    assert answer.text == "**GeneralAgent**: Checking.\n\n🔧 `lookup` [1] ⏳"
+    assert [entry.tool_name for entry in answer.tool_trace] == ["lookup"]
 
 
 @pytest.mark.asyncio

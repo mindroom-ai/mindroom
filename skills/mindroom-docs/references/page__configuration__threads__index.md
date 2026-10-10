@@ -211,12 +211,17 @@ Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unav
 
 The check runs between completed tool batches and never interrupts a running tool.
 Queued messages are handled after the active response finishes either way.
+A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
 The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
 
 ## Message Edits
 
-When a user edits a message that already received an agent response, the agent regenerates its reply for the updated content and edits its previous reply in place.
+When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
+If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
+While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
 Edits by agents never trigger regeneration.
 When another agent's reply finishes with a mention of this agent, it reaches this agent as a new message.

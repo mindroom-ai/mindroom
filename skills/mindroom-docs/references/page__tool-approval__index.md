@@ -43,7 +43,8 @@ tool_approval:
 - An unanswered card expires after its `timeout_days` and the call is denied.
 - A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 
-While approval is pending, the agent stops typing and the conversation can continue.
+While approval is pending, the agent stops typing and counts as still responding in that conversation: later messages to it there wait until the approval ends and get a ⏳ reaction, while other conversations and agents carry on.
+Stopping the reply with 🛑, or deleting the message it answers, cancels the approval and expires its card, and deleting the message also removes the reply; an edit that regenerates the reply cancels it too (see [Message Edits](https://docs.mindroom.chat/configuration/threads/#message-edits)).
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
 
