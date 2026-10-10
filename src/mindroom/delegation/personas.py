@@ -150,7 +150,8 @@ def _read_profile(  # noqa: PLR0911 - each refusal is its own reason
 ) -> tuple[_PersonaProfile | _InvalidPersonaProfile | None, int]:
     """Read one profile below its pinned directory with the bytes read; None when the file is absent."""
     if not _PROFILE_NAME.fullmatch(name):
-        return _InvalidPersonaProfile(name=name, reason=_NAME_RULE), 0
+        # A planted filename can hold control characters or undecodable bytes that every model request would carry.
+        return _InvalidPersonaProfile(name=name.encode("unicode_escape").decode(), reason=_NAME_RULE), 0
     try:
         data = read_regular_file_within_root(
             directory_fd,
@@ -230,7 +231,7 @@ def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaPr
     listing = "\n".join(lines)
     if len(listing) <= _MAX_LISTING_CHARS:
         return listing
-    return f"{len(entries)} subagent profiles are saved in {_PROFILE_DIRNAME}/; list that directory to see them."
+    return f"Too many subagent profiles to list are saved in {_PROFILE_DIRNAME}/; list that directory to see them."
 
 
 def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: int) -> list[str]:

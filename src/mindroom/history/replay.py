@@ -101,6 +101,15 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
     return message.model_copy(update=updates) if updates else message
 
 
+# AGNO_COMPAT: A string system_message skips the session summary.
+# Reason: Agno's get_system_message returns a string system_message before the step that appends
+# session.summary, so an authored subagent's verbatim prompt would drop a compacted session's summary;
+# this copies Agno's private summary wording so the prompt carries it and replay planning counts it.
+# Upstream issue: Tracking gap; no issue or PR identified for rendering the summary with a custom system_message.
+# Upstream PR: None identified.
+# Remove when: Agno appends session.summary to a string system_message when add_session_summary_to_context is on,
+# or exposes the summary block publicly; replay planning must still count the summary once.
+# Coverage: tests/test_agent_personas.py::test_persona_keeps_its_compacted_history_summary.
 def _session_summary_block(summary: str) -> str:
     """Render a stored session summary the way Agno's system-message builder adds it."""
     return (

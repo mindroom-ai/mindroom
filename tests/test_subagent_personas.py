@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
@@ -162,6 +163,20 @@ def test_list_profiles_skips_unsafe_entries(tmp_path: Path) -> None:
     assert "lowercase" in entries[0].reason
 
 
+def test_listing_escapes_planted_filenames(tmp_path: Path) -> None:
+    """A planted filename never puts undecodable bytes or a line break into the run_subagent description."""
+    _profile_file(tmp_path, "critic.md", _CRITIC)
+    _profile_file(tmp_path, os.fsdecode(b"\xffnotes.md"), _CRITIC)
+    _profile_file(tmp_path, "two\nlines.md", _CRITIC)
+
+    listing = render_profile_listing(list_profiles(tmp_path))
+
+    listing.encode("utf-8")
+    assert "- \\udcffnotes (invalid: " in listing
+    assert "- two\\nlines (invalid: " in listing
+    assert len(listing.splitlines()) == 3
+
+
 def test_list_profiles_without_directory_is_empty(tmp_path: Path) -> None:
     """A workspace without subagents/ has no profiles."""
     assert list_profiles(tmp_path) == []
@@ -315,14 +330,12 @@ def test_render_profile_listing_shows_entries_and_errors() -> None:
 
 
 def test_render_profile_listing_bounds_length() -> None:
-    """A listing that would exceed 2,000 characters becomes a count pointing at subagents/."""
+    """A listing that would exceed 2,000 characters becomes a pointer at subagents/, with no count past the read limit."""
     entries = [
         _parse_profile(f"p{index:03d}", "---\ndescription: " + "d" * 40 + "\n---\nBody\n") for index in range(256)
     ]
     listing = render_profile_listing(entries)
-    assert len(listing) <= 2000
-    assert "256" in listing
-    assert "subagents/" in listing
+    assert listing == "Too many subagent profiles to list are saved in subagents/; list that directory to see them."
 
 
 def test_render_profile_listing_empty() -> None:

@@ -17,6 +17,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents, ai
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
+from mindroom.config.models import ModelConfig
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
 from mindroom.history.archive import archive_runs
@@ -165,7 +166,7 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
 
 
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
-    """Only the named toolkit is built; unnamed caller toolkits are never constructed."""
+    """Only the named toolkit's functions are offered; an unnamed caller toolkit offers none."""
     runtime = _runtime(tmp_path, tools=["file", "shell"])
     agent = _child(runtime, ["file"])
     toolkit_functions = {
@@ -224,6 +225,25 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
         for name in (*tool.functions, *tool.get_async_functions())
     }
     assert "read_file" not in built
+
+
+def test_persona_tools_are_never_wire_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a model with native tool search, a persona's named toolkits are present from its first request."""
+    runtime = _runtime(tmp_path, tools=[{"file": {"defer": True}}])
+    runtime.config.models["default"] = ModelConfig(provider="anthropic", id="claude-sonnet-5-5")
+    deferred: list[frozenset[str]] = []
+
+    def record(_model: object, *, deferred_tool_names: frozenset[str]) -> None:
+        deferred.append(deferred_tool_names)
+
+    monkeypatch.setattr(agents, "install_claude_deferred_tool_search", record)
+
+    agents.create_agent("helper", runtime.config, runtime.runtime_paths, execution_identity=None)
+    _child(runtime, ["file"])
+
+    # Only the configured agent defers its toolkit; the persona's build installs no tool search.
+    [configured] = deferred
+    assert "read_file" in configured
 
 
 def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
