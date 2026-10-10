@@ -127,6 +127,10 @@ describe("brokered API keys on agent cards", () => {
     can_manage: true,
     configured: false,
     updated_at: null,
+    active_source: null,
+    key_configured: false,
+    key_updated_at: null,
+    oauth: null,
   };
 
   it("lists the agent's API keys and refreshes the catalog after a save", async () => {
@@ -139,7 +143,14 @@ describe("brokered API keys on agent cards", () => {
           agents: [
             {
               ...catalog([service]).agents[0],
-              egress_services: [{ ...egressService, configured }],
+              egress_services: [
+                {
+                  ...egressService,
+                  configured,
+                  key_configured: configured,
+                  active_source: configured ? "key" : null,
+                },
+              ],
             },
           ],
         });
@@ -170,7 +181,79 @@ describe("brokered API keys on agent cards", () => {
     render(<Connections />);
     await expandAgent();
     await screen.findByRole("button", { name: "Connect Mail" });
-    expect(screen.queryByText("API keys")).toBeNull();
+    expect(screen.queryByText("API keys and accounts")).toBeNull();
+  });
+
+  it("connects an account from the agent card and refreshes the catalog", async () => {
+    let connected = false;
+    let catalogRequests = 0;
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+    };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    installApi({
+      "/api/connections": async () => {
+        catalogRequests += 1;
+        return json({
+          agents: [
+            {
+              ...catalog([service]).agents[0],
+              egress_services: [
+                {
+                  ...egressService,
+                  configured: connected,
+                  active_source: connected ? "oauth" : null,
+                  oauth: {
+                    provider: "github",
+                    display_name: "GitHub",
+                    connected,
+                    account_label: connected ? "octocat" : null,
+                    can_connect: true,
+                    reset_required: false,
+                    service_account: false,
+                  },
+                },
+              ],
+            },
+          ],
+        });
+      },
+      "/api/connections/egress/agents/personal/github/connect": async () =>
+        json({
+          provider: "github",
+          auth_url: "https://github.com/login/oauth/authorize",
+          completion_origin: "https://portal.example.com",
+        }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Connect GitHub" }),
+    );
+    await waitFor(() =>
+      expect(popup.location.href).toBe(
+        "https://github.com/login/oauth/authorize",
+      ),
+    );
+    connected = true;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "https://portal.example.com",
+        source: popup as unknown as Window,
+        data: {
+          type: "mindroom:oauth-complete",
+          provider: "github",
+          status: "connected",
+        },
+      }),
+    );
+    expect(await screen.findByText("Connected as octocat")).toBeInTheDocument();
+    expect(catalogRequests).toBe(2);
+    expect(
+      screen.getByRole("button", { name: "Disconnect GitHub" }),
+    ).toBeInTheDocument();
   });
 });
 

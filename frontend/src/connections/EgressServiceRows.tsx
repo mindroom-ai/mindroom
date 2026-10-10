@@ -12,10 +12,29 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import { type RequestErrorMessages, requestConnection } from "./request";
 import type { EgressCredentialService } from "./types";
 
+type AccountAction = "connect" | "disconnect";
+
+/** The endpoints one service row talks to. */
+interface ServicePaths {
+  secret: string;
+  connect: string;
+  disconnect: string;
+}
+
 function statusLabel(service: EgressCredentialService): string {
+  const oauth = service.oauth;
+  if (oauth) {
+    if (service.active_source === "key") return "Using API key";
+    if (service.active_source === "oauth")
+      return oauth.account_label
+        ? `Connected as ${oauth.account_label}`
+        : "Connected";
+    return "Not set";
+  }
   if (!service.configured) return "Not set";
   const updated = service.updated_at ? new Date(service.updated_at) : null;
   return updated && !Number.isNaN(updated.getTime())
@@ -36,23 +55,34 @@ function removeWarning(service: EgressCredentialService): string {
 }
 
 function EgressServiceRow({
-  path,
+  paths,
   service,
   onChanged,
   errorMessages,
 }: {
-  path: string;
+  paths: ServicePaths;
   service: EgressCredentialService;
   onChanged: () => void;
   errorMessages?: RequestErrorMessages;
 }) {
   const [editing, setEditing] = useState(false);
   const [secret, setSecret] = useState("");
-  const [busy, setBusy] = useState<"save" | "remove" | null>(null);
+  const [busy, setBusy] = useState<
+    "save" | "remove" | "connect" | "disconnect" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirm, setConfirm] = useState<"key" | "account" | null>(null);
   const operation = useRef<AbortController | null>(null);
   const keyLabel = `${service.display_name} API key`;
+  const oauth = service.oauth;
+  // Rows with an account keep the key behind a toggle until a key is set.
+  const showKeyControls = !oauth || service.key_configured || editing;
+  // Requester-scoped accounts belong to the requester, so the server lets any
+  // eligible user manage them even without key rights.
+  const canResetAccount =
+    oauth !== null &&
+    (oauth.connected || oauth.reset_required) &&
+    (service.can_manage || oauth.can_connect);
 
   useEffect(() => () => operation.current?.abort(), []);
 
@@ -70,7 +100,7 @@ function EgressServiceRow({
     setError(null);
     try {
       await requestConnection<void>(
-        path,
+        paths.secret,
         controller.signal,
         "PUT",
         { secret },
@@ -92,14 +122,14 @@ function EgressServiceRow({
   };
 
   const remove = async () => {
-    setConfirmOpen(false);
+    setConfirm(null);
     const controller = new AbortController();
     operation.current = controller;
     setBusy("remove");
     setError(null);
     try {
       await requestConnection<void>(
-        path,
+        paths.secret,
         controller.signal,
         "DELETE",
         undefined,
@@ -112,6 +142,65 @@ function EgressServiceRow({
           cause instanceof Error
             ? cause.message
             : "Could not remove the key. Try again.",
+        );
+    } finally {
+      if (!controller.signal.aborted) setBusy(null);
+    }
+  };
+
+  const connect = async () => {
+    if (!oauth) return;
+    const controller = new AbortController();
+    operation.current = controller;
+    setBusy("connect");
+    setError(null);
+    try {
+      await connectWithPopup(
+        oauth.provider,
+        () =>
+          requestConnection<OAuthAuthorization>(
+            paths.connect,
+            controller.signal,
+            "POST",
+            {},
+            errorMessages,
+          ),
+        controller.signal,
+      );
+      if (!controller.signal.aborted) onChanged();
+    } catch (cause) {
+      if (!controller.signal.aborted)
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Could not connect. Try again.",
+        );
+    } finally {
+      if (!controller.signal.aborted) setBusy(null);
+    }
+  };
+
+  const disconnect = async () => {
+    setConfirm(null);
+    const controller = new AbortController();
+    operation.current = controller;
+    setBusy("disconnect");
+    setError(null);
+    try {
+      await requestConnection<void>(
+        paths.disconnect,
+        controller.signal,
+        "POST",
+        {},
+        errorMessages,
+      );
+      if (!controller.signal.aborted) onChanged();
+    } catch (cause) {
+      if (!controller.signal.aborted)
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Could not disconnect. Try again.",
         );
     } finally {
       if (!controller.signal.aborted) setBusy(null);
@@ -140,32 +229,95 @@ function EgressServiceRow({
           >
             {statusLabel(service)}
           </Badge>
-          {!service.can_manage && (
+          {oauth?.service_account && (
             <span className="text-xs text-muted-foreground">
-              Managed by credential managers
+              Uses a shared service account
             </span>
           )}
-          {service.can_manage && !editing && (
+          {!service.can_manage && (
+            <span className="text-xs text-muted-foreground">
+              {oauth?.can_connect
+                ? "API key managed by credential managers"
+                : "Managed by credential managers"}
+            </span>
+          )}
+          {oauth?.can_connect && !oauth.connected && (
+            <Button
+              size="sm"
+              disabled={busy !== null}
+              aria-label={`${oauth.reset_required ? "Reconnect" : "Connect"} ${oauth.display_name}`}
+              onClick={() => void connect()}
+            >
+              {busy === "connect"
+                ? "Connecting…"
+                : `${oauth.reset_required ? "Reconnect" : "Connect"} ${oauth.display_name}`}
+            </Button>
+          )}
+          {busy === "connect" && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                operation.current?.abort();
+                setBusy(null);
+              }}
+            >
+              Cancel
+            </Button>
+          )}
+          {oauth && canResetAccount && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy !== null}
+              aria-label={
+                oauth.connected
+                  ? `Disconnect ${oauth.display_name}`
+                  : `Reset ${oauth.display_name} connection`
+              }
+              onClick={() => setConfirm("account")}
+            >
+              {busy === "disconnect"
+                ? "Disconnecting…"
+                : oauth.connected
+                  ? "Disconnect"
+                  : "Reset connection"}
+            </Button>
+          )}
+          {oauth && service.can_manage && !showKeyControls && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy !== null}
+              onClick={() => {
+                setError(null);
+                setEditing(true);
+              }}
+            >
+              Use an API key instead
+            </Button>
+          )}
+          {service.can_manage && showKeyControls && !editing && (
             <>
               <Button
                 size="sm"
                 variant="outline"
                 disabled={busy !== null}
-                aria-label={`${service.configured ? "Replace" : "Set"} ${keyLabel}`}
+                aria-label={`${service.key_configured ? "Replace" : "Set"} ${keyLabel}`}
                 onClick={() => {
                   setError(null);
                   setEditing(true);
                 }}
               >
-                {service.configured ? "Replace" : "Set"}
+                {service.key_configured ? "Replace" : "Set"}
               </Button>
-              {service.configured && (
+              {service.key_configured && (
                 <Button
                   size="sm"
                   variant="outline"
                   disabled={busy !== null}
                   aria-label={`Remove ${keyLabel}`}
-                  onClick={() => setConfirmOpen(true)}
+                  onClick={() => setConfirm("key")}
                 >
                   {busy === "remove" ? "Removing…" : "Remove"}
                 </Button>
@@ -222,14 +374,17 @@ function EgressServiceRow({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+      <Dialog
+        open={confirm === "key"}
+        onOpenChange={(open) => !open && setConfirm(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Remove {keyLabel}?</DialogTitle>
             <DialogDescription>{removeWarning(service)}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+            <Button variant="outline" onClick={() => setConfirm(null)}>
               Cancel
             </Button>
             <Button variant="destructive" onClick={() => void remove()}>
@@ -238,33 +393,80 @@ function EgressServiceRow({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {oauth && (
+        <Dialog
+          open={confirm === "account"}
+          onOpenChange={(open) => !open && setConfirm(null)}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {oauth.connected ? "Disconnect" : "Reset"} {oauth.display_name}?
+              </DialogTitle>
+              <DialogDescription>
+                This removes the saved {oauth.display_name} connection. Agents
+                lose access through it until an account is connected again.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
+              <Button variant="destructive" onClick={() => void disconnect()}>
+                {oauth.connected ? "Disconnect" : "Reset connection"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </li>
   );
 }
 
-/** Where one service's secret is written and removed. */
-type SecretTarget =
-  | { agentName: string; secretPath?: undefined }
-  | { agentName?: undefined; secretPath: (serviceName: string) => string };
+/** Where one service's secret is written and its account is connected. */
+type ServiceTarget =
+  | {
+      agentName: string;
+      secretPath?: undefined;
+      accountPath?: undefined;
+    }
+  | {
+      agentName?: undefined;
+      secretPath: (serviceName: string) => string;
+      accountPath: (serviceName: string, action: AccountAction) => string;
+    };
 
-function secretPathFor(target: SecretTarget, serviceName: string): string {
-  if (target.secretPath) return target.secretPath(serviceName);
-  return `/api/connections/egress/agents/${encodeURIComponent(target.agentName)}/${encodeURIComponent(serviceName)}`;
+function servicePathsFor(
+  target: ServiceTarget,
+  serviceName: string,
+): ServicePaths {
+  if (target.secretPath)
+    return {
+      secret: target.secretPath(serviceName),
+      connect: target.accountPath(serviceName, "connect"),
+      disconnect: target.accountPath(serviceName, "disconnect"),
+    };
+  const base = `/api/connections/egress/agents/${encodeURIComponent(target.agentName)}/${encodeURIComponent(serviceName)}`;
+  return {
+    secret: base,
+    connect: `${base}/connect`,
+    disconnect: `${base}/disconnect`,
+  };
 }
 
 /**
- * API keys the egress broker injects into outbound requests.
+ * Accounts and API keys the egress broker injects into outbound requests.
  *
  * Rows target one agent's personal connections API by default. Pass
- * `secretPath` instead of `agentName` to write to another endpoint, such as
- * the dashboard's.
+ * `secretPath` and `accountPath` instead of `agentName` to use another
+ * endpoint, such as the dashboard's.
  */
 export function EgressServiceRows({
   services,
   onChanged,
   errorMessages,
   ...target
-}: SecretTarget & {
+}: ServiceTarget & {
   services: EgressCredentialService[];
   onChanged: () => void;
   /** Wording for 403 and 404 responses outside the Connections portal. */
@@ -275,7 +477,7 @@ export function EgressServiceRows({
       {services.map((service) => (
         <EgressServiceRow
           key={service.name}
-          path={secretPathFor(target, service.name)}
+          paths={servicePathsFor(target, service.name)}
           service={service}
           onChanged={onChanged}
           errorMessages={errorMessages}

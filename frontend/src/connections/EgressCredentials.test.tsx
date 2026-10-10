@@ -8,7 +8,11 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EgressCredentials } from "./EgressCredentials";
-import type { EgressCredentialAgent } from "./types";
+import type {
+  EgressCredentialAgent,
+  EgressCredentialService,
+  EgressOAuthStatus,
+} from "./types";
 
 const service = {
   name: "github",
@@ -18,6 +22,19 @@ const service = {
   can_manage: true,
   configured: false,
   updated_at: null,
+  active_source: null,
+  key_configured: false,
+  key_updated_at: null,
+  oauth: null,
+} satisfies EgressCredentialService;
+const account: EgressOAuthStatus = {
+  provider: "github",
+  display_name: "GitHub",
+  connected: false,
+  account_label: null,
+  can_connect: true,
+  reset_required: false,
+  service_account: false,
 };
 const agents: EgressCredentialAgent[] = [
   {
@@ -96,7 +113,14 @@ describe("egress credentials page", () => {
         agents: [
           {
             ...agents[0],
-            services: [{ ...service, configured }],
+            services: [
+              {
+                ...service,
+                configured,
+                key_configured: configured,
+                active_source: configured ? "key" : null,
+              },
+            ],
           },
         ],
       });
@@ -114,5 +138,88 @@ describe("egress credentials page", () => {
         screen.getByRole("button", { name: "Replace GitHub API key" }),
       ).toBeInTheDocument(),
     );
+  });
+
+  it("reloads the listing after an account is connected and disconnected", async () => {
+    let connected = false;
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+    };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      const path = String(input);
+      if (path.endsWith("/connect"))
+        return json({
+          provider: "github",
+          auth_url: "https://github.com/login/oauth/authorize",
+          completion_origin: "https://portal.example.com",
+        });
+      if (path.endsWith("/disconnect")) {
+        connected = false;
+        return json({ status: "disconnected", provider: "github" });
+      }
+      expect(options?.method ?? "GET").toBe("GET");
+      return json({
+        agents: [
+          {
+            ...agents[0],
+            services: [
+              {
+                ...service,
+                configured: connected,
+                active_source: connected ? "oauth" : null,
+                oauth: {
+                  ...account,
+                  connected,
+                  account_label: connected ? "octocat" : null,
+                },
+              },
+            ],
+          },
+        ],
+      });
+    });
+    render(<EgressCredentials />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Connect GitHub" }),
+    );
+    await waitFor(() =>
+      expect(popup.location.href).toBe(
+        "https://github.com/login/oauth/authorize",
+      ),
+    );
+    connected = true;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "https://portal.example.com",
+        source: popup as unknown as Window,
+        data: {
+          type: "mindroom:oauth-complete",
+          provider: "github",
+          status: "connected",
+        },
+      }),
+    );
+    expect(await screen.findByText("Connected as octocat")).toBeInTheDocument();
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(
+          ([input]) => String(input) === "/api/connections/egress",
+        ),
+    ).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Connect GitHub" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Connected as/)).toBeNull();
   });
 });

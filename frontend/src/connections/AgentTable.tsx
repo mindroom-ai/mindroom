@@ -266,7 +266,7 @@ export function AgentTable({
                         {row.original.egress_services?.length ? (
                           <div className="border-t border-border/60">
                             <h3 className="px-5 pt-4 text-xs font-medium text-muted-foreground">
-                              API keys
+                              API keys and accounts
                             </h3>
                             <EgressServiceRows
                               agentName={row.original.agent_name}

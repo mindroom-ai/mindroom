@@ -33,6 +33,10 @@ const github = {
   description: "GitHub API and git over HTTPS",
   configured: false,
   updated_at: null,
+  active_source: null,
+  key_configured: false,
+  key_updated_at: null,
+  oauth: null,
 };
 const openai = {
   name: "openai",
@@ -40,6 +44,24 @@ const openai = {
   description: "OpenAI API",
   configured: true,
   updated_at: "2026-10-05T12:00:00+00:00",
+  active_source: "key",
+  key_configured: true,
+  key_updated_at: "2026-10-05T12:00:00+00:00",
+  oauth: null,
+};
+const githubAccount = {
+  provider: "github",
+  display_name: "GitHub",
+  connected: false,
+  account_label: null,
+  can_connect: true,
+  reset_required: false,
+  service_account: false,
+};
+const authorization = {
+  provider: "github",
+  auth_url: "https://github.com/login/oauth/authorize",
+  completion_origin: "https://portal.example.com",
 };
 
 const newest = {
@@ -72,6 +94,7 @@ const oldest = {
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status });
 
+let services: unknown[];
 let logsResponse: () => Response | Promise<Response>;
 let mutationResponse: () => Response;
 
@@ -80,7 +103,7 @@ function mockApi() {
     const url = new URL(String(input), "http://localhost");
     const method = init?.method ?? "GET";
     if (url.pathname === "/api/egress-broker/services" && method === "GET")
-      return json({ services: [github, openai] });
+      return json({ services });
     if (url.pathname === "/api/egress-broker/logs") return logsResponse();
     return mutationResponse();
   });
@@ -114,6 +137,7 @@ beforeEach(() => {
     ],
     config: { defaults: { tools: ["shell"] } },
   };
+  services = [github, openai];
   logsResponse = () => json({ records: [newest, oldest] });
   mutationResponse = () => new Response(null, { status: 204 });
   mockApi();
@@ -465,9 +489,110 @@ describe("egress broker secret target", () => {
     mutationResponse = () => json({ detail: "nope" }, 403);
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(
-      await screen.findByText("You are not allowed to change egress keys."),
+      await screen.findByText(
+        "You are not allowed to change egress keys or accounts.",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Connections/)).toBeNull();
+  });
+});
+
+describe("egress broker connected accounts", () => {
+  let popup: {
+    closed: boolean;
+    close: ReturnType<typeof vi.fn>;
+    location: { href: string };
+  };
+
+  beforeEach(() => {
+    popup = {
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+    };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    services = [{ ...github, oauth: githubAccount }, openai];
+  });
+
+  it("connects an account for the selected agent and reloads the list", async () => {
+    mutationResponse = () => json(authorization);
+    render(<EgressBroker />);
+    await screen.findByText("GitHub");
+    selectTarget("coder");
+    await waitFor(() =>
+      expect(requests("/api/egress-broker/services")).toHaveLength(2),
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Connect GitHub" }),
+    );
+    await waitFor(() =>
+      expect(popup.location.href).toBe(authorization.auth_url),
+    );
+    const [connect] = requests(
+      "/api/egress-broker/services/github/connect",
+      "POST",
+    );
+    expect(connect.searchParams.get("agent_name")).toBe("coder");
+
+    services = [
+      {
+        ...github,
+        configured: true,
+        active_source: "oauth",
+        oauth: { ...githubAccount, connected: true, account_label: "octocat" },
+      },
+      openai,
+    ];
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: authorization.completion_origin,
+        source: popup as unknown as Window,
+        data: {
+          type: "mindroom:oauth-complete",
+          provider: "github",
+          status: "connected",
+        },
+      }),
+    );
+    expect(await screen.findByText("Connected as octocat")).toBeInTheDocument();
+    expect(requests("/api/egress-broker/services")).toHaveLength(3);
+  });
+
+  it("disconnects the global account without an agent_name", async () => {
+    services = [
+      {
+        ...github,
+        configured: true,
+        active_source: "oauth",
+        oauth: { ...githubAccount, connected: true, account_label: "octocat" },
+      },
+      openai,
+    ];
+    mutationResponse = () =>
+      json({ status: "disconnected", provider: "github" });
+    render(<EgressBroker />);
+    expect(await screen.findByText("Connected as octocat")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        requests("/api/egress-broker/services/github/disconnect", "POST"),
+      ).toHaveLength(1),
+    );
+    expect(
+      requests("/api/egress-broker/services/github/disconnect", "POST")[0]
+        .search,
+    ).toBe("");
+    await waitFor(() =>
+      expect(requests("/api/egress-broker/services")).toHaveLength(2),
+    );
   });
 });
 

@@ -39,6 +39,18 @@ export interface ConnectionStatus {
   account_label: string | null;
 }
 
+/** The account a service can use instead of an API key. */
+export interface EgressOAuthStatus {
+  provider: string;
+  display_name: string;
+  connected: boolean;
+  account_label: string | null;
+  can_connect: boolean;
+  reset_required: boolean;
+  /** A shared service account serves this provider, so personal accounts are not connectable. */
+  service_account: boolean;
+}
+
 export interface EgressCredentialService {
   name: string;
   display_name: string;
@@ -48,8 +60,14 @@ export interface EgressCredentialService {
   /** Set by the dashboard for the global key that every agent without a worker scope shares. */
   is_global?: boolean;
   can_manage: boolean;
+  /** True when either an API key or a connected account is available. */
   configured: boolean;
   updated_at: string | null;
+  /** Which source the broker uses; an explicit key wins over a connected account. */
+  active_source: "key" | "oauth" | null;
+  key_configured: boolean;
+  key_updated_at: string | null;
+  oauth: EgressOAuthStatus | null;
 }
 
 export interface EgressCredentialAgent {

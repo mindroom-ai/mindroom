@@ -6,7 +6,7 @@ import { EgressServiceRows } from "./EgressServiceRows";
 import { requestConnection } from "./request";
 import type { EgressCredentialAgent, EgressCredentialList } from "./types";
 
-/** Personal page to set the API keys the egress broker injects for each agent. */
+/** Personal page to connect accounts or set the API keys the egress broker injects for each agent. */
 export function EgressCredentials() {
   const [agents, setAgents] = useState<EgressCredentialAgent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -49,9 +49,10 @@ export function EgressCredentials() {
               Your agents' API keys
             </h1>
             <p className="max-w-2xl text-sm text-muted-foreground">
-              Keys are stored on the MindRoom server and added to outgoing
-              requests for the services below. Your agents never see them, and
-              saved keys cannot be read back.
+              Connect an account or paste an API key for the services below.
+              Both are stored on the MindRoom server and added to outgoing
+              requests. Your agents never see them, and saved keys cannot be
+              read back.
             </p>
           </div>
         </header>

@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EgressServiceRows } from "./EgressServiceRows";
-import type { EgressCredentialService } from "./types";
+import type { EgressCredentialService, EgressOAuthStatus } from "./types";
 
 const github: EgressCredentialService = {
   name: "github",
@@ -18,6 +18,10 @@ const github: EgressCredentialService = {
   can_manage: true,
   configured: false,
   updated_at: null,
+  active_source: null,
+  key_configured: false,
+  key_updated_at: null,
+  oauth: null,
 };
 const openai: EgressCredentialService = {
   ...github,
@@ -25,7 +29,34 @@ const openai: EgressCredentialService = {
   display_name: "OpenAI",
   description: "OpenAI API",
   configured: true,
-  updated_at: null,
+  active_source: "key",
+  key_configured: true,
+};
+const githubAccount: EgressOAuthStatus = {
+  provider: "github",
+  display_name: "GitHub",
+  connected: false,
+  account_label: null,
+  can_connect: true,
+  reset_required: false,
+  service_account: false,
+};
+const withAccount = (
+  account: Partial<EgressOAuthStatus> = {},
+  service: Partial<EgressCredentialService> = {},
+): EgressCredentialService => ({
+  ...github,
+  oauth: { ...githubAccount, ...account },
+  ...service,
+});
+const connectedGithub = withAccount(
+  { connected: true, account_label: "octocat" },
+  { configured: true, active_source: "oauth" },
+);
+const authorization = {
+  provider: "github",
+  auth_url: "https://github.com/login/oauth/authorize?state=abc",
+  completion_origin: "https://portal.example.com",
 };
 
 const noContent = () => new Response(null, { status: 204 });
@@ -70,7 +101,9 @@ describe("egress service rows", () => {
     render(
       <EgressServiceRows
         agentName="personal"
-        services={[{ ...openai, updated_at: updatedAt }]}
+        services={[
+          { ...openai, updated_at: updatedAt, key_updated_at: updatedAt },
+        ]}
         onChanged={vi.fn()}
       />,
     );
@@ -132,6 +165,7 @@ describe("egress service rows", () => {
     render(
       <EgressServiceRows
         secretPath={(name) => `/custom/${name}/secret`}
+        accountPath={(name, action) => `/custom/${name}/${action}`}
         services={[github]}
         onChanged={vi.fn()}
       />,
@@ -333,6 +367,7 @@ describe("egress service rows", () => {
     render(
       <EgressServiceRows
         secretPath={(name) => `/custom/${name}/secret`}
+        accountPath={(name, action) => `/custom/${name}/${action}`}
         errorMessages={{ forbidden: "No access.", notFound: "Gone." }}
         services={[openai]}
         onChanged={vi.fn()}
@@ -359,5 +394,430 @@ describe("egress service rows", () => {
       }),
     );
     expect(await screen.findByText("No access.")).toBeInTheDocument();
+  });
+});
+
+describe("connected accounts", () => {
+  let popup: {
+    closed: boolean;
+    close: ReturnType<typeof vi.fn>;
+    location: { href: string };
+  };
+
+  beforeEach(() => {
+    popup = {
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+    };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+  });
+
+  function finishAuthorization(provider = "github") {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: authorization.completion_origin,
+        source: popup as unknown as Window,
+        data: {
+          type: "mindroom:oauth-complete",
+          provider,
+          status: "connected",
+        },
+      }),
+    );
+  }
+
+  it("offers Connect first and keeps the key behind a secondary toggle", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount()]}
+        onChanged={vi.fn()}
+      />,
+    );
+    const github = row("GitHub");
+    expect(within(github).getByText("Not set")).toBeInTheDocument();
+    expect(
+      within(github).getByRole("button", { name: "Connect GitHub" }),
+    ).toBeEnabled();
+    expect(
+      within(github).queryByRole("button", { name: "Set GitHub API key" }),
+    ).toBeNull();
+
+    fireEvent.click(
+      within(github).getByRole("button", { name: "Use an API key instead" }),
+    );
+    expect(within(github).getByLabelText("GitHub API key")).toBeInTheDocument();
+    expect(
+      within(github).queryByRole("button", { name: "Use an API key instead" }),
+    ).toBeNull();
+    // Cancelling folds the key controls away again.
+    fireEvent.click(within(github).getByRole("button", { name: "Cancel" }));
+    expect(
+      within(github).getByRole("button", { name: "Use an API key instead" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the popup, calls the connect endpoint and reports the change", async () => {
+    vi.mocked(fetch).mockImplementation(async () => json(authorization));
+    const onChanged = vi.fn();
+    render(
+      <EgressServiceRows
+        agentName="my agent"
+        services={[withAccount()]}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+
+    await waitFor(() =>
+      expect(popup.location.href).toBe(authorization.auth_url),
+    );
+    expect(window.open).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/connections/egress/agents/my%20agent/github/connect",
+      expect.objectContaining({ method: "POST", credentials: "same-origin" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Connect GitHub" }),
+    ).toBeDisabled();
+    expect(onChanged).not.toHaveBeenCalled();
+
+    finishAuthorization();
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(popup.close).toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Connect GitHub" }),
+    ).toBeEnabled();
+  });
+
+  it("uses the supplied account paths for connect and disconnect", async () => {
+    vi.mocked(fetch).mockImplementation(async (input) =>
+      String(input).includes("/connect")
+        ? json(authorization)
+        : json({ status: "disconnected", provider: "github" }),
+    );
+    const onChanged = vi.fn();
+    const { rerender } = render(
+      <EgressServiceRows
+        secretPath={(name) => `/custom/${name}/secret`}
+        accountPath={(name, action) => `/custom/${name}/${action}?agent_name=a`}
+        services={[withAccount()]}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    await waitFor(() =>
+      expect(popup.location.href).toBe(authorization.auth_url),
+    );
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe(
+      "/custom/github/connect?agent_name=a",
+    );
+    finishAuthorization();
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <EgressServiceRows
+        secretPath={(name) => `/custom/${name}/secret`}
+        accountPath={(name, action) => `/custom/${name}/${action}?agent_name=a`}
+        services={[connectedGithub]}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(fetch).mock.calls[1][0]).toBe(
+      "/custom/github/disconnect?agent_name=a",
+    );
+  });
+
+  it("shows the server error and does not report a change when connecting fails", async () => {
+    vi.mocked(fetch).mockImplementation(async () => json({}, 409));
+    const onChanged = vi.fn();
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount()]}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not complete the request. Try again.",
+    );
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Connect GitHub" }),
+    ).toBeEnabled();
+  });
+
+  it("tells the user when the browser blocks the popup", async () => {
+    vi.mocked(window.open).mockReturnValue(null);
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount()]}
+        onChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The popup was blocked",
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("offers Connect only when the server says the account is connectable", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount({ can_connect: false })]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Use an API key instead" }),
+    ).toBeInTheDocument();
+  });
+
+  it("lets a user without key rights connect a requester-scoped account", () => {
+    render(
+      <EgressServiceRows
+        agentName="shared_dev"
+        services={[withAccount({}, { is_shared: true, can_manage: false })]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Connect GitHub" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /API key/ })).toBeNull();
+    expect(
+      screen.getByText("API key managed by credential managers"),
+    ).toBeVisible();
+  });
+
+  it("offers no actions to a user who can neither connect nor manage", () => {
+    render(
+      <EgressServiceRows
+        agentName="shared_dev"
+        services={[
+          withAccount(
+            { connected: true, can_connect: false },
+            { is_shared: true, can_manage: false, active_source: "oauth" },
+          ),
+        ]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(within(row("GitHub")).getByText("Connected")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText("Managed by credential managers")).toBeVisible();
+  });
+
+  it("shows the connected account with Disconnect", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[connectedGithub]}
+        onChanged={vi.fn()}
+      />,
+    );
+    const github = row("GitHub");
+    expect(
+      within(github).getByText("Connected as octocat"),
+    ).toBeInTheDocument();
+    expect(
+      within(github).getByRole("button", { name: "Disconnect GitHub" }),
+    ).toBeInTheDocument();
+    expect(
+      within(github).queryByRole("button", { name: /Connect/ }),
+    ).toBeNull();
+  });
+
+  it("says Connected when the provider gives no account label", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[
+          withAccount(
+            { connected: true },
+            { configured: true, active_source: "oauth" },
+          ),
+        ]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(within(row("GitHub")).getByText("Connected")).toBeInTheDocument();
+  });
+
+  it("disconnects only after confirmation and reports the change", async () => {
+    vi.mocked(fetch).mockImplementation(async () =>
+      json({ status: "disconnected", provider: "github" }),
+    );
+    const onChanged = vi.fn();
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[connectedGithub]}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/connections/egress/agents/personal/github/disconnect",
+      expect.objectContaining({ method: "POST", credentials: "same-origin" }),
+    );
+  });
+
+  it("does not disconnect when the confirmation is cancelled", async () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[connectedGithub]}
+        onChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("says the API key is in use and keeps its controls visible", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[
+          withAccount(
+            { connected: true, account_label: "octocat" },
+            { configured: true, active_source: "key", key_configured: true },
+          ),
+        ]}
+        onChanged={vi.fn()}
+      />,
+    );
+    const github = row("GitHub");
+    expect(within(github).getByText("Using API key")).toBeInTheDocument();
+    expect(within(github).queryByText(/Connected as/)).toBeNull();
+    expect(
+      within(github).getByRole("button", { name: "Replace GitHub API key" }),
+    ).toBeInTheDocument();
+    expect(
+      within(github).getByRole("button", { name: "Remove GitHub API key" }),
+    ).toBeInTheDocument();
+    expect(
+      within(github).queryByRole("button", { name: "Use an API key instead" }),
+    ).toBeNull();
+  });
+
+  it("offers Reconnect when the saved connection needs a reset", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount({ reset_required: true })]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Reconnect GitHub" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
+  });
+
+  it("resets an unreadable connection after confirmation", async () => {
+    vi.mocked(fetch).mockImplementation(async () =>
+      json({ status: "disconnected", provider: "github" }),
+    );
+    const onChanged = vi.fn();
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount({ reset_required: true })]}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reset GitHub connection" }),
+    );
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Reset connection",
+      }),
+    );
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe(
+      "/api/connections/egress/agents/personal/github/disconnect",
+    );
+  });
+
+  it("stops waiting for authorization when Cancel is clicked", async () => {
+    vi.mocked(fetch).mockImplementation(async () => json(authorization));
+    const onChanged = vi.fn();
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount()]}
+        onChanged={onChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    await waitFor(() =>
+      expect(popup.location.href).toBe(authorization.auth_url),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.getByRole("button", { name: "Connect GitHub" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    await waitFor(() => expect(popup.close).toHaveBeenCalled());
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("explains a shared service account and offers no connect action", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[withAccount({ service_account: true, can_connect: false })]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      within(row("GitHub")).getByText("Uses a shared service account"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
+  });
+
+  it("leaves services without an account provider as plain key rows", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[github]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
+    expect(screen.queryByText("Use an API key instead")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Set GitHub API key" }),
+    ).toBeInTheDocument();
   });
 });

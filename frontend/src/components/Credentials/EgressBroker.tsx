@@ -9,7 +9,10 @@ import {
 import { Download, RefreshCw } from "lucide-react";
 import { EgressServiceRows } from "@/connections/EgressServiceRows";
 import type { RequestErrorMessages } from "@/connections/request";
-import type { EgressCredentialService } from "@/connections/types";
+import type {
+  EgressCredentialService,
+  EgressOAuthStatus,
+} from "@/connections/types";
 import {
   API_ENDPOINTS,
   fetchJSON,
@@ -42,7 +45,7 @@ const GLOBAL_OPTION = "Global (unscoped agents)";
 // Brokered traffic only exists for agents that can run commands.
 const EGRESS_TOOLS = ["shell", "python"];
 const SECRET_ERROR_MESSAGES: RequestErrorMessages = {
-  forbidden: "You are not allowed to change egress keys.",
+  forbidden: "You are not allowed to change egress keys or accounts.",
   notFound:
     "This service is no longer configured. Reload the page to update the list.",
 };
@@ -53,6 +56,10 @@ interface BrokerService {
   description: string;
   configured: boolean;
   updated_at: string | null;
+  active_source: "key" | "oauth" | null;
+  key_configured: boolean;
+  key_updated_at: string | null;
+  oauth: EgressOAuthStatus | null;
 }
 
 interface AuditRecord {
@@ -159,7 +166,7 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
   return (
     <section aria-labelledby="egress-services-heading" className="space-y-2">
       <h3 id="egress-services-heading" className="text-sm font-medium">
-        Service keys
+        Service keys and accounts
       </h3>
       {error && (
         <Alert variant="destructive" className="p-2">
@@ -183,6 +190,12 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
             secretPath={(serviceName) =>
               withAgentName(
                 API_ENDPOINTS.egressBroker.secret(serviceName),
+                agentName,
+              )
+            }
+            accountPath={(serviceName, action) =>
+              withAgentName(
+                API_ENDPOINTS.egressBroker.account(serviceName, action),
                 agentName,
               )
             }
@@ -397,8 +410,9 @@ export function EgressBroker() {
       <CardHeader className="pb-3">
         <CardTitle className="text-xl">Egress broker</CardTitle>
         <CardDescription>
-          API keys the broker injects into outbound requests from agent workers.
-          Keys are write-only and never shown again.
+          API keys and connected accounts the broker injects into outbound
+          requests from agent workers. Keys are write-only and never shown
+          again.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
