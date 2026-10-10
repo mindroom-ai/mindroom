@@ -454,7 +454,7 @@ ResponseResult(
     delivery_kind: str,  # "sent" or "edited"
     response_kind: str,
     envelope: MessageEnvelope,
-    tool_trace: tuple[ToolTraceEntry, ...] = (),  # tool calls that produced this reply
+    tool_trace: tuple[ToolTraceEntry, ...] = (),  # tool calls shown with this reply; empty for team replies and agents with show_tool_calls: false
 )
 ```
 

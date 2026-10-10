@@ -72,8 +72,7 @@ def _tool_line(entry: ToolTraceEntry) -> str:
         line += f" with {_clip(entry.args_preview)}"
     if entry.result_preview:
         line += f"; result: {_clip(entry.result_preview)}"
-    # Tool arguments are not essential evidence, so redact them instead of refusing the whole request.
-    return redact_sensitive_text(line)
+    return line
 
 
 def _research_check_messages(
@@ -92,6 +91,9 @@ def _research_check_messages(
             break
         lines.append(line)
     tools = "\n".join(["Tool calls made for this reply:", *lines]) if lines else "Tool calls made for this reply: none"
+    # Tool previews are not essential evidence, so redact them instead of refusing the whole request; the joined
+    # text is redacted once because some credential patterns span a line break.
+    tools = redact_sensitive_text(tools)
     return (
         JudgmentMessage("user", body),
         JudgmentMessage("assistant", tools),
@@ -100,7 +102,9 @@ def _research_check_messages(
 
 
 def _reply_opening(reply: str) -> str:
-    return _clip(" ".join(line for line in reply.splitlines() if not is_visible_tool_marker_line(line)), _OPENING_CHARS)
+    # Without "@", a mention in the quote cannot tag another agent or person in the follow-up.
+    text = " ".join(line for line in reply.splitlines() if not is_visible_tool_marker_line(line)).replace("@", "")
+    return _clip(text, _OPENING_CHARS)
 
 
 @hook(EVENT_MESSAGE_AFTER_RESPONSE, timeout_ms=35_000)

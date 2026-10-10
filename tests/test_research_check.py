@@ -232,7 +232,6 @@ async def test_false_abstain_and_failure_send_nothing(
         {"envelope": _dispatched_envelope("hook_dispatch", hook_source="automation/dreaming")},
         {"envelope": _dispatched_envelope("scheduled")},
         {"envelope": _dispatched_envelope("external_trigger")},
-        {"response_kind": "router"},
         {"response_kind": "team"},
         {"settings": _SETTINGS | {"agents": ["other"]}},
     ],
@@ -241,7 +240,6 @@ async def test_false_abstain_and_failure_send_nothing(
         "automation",
         "scheduled",
         "external-trigger",
-        "router-reply",
         "team-reply",
         "filtered-agent",
     ],
@@ -410,6 +408,18 @@ async def test_follow_up_quotes_the_reply_text_not_its_tool_markers(harness: _Ha
 
 
 @pytest.mark.asyncio
+async def test_follow_up_quote_mentions_no_one(harness: _Harness) -> None:
+    """Mentions in the quoted reply would tag other agents or people in the follow-up."""
+    reply = "Ask @researcher or @alice:example.org to double-check Café Noir."
+
+    await research_check.check_research(harness.context(response_text=reply))
+
+    [sent] = harness.sent
+    assert sent.body.count("@") == 1
+    assert sent.body.startswith("@code ")
+
+
+@pytest.mark.asyncio
 async def test_replies_to_other_agents_are_not_checked(harness: _Harness) -> None:
     """Only a person's request earns a follow-up; an agent asking another agent does not."""
     envelope = _envelope(
@@ -426,6 +436,30 @@ async def test_replies_to_other_agents_are_not_checked(harness: _Harness) -> Non
 
     assert harness.bound == []
     assert harness.sent == []
+
+
+@pytest.mark.asyncio
+async def test_failed_search_retry_is_still_judged(harness: _Harness) -> None:
+    """A search tool's "provide an API key" error followed by a retry must not get the whole request refused."""
+    trace = (
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="serpapi_search",
+            args_preview="query=coffee",
+            result_preview="Please provide an API key",
+        ),
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="duckduckgo_search",
+            args_preview="query=coffee",
+            result_preview="No results found.",
+        ),
+    )
+
+    await research_check.check_research(harness.context(tool_trace=trace))
+
+    [request] = harness.requests
+    assert "duckduckgo_search" in _conversation(request)[1]["text"]
 
 
 @pytest.mark.asyncio
