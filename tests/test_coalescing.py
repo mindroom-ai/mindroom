@@ -1356,6 +1356,45 @@ async def test_active_follow_up_backlog_keeps_media_with_its_own_requester() -> 
 
 
 @pytest.mark.asyncio
+async def test_active_follow_up_backlog_keeps_a_message_for_another_participant_out_of_this_agents_turn() -> None:
+    """A queued message addressed to someone else runs as its own turn, so it cannot make the agent skip one for it."""
+    calls: list[list[str]] = []
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(list(batch.handled_turn.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    for event_id, body, for_another_participant in (
+        ("$a1:localhost", "also check X", False),
+        ("$a2:localhost", "@bob what do you think?", True),
+        ("$a3:localhost", "and Y", False),
+    ):
+        pending = make_pending_event(
+            _text_event(event_id, body, 1_000_000),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id="@alice:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        )
+        await _admit_ready(
+            gate,
+            key,
+            replace(pending, event=replace(pending.event, for_another_participant=for_another_participant)),
+        )
+    # The message for someone else is another run, so a newer message of Alice's cannot supersede her earlier one.
+    assert gate.follow_up_backlog_queues_other_run(key, "@alice:localhost")
+    await gate.drain_all()
+
+    assert calls == [["$a1:localhost"], ["$a2:localhost"], ["$a3:localhost"]]
+
+
+@pytest.mark.asyncio
 async def test_media_tailed_follow_up_backlog_flushes_immediately_at_idle() -> None:
     """A follow-up backlog ending in media flushes at idle without a debounce wait.
 

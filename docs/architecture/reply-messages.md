@@ -82,7 +82,7 @@ The create, each pause, and every terminal update are durable rows, recorded wit
 Each progress edit is a direct edit recorded first by `write_ahead`, which raises the confirmed sequence of the previous edit.
 A note a rule decides without a payload (an ownerless Stop, a restart, a settlement without an answer) is an owed write that `settle_reply_debt` renders and enqueues.
 Recovery renders from the possibly-shown presentation, so a restart continues below what the reply may already show.
-A replay tells the model which tool calls the attempts it takes over recorded, those spans that ended `lost`, `released`, `paused`, or `superseded` since the reply's last answer, so it does not repeat a finished call.
+A replay tells the model which tool calls the attempts it takes over recorded, those spans that ended `lost`, `released`, `paused`, or `superseded` since the reply's last answer, so it knows which calls already ran.
 A regeneration redoes its edit's turn, so it is told only about the earlier attempts of the same edit, such as one a restart cut short.
 
 ## Stop

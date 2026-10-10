@@ -376,6 +376,18 @@ def pending_event_run_identity(key: CoalescingKey, pending_event: PendingEvent) 
     return _pending_event_requester_user_id(key, pending_event), event.sender if event.acts_for_requester else None
 
 
+def pending_event_addressing(pending_event: PendingEvent) -> bool | None:
+    """Return whether one queued event is for another participant; ``None`` for an upload that leaves that to its caption.
+
+    A batch takes its mentions from its latest event, so a message for another
+    participant never shares a batch with one for this agent: the agent would skip both.
+    """
+    event = pending_event.event
+    if event.raw_event is not None and not event.for_another_participant:
+        return None
+    return event.for_another_participant
+
+
 def _batch_requester_user_id(key: CoalescingKey, ordered_pending_events: list[PendingEvent]) -> str:
     """Resolve the one requester every event in the batch executes as.
 

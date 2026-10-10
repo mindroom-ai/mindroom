@@ -20,6 +20,7 @@ from .coalescing_batch import (
     build_prepared_turn,
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
+    pending_event_addressing,
     pending_event_run_identity,
 )
 from .coalescing_cleanup import (
@@ -301,6 +302,7 @@ class CoalescingGate:
         """Return whether an active follow-up backlog still queues a run other than this requester's own messages."""
         return is_active_follow_up_coalescing_key(key) and any(
             pending_event_run_identity(key, pending_event) != (requester_user_id, None)
+            or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
 
@@ -1215,11 +1217,18 @@ class CoalescingGate:
 
     @staticmethod
     def _front_same_run_identity_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
-        """Cap a front run at its first run-identity change so each turn runs as its own sender."""
+        """Cap a front run at its first change of run identity or addressing, so each turn runs as its own sender."""
         front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
+        addressing: bool | None = None
         for index, queued in enumerate(islice(gate.queue, count)):
             if pending_event_run_identity(key, queued.pending_event) != front_identity:
                 return index
+            event_addressing = pending_event_addressing(queued.pending_event)
+            if event_addressing is None:
+                continue
+            if addressing is not None and event_addressing != addressing:
+                return index
+            addressing = event_addressing
         return count
 
     async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:

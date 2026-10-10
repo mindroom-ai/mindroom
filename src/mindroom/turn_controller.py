@@ -1149,6 +1149,7 @@ class TurnController:
                 trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
                 discovery_event_id=self.deps.ingress.discovery_event_id(event),
                 turn_dispatch_recovery=turn_dispatch_recovery_active(),
+                for_another_participant=not self._addressed_to_this_agent(room, prepared_event.source),
             ),
             room=room,
             dispatch_metadata=dispatch_metadata,
@@ -2610,6 +2611,7 @@ class TurnController:
                         message_received_depth=envelope.message_received_depth,
                         trust_internal_payload_metadata=True,
                         turn_dispatch_recovery=turn_dispatch_recovery_active(),
+                        for_another_participant=not self._addressed_to_this_agent(room, normalized_event.source),
                     ),
                     room=room,
                     dispatch_metadata=(

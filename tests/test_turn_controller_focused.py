@@ -1803,7 +1803,10 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
     held: bool,
     mention: str | None,
 ) -> None:
-    """A human message to a conversation an approval holds is marked as waiting, unless it is for another agent."""
+    """A human message to a conversation an approval holds is marked as waiting, unless it is for another agent.
+
+    The queue records whether it is for another participant, so it never shares a turn with messages for this agent.
+    """
     harness = _build_harness(config, tmp_path)
     harness.runner.held_for_approval = held
     room = _room_with_members(config, "general", "research")
@@ -1817,6 +1820,10 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
 
     waits = held and mention in {None, "general"}
     assert harness.gateway.reactions == ([(event.event_id, "⏳", "approval_wait")] if waits else [])
+    await harness.gate.drain_all()
+    assert [batch.event.for_another_participant for batch in harness.gate_batches] == [
+        mention not in {None, "general"},
+    ]
 
 
 @pytest.mark.asyncio
