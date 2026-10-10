@@ -45,6 +45,7 @@ Workers can read their own proxy token (it is in their environment), but the tok
 On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated workers when requesters must not be able to use each other's brokered credentials.
 
 The egress broker listener (when `MINDROOM_EGRESS_BROKER_PORT` is set) is a worker-reachable primary runtime surface: workers must reach it to make brokered requests, so it must be accessible from the worker network (Docker `docker0` interface or the Kubernetes broker Service).
+The hosted `static_runner` sidecar shares the primary pod's network instead, so there the broker binds only loopback (`127.0.0.1`) and is reachable from no other pod.
 The broker port must not be published beyond the worker network, because a leaked or expired token could otherwise be used from arbitrary network locations.
 Firewall rules and network policies confine the broker port to worker-originated connections only.
 

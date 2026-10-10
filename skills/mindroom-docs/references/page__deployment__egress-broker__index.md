@@ -248,8 +248,10 @@ The instance chart that the SaaS platform deploys runs tool code in a `static_ru
 Set `egressBroker.enabled: true` and the chart sets `MINDROOM_EGRESS_BROKER_PORT=8768`, `MINDROOM_EGRESS_BROKER_HOST=127.0.0.1`, and `MINDROOM_EGRESS_BROKER_URL=http://127.0.0.1:8768` on the primary container and on nothing else.
 The broker binds loopback, so the sidecar reaches it without a Service or NetworkPolicy, and nothing outside the pod can.
 Tenant secrets are then managed on the dashboard or the personal egress page like any other deployment.
-The chart default is off and the platform provisioner does not forward this value yet, so set it in the instance chart's Helm values, for example `--set egressBroker.enabled=true`.
-It takes effect with a SaaS release, because the primary image must include the broker.
+The chart default is off, and the platform provisioner does not forward `egressBroker.enabled` yet.
+It runs `helm upgrade --install` with a fixed set of values and no `--reuse-values`, and every release deploy re-provisions all tenants, so a value set by hand (for example `--set egressBroker.enabled=true`) is overwritten by the next provision and brokered secrets then silently stop being injected.
+Until the provisioner forwards the value, which is a follow-up, treat a hand-set value as for testing only.
+The primary image must also include the broker, so it takes effect with a SaaS release.
 
 ### Background-script workers
 
@@ -263,9 +265,10 @@ The broker returns these errors to worker code:
 | Condition | Response |
 |-----------|----------|
 | Missing or invalid proxy token | 407 with `Proxy-Authenticate: Basic` challenge |
-| Expired token | 407 with `Proxy-Authenticate: Basic` challenge; already-open tunnels and websockets continue until closed |
+| Expired token | 407 with `Proxy-Authenticate: Basic` challenge, including on each request inside an already-open intercepted tunnel; only websocket splices and raw (unmatched-host) tunnels that were already open continue until closed |
 | Plain HTTP request matching a rule | 403 JSON `{"error": "tls_required", "service": "<name>"}` |
-| Host mismatch inside an intercepted tunnel | 403 JSON `{"error": "host_mismatch"}` (non-origin-form target or `Host` header naming a different host) |
+| `Host` header inside an intercepted tunnel naming a different host than the CONNECT target | 403 JSON `{"error": "host_mismatch"}` |
+| Non-origin-form request target (absolute, authority, or asterisk form) inside an intercepted tunnel | 400 JSON `{"error": "bad_request"}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked"}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed"}` with service list hint |
 | Matched service, no secret in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>"}` |
@@ -284,7 +287,7 @@ The following are tested and intentional:
 
 - Only `Upgrade: websocket` is spliced; after a 101 response the broker forwards frames without inspecting them.
 - Plain HTTP requests that match a rule get 403 `tls_required` and are never injected, because the secret would travel unencrypted.
-- Inside an intercepted HTTPS tunnel, a `Host` header or target that names a different host than the CONNECT target gets 403 `host_mismatch` to prevent secrets from being sent to the wrong destination. Non-origin-form request targets are rejected with 400.
+- Inside an intercepted HTTPS tunnel, a `Host` header that names a different host than the CONNECT target gets 403 `host_mismatch` to prevent secrets from being sent to the wrong destination. Non-origin-form request targets are rejected with 400 `bad_request`.
 - Routing uses the CONNECT target host and port only, never the `Host` header, so a replaced `Host` header cannot redirect the secret.
 - Redirects are returned to the client without following them; a redirect to a new host requires a new CONNECT and a new match.
 - The client's value for the slot the broker injects into (such as `Authorization`) is always removed before injection.

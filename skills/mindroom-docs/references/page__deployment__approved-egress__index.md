@@ -139,8 +139,9 @@ Workers keep Squid as their first hop: the primary sets `MINDROOM_EGRESS_BROKER_
 After the allowlist and grant check, requests that carry a token go on to the broker, which still validates the token and injects credentials, while requests without a token go directly to the internet.
 The broker's ingress NetworkPolicy admits only the approved egress pods in this mode, and changing `egressBroker.port` restarts the proxy.
 
-Before a grant, Squid denies a brokered host such as `api.github.com`, so `curl https://api.github.com/user` fails.
-After `request_network_access` for that host is approved, the same request succeeds with the credential injected.
+By design, Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
+After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
+This is the intended behavior of the chain, not something that has been demonstrated on a live cluster.
 `approvedEgress.parentProxy.bypassDomains` still skips the broker for destinations such as signed URLs.
 
 The chart refuses `approvedEgress.parentProxy.enabled` with a host other than the default while the broker is enabled, so a custom parent is not dropped silently, and it refuses the broker together with `workers.kubernetes.agentVault`.

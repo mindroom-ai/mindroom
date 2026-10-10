@@ -295,7 +295,7 @@ For the Tuwunel volume, use an offline snapshot or Tuwunel's own database backup
   A missing index is rebuilt in the background the next time the base is used, repeating every embedding call, and agents report the base as initializing meanwhile.
   The sources, including files uploaded through the dashboard, are not rebuildable unless they come from Git, in which case they are cloned again from the configured repository.
 - `logs/` only holds runtime log files.
-- `egress_broker/` holds the broker's CA, token signing key, and request log. A missing CA or key is generated again and only invalidates outstanding worker tokens, because each call gets a fresh one, but the request log is lost.
+- `egress_broker/` holds the broker's CA, token signing key, and request log. Deleting it generates them again and loses the request log. Outstanding worker tokens stop working, and calls already running with the old CA certificate fail TLS until their next call, because each call gets a fresh token and CA from the primary. `ca.key` is encrypted with `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, so changing that key makes the broker fail to start until you remove `egress_broker/`.
 - The approved egress volume only holds temporary grants, which expire after at most `approvedEgress.maxTtlSeconds`.
 
 Everything else on the storage, sessions, state, and journal volumes is not rebuildable.
