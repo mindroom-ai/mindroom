@@ -322,3 +322,57 @@ async def test_a_wake_no_span_took_settles_and_ends_a_wait_no_work_is_left_for(t
     ended = await principal.replies.load(reply.reply_id)
     assert ended is not None
     assert ended.state is rl.ReplyState.COMPLETED
+
+
+async def test_a_stop_of_an_older_waiting_reply_leaves_a_newer_turns_work_alone(tmp_path: Path) -> None:
+    """Work a later message of the conversation started belongs to that message's reply, which stops it."""
+    owner = job_owner()
+    runtime = await tool_job_runtime(tmp_path)
+    coordinator = _coordinator(tmp_path, runtime, MagicMock())
+    journal = coordinator._journal
+    assert journal is not None
+    principal = journal.principal(_PRINCIPAL)
+    key = _key(owner)
+
+    def message(event_id: str, origin_server_ts: int) -> InboundEvent:
+        return InboundEvent(
+            event_id,
+            key.room_id,
+            key.thread_id,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            key.requester_id,
+            origin_server_ts,
+            {},
+        )
+
+    await principal.admit(message("$earlier", 1))
+    reply = await _waiting_reply(principal, key)
+    await principal.admit(message("$newer", 2))
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        for job_id, source in (("earlier", "$earlier"), ("newer", "$newer")):
+            await start_job(
+                runtime,
+                job_id,
+                tool_name="tool",
+                depth=0,
+                adapter={},
+                owner=owner,
+                source_event_id=source,
+                operation=forever,
+            )
+        stop = rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=30)
+        await principal.replies.update(reply.reply_id, lambda _current: stop)
+
+        await coordinator._apply_job_stops()
+
+        await wait_for_status(runtime, "earlier", "cancelled")
+        assert user_stopped(runtime, "earlier")
+        assert not user_stopped(runtime, "newer")
+    finally:
+        await runtime.shutdown()

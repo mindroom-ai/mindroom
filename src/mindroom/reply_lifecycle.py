@@ -203,7 +203,8 @@ class Reply:
     redaction_pending: tuple[str, ...] = ()
     approval_id: str | None = None
     owed_write: OwedWrite | None = None
-    # Whose outstanding background work the reply waits for, set when it first waits and kept after: opaque JSON.
+    # Whose outstanding background work the reply waits for, as opaque JSON: set by each wait and kept after it,
+    # so a Stop during the wake still reaches that work; a regeneration clears it.
     hold_key: str | None = None
 
     @property
@@ -753,10 +754,11 @@ def _wake(
     """
     if reply is None or reply.reply_id != request.wake_reply_id:
         return _unchanged(Outcome.DUPLICATE, reply)
+    # The wake's own source names the attempt to retry, its approval's resume included.
     retried = (
         reply.state is ReplyState.ACTIVE
         and last is not None
-        and last.kind is SpanKind.WAKE
+        and last.delivery_id == request.delivery_id
         and last.outcome in _SOURCES_PENDING_OUTCOMES
     )
     if reply.state is not ReplyState.WAITING and not retried:
@@ -788,8 +790,9 @@ def _regeneration(
         rollback = _kept_answer(reply, last)
     else:
         rollback = _rollback_of(reply) if reply.terminal else None
-    # Its rows belong to the membership its edit arrived in, which a leave and rejoin moved on.
-    updated = replace(reply, membership_epoch=request.membership_epoch)
+    # Its rows belong to the membership its edit arrived in, which a leave and rejoin moved on; the regenerated
+    # answer starts over, so no earlier wait is its.
+    updated = replace(reply, membership_epoch=request.membership_epoch, hold_key=None)
     span = _new_span(request, updated, SpanKind.REGENERATION, rollback=rollback)
     # A regeneration replaces the whole answer; the old one lives in the rollback.
     regenerating = _set_state(updated, ReplyState.ACTIVE, request.now_ns)
@@ -1555,8 +1558,11 @@ def flush_owed_write(
 
 
 def dispatch_failed(reply: Reply, current: Span | None, *, error_text: str, now_ns: int) -> Transition:
-    """A dispatch failed before or after a claim: the reply shows the error."""
-    if reply.terminal:
+    """A dispatch failed before or after a claim: the reply shows the error.
+
+    A waiting reply's answer stands: a dispatch that failed before its wake claimed it changed nothing.
+    """
+    if reply.terminal or reply.state is ReplyState.WAITING:
         return _unchanged(Outcome.DUPLICATE, reply)
     if current is not None and not current.ended and (kept := _kept_answer(reply, current)) is not None:
         return _restored(reply, current, kept, now_ns, SettleSources(current.span_id))
@@ -1642,23 +1648,33 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     ``span`` is the reply's current span, or its last one when none runs.
     A reply an approval holds goes too, and the deletion cancels that
     approval, as a Stop would: its settlement expires the cards and settles
-    the sources it holds. A reply that waits for background work, or whose
-    wake runs, keeps the answer it already gave, and that work is cancelled.
+    the sources it holds. A reply that waited for background work keeps the
+    answer it gave: a waiting one ends with it, and one whose wake was cut
+    short ends with the interrupted note. Either way the reply's background
+    work is cancelled.
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     live = span is not None and span.span_id == reply.current_span_id and not span.ended
     current = span if live else None
-    if reply.approval_id is None and (
-        reply.state is ReplyState.WAITING or (span is not None and span.kind is SpanKind.WAKE)
-    ):
-        # The reply already answered: that answer stands, and the background work it waits for is cancelled.
+    if reply.approval_id is None and reply.hold_key is not None:
+        # The reply already answered: that answer stands.
         updated, spans = _end_running(reply, current, SpanOutcome.CANCELLED)
         cancel = () if current is None else (CancelSpan(current.span_id),)
-        owed = OwedWrite(reply.last_span_id, None)
+        if reply.state is ReplyState.WAITING:
+            ending = _set_state(
+                _stop_applied(updated),
+                ReplyState.COMPLETED,
+                now_ns,
+                owed_write=OwedWrite(reply.last_span_id, None),
+            )
+        else:
+            # A wake may have shown part of its continuation, which must not read as a finished answer.
+            owed = OwedWrite(reply.last_span_id, NoteKind.INTERRUPTED)
+            ending = _set_state(_stop_applied(updated), ReplyState.FAILED, now_ns, owed_write=owed)
         return Transition(
             outcome=Outcome.APPLIED,
-            reply=_set_state(_stop_applied(updated), ReplyState.COMPLETED, now_ns, owed_write=owed),
+            reply=ending,
             spans=spans,
             effects=(*cancel, SettleSources(reply.last_span_id, answered=False), StopJobs(reply.reply_id)),
         )
@@ -1683,7 +1699,9 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
         if reply.approval_id is None
         else FenceApproval(reply.approval_id, "cancelled_by_user")
     )
-    return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=(*cancel, ending))
+    # As a Stop would, the deletion cancels the background work the reply started.
+    effects = (*cancel, ending, StopJobs(reply.reply_id))
+    return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=effects)
 
 
 def departed(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
@@ -1820,6 +1838,16 @@ def owed_write_refused(reply: Reply, owed: OwedWrite, *, now_ns: int) -> Transit
     if reply.owed_write != owed:
         return _unchanged(Outcome.DUPLICATE, reply)
     return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, owed_write=None))
+
+
+def vacated(reply: Reply, owed: OwedWrite, *, now_ns: int) -> Transition:
+    """End the message of a reply whose owed write would show nothing but its placeholder, as a wait with no answer.
+
+    Nothing is left for the message to show, so it goes, as a reply that showed only its placeholder does.
+    """
+    if reply.owed_write != owed:
+        return _unchanged(Outcome.DUPLICATE, reply)
+    return Transition(outcome=Outcome.APPLIED, reply=_touch(_gone(reply, now_ns), now_ns, owed_write=None))
 
 
 def redactions_done(reply: Reply, event_ids: tuple[str, ...], *, now_ns: int) -> Transition:

@@ -1890,8 +1890,8 @@ async def test_a_newer_waiting_reply_takes_the_work_over(journal_store: EventJou
     """At most one reply waits for a key's work: the newer one ends the older one, which keeps its answer."""
     principal = journal_store.principal(PRINCIPAL)
     await _waiting(principal)
-    other_key = await _waiting(principal, source="$elsewhere", reply_id="reply-3")
-    assert other_key.hold_key == _KEY
+    newer = await _waiting(principal, source="$elsewhere", reply_id="reply-3")
+    assert newer.hold_key == _KEY
     # The second wait above took reply-1 over too; a reply on another key is left alone.
     first = await principal.replies.load("reply-1")
     assert first is not None

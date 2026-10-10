@@ -42,8 +42,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import EventJournalStore
-    from mindroom.event_journal.replies import ReplyStore
+    from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.reply_lifecycle import Reply
     from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -319,13 +318,25 @@ class ToolJobRuntimeCoordinator:
             principal = journal.principal(principal_id)
             reply = await principal.replies.load(reply_id)
             if reply is not None:
-                matches = await self._stopped_work(principal.replies, reply)
+                matches = await self._stopped_work(principal, reply)
                 await self.runtime.stop_jobs(receipt_order=reply.stop_receipt_order or 0, matches=matches)
             await principal.replies.forget_job_stop(reply_id)
 
-    async def _stopped_work(self, replies: ReplyStore, reply: Reply) -> Callable[[BackgroundJob], Awaitable[bool]]:
-        """Match the work a stopped reply started, and the work it waited for when it ever waited."""
-        sources = {source for span in await replies.spans(reply.reply_id) for source in span.sources.pending_event_ids}
+    async def _stopped_work(
+        self,
+        principal: PrincipalStore,
+        reply: Reply,
+    ) -> Callable[[BackgroundJob], Awaitable[bool]]:
+        """Match the work a stopped reply started, and the work it waited for when it ever waited.
+
+        The work a newer turn of the conversation started after the reply's own sources is that turn's to stop.
+        """
+        spans = await principal.replies.spans(reply.reply_id)
+        sources = {source for span in spans for source in span.sources.pending_event_ids}
+        orders = [
+            event.receipt_order for source in sources if (event := await principal.load_event(source)) is not None
+        ]
+        cutoff = max(orders, default=None)
         held = (
             frozenset()
             if reply.hold_key is None
@@ -335,11 +346,14 @@ class ToolJobRuntimeCoordinator:
         )
 
         async def matches(job: BackgroundJob) -> bool:
-            return (
-                job.owner.recipient == reply.entity_name
-                and job.owner.room_id == reply.room_id
-                and (job.source_event_id in sources or job.job_id in held)
-            )
+            if job.owner.recipient != reply.entity_name or job.owner.room_id != reply.room_id:
+                return False
+            if job.source_event_id in sources:
+                return True
+            if job.job_id not in held:
+                return False
+            started = None if job.source_event_id is None else await principal.load_event(job.source_event_id)
+            return started is None or cutoff is None or started.receipt_order <= cutoff
 
         return matches
 

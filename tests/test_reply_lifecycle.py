@@ -1537,7 +1537,7 @@ def test_deleting_the_sources_of_a_held_reply_cancels_its_approval_and_keeps_a_f
     the sources the approval holds.
     """
     reply, span, transition = _paused()
-    cancel = (FenceApproval("approval-1", "cancelled_by_user"),)
+    cancel = (FenceApproval("approval-1", "cancelled_by_user"), rl.StopJobs(reply.reply_id))
     settling = replace(reply, state=ReplyState.ACTIVE, current_span_id=None)
     assert settling.approval_id is not None
     for held in (reply, settling):
@@ -2458,7 +2458,9 @@ def test_deleting_the_message_during_a_wake_cancels_the_wake() -> None:
     assert woken.claimed is not None
     transition = rl.sources_deleted(woken.reply, woken.claimed, now_ns=NOW)
     assert transition.reply is not None
-    assert transition.reply.state is ReplyState.COMPLETED
+    # What the wake may have shown of its continuation ends with the interrupted note, not as a finished answer.
+    assert transition.reply.state is ReplyState.FAILED
+    assert transition.reply.owed_write == rl.OwedWrite(woken.claimed.span_id, NoteKind.INTERRUPTED)
     assert _span_after(transition, woken.claimed.span_id).outcome is SpanOutcome.CANCELLED
     assert transition.effects == (
         CancelSpan(woken.claimed.span_id),
@@ -2489,3 +2491,60 @@ def test_a_waiting_reply_records_its_stop_button() -> None:
     transition = rl.record_stop_button(reply, event_id="$button", membership_current=True, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.stop_button_event_id == "$button"
+
+
+def test_a_wake_whose_approval_resume_was_released_is_retried_as_a_wake() -> None:
+    """A restart that released a wake's approval resume leaves its source pending; the retry continues as a wake."""
+    reply, span = _waiting()
+    woken = rl.claim(_wake_request(), _context(reply, span))
+    assert woken.reply is not None
+    assert woken.claimed is not None
+    resume = replace(
+        woken.claimed,
+        span_id="span-resume",
+        kind=SpanKind.APPROVAL_RESUME,
+        approval_id="approval-1",
+        outcome=SpanOutcome.RELEASED,
+    )
+    released = replace(woken.reply, current_span_id=None, last_span_id=resume.span_id)
+    retried = rl.claim(_wake_request("span-retry"), _context(released, span, resume))
+    assert retried.claimed is not None
+    assert retried.claimed.kind is SpanKind.WAKE
+
+
+def test_deleting_a_running_turns_message_cancels_the_work_it_started() -> None:
+    """As a Stop would, a deletion that ends a running reply also cancels its background work."""
+    reply, span = _turn()
+    deleted = rl.sources_deleted(reply, span, now_ns=NOW)
+    assert rl.StopJobs(reply.reply_id) in deleted.effects
+
+
+def test_a_wait_that_gave_no_answer_removes_its_message() -> None:
+    """A reply whose owed end would show only its placeholder ends gone, its message redacted."""
+    reply, _span = _waiting()
+    ended = rl.unhold(replace(reply, event_id="$reply"), now_ns=NOW).reply
+    assert ended is not None
+    assert ended.owed_write is not None
+    vacated = rl.vacated(ended, ended.owed_write, now_ns=NOW).reply
+    assert vacated is not None
+    assert vacated.state is ReplyState.GONE
+    assert vacated.owed_write is None
+    assert "$reply" in vacated.redaction_pending
+    assert rl.vacated(vacated, ended.owed_write, now_ns=NOW).outcome is Outcome.DUPLICATE
+
+
+def test_a_regeneration_starts_without_the_wait_of_the_answer_it_replaces() -> None:
+    """A Stop of the regenerated answer reaches only the work the regeneration starts."""
+    reply, span = _waiting()
+    stopped = rl.stop(reply, span, StopFacts(receipt_order=4, span_live=False), now_ns=NOW).reply
+    assert stopped is not None
+    edit = _request("span-edit", delivery_id="$edit", driving_edit_id="$edit")
+    regenerated = rl.claim(edit, _context(replace(stopped, owed_write=None), span))
+    assert regenerated.reply is not None
+    assert regenerated.reply.hold_key is None
+
+
+def test_a_failed_dispatch_leaves_a_waiting_reply_waiting() -> None:
+    """A dispatch that failed before a wake claimed the reply changed nothing it shows."""
+    reply, _span = _waiting()
+    assert rl.dispatch_failed(reply, None, error_text="boom", now_ns=NOW).outcome is Outcome.DUPLICATE

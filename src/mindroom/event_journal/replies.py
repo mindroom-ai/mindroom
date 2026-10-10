@@ -148,6 +148,8 @@ def _take_over(transaction: Transaction, principal_id: str, transition: Transiti
     older = reply_messages.lock(transaction, principal_id, waiting)
     assert older is not None, "the reply waiting on a key exists"
     taken = apply(transaction, principal_id, rl.unhold(older, now_ns=reply.updated_at_ns))
+    if not taken.transition.applied:
+        return taken.post_commit
     return (*taken.post_commit, ReplyDebtDue(waiting))
 
 
@@ -377,8 +379,14 @@ def claim(
     )
     reply: Reply | None = None
     if request.wake_reply_id is not None:
+        # A wake continues only the reply it names; one retention forgot leaves it nothing to run.
         reply = reply_messages.lock(transaction, principal_id, request.wake_reply_id)
-    if reply is None and interactive is not None:
+        return apply(
+            transaction,
+            principal_id,
+            rl.claim(request, _claim_context(transaction, principal_id, request, reply)),
+        )
+    if interactive is not None:
         reply = reply_messages.lock(transaction, principal_id, interactive.reply_id)
     if reply is None and existing_event_id is not None:
         found = reply_messages.for_event(transaction, principal_id, existing_event_id)
@@ -393,8 +401,23 @@ def claim(
     if reply is not None and reply.state is rl.ReplyState.GONE and request.driving_edit_id is None:
         # A removed reply is never continued; the turn answers again in a new one.
         reply = None
-    active_generation = reply_messages.active_generation(transaction, principal_id) or request.bot_generation
-    context = rl.ClaimContext(
+    context = replace(_claim_context(transaction, principal_id, request, reply), interactive_span=interactive)
+    if reply is None or request.driving_edit_id is not None:
+        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
+        admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
+        if admitted is not None:
+            request = replace(request, membership_epoch=admitted[1])
+    return apply(transaction, principal_id, rl.claim(request, context))
+
+
+def _claim_context(
+    transaction: Transaction,
+    principal_id: str,
+    request: rl.ClaimRequest,
+    reply: Reply | None,
+) -> rl.ClaimContext:
+    """Read what a claim of ``reply`` decides on, inside its transaction."""
+    return rl.ClaimContext(
         reply=reply,
         last_span=None if reply is None else reply_spans.load(transaction, principal_id, reply.last_span_id),
         current_span=(
@@ -402,16 +425,10 @@ def claim(
             if reply is None or reply.current_span_id is None
             else reply_spans.load(transaction, principal_id, reply.current_span_id)
         ),
-        interactive_span=interactive,
+        interactive_span=None,
         durable_write_debt=reply is not None and has_unresolved_rows(transaction, principal_id, reply.reply_id),
-        active_generation=active_generation,
+        active_generation=reply_messages.active_generation(transaction, principal_id) or request.bot_generation,
     )
-    if reply is None or request.driving_edit_id is not None:
-        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
-        admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
-        if admitted is not None:
-            request = replace(request, membership_epoch=admitted[1])
-    return apply(transaction, principal_id, rl.claim(request, context))
 
 
 # ---------------------------------------------------------------------------

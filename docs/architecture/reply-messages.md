@@ -71,7 +71,7 @@ A claim runs under the conversation lock after the turn's first source gate and 
 - A last span ended `released` or `lost`: a `replay`, or the same regeneration re-run.
 - A last span ended `superseded`: a span of the same kind.
 - Unresolved durable writes, an owed note, or an approval that still holds a reply after its Stop or end: `deferred`; their resolution, or the approval's end, retries the sources.
-- A wake names its waiting reply: a `wake` span continues it, as does the retry of a wake that ended `released` or `lost`; a reply that stopped waiting runs nothing for it, and only its wake continues a waiting reply.
+- A wake names its waiting reply: a `wake` span continues it, as does the retry of a wake, or of its approval's resume, that ended `released`, `lost`, or `superseded`; a reply that stopped waiting runs nothing for it, and only its wake continues a waiting reply.
 
 The edit regenerator decides which edits reach a claim: only an edit of the latest message of its conversation, with no later message from someone other than an agent, whose reply showed something and is not `gone`.
 It records a Stop on that reply first when a span still runs for it or an approval holds it, and its claim then waits for the conversation lock that span holds and for the approval the Stop fenced to end.
@@ -123,7 +123,7 @@ A span whose response boundary leaves background work outstanding, with nothing 
 The wait's row is an edit that shows the answer with the waiting note, or the reply's create shows it when it is the first visible message; the reply's terminal row comes from a wake's finish or from the end of the wait.
 A reply an approval holds never waits: its span finishes, and the key's next reply takes the work.
 At most one reply waits for a key: a newer reply that starts waiting on it ends the older one, in the same commit and before the newer one is saved.
-A wait that ends, because a newer reply took the work over, no work is left, or the entity was removed, ends the reply `completed` through `unhold`, owing the write that shows its answer without the waiting note.
+A wait that ends, because a newer reply took the work over, no work is left, or the entity was removed, ends the reply `completed` through `unhold`, owing the write that shows its answer without the waiting note; a wait that gave no answer removes its message instead.
 A wake is a journal source the job runtime admits for a waiting reply whose work is ready; its span continues the reply below what it showed, carries the turn's logical sources, and ends like any span, waiting again or finishing.
 A wake an interruption or restart cut short keeps its source pending, so the journal retries it, and the retry continues as a replay does, told which calls it already made.
 A waiting reply does not hold its conversation: later messages are answered as usual.
@@ -154,7 +154,7 @@ A replay that a newer message from the same requester supersedes settles its sou
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.
 Deleting every logical source of a reply's current work ends it `gone` in the tombstone's commit, which records the reply and the span it cancelled; the bot then cancels exactly that span and redacts what the reply showed, and wakes the approval that held the reply, which it fenced; a written answer is kept, including the finished answer an edit was regenerating before the regeneration showed anything.
-Deleting every message a waiting reply answers, or the one its running wake continues, ends the reply `completed` with its answer kept and cancels its background work.
+Deleting every message a reply answers also cancels the background work the reply started or waits for; a waiting reply ends `completed` with its answer kept, and one whose wake was cut short or still runs ends `failed` with the interrupted note below what it showed.
 An entity removed from the configuration has no bot: its open replies end without Matrix writes, a waiting one `completed` and the others `failed` with their sources settled unanswered; a reply an approval holds is left to that approval, whose discard ends it, or whose owner settles it on coming back.
 A removed entity's reply keeps the notes and redactions it still owes Matrix, which its bot delivers if the entity comes back.
 The handled-turn retention pass deletes finished replies that owe nothing, with their spans, 30 days after their last change, the age at which the ledger forgets their turns.

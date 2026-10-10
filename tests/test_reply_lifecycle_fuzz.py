@@ -362,8 +362,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if "$source" in self.model.deleted:
             # The source gate finds the message deleted, and the reply ends as a deletion ends it.
             self._apply(rl.sources_deleted(self.model.reply, last, now_ns=self._now()))  # type: ignore[arg-type]
-        elif last.kind is SpanKind.WAKE:
-            # The journal retries the wake's own source.
+        elif last.delivery_id.startswith("job-wake-"):
+            # The journal retries the wake's own source, a wake's or its approval's resume.
             self._claim_wake(last.delivery_id)
         elif last.delivery_id.startswith("$edit-"):
             # The pending source is an edit, a regeneration's or its approved resume's: the regenerator replays it
@@ -1151,6 +1151,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.answered.clear()
         self.model.wakes = 0
         self.model.work = "none"
+        # The store forgets the Stops of the replies it forgets.
+        self.model.job_stops.clear()
 
     # --- background work ----------------------------------------------------
 
@@ -1288,6 +1290,12 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self._apply(rl.unhold(reply, now_ns=self._now()))
         self.model.work = "none"
 
+    @precondition(lambda self: self.model.work != "none")
+    @rule()
+    def newer_reply_retrieves_the_work(self) -> None:
+        """A newer reply of the key retrieves or takes the work, or the work is cancelled or revoked."""
+        self.model.work = "none"
+
     @precondition(lambda self: bool(self.model.job_stops))
     @rule()
     def apply_job_stops(self) -> None:
@@ -1390,6 +1398,16 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert reply.hold_key is not None, reply
         assert last.outcome is SpanOutcome.COMPLETED, last
         assert self._is_settled(last.span_id), last
+
+    @invariant()
+    def a_stop_button_belongs_to_a_running_reply(self) -> None:
+        """I8: a reply keeps its Stop button only while active, waiting, or waiting in place for an approval."""
+        reply = self.model.reply
+        if reply is None or reply.stop_button_event_id is None:
+            return
+        assert reply.state in {ReplyState.ACTIVE, ReplyState.WAITING} or (
+            reply.state is ReplyState.PAUSED and reply.current_span_id is not None
+        ), reply
 
     @invariant()
     def a_paused_reply_is_held(self) -> None:
