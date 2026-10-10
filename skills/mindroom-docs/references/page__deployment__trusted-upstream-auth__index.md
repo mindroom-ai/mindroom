@@ -3,7 +3,8 @@
 Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned reverse proxy or identity gateway that has already authenticated the human.
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
-The [Connections portal](#connections-portal), the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service) also build on this mode.
+The [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) and the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service) also build on this mode.
+The [Connections portal](#connections-portal) can use this mode or [Matrix sign-in from MindRoom Chat](#matrix-sign-in-from-mindroom-chat), which needs no identity gateway.
 
 Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
 Enable it only when every network path to MindRoom removes client-supplied copies of the trusted headers and injects verified values itself; never expose such an instance directly to browsers or the public internet.
@@ -102,7 +103,12 @@ agents:
         defer: true
 ```
 
-The portal requires [strict JWT mode](#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
+Users sign in to the portal in one of two ways, and both can be enabled together:
+
+- **Trusted upstream:** [strict JWT mode](#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
+- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway and leaves dashboard authentication unchanged.
+
+Portal API requests without a valid sign-in return `401`.
 Connect and disconnect requests also require `MINDROOM_PUBLIC_URL`, or the request URL when unset, to be an HTTPS origin, and the browser's `Origin` header to match it.
 
 The portal groups OAuth services by agent, covering the named private agent and the shared agents the user may use or manage credentials for.
@@ -115,10 +121,46 @@ Disconnecting a shared connection affects every agent using its [credential scop
 The portal never shows tokens, model configuration, generic credential editing, or OAuth client settings; operators still configure OAuth clients.
 When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
 Users choose the agents and tools the optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#choose-exposed-agents-and-tools) exposes on the same page.
+Matrix sign-in users have no email, so that section still needs trusted upstream sign-in when MCP accounts are [SCIM-provisioned](https://docs.mindroom.chat/deployment/mcp-gateway/#managed-account-provisioning).
 
-To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API behind the authenticated upstream.
+To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
 Exclude `/connections` from the other application's service-worker navigation fallback.
 Portal assets are served under `/connections/assets/`, so root `/assets/` can keep serving the other application.
+
+### Matrix Sign-In From MindRoom Chat
+
+Users signed in to MindRoom Chat can open the portal without an identity gateway.
+Chat's **Connections** card in Settings, General opens `/connections/` on the runtime origin that Chat uses for [Computers](https://docs.mindroom.chat/tools/worker-computer/#connect-mindroom-chat).
+Enable it with the portal settings and the origins of the Chat deployments allowed to sign users in:
+
+```bash
+MINDROOM_CONNECTIONS_AGENT=personal
+MINDROOM_PUBLIC_URL=https://assistant.example.org
+MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.example.org"]'
+```
+
+- `MINDROOM_CONNECTIONS_AGENT` names a private agent with `private.per: user` or `user_agent`.
+- `MINDROOM_PUBLIC_URL`, or the request URL when unset, is an HTTPS origin.
+- `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` is a JSON list of exact Chat origins, with the same rules as `MINDROOM_COMPUTER_ALLOWED_ORIGINS` in [Connect MindRoom Chat](https://docs.mindroom.chat/tools/worker-computer/#connect-mindroom-chat).
+  Entries are HTTPS origins, loopback HTTP origins, or `capacitor://localhost`, without a path or wildcard, and one invalid entry disables the whole list.
+
+Sign-in works as follows:
+
+1. Chat opens `/connections/` in a new window.
+2. The portal asks the window that opened it for a Matrix OpenID token over `postMessage`.
+3. The portal posts the token and the origin of Chat's message to `POST /api/connections/session`.
+4. MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, then verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo`.
+   Only users of that homeserver are accepted.
+5. MindRoom sets the `__Host-mindroom_connections_session` cookie, and the portal shows `Signed in as <Matrix ID>`.
+
+The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`, and the session lasts one hour.
+Sessions live in MindRoom's memory, so a restart signs everyone out; opening Connections from Chat again signs the user in again.
+The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
+
+A session authenticates only `/connections`, `/api/connections/*`, and the OAuth success page and the OAuth callback for flows that the session started.
+It never grants dashboard or administrator access, even to an administrator.
+Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth, which the dashboard keeps using, and alongside trusted upstream sign-in.
+`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
 
 ## Helm Charts
 
@@ -151,13 +193,14 @@ Both charts fail to render when `enabled` is true without `userIdHeader`, when `
 Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
 With the Connections portal enabled, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the portal and the OAuth callback, success, and reset pages keep their own access checks.
+A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) never reaches dashboard routes, so it needs no administrator check.
 
 Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.
 A personal OAuth link opened by a browser signed in as anyone other than the requester who received it fails with `403`; see [Connect An Account](https://docs.mindroom.chat/oauth-framework/#connect-an-account) for link rules.
 
 ## Browser Mutation Protection
 
-Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity or a dashboard cookie must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset.
+Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity, a dashboard cookie, or a Connections sign-in session must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset.
 Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the `Origin` matches.
 A validated bearer token skips these checks, but adding a bearer header to a trusted-upstream request does not.
 `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` controls which origins may read credentialed responses and never authorizes cross-origin changes.
@@ -180,7 +223,12 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `403 Administrator access required` | With the portal enabled, only `administrators` reach ordinary dashboard routes |
 | `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
-| `403 Connections require trusted signed authentication` or `Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
+| `401 Connections sign-in required` | Open Connections from MindRoom Chat with Matrix sign-in configured, or enable strict JWT mode |
+| `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
+| `404 Connections are not enabled` | Set `MINDROOM_CONNECTIONS_AGENT` |
+| `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, and fix any invalid entry because one disables the whole list |
+| `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again |
+| `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
 | `403 Connections require a configured private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent` |
 | `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |
 | `403 Connections require an HTTPS public origin` or `Connection changes require a same-origin request` | Set an HTTPS `MINDROOM_PUBLIC_URL` and open the portal from that origin |
