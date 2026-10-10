@@ -17617,6 +17617,8 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 
 Users signed in to MindRoom Chat can open the portal without an identity gateway.
 Chat's **Connections** card in Settings, General opens `/connections/` on the runtime origin that Chat uses for [Computers](https://docs.mindroom.chat/tools/worker-computer/#connect-mindroom-chat).
+Chat finds that origin through its Computers backend setting: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
+Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their runtime's URL under Computers before the card works.
 Enable it with the portal settings and the origins of the Chat deployments allowed to sign users in:
 
 ```bash
@@ -17627,13 +17629,16 @@ MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.example.org"]'
 
 - `MINDROOM_CONNECTIONS_AGENT` names a private agent with `private.per: user` or `user_agent`.
 - `MINDROOM_PUBLIC_URL`, or the request URL when unset, is an HTTPS origin.
+  The sign-in request's `Origin` must equal that public origin, so Chat's Computers URL must be the `MINDROOM_PUBLIC_URL` origin and the portal must be opened there.
 - `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` is a JSON list of exact Chat origins, with the same rules as `MINDROOM_COMPUTER_ALLOWED_ORIGINS` in [Connect MindRoom Chat](https://docs.mindroom.chat/tools/worker-computer/#connect-mindroom-chat).
   Entries are HTTPS origins, loopback HTTP origins, or `capacitor://localhost`, without a path or wildcard, and one invalid entry disables the whole list.
+  The list accepts `capacitor://localhost`, but native MindRoom Chat builds do not offer Connections yet, so only web Chat origins can sign users in.
 
 Sign-in works as follows:
 
 1. Chat opens `/connections/` in a new window.
 2. The portal asks the window that opened it for a Matrix OpenID token over `postMessage`.
+   It asks even when the browser still holds a session, so the account signed in to Chat replaces another account's session in the same browser.
 3. The portal posts the token and the origin of Chat's message to `POST /api/connections/session`.
 4. MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, then verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo`.
    Only users of that homeserver are accepted.
@@ -17718,6 +17723,7 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `401 Connections sign-in required` | Open Connections from MindRoom Chat with Matrix sign-in configured, or enable strict JWT mode |
 | `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
 | `404 Connections are not enabled` | Set `MINDROOM_CONNECTIONS_AGENT` |
+| `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, and fix any invalid entry because one disables the whole list |
 | `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again |
 | `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
