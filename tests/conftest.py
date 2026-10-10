@@ -2944,6 +2944,8 @@ def _isolate_structlog_configuration(
         (agno_logger, agno_logger.handlers[:], agno_logger.filters[:], agno_logger.level, agno_logger.propagate)
         for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger)
     ]
+    # Team and workflow runs repoint Agno's default logger, and `log_info` and friends follow it.
+    agno_default_logger = agno_log.logger
     yield
     _configure_quiet_structlog()
     for agno_logger, handlers, filters, level, propagate in agno_loggers:
@@ -2951,6 +2953,7 @@ def _isolate_structlog_configuration(
         agno_logger.filters[:] = filters
         agno_logger.setLevel(level)
         agno_logger.propagate = propagate
+    agno_log.logger = agno_default_logger
 
 
 @pytest.fixture(autouse=True)

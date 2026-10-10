@@ -605,8 +605,8 @@ def test_agno_records_follow_configured_format_and_level(
     setup_logging(level=level, runtime_paths=_runtime_paths(tmp_path))
     capsys.readouterr()
 
-    agno_log.log_info("Upserting 2 documents")
-    agno_log.log_warning("Skipping one document")
+    agno_log.agent_logger.info("Upserting 2 documents")
+    agno_log.agent_logger.warning("Skipping one document")
 
     records = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
     expected = [("Upserting 2 documents", "info")] if level == "INFO" else []
@@ -642,9 +642,9 @@ def test_agno_records_keep_the_resolved_level_after_agno_resets_it(
 
     # Every Agent, Team, and Workflow run calls this.
     agno_log.set_log_level_to_info()
-    agno_log.log_info("agno_info")
-    agno_log.log_warning("agno_warning")
-    agno_log.log_error("agno_error")
+    agno_log.agent_logger.info("agno_info")
+    agno_log.agent_logger.warning("agno_warning")
+    agno_log.agent_logger.error("agno_error")
 
     records = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
     assert [record["event"] for record in records] == expected
