@@ -416,12 +416,12 @@ There are three supported shapes:
 
 - **Native egress broker** runs inside the primary runtime and injects secrets from the same credential store workers already use for other tools.
   See [Brokered Worker Egress](egress-broker.md) for configuration, secret management, and deployment.
-  This is the recommended option for new deployments; it works with Docker workers and will support Kubernetes workers in a follow-up chart release.
-- **Per-worker Agent Vault egress** (Kubernetes backend), which gives each worker its own vault for per-user or per-agent isolation, described below.
+  This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values, and the hosted instance chart can enable it for its sandbox-runner sidecar.
+- **Per-worker Agent Vault egress** (Kubernetes backend), the legacy path, which gives each worker its own vault for per-user or per-agent isolation, described below.
 - **A shared credential-injecting proxy** that you run, configured through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`, the chart's `egressProxy` integration, or the worker proxy environment on other backends.
   The proxy holds the real credential and workers receive only its URL.
 
-[Approved egress](approved-egress.md) and the `mindroom-egress-proxy` image restrict which hosts workers can reach but do not inject credentials; to combine them with Agent Vault, see [Agent Vault Chaining](approved-egress.md#agent-vault-chaining).
+[Approved egress](approved-egress.md) and the `mindroom-egress-proxy` image restrict which hosts workers can reach but do not inject credentials; to combine them with the egress broker, see [Egress Broker Chaining](approved-egress.md#egress-broker-chaining), or with Agent Vault, see [Agent Vault Chaining](approved-egress.md#agent-vault-chaining).
 
 Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intend the worker process to receive them.
 

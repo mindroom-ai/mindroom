@@ -82,6 +82,11 @@ matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at s
 workerBackend: static_runner
 workerCleanupIntervalSeconds: 30
 
+# Native credential-injecting egress broker in the primary, bound to loopback on port 8768 for the same-pod sandbox runner.
+# Needs no Service or NetworkPolicy; the port is fixed because the runner and primary share the pod's network.
+egressBroker:
+  enabled: false
+
 # API keys and secrets (referenced via Secret in deployment)
 # Production provisioner deploys create this Secret outside Helm so secret values
 # do not land in Helm release history.

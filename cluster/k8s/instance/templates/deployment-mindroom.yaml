@@ -138,6 +138,15 @@ spec:
           value: {{ $workerBackend | quote }}
         - name: MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS
           value: {{ .Values.workerCleanupIntervalSeconds | quote }}
+        {{- if (.Values.egressBroker | default (dict)).enabled }}
+        # The sandbox-runner sidecar shares this pod's network, so it reaches the loopback-only broker without a Service or NetworkPolicy.
+        - name: MINDROOM_EGRESS_BROKER_PORT
+          value: "8768"
+        - name: MINDROOM_EGRESS_BROKER_HOST
+          value: "127.0.0.1"
+        - name: MINDROOM_EGRESS_BROKER_URL
+          value: "http://127.0.0.1:8768"
+        {{- end }}
         - name: MINDROOM_SANDBOX_PROXY_URL
           value: "http://localhost:8766"
         - name: MINDROOM_SANDBOX_PROXY_TOKEN

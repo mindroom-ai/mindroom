@@ -822,6 +822,19 @@ See [Background Python Scripts](../../../docs/tools/background-scripts.md#worker
 
 The egress broker lets agents call authenticated HTTP APIs from Kubernetes workers without the worker ever holding the credential.
 The primary runs the broker on its own port, workers send their traffic through it, and it injects the stored credential for the matching service.
+The primary needs no extra pod, and workers need no changes: each call carries its own token and CA certificate.
+For configuration, secret management, and error codes, see [Brokered Worker Egress](../../../docs/deployment/egress-broker.md).
+
+The chart supports direct and chain modes:
+
+| Mode | Values | Worker to broker | Broker to internet |
+|---|---|---|---|
+| Direct | `egressBroker.enabled` | Worker pod to the `<fullname>-egress-broker` Service to the primary pod | Direct from the primary pod |
+| Direct with an operator proxy | `egressBroker.enabled` and `egressProxy.enabled` | Same, plus an additive worker egress NetworkPolicy for the broker port | Through the operator proxy when the primary's env sets `HTTPS_PROXY` and `NO_PROXY` |
+| Chain | `egressBroker.enabled` and `approvedEgress.enabled` | Worker to Squid (grant check by pod IP) to the broker as Squid's parent | Direct from the primary pod |
+
+The SaaS instance chart (`cluster/k8s/instance`) has its own `egressBroker.enabled`, which sets the loopback env on the primary for its sandbox-runner sidecar and renders no Service or NetworkPolicy.
+
 Set `egressBroker.enabled` to have the primary serve that listener:
 
 ```yaml
@@ -851,7 +864,12 @@ Leave `approvedEgress.parentProxy.host` at its default in this setup, because th
 
 `egressBroker.enabled` requires `workers.backend=kubernetes`, and `egressBroker.port` must differ from `runtime.apiPort` and `scriptGateway.port`.
 It cannot be combined with `workers.kubernetes.agentVault`.
-To migrate, enter secrets on the egress page first, then disable `workers.kubernetes.agentVault` in the same upgrade that enables `egressBroker`.
+To migrate from Agent Vault:
+
+1. Add the services to the deployment's `config.yaml` under `egress_broker.services`.
+2. Have users and credential managers enter secrets on `/connections/egress` or the dashboard while Agent Vault still serves traffic. The personal page needs trusted upstream auth with JWT; without it only the dashboard can manage secrets.
+3. Run one `helm upgrade` with `egressBroker.enabled=true` and `workers.kubernetes.agentVault.enabled=false`. If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in that upgrade.
+4. Verify with brokered calls from real workers, then delete the Agent Vault bootstrap Secret and PVC after a grace period.
 The broker connects directly from the primary pod, unless the primary's `HTTPS_PROXY`/`NO_PROXY` routes it through an operator proxy.
 If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
 The broker shares the primary's lifecycle, so a primary restart interrupts brokered connections that are in flight.

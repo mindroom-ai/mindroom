@@ -110,8 +110,50 @@ The toolkit reads these environment variables, which the runtime chart sets for 
 | `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH` | Static allowlist file with one entry per line and `#` comments | `/etc/mindroom-egress/allowed-domains.txt` |
 | `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` | Maximum grant TTL | `21600` |
 
+## Egress Broker Chaining
+
+When approved egress and the native [egress broker](egress-broker.md) are used together, the chain is:
+
+```text
+worker -> approved egress (Squid) -> egress broker in the primary -> internet
+```
+
+Squid stays first because temporary grants are matched to the worker by its source IP, so grants and the static allowlist keep working unchanged.
+The broker verifies the worker's token and injects credentials, and it dials the internet directly from the primary pod, so there is nothing else to deploy.
+
+```yaml
+workers:
+  backend: kubernetes
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+
+egressBroker:
+  enabled: true
+
+approvedEgress:
+  enabled: true
+  image:
+    tag: v0.1.10
+```
+
+With both enabled, the chart renders Squid's parent as the broker Service and port, so you do not set `approvedEgress.parentProxy`.
+Workers keep Squid as their first hop: the primary sets `MINDROOM_EGRESS_BROKER_URL` to Squid's URL, and each worker call carries its broker token as the proxy username.
+After the allowlist and grant check, requests that carry a token go on to the broker, which still validates the token and injects credentials, while requests without a token go directly to the internet.
+The broker's ingress NetworkPolicy admits only the approved egress pods in this mode, and changing `egressBroker.port` restarts the proxy.
+
+Before a grant, Squid denies a brokered host such as `api.github.com`, so `curl https://api.github.com/user` fails.
+After `request_network_access` for that host is approved, the same request succeeds with the credential injected.
+`approvedEgress.parentProxy.bypassDomains` still skips the broker for destinations such as signed URLs.
+
+The chart refuses `approvedEgress.parentProxy.enabled` with a host other than the default while the broker is enabled, so a custom parent is not dropped silently, and it refuses the broker together with `workers.kubernetes.agentVault`.
+See [Brokered Worker Egress](egress-broker.md#kubernetes) for the other Kubernetes topologies and the migration from Agent Vault.
+
 ## Agent Vault Chaining
 
+Agent Vault is the legacy credential-injecting path; the native [egress broker](#egress-broker-chaining) replaces it, and the chart does not allow both at once.
+Use this section only for deployments that still run Agent Vault.
 When approved egress and [Agent Vault](sandbox-proxy.md) are used together, the chain must be:
 
 ```text

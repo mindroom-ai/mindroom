@@ -4865,3 +4865,43 @@ def test_runtime_chart_chain_rejects_custom_parent_host() -> None:
         "approvedEgress.parentProxy.host must stay at its default when egressBroker.enabled; "
         "the chart chains Squid to the egress broker"
     ) in completed.stderr
+
+
+_INSTANCE_EGRESS_BROKER_ENV = {
+    "MINDROOM_EGRESS_BROKER_PORT": "8768",
+    "MINDROOM_EGRESS_BROKER_HOST": "127.0.0.1",
+    "MINDROOM_EGRESS_BROKER_URL": "http://127.0.0.1:8768",
+}
+
+
+def _instance_resource_identities(docs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return sorted((doc["kind"], doc["metadata"]["name"]) for doc in docs)
+
+
+def test_instance_chart_egress_broker_env_on_primary_only() -> None:
+    """The broker binds loopback in the primary, which the same-pod sidecar reaches without a Service or policy."""
+    baseline = _render_chart(Path("cluster/k8s/instance"))
+    docs = _render_chart(Path("cluster/k8s/instance"), "egressBroker.enabled=true")
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    primary_env = _env_by_name(_container(deployment, "mindroom"))
+    runner_env = _env_by_name(_container(deployment, "sandbox-runner"))
+
+    for name, value in _INSTANCE_EGRESS_BROKER_ENV.items():
+        assert primary_env[name] == {"name": name, "value": value}
+    assert not [name for name in runner_env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert not [
+        name
+        for name in primary_env
+        if name.startswith("MINDROOM_EGRESS_BROKER_") and name not in _INSTANCE_EGRESS_BROKER_ENV
+    ]
+    assert _instance_resource_identities(docs) == _instance_resource_identities(baseline)
+    assert [port["name"] for port in _container(deployment, "mindroom")["ports"]] == ["api"]
+
+
+def test_instance_chart_egress_broker_disabled_by_default() -> None:
+    """Hosted tenants get no broker env unless the release opts in."""
+    deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
+
+    for container in ("mindroom", "sandbox-runner"):
+        env = _env_by_name(_container(deployment, container))
+        assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
