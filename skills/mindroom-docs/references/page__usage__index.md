@@ -43,8 +43,9 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `compaction_summary` | Conversation compaction summaries |
 | `memory_auto_flush` | Background memory auto-flush extraction |
 | `dynamic_workflow` | Embedded Dynamic Workflow participants |
+| `claude_agent` | Claude Code sessions run by the `claude_agent` tool |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |
-| `routing`, `room_topic`, `schedule_parse`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
+| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
 `system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.

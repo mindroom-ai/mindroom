@@ -10,7 +10,10 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, ClassVar, Literal, Protocol, cast, runtime_checkable
+from uuid import uuid4
 
+from agno.metrics import ModelMetrics, RunMetrics
+from agno.run.agent import RunOutput
 from agno.tools import Toolkit
 from claude_agent_sdk import (
     AssistantMessage,
@@ -22,7 +25,9 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
+from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
@@ -291,6 +296,41 @@ async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
         logger.warning("Claude session cleanup timed out", timeout_seconds=_START_CLEANUP_TIMEOUT_SECONDS)
     elif not owner.cancelled() and (error := owner.exception()) is not None:
         logger.warning("Claude session cleanup failed", error=str(error))
+
+
+async def _record_session_usage(result: ResultMessage | None) -> None:
+    """Count one Claude Code turn's usage toward the conversation and requester that ran it."""
+    owner = get_helper_usage_owner()
+    if owner is None or result is None or not result.model_usage:
+        return
+    models = [
+        ModelMetrics(
+            id=model_id,
+            provider="Anthropic",
+            input_tokens=usage["inputTokens"],
+            output_tokens=usage["outputTokens"],
+            total_tokens=usage["inputTokens"] + usage["outputTokens"],
+            cache_read_tokens=usage["cacheReadInputTokens"],
+            cache_write_tokens=usage["cacheCreationInputTokens"],
+        )
+        for model_id, usage in result.model_usage.items()
+    ]
+    metrics = RunMetrics(details={"model": models})
+    for model in models:
+        metrics.input_tokens += model.input_tokens
+        metrics.output_tokens += model.output_tokens
+        metrics.total_tokens += model.total_tokens
+        metrics.cache_read_tokens += model.cache_read_tokens
+        metrics.cache_write_tokens += model.cache_write_tokens
+    context = get_tool_runtime_context()
+    invocation_id = uuid4().hex
+    await record_helper_usage(
+        RunOutput(run_id=invocation_id, metrics=metrics),
+        owner=owner,
+        invocation_id=invocation_id,
+        kind="claude_agent",
+        requester_id=context.requester_id if context is not None else None,
+    )
 
 
 class ClaudeAgentTools(Toolkit):
@@ -591,6 +631,7 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
+        await _record_session_usage(msg_result)
         return self._format_response_output(response_text, tool_names, msg_result)
 
     async def _collect_response(

@@ -7,6 +7,7 @@ import contextvars
 import json
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from types import SimpleNamespace
@@ -19,10 +20,16 @@ from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ProcessError, Res
 
 import mindroom.tools  # noqa: F401
 from mindroom.custom_tools import claude_agent as claude_agent_module
+from mindroom.helper_usage import helper_usage_context
+from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.usage_stats import collect_admin_usage
+from tests.history_helpers import _forced_compaction_context, _session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterator
+    from pathlib import Path
 
 
 @dataclass
@@ -63,6 +70,42 @@ class _FakeClaudeSDKClient:
 
     async def disconnect(self) -> None:
         self.connected = False
+
+
+def _model_usage(inputs: int, outputs: int, cache_reads: int, cache_writes: int) -> dict[str, Any]:
+    return {
+        "inputTokens": inputs,
+        "outputTokens": outputs,
+        "cacheReadInputTokens": cache_reads,
+        "cacheCreationInputTokens": cache_writes,
+        "webSearchRequests": 0,
+        "costUSD": 0.01,
+        "contextWindow": 200000,
+        "maxOutputTokens": 64000,
+    }
+
+
+@dataclass
+class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose session reports usage for two models, as Claude Code does."""
+
+    instances: ClassVar[list[_MeteredFakeClaudeSDKClient]] = []
+
+    async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
+        yield AssistantMessage(content=[TextBlock(text="Fixed it")], model="claude-sonnet-5-5")
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=3,
+            session_id="claude-session-123",
+            total_cost_usd=0.02,
+            model_usage={
+                "claude-sonnet-5-5": _model_usage(1000, 200, 5000, 300),
+                "claude-haiku-5-5": _model_usage(400, 50, 0, 0),
+            },
+        )
 
 
 @dataclass
@@ -1083,3 +1126,41 @@ async def test_claude_start_session_error_includes_context(
     assert "- continue_conversation: True" in result
     assert "- resume: resume-xyz" in result
     assert "- fork_session: False" in result
+
+
+@pytest.mark.asyncio
+async def test_claude_session_usage_counts_toward_the_conversation(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code sessions spend tokens on the requester's behalf, so their usage joins the conversation's."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _MeteredFakeClaudeSDKClient)
+    config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
+    open_scope = partial(
+        open_resolved_scope_session_context,
+        agent_name="test_agent",
+        scope=scope,
+        session_id="session",
+        config=config,
+        runtime_paths=paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+    )
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    try:
+        with open_scope() as scope_context, helper_usage_context(scope_context), tool_runtime_context(context):
+            await tools.claude_send(
+                "Fix the bug",
+                run_context=RunContext(run_id="run-1", session_id="session"),
+                agent=SimpleNamespace(name="test_agent"),
+            )
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert (report.totals.input_tokens, report.totals.output_tokens) == (1400, 250)
+        assert (report.totals.cache_read_tokens, report.totals.cache_write_tokens) == (5000, 300)
+        assert sorted((row.model, row.totals.total_tokens) for row in report.model_breakdown) == [
+            ("claude-haiku-5-5", 450),
+            ("claude-sonnet-5-5", 1200),
+        ]
+        assert [row.user_id for row in report.user_breakdown] == [context.requester_id]
+    finally:
+        storage.close()
