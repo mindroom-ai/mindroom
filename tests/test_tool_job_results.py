@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import json
-from pathlib import Path
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,6 +22,8 @@ from mindroom.tool_jobs.results import (
 from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.tool_jobs.runtime import BackgroundOutcome
 
 
@@ -80,31 +82,31 @@ def test_payload_rejects_an_oversized_artifact_without_reading_it(
     monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 400)
     path = tmp_path / "artifact.bin"
     path.write_bytes(b"x" * 301)
-    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: pytest.fail("oversized artifact was opened"))
+    monkeypatch.setattr(os, "fdopen", lambda *_args, **_kwargs: pytest.fail("oversized artifact was read"))
 
     with pytest.raises(ValueError, match="encoded JSON limit"):
         encode_result_payload(ToolResultPayload(value=File(filepath=path)))
 
 
 def test_payload_artifacts_share_one_read_allowance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Files that each fit alone cannot be read together: the second is rejected from its size unopened."""
+    """Files that each fit alone cannot be read together: the second is rejected from its size unread."""
     monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 400)
     first, second = tmp_path / "first.bin", tmp_path / "second.bin"
     first.write_bytes(b"x" * 200)
     second.write_bytes(b"y" * 200)
-    opened: list[Path] = []
-    real_open = Path.open
+    read: list[int] = []
+    real_fdopen = os.fdopen
 
-    def recording_open(path: Path, *args: object, **kwargs: object) -> object:
-        opened.append(path)
-        return real_open(path, *args, **kwargs)
+    def recording_fdopen(descriptor: int, *args: object, **kwargs: object) -> object:
+        read.append(os.fstat(descriptor).st_ino)
+        return real_fdopen(descriptor, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", recording_open)
+    monkeypatch.setattr(os, "fdopen", recording_fdopen)
 
     with pytest.raises(ValueError, match="encoded JSON limit"):
         encode_result_payload(ToolResultPayload(value=[File(filepath=first), File(filepath=second)]))
 
-    assert opened == [first]
+    assert read == [first.stat().st_ino]
 
 
 def test_payload_reads_a_growing_artifact_once_within_its_bound(
@@ -123,12 +125,40 @@ def test_payload_reads_a_growing_artifact_once_within_its_bound(
             read_sizes.append(effective_size)
             return b"x" * (4096 if effective_size < 0 else effective_size)
 
-    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: GrowingFile())
+    monkeypatch.setattr(os, "fdopen", lambda *_args, **_kwargs: GrowingFile())
 
     with pytest.raises(ValueError, match="encoded JSON limit"):
         encode_result_payload(ToolResultPayload(value=File(filepath=path)))
 
     assert read_sizes == [3 * (2048 // 4) + 1]
+
+
+def test_payload_keeps_returned_bytes_without_reopening_their_path(tmp_path: Path) -> None:
+    """Worker code can replace a returned file, so bytes the tool returned stand and its path is never read."""
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"primary secret")
+    path = tmp_path / "generated.txt"
+    path.symlink_to(secret)
+    encoded = encode_result_payload(ToolResultPayload(value=File(content=b"generated", filepath=path)))
+
+    restored = _decode_result_payload(encoded).value
+
+    assert (restored.content, restored.filepath) == (b"generated", None)
+
+
+@pytest.mark.parametrize("kind", ["link", "fifo"])
+def test_payload_reads_a_path_only_artifact_only_as_a_regular_file(tmp_path: Path, kind: str) -> None:
+    """A path-only artifact replaced by a link is refused, and a FIFO cannot stall encoding."""
+    path = tmp_path / "artifact.bin"
+    if kind == "link":
+        secret = tmp_path / "secret"
+        secret.write_bytes(b"primary secret")
+        path.symlink_to(secret)
+    else:
+        os.mkfifo(path)
+
+    with pytest.raises(OSError if kind == "link" else ValueError):
+        encode_result_payload(ToolResultPayload(value=File(filepath=path)))
 
 
 @pytest.mark.asyncio

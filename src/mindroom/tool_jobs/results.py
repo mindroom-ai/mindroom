@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,11 +49,23 @@ class _FileAllowance:
 
 
 def _file_bytes(path: Path, allowance: _FileAllowance) -> bytes:
-    """Read a local artifact within the remaining allowance, even if the file grows meanwhile."""
-    if path.stat().st_size > allowance.remaining:
-        raise _size_error()
-    with path.open("rb") as source:
-        raw = source.read(allowance.remaining + 1)
+    """Read a local artifact within the remaining allowance, even if the file grows meanwhile.
+
+    Worker code can replace a workspace file, so only a regular file whose last component is no link is read, and a
+    FIFO cannot stall the read.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            msg = "A tool result's file must be a regular file."
+            raise ValueError(msg)
+        if info.st_size > allowance.remaining:
+            raise _size_error()
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            raw = source.read(allowance.remaining + 1)
+    finally:
+        os.close(descriptor)
     if len(raw) > allowance.remaining:
         raise _size_error()
     allowance.remaining -= len(raw)
@@ -73,7 +87,9 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
         fields = value.model_dump(mode="python")
         if value.filepath is not None:
             fields["filepath"] = None
-            fields["content"] = _file_bytes(Path(value.filepath), allowance)
+            # Bytes the tool returned stand; its path is read only when they are missing.
+            if value.content is None:
+                fields["content"] = _file_bytes(Path(value.filepath), allowance)
         return {"type": type(value).__name__, "value": _encode(fields, allowance)}
     if isinstance(value, Message):
         return {"type": "Message", "value": _encode(value.model_dump(mode="python"), allowance)}
