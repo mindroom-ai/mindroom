@@ -20,7 +20,7 @@ Validate a file with:
 mindroom config validate --path /path/to/config.yaml
 ```
 
-Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](../deployment/storage.md#event-journal) and [background tool job](../tools/agent-orchestration.md#background-jobs) changes, which need a restart.
+Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](../deployment/storage.md#event-journal) changes and turning [background tool jobs](../tools/agent-orchestration.md#background-jobs) on or off or changing their excluded toolkits, which need a restart.
 Edits to an agent's or team's own settings, such as `instructions`, `model`, `tools`, or a team's `mode`, apply from its next reply without restarting it.
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
 An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
