@@ -26,6 +26,7 @@ is_shared  # JSON response field consumed by connections portal (src/mindroom/ap
 can_use  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
 avatar  # FastAPI route (src/mindroom/api/connections.py)
 sign_in  # FastAPI route (src/mindroom/api/connections_session.py)
+current_session  # FastAPI route (src/mindroom/api/connections_session.py)
 can_connect  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 localhostProfile  # Kubernetes wire TypedDict key (src/mindroom/workers/backends/kubernetes_config.py)

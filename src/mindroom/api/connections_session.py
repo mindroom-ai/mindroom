@@ -11,6 +11,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle
+from mindroom.api.auth import require_connections_user
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS, require_connections_same_origin
 from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE, CONNECTIONS_SESSION_SECONDS
 from mindroom.constants import RuntimePaths
@@ -57,11 +58,16 @@ class _SignedIn(BaseModel):
     matrix_user_id: str
 
 
-def _portal_paths(request: Request) -> RuntimePaths:
-    """Gate the request before its body is parsed, so a refused request never reads the token."""
+def _enabled_portal_paths(request: Request) -> RuntimePaths:
     paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     if not (paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
         raise HTTPException(404, "Connections are not enabled", headers=CONNECTIONS_HEADERS)
+    return paths
+
+
+def _portal_paths(request: Request) -> RuntimePaths:
+    """Gate the request before its body is parsed, so a refused request never reads the token."""
+    paths = _enabled_portal_paths(request)
     require_connections_same_origin(request, paths)
     return paths
 
@@ -92,3 +98,12 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
         samesite="lax",
     )
     return _SignedIn(matrix_user_id=matrix_user_id)
+
+
+@router.get("")
+async def current_session(request: Request, response: Response) -> _SignedIn:
+    """Tell the portal page which Matrix user is signed in, or 401 so it signs in."""
+    _enabled_portal_paths(request)
+    auth_user = await require_connections_user(request)
+    response.headers.update(CONNECTIONS_HEADERS)
+    return _SignedIn(matrix_user_id=auth_user["matrix_user_id"])

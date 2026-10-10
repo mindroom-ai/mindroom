@@ -54,7 +54,8 @@ def require_auth_user_id(request: Request) -> str:
 def _dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
     """Return the requester identity dashboard-scoped worker credentials should use."""
     auth_user = _request_auth_user(request) or {}
-    if auth_user.get("auth_source") == "trusted_upstream":
+    # Signed-in Matrix users act as themselves, never as the configured owner.
+    if auth_user.get("auth_source") in {"trusted_upstream", "matrix_openid"}:
         matrix_user_id = auth_user.get("matrix_user_id")
         return try_parse_historical_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
     owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
