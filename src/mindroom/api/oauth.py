@@ -927,6 +927,19 @@ async def callback(provider_id: str, request: Request) -> Response:
 async def status(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthStatusResponse:
     """Return scoped connection status for one provider."""
     await _require_oauth_api_user(request)
+    return await authenticated_connection_status(provider_id, request, agent_name=agent_name)
+
+
+async def authenticated_connection_status(
+    provider_id: str,
+    request: Request,
+    *,
+    agent_name: str | None,
+) -> OAuthStatusResponse:
+    """Return scoped connection status for a request the caller has already authenticated.
+
+    Callers that load several providers for one request authenticate once and call this per provider.
+    """
     provider, runtime_paths = _load_provider(request, provider_id)
     target = _resolve_oauth_credentials_target(
         request,
@@ -938,7 +951,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
 
 
 @dataclass(frozen=True)
-class _PersonalConnectionView:
+class PersonalConnectionView:
     """What one viewer may see and do with a provider's connection."""
 
     connected: bool
@@ -947,14 +960,14 @@ class _PersonalConnectionView:
     account_label: str | None
 
 
-def personal_connection_view(result: OAuthStatusResponse, *, can_manage: bool) -> _PersonalConnectionView:
+def personal_connection_view(result: OAuthStatusResponse, *, can_manage: bool) -> PersonalConnectionView:
     """Mask a provider status for a viewer; the Connections portal and the egress pages share this view.
 
     Shared service accounts are runtime configuration, never a personal account: managers see no connection to
     manage and users see the service as connected. Only managers may connect and see the account.
     """
     personal = not result.has_service_account_config
-    return _PersonalConnectionView(
+    return PersonalConnectionView(
         connected=result.connected and (personal or not can_manage),
         can_connect=result.has_client_config and personal and can_manage,
         reset_required=result.reset_required,

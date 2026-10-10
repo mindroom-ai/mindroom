@@ -1514,10 +1514,18 @@ path = "mindroom.api.egress_broker"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials_target",
-    "mindroom.api.egress_credentials",
+    "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.egress_broker.secrets",
     "mindroom.egress_broker.service",
+]
+
+[[modules]]
+path = "mindroom.api.egress_status"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.oauth",
+    "mindroom.egress_broker.secrets",
 ]
 
 [[modules]]
@@ -1673,6 +1681,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.auth",
     "mindroom.api.connection_agents",
+    "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.authorization",
     "mindroom.credentials",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
@@ -11,10 +12,11 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from mindroom.api import main, oauth
+from mindroom.api import connections, main, oauth
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.egress_broker import secrets
 from mindroom.egress_broker.oauth_source import Token, resolve_oauth_token
 from mindroom.oauth import credential_store as oauth_credential_store
 from mindroom.oauth import registry as oauth_registry
@@ -624,13 +626,7 @@ def test_requester_scoped_provider_connects_the_requester(oauth_egress_portal: d
     assert _egress_row(portal, "alice", "shared_dev", "gh")["oauth"]["connected"] is False
 
 
-@pytest.mark.parametrize("action", ["connect", "disconnect"])
-def test_service_account_provider_is_not_managed_as_a_personal_account(
-    oauth_egress_portal: dict[str, Any],
-    action: str,
-) -> None:
-    """A shared Google service account is runtime configuration, never a personal account."""
-    portal = oauth_egress_portal
+def _enable_service_account(portal: dict[str, Any]) -> None:
     paths = replace(
         portal["paths"],
         process_env={**portal["paths"].process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"},
@@ -639,13 +635,40 @@ def test_service_account_provider_is_not_managed_as_a_personal_account(
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
 
+
+def test_service_account_provider_cannot_be_connected(oauth_egress_portal: dict[str, Any]) -> None:
+    """A shared Google service account is runtime configuration, never a personal account."""
+    portal = oauth_egress_portal
+    _enable_service_account(portal)
+
     response = portal["client"].post(
-        f"/api/connections/egress/agents/personal/drive/{action}",
+        "/api/connections/egress/agents/personal/drive/connect",
         headers=portal["headers"]["alice"],
         json={},
     )
     assert response.status_code == 409, response.text
     assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["can_connect"] is False
+
+
+def test_personal_connection_stored_before_a_service_account_can_still_be_disconnected(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """The broker keeps injecting a stored personal token, so the user must be able to revoke it."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _enable_service_account(portal)
+    assert _egress_row(portal, "alice", "personal", "drive")["active_source"] == "oauth"
+
+    response = portal["client"].post(
+        "/api/connections/egress/agents/personal/drive/disconnect",
+        headers=portal["headers"]["alice"],
+        json={},
+    )
+    assert response.status_code == 200, response.text
+    row = _egress_row(portal, "alice", "personal", "drive")
+    assert row["oauth"]["connected"] is False
+    assert row["oauth"]["service_account"] is True
+    assert row["active_source"] is None
 
 
 def test_portal_catalog_includes_the_oauth_status(oauth_egress_portal: dict[str, Any]) -> None:
@@ -723,16 +746,6 @@ def test_egress_oauth_status_agrees_with_the_portal_status(oauth_egress_portal: 
     assert alice["connected"] is False
 
 
-def _enable_service_account(portal: dict[str, Any]) -> None:
-    paths = replace(
-        portal["paths"],
-        process_env={**portal["paths"].process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"},
-    )
-    main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, portal["payload"])
-    _use_runtime_auth_settings(main.app)
-
-
 def test_service_account_is_reported_as_the_broker_sees_it_and_the_portal_keeps_its_semantics(
     oauth_egress_portal: dict[str, Any],
 ) -> None:
@@ -808,21 +821,26 @@ def test_listing_never_refreshes_tokens(oauth_egress_portal: dict[str, Any], mon
     assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 200
 
 
-def test_an_unloadable_connection_state_does_not_fail_the_listing(
+@pytest.mark.parametrize(
+    "failure",
+    [HTTPException(503, "internal-client-secret"), RuntimeError("internal-client-secret")],
+)
+def test_an_unreadable_connection_state_degrades_one_service_without_failing_the_pages(
     oauth_egress_portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
 ) -> None:
-    """One provider failing to report leaves the page up, with its service shown as not connectable."""
+    """Whatever fails while reading one provider's state, that service shows as not connectable and the rest stay."""
     portal = oauth_egress_portal
+    real = oauth.agent_connection_status
 
-    async def unavailable(*_args: object, **_kwargs: object) -> None:
-        raise HTTPException(503, "internal-client-secret")
+    async def fails_for_drive(request: Any, provider: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if provider.id == "google_drive":
+            raise failure
+        return await real(request, provider, *args, **kwargs)
 
-    monkeypatch.setattr(oauth, "agent_connection_status", unavailable)
-    response = portal["client"].get("/api/connections/egress", headers=portal["headers"]["alice"])
-    assert response.status_code == 200, response.text
-    assert "internal-client-secret" not in response.text
-    assert _egress_row(portal, "alice", "personal", "drive")["oauth"] == {
+    monkeypatch.setattr(oauth, "agent_connection_status", fails_for_drive)
+    degraded = {
         "provider": "google_drive",
         "display_name": "Test Drive",
         "connected": False,
@@ -831,7 +849,86 @@ def test_an_unloadable_connection_state_does_not_fail_the_listing(
         "reset_required": False,
         "service_account": False,
     }
+    listing = portal["client"].get("/api/connections/egress", headers=portal["headers"]["alice"])
+    assert listing.status_code == 200, listing.text
+    catalog = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    assert catalog.status_code == 200, catalog.text
+    assert "internal-client-secret" not in listing.text + catalog.text
+    assert _egress_row(portal, "alice", "personal", "drive")["oauth"] == degraded
+    assert _egress_row(portal, "alice", "personal", "gh")["oauth"]["can_connect"] is True
+    personal = next(agent for agent in catalog.json()["agents"] if agent["agent_name"] == "personal")
+    rows = {service["name"]: service for service in personal["egress_services"]}
+    assert rows["drive"]["oauth"] == degraded
+    assert rows["gh"]["oauth"]["can_connect"] is True
+
+
+def test_portal_routes_never_load_egress_oauth_status(
+    oauth_egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the catalog reads egress OAuth state; status, connect and disconnect of other providers do not."""
+    portal = oauth_egress_portal
+    client, headers = portal["client"], portal["headers"]["alice"]
+    calls: list[str] = []
+    real = connections.egress_services_for_agent
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        calls.append(args[1])
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(connections, "egress_services_for_agent", counted)
+    base = "/api/connections/agents/personal/google_drive"
+    assert client.get(f"{base}/status", headers=headers).status_code == 200
+    connect = client.post(f"{base}/connect", headers=headers, json={})
+    assert connect.status_code == 200, connect.text
+    assert client.post(f"{base}/disconnect", headers=headers, json={}).status_code == 200
+    assert calls == []
+
+    assert client.get("/api/connections", headers=headers).status_code == 200
+    assert "personal" in calls
+
+
+def test_key_status_is_read_off_the_event_loop(
+    oauth_egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading a key's status decrypts a credential file, so the async listing runs it in a thread."""
+    portal = oauth_egress_portal
+    real = secrets.secret_status
+    on_loop: list[bool] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(secrets, "secret_status", recorded)
+    assert portal["client"].get("/api/connections/egress", headers=portal["headers"]["alice"]).status_code == 200
     assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 200
+    assert on_loop
+    assert not any(on_loop)
+
+
+def test_disconnecting_a_requester_scoped_account_leaves_other_users_connected(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """On a shared agent each user's GitHub connection is their own."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "shared_dev", "gh", "github")
+    _connect_account(portal, "bob", "shared_dev", "gh", "github")
+
+    response = portal["client"].post(
+        "/api/connections/egress/agents/shared_dev/gh/disconnect",
+        headers=portal["headers"]["alice"],
+        json={},
+    )
+    assert response.status_code == 200, response.text
+    assert _egress_row(portal, "alice", "shared_dev", "gh")["oauth"]["connected"] is False
+    assert _egress_row(portal, "bob", "shared_dev", "gh")["oauth"]["connected"] is True
 
 
 def test_plain_user_of_a_shared_agent_connects_their_own_requester_scoped_account(

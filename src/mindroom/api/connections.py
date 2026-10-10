@@ -29,7 +29,6 @@ from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata
@@ -128,11 +127,7 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     providers = load_oauth_providers_for_snapshot(snapshot)
     metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, user.config, tolerate_plugin_load_errors=True)
-    memberships = config_lifecycle.app_state(request.app).agent_reply_memberships
-    agents = [
-        await _agent_connections(request, name, user, providers, metadata, memberships)
-        for name in user.visible_agent_names
-    ]
+    agents = [_agent_connections(name, user, providers, metadata) for name in user.visible_agent_names]
     return _Connections(
         runtime_paths=snapshot.runtime_paths,
         user=user,
@@ -141,13 +136,11 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
     )
 
 
-async def _agent_connections(
-    request: Request,
+def _agent_connections(
     agent_name: str,
     user: ConnectionUserContext,
     providers: dict[str, OAuthProvider],
     metadata: dict[str, ToolMetadata],
-    memberships: AgentReplyMembershipIndex,
 ) -> AgentConnections:
     """List assigned toolkits and group their browser connections by provider."""
     services: dict[str, ConnectionService] = {}
@@ -187,20 +180,6 @@ async def _agent_connections(
         if tool_name not in service.tools:
             service.tools.append(tool_name)
 
-    # Egress rows follow the personal egress API's eligibility rule: only agents the user may use.
-    egress_services = (
-        await egress_services_for_agent(
-            request,
-            agent_name,
-            user.owner.requester_id,
-            config,
-            user.runtime_paths,
-            memberships,
-            get_runtime_credentials_manager(user.runtime_paths),
-        )
-        or []
-    )
-
     agent = config.agents[agent_name]
     return AgentConnections(
         agent_name=agent_name,
@@ -209,7 +188,6 @@ async def _agent_connections(
         can_use=agent_name in user.agent_names,
         services=list(services.values()),
         tools=tools,
-        egress_services=egress_services,
     )
 
 
@@ -237,9 +215,36 @@ def _require_same_origin(request: Request, context: _Connections) -> None:
 
 
 @router.get("")
-async def catalog(context: _ConnectionsContext) -> ConnectionsCatalog:
-    """List allowed services without waiting for any upstream account status."""
-    return context.catalog
+async def catalog(request: Request, context: _ConnectionsContext) -> ConnectionsCatalog:
+    """List allowed services; the status of their accounts is loaded per card, not here.
+
+    Egress rows follow the personal egress API's eligibility rule, only agents the user may use, and carry the
+    stored OAuth state of their services. That state is read only here, so status, connect and disconnect of other
+    providers never depend on it, and one service whose state cannot be read is shown as not connectable. Reading it
+    skips the token refresh; resolving a provider's OAuth client can still bootstrap it over the network once when
+    none is stored.
+    """
+    user = context.user
+    memberships = config_lifecycle.app_state(request.app).agent_reply_memberships
+    manager = get_runtime_credentials_manager(context.runtime_paths)
+    agents = [
+        agent.model_copy(
+            update={
+                "egress_services": await egress_services_for_agent(
+                    request,
+                    agent.agent_name,
+                    user.owner.requester_id,
+                    user.config,
+                    context.runtime_paths,
+                    memberships,
+                    manager,
+                )
+                or [],
+            },
+        )
+        for agent in context.catalog.agents
+    ]
+    return ConnectionsCatalog(agents=agents)
 
 
 @router.get("/agents/{agent_name}/avatar")

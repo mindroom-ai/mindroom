@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
+from fastapi import HTTPException
 
+from mindroom.api import oauth
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.egress_broker import secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_oauth_api import _fake_provider
@@ -532,12 +536,7 @@ def test_connect_and_disconnect_reject_unknown_agents(oauth_broker_client: TestC
         assert response.status_code in {400, 404}, response.text
 
 
-@pytest.mark.parametrize("action", ["connect", "disconnect"])
-def test_connect_and_disconnect_409_for_a_service_account_provider(
-    oauth_broker_client: TestClient,
-    action: str,
-) -> None:
-    """A shared Google service account is runtime configuration, never a personal account."""
+def _enable_service_account() -> None:
     from dataclasses import replace  # noqa: PLC0415
 
     from mindroom.api import config_lifecycle, main  # noqa: PLC0415
@@ -547,7 +546,12 @@ def test_connect_and_disconnect_409_for_a_service_account_provider(
     main.initialize_api_app(main.app, paths)
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
 
-    response = oauth_broker_client.post(f"/api/egress-broker/services/drive/{action}")
+
+def test_service_account_provider_cannot_be_connected(oauth_broker_client: TestClient) -> None:
+    """A shared Google service account is runtime configuration, never a personal account."""
+    _enable_service_account()
+
+    response = oauth_broker_client.post("/api/egress-broker/services/drive/connect")
     assert response.status_code == 409, response.text
     drive = _service(oauth_broker_client, "drive")
     assert drive["oauth"]["service_account"] is True
@@ -557,23 +561,86 @@ def test_connect_and_disconnect_409_for_a_service_account_provider(
     assert drive["configured"] is False
 
 
-def test_an_unloadable_connection_state_does_not_fail_the_listing(
+def test_personal_connection_stored_before_a_service_account_can_still_be_disconnected(
+    oauth_broker_client: TestClient,
+) -> None:
+    """The broker keeps injecting a stored personal token, so the operator must be able to revoke it."""
+    _connect(oauth_broker_client, "drive", "google_drive")
+    _enable_service_account()
+    assert _service(oauth_broker_client, "drive")["active_source"] == "oauth"
+
+    response = oauth_broker_client.post("/api/egress-broker/services/drive/disconnect")
+    assert response.status_code == 200, response.text
+    drive = _service(oauth_broker_client, "drive")
+    assert drive["oauth"]["connected"] is False
+    assert drive["active_source"] is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [HTTPException(503, "internal-client-secret"), RuntimeError("internal-client-secret")],
+)
+def test_an_unreadable_connection_state_degrades_one_service_without_failing_the_panel(
     oauth_broker_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
 ) -> None:
-    """One provider failing to report leaves the panel up, with its service shown as not connectable."""
-    from fastapi import HTTPException  # noqa: PLC0415
+    """Whatever fails while reading one provider's state, that service shows as not connectable and the rest stay."""
+    real = oauth.authenticated_connection_status
 
-    from mindroom.api import oauth  # noqa: PLC0415
+    async def fails_for_drive(provider_id: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if provider_id == "google_drive":
+            raise failure
+        return await real(provider_id, *args, **kwargs)
 
-    async def unavailable(*_args: object, **_kwargs: object) -> None:
-        raise HTTPException(503, "internal-client-secret")
-
-    monkeypatch.setattr(oauth, "status", unavailable)
+    monkeypatch.setattr(oauth, "authenticated_connection_status", fails_for_drive)
     response = oauth_broker_client.get("/api/egress-broker/services")
     assert response.status_code == 200, response.text
     assert "internal-client-secret" not in response.text
     drive = _service(oauth_broker_client, "drive")
     assert drive["oauth"]["connected"] is False
     assert drive["oauth"]["can_connect"] is False
+    assert _service(oauth_broker_client, "gh")["oauth"]["can_connect"] is True
     assert _service(oauth_broker_client, "github")["oauth"] is None
+
+
+def test_listing_authenticates_once_not_per_service(
+    oauth_broker_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router's dependency authenticates the request; the per-provider status does not repeat it."""
+    calls: list[str] = []
+    real = oauth.verify_user
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        calls.append("verify")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(oauth, "verify_user", counted)
+    assert oauth_broker_client.get("/api/egress-broker/services").status_code == 200
+    assert calls == []
+    assert oauth_broker_client.get("/api/oauth/google_drive/status").status_code == 200
+    assert calls == ["verify"]
+
+
+def test_key_status_is_read_off_the_event_loop(
+    oauth_broker_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading a key's status decrypts a credential file, so the async listing runs it in a thread."""
+    real = secrets.secret_status
+    on_loop: list[bool] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(secrets, "secret_status", recorded)
+    assert oauth_broker_client.get("/api/egress-broker/services").status_code == 200
+    assert on_loop
+    assert not any(on_loop)

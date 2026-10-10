@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -14,17 +14,17 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     worker_target_for_credentials_target,
 )
-from mindroom.api.egress_credentials import (
-    EgressOAuthStatus,
+from mindroom.api.egress_status import (
+    EgressSourceStatus,
     egress_oauth_provider,
     egress_oauth_status,
     egress_service_status,
-    source_status_fields,
     unavailable_egress_oauth_status,
 )
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
+from mindroom.logging_config import get_logger
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 
 if TYPE_CHECKING:
@@ -33,30 +33,21 @@ if TYPE_CHECKING:
     from mindroom.egress_broker.secrets import OAuthStatus
 
 router = APIRouter(prefix="/api/egress-broker", tags=["egress-broker"])
+logger = get_logger(__name__)
 
 
-class ServiceStatus(BaseModel):
-    """Status of one egress service.
-
-    `configured` is true when either secret source is available and `updated_at` is the API key's timestamp, both
-    kept for older clients. `active_source` says which source the broker uses: an explicit key wins over OAuth.
-    """
+class _ServiceStatus(EgressSourceStatus):
+    """Status of one egress service."""
 
     name: str
     display_name: str | None
     description: str
-    configured: bool
-    updated_at: str | None
-    active_source: Literal["key", "oauth"] | None
-    key_configured: bool
-    key_updated_at: str | None
-    oauth: EgressOAuthStatus | None
 
 
 class ServicesResponse(BaseModel):
     """List of egress services with their status."""
 
-    services: list[ServiceStatus]
+    services: list[_ServiceStatus]
 
 
 class PutSecretRequest(BaseModel):
@@ -96,7 +87,11 @@ async def _admin_oauth_status(
     name: str,
     provider_id: str,
 ) -> OAuthStatus | None:
-    """Load a provider's connection state for the selected scope with the dashboard's own OAuth status route."""
+    """Load a provider's connection state for the selected scope with the dashboard's OAuth status helper.
+
+    The router's dependency has authenticated the request. Any failure to read one provider's state shows that
+    service as not connectable instead of failing the panel.
+    """
     from mindroom.api import config_lifecycle  # noqa: PLC0415
 
     provider = load_oauth_providers_for_snapshot(config_lifecycle.bind_current_request_snapshot(request)).get(
@@ -105,28 +100,34 @@ async def _admin_oauth_status(
     if provider is None:
         return None
     try:
-        result = await oauth.status(provider_id, request, agent_name=target.agent_name)
-    except HTTPException:
-        return unavailable_egress_oauth_status(provider)
-    return await egress_oauth_status(
-        result,
-        can_manage=True,
-        stored_connection=partial(
-            oauth_status,
-            provider_id,
-            worker_target_for_credentials_target(target),
+        result = await oauth.authenticated_connection_status(provider_id, request, agent_name=target.agent_name)
+        return await egress_oauth_status(
+            result,
+            can_manage=True,
+            stored_connection=partial(
+                oauth_status,
+                provider_id,
+                worker_target_for_credentials_target(target),
+                service=name,
+                config=config,
+                runtime_paths=target.runtime_paths,
+                credentials_manager=target.base_manager,
+            ),
+        )
+    except Exception as exc:
+        logger.warning(
+            "egress_oauth_status_unavailable",
             service=name,
-            config=config,
-            runtime_paths=target.runtime_paths,
-            credentials_manager=target.base_manager,
-        ),
-    )
+            provider_id=provider_id,
+            error_type=type(exc).__name__,
+        )
+        return unavailable_egress_oauth_status(provider)
 
 
 async def _load_service_statuses_for_target(
     request: Request,
     target: RequestCredentialsTarget,
-) -> list[ServiceStatus]:
+) -> list[_ServiceStatus]:
     """Build service status list for one target."""
     from mindroom.api import config_lifecycle  # noqa: PLC0415
 
@@ -136,20 +137,20 @@ async def _load_service_statuses_for_target(
 
     worker_target = worker_target_for_credentials_target(target)
 
-    services: list[ServiceStatus] = []
+    services: list[_ServiceStatus] = []
     for name, service_config in config.egress_broker.services.items():
         oauth_part = (
             await _admin_oauth_status(request, config, target, name, service_config.oauth_provider)
             if service_config.oauth_provider is not None
             else None
         )
-        status = egress_service_status(target.base_manager, worker_target, service_config, name, oauth_part)
+        sources = await egress_service_status(target.base_manager, worker_target, service_config, name, oauth_part)
         services.append(
-            ServiceStatus(
+            _ServiceStatus(
                 name=name,
                 display_name=service_config.display_name,
                 description=service_config.description,
-                **source_status_fields(status),
+                **sources.model_dump(),
             ),
         )
 
@@ -240,7 +241,7 @@ async def connect_service_account(
     Raises 404 if the service is not configured or has no usable OAuth provider, 409 if a service account
     replaces personal accounts for that provider.
     """
-    provider = egress_oauth_provider(request, name)
+    provider = egress_oauth_provider(request, name, connecting=True)
     return await oauth.connect(provider.id, request, agent_name=agent_name)
 
 
@@ -251,7 +252,7 @@ async def disconnect_service_account(
     agent_name: Annotated[str | None, Query()] = None,
 ) -> dict[str, str]:
     """Reset the OAuth connection of a service's provider for the selected scope."""
-    provider = egress_oauth_provider(request, name)
+    provider = egress_oauth_provider(request, name, connecting=False)
     return await oauth.disconnect(provider.id, request, agent_name=agent_name)
 
 

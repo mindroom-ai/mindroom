@@ -29,6 +29,7 @@ can_connect  # JSON response field consumed by personal portal (src/mindroom/api
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 key_configured  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
 key_updated_at  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
+egress_services  # JSON response field set on the catalog by its route (src/mindroom/api/connections.py)
 connect_egress_account  # FastAPI route (src/mindroom/api/egress_credentials.py)
 disconnect_egress_account  # FastAPI route (src/mindroom/api/egress_credentials.py)
 connect_service_account  # FastAPI route (src/mindroom/api/egress_broker.py)

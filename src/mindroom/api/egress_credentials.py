@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import asdict
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
@@ -17,70 +15,41 @@ from mindroom.api.connection_agents import (
     build_connection_agent_target,
     require_connections_same_origin,
 )
+from mindroom.api.egress_status import (
+    EgressSourceStatus,
+    egress_oauth_provider,
+    egress_oauth_status,
+    egress_service_status,
+    service_oauth_provider,
+    unavailable_egress_oauth_status,
+)
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker.oauth_source import oauth_status
-from mindroom.egress_broker.secrets import (
-    EgressServiceStatus,
-    OAuthStatus,
-    delete_secret,
-    save_secret,
-    service_status,
-)
-from mindroom.oauth.registry import load_oauth_providers_for_snapshot
-from mindroom.oauth.service import oauth_provider_service_account_configured
+from mindroom.egress_broker.secrets import OAuthStatus, delete_secret, save_secret
+from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.api.config_lifecycle import ApiSnapshot
-    from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-    from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 router = APIRouter(prefix="/api/connections/egress", tags=["egress-credentials"])
+logger = get_logger(__name__)
 
 
-class EgressOAuthStatus(BaseModel):
-    """Connection state of the OAuth account a service can use instead of an API key.
-
-    `connected` means the broker would inject a personal access token. `service_account` marks a provider that a
-    shared service account serves instead: the broker cannot inject that, and personal accounts are not connectable.
-    """
-
-    provider: str
-    display_name: str
-    connected: bool
-    account_label: str | None
-    can_connect: bool
-    reset_required: bool
-    service_account: bool
-
-
-class EgressCredentialService(BaseModel):
-    """One egress service with its management permissions and status.
-
-    `configured` is true when either secret source is available and `updated_at` is the API key's timestamp, both
-    kept for older clients. `active_source` says which source the broker uses: an explicit key wins over OAuth.
-    """
+class EgressCredentialService(EgressSourceStatus):
+    """One egress service with its management permissions and its key and OAuth sources."""
 
     name: str
     display_name: str
     description: str
     is_shared: bool
     can_manage: bool
-    configured: bool
-    updated_at: str | None
-    active_source: Literal["key", "oauth"] | None
-    key_configured: bool
-    key_updated_at: str | None
-    oauth: EgressOAuthStatus | None
 
 
 class EgressCredentialAgent(BaseModel):
@@ -107,107 +76,6 @@ class PutSecretRequest(BaseModel):
 
 class _EmptyMutation(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-async def egress_oauth_status(
-    result: oauth.OAuthStatusResponse,
-    *,
-    can_manage: bool,
-    stored_connection: Callable[[], OAuthStatus | None],
-) -> OAuthStatus:
-    """Return a service's OAuth status as the broker sees it.
-
-    Without a service account this is what the Connections portal shows the same viewer. A service account is not
-    a token the broker can inject, so with one `connected` only reflects a stored personal connection that the
-    broker would still use (`stored_connection` reads it like the broker does), and nothing is connectable.
-    """
-    if not result.has_service_account_config:
-        view = oauth.personal_connection_view(result, can_manage=can_manage)
-        return OAuthStatus(
-            provider=result.provider,
-            display_name=result.display_name,
-            connected=view.connected,
-            account_label=view.account_label,
-            can_connect=view.can_connect,
-            reset_required=view.reset_required,
-        )
-    stored = await asyncio.to_thread(stored_connection)
-    return OAuthStatus(
-        provider=result.provider,
-        display_name=result.display_name,
-        connected=stored is not None and stored.connected,
-        account_label=None,
-        can_connect=False,
-        reset_required=result.reset_required,
-        service_account=True,
-    )
-
-
-def unavailable_egress_oauth_status(provider: OAuthProvider) -> OAuthStatus:
-    """Return the status shown while a provider's connection state cannot be loaded, so one failure spares the page."""
-    return OAuthStatus(
-        provider=provider.id,
-        display_name=provider.display_name,
-        connected=False,
-        account_label=None,
-        can_connect=False,
-        reset_required=False,
-    )
-
-
-def egress_service_status(
-    manager: CredentialsManager,
-    target: ResolvedWorkerTarget | None,
-    service: EgressService,
-    name: str,
-    oauth_part: OAuthStatus | None,
-) -> EgressServiceStatus:
-    """Combine a service's key status with its already loaded OAuth status; an explicit key wins."""
-    return service_status(manager, target, service, name, oauth_status=lambda _provider_id, _target: oauth_part)
-
-
-def source_status_fields(status: EgressServiceStatus) -> dict[str, Any]:
-    """Return the response fields that describe a service's key and OAuth sources."""
-    return {
-        "configured": status.configured,
-        "updated_at": status.key_updated_at,
-        "active_source": status.active_source,
-        "key_configured": status.key_configured,
-        "key_updated_at": status.key_updated_at,
-        "oauth": EgressOAuthStatus(**asdict(status.oauth)) if status.oauth is not None else None,
-    }
-
-
-def _service_oauth_provider(snapshot: ApiSnapshot, service_name: str) -> OAuthProvider | None:
-    """Return the registry's provider for a configured egress service, or None without a known one."""
-    config = snapshot.runtime_config
-    service = config.egress_broker.services.get(service_name) if config is not None else None
-    if service is None or service.oauth_provider is None:
-        return None
-    return load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
-
-
-def egress_oauth_provider(
-    request: Request,
-    service_name: str,
-    *,
-    headers: Mapping[str, str] | None = None,
-) -> OAuthProvider:
-    """Return the OAuth provider of a configured egress service for the connect and disconnect routes.
-
-    A service without a provider, or whose provider the registry does not know, is a 404. While a shared service
-    account is configured for the provider, personal accounts are not managed here at all, which is a 409.
-    """
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    config = snapshot.runtime_config
-    if config is None or service_name not in config.egress_broker.services:
-        raise HTTPException(404, "Service is not configured", headers=headers)
-    provider = _service_oauth_provider(snapshot, service_name)
-    if provider is None:
-        raise HTTPException(404, "Service has no account connection", headers=headers)
-    if oauth_provider_service_account_configured(provider, snapshot.runtime_paths):
-        raise HTTPException(409, "Personal account linking is unavailable for this service", headers=headers)
-    return provider
 
 
 def _check_agent_eligibility(
@@ -256,10 +124,11 @@ async def _personal_oauth_status(
 ) -> OAuthStatus | None:
     """Load a service's provider connection state for one agent with the helper behind the portal's status route.
 
-    The token refresh is skipped so a listing never waits on the provider; an unknown provider has no status.
+    The token refresh is skipped so a listing never waits on the provider; an unknown provider has no status, and
+    any failure to read one provider's state shows that service as not connectable instead of failing the listing.
     Requester-scoped connections (GitHub) belong to the requester, so every user of the agent manages their own.
     """
-    provider = _service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service_name)
+    provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service_name)
     if provider is None:
         return None
     try:
@@ -272,21 +141,27 @@ async def _personal_oauth_status(
             config=config,
             refresh=False,
         )
-    except HTTPException:
-        return unavailable_egress_oauth_status(provider)
-    return await egress_oauth_status(
-        result,
-        can_manage=can_manage or provider.requester_scoped_credentials,
-        stored_connection=partial(
-            oauth_status,
-            provider.id,
-            target,
+        return await egress_oauth_status(
+            result,
+            can_manage=can_manage or provider.requester_scoped_credentials,
+            stored_connection=partial(
+                oauth_status,
+                provider.id,
+                target,
+                service=service_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                credentials_manager=manager,
+            ),
+        )
+    except Exception as exc:
+        logger.warning(
+            "egress_oauth_status_unavailable",
             service=service_name,
-            config=config,
-            runtime_paths=runtime_paths,
-            credentials_manager=manager,
-        ),
-    )
+            provider_id=provider.id,
+            error_type=type(exc).__name__,
+        )
+        return unavailable_egress_oauth_status(provider)
 
 
 async def _build_service_for_agent(
@@ -302,26 +177,18 @@ async def _build_service_for_agent(
     is_shared, can_manage = eligibility
     service = config.egress_broker.services[name]
     oauth_part = (
-        await _personal_oauth_status(
-            request,
-            config,
-            runtime_paths,
-            manager,
-            target,
-            name,
-            can_manage=can_manage,
-        )
+        await _personal_oauth_status(request, config, runtime_paths, manager, target, name, can_manage=can_manage)
         if service.oauth_provider is not None
         else None
     )
-    status = egress_service_status(manager, target, service, name, oauth_part)
+    sources = await egress_service_status(manager, target, service, name, oauth_part)
     return EgressCredentialService(
         name=name,
         display_name=service.display_name or name.replace("_", " ").title(),
         description=service.description,
         is_shared=is_shared,
         can_manage=can_manage,
-        **source_status_fields(status),
+        **sources.model_dump(),
     )
 
 
@@ -442,7 +309,7 @@ def _resolve_agent_and_service(
 
     requester_owned = False
     if requester_owned_oauth:
-        provider = _service_oauth_provider(snapshot, service)
+        provider = service_oauth_provider(snapshot, service)
         requester_owned = provider is not None and provider.requester_scoped_credentials
     if require_management and not can_manage and not requester_owned:
         raise HTTPException(403, "Credential management is required", headers=CONNECTIONS_HEADERS)
@@ -528,7 +395,7 @@ async def connect_egress_account(
         require_management=True,
         requester_owned_oauth=True,
     )
-    provider = egress_oauth_provider(request, service, headers=CONNECTIONS_HEADERS)
+    provider = egress_oauth_provider(request, service, connecting=True, headers=CONNECTIONS_HEADERS)
     try:
         return await oauth.connect(provider.id, request, agent_name=agent_name)
     except HTTPException as exc:
@@ -557,7 +424,7 @@ async def disconnect_egress_account(
         require_management=True,
         requester_owned_oauth=True,
     )
-    provider = egress_oauth_provider(request, service, headers=CONNECTIONS_HEADERS)
+    provider = egress_oauth_provider(request, service, connecting=False, headers=CONNECTIONS_HEADERS)
     try:
         return await oauth.disconnect(provider.id, request, agent_name=agent_name)
     except HTTPException as exc:
