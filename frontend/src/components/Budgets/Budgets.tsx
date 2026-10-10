@@ -17,6 +17,7 @@ import { NativeSelect } from "@/components/SchemaForm";
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
 import type { ConfigPath } from "@/lib/configSchema";
 import { isConcreteMatrixUserId } from "@/lib/matrixIds";
+import { cn } from "@/lib/utils";
 import { fetchBudgets } from "@/services/budgetService";
 import { useConfigStore } from "@/store/configStore";
 import type { EnabledBudgetStatus } from "@/types/budgets";
@@ -74,20 +75,23 @@ function UsdInput({
     // Only an outside change of the committed value resets the typed text.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
+  const invalid = parseUsd(text) === null;
   return (
     <Input
-      type="number"
       inputMode="decimal"
-      min={0}
-      step="any"
       aria-label={label}
+      aria-invalid={invalid}
       value={text}
       placeholder={placeholder}
-      className={className}
+      className={cn("aria-invalid:border-destructive", className)}
       onChange={(event) => {
         setText(event.target.value);
         const parsed = parseUsd(event.target.value);
         if (parsed !== null) onCommit(parsed);
+      }}
+      // An invalid amount is never committed, so leaving the field shows the amount that will be saved.
+      onBlur={() => {
+        if (invalid) setText(value == null ? "" : String(value));
       }}
     />
   );
@@ -225,6 +229,8 @@ function UsersCard({
     if (!capKeys.has(canonicalOf(key))) capKeys.set(canonicalOf(key), key);
   }
   const capKeyOf = (userId: string) => capKeys.get(userId) ?? userId;
+  // Until a spend scan has reported, spend is unknown rather than zero.
+  const spendKnown = status?.generated_at != null;
   const spend = new Map(
     (status?.users ?? []).map((user) => [user.user_id, user.spend_usd]),
   );
@@ -301,7 +307,9 @@ function UsersCard({
               {userIds.length === 0 && (
                 <tr>
                   <td colSpan={4} className="py-4 text-muted-foreground">
-                    No spend this month yet.
+                    {spendKnown
+                      ? "No spend this month yet."
+                      : "Spend appears after the next refresh."}
                   </td>
                 </tr>
               )}
@@ -309,7 +317,7 @@ function UsersCard({
                 const userSpend = spend.get(userId) ?? 0;
                 const override = overrides[capKeyOf(userId)];
                 const limit = override ?? budgets.monthly_limit_usd;
-                const over = limit != null && userSpend >= limit;
+                const over = spendKnown && limit != null && userSpend >= limit;
                 const fraction =
                   limit == null
                     ? 0
@@ -325,8 +333,8 @@ function UsersCard({
                       {userId}
                     </td>
                     <td className="sm:py-2 sm:pr-3">
-                      <div>{formatUsd(userSpend)}</div>
-                      {limit != null && (
+                      <div>{spendKnown ? formatUsd(userSpend) : "—"}</div>
+                      {spendKnown && limit != null && (
                         <div
                           aria-hidden="true"
                           className="mt-1 h-1.5 w-24 overflow-hidden rounded-full bg-muted"
@@ -366,7 +374,11 @@ function UsersCard({
                         </Badge>
                       ) : (
                         <Badge variant="secondary">
-                          {limit == null ? "Uncapped" : "Within budget"}
+                          {limit == null
+                            ? "Uncapped"
+                            : spendKnown
+                              ? "Within budget"
+                              : "Waiting for spend"}
                         </Badge>
                       )}
                     </td>

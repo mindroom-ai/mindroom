@@ -126,10 +126,10 @@ describe("Budgets", () => {
     expect(within(bob).getByText("$3.25")).toBeInTheDocument();
     expect(within(bob).getByText("Within budget")).toBeInTheDocument();
     expect(
-      within(bob).getByRole("spinbutton", {
+      within(bob).getByRole("textbox", {
         name: "Monthly cap for @bob:example.org",
       }),
-    ).toHaveValue(100);
+    ).toHaveValue("100");
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining("/api/budgets"),
       expect.objectContaining({ cache: "no-store" }),
@@ -164,7 +164,7 @@ describe("Budgets", () => {
     });
     expect(within(alice).getByText("$0.011")).toBeInTheDocument();
     expect(
-      within(alice).getByRole("spinbutton", {
+      within(alice).getByRole("textbox", {
         name: "Monthly cap for @alice:example.org",
       }),
     ).toHaveAttribute("placeholder", "Default ($0.005)");
@@ -175,7 +175,7 @@ describe("Budgets", () => {
     renderBudgets();
 
     expect(
-      await screen.findByRole("spinbutton", { name: "astra cache read price" }),
+      await screen.findByRole("textbox", { name: "astra cache read price" }),
     ).toHaveAttribute("placeholder", "= input");
   });
 
@@ -210,11 +210,11 @@ describe("Budgets", () => {
     const alice = await screen.findByRole("row", {
       name: /@alice:example.org/,
     });
-    const cap = within(alice).getByRole("spinbutton", {
+    const cap = within(alice).getByRole("textbox", {
       name: "Monthly cap for @alice:example.org",
     });
-    expect(cap).toHaveValue(100);
-    expect(within(alice).getByText("Within budget")).toBeInTheDocument();
+    expect(cap).toHaveValue("100");
+    expect(await within(alice).findByText("Within budget")).toBeInTheDocument();
     expect(
       screen.queryByRole("row", { name: /@tg-alice:example.org/ }),
     ).not.toBeInTheDocument();
@@ -269,7 +269,7 @@ describe("Budgets", () => {
     fireEvent.change(screen.getByPlaceholderText("@user:example.com"), {
       target: { value: "@tg-alice:example.org" },
     });
-    fireEvent.change(screen.getByRole("spinbutton", { name: "New user cap" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "New user cap" }), {
       target: { value: "5" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add user" }));
@@ -286,7 +286,7 @@ describe("Budgets", () => {
   it("writes a user's cap override and clears it back to the default", async () => {
     vi.mocked(fetch).mockResolvedValue(respond(status));
     renderBudgets();
-    const aliceCap = await screen.findByRole("spinbutton", {
+    const aliceCap = await screen.findByRole("textbox", {
       name: "Monthly cap for @alice:example.org",
     });
 
@@ -297,7 +297,7 @@ describe("Budgets", () => {
     );
 
     fireEvent.change(
-      screen.getByRole("spinbutton", {
+      screen.getByRole("textbox", {
         name: "Monthly cap for @bob:example.org",
       }),
       { target: { value: "" } },
@@ -316,7 +316,7 @@ describe("Budgets", () => {
     fireEvent.change(screen.getByPlaceholderText("@user:example.com"), {
       target: { value: "@carol:example.org" },
     });
-    fireEvent.change(screen.getByRole("spinbutton", { name: "New user cap" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "New user cap" }), {
       target: { value: "5" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add user" }));
@@ -335,7 +335,7 @@ describe("Budgets", () => {
     await screen.findByRole("row", { name: /@alice:example.org/ });
 
     fireEvent.change(
-      screen.getByRole("spinbutton", {
+      screen.getByRole("textbox", {
         name: "Monthly cap for @bob:example.org",
       }),
       { target: { value: "" } },
@@ -348,7 +348,7 @@ describe("Budgets", () => {
     rerenderPage();
 
     expect(
-      screen.getByRole("spinbutton", {
+      screen.getByRole("textbox", {
         name: "Monthly cap for @bob:example.org",
       }),
     ).toBeInTheDocument();
@@ -359,7 +359,7 @@ describe("Budgets", () => {
     renderBudgets();
 
     fireEvent.change(
-      await screen.findByRole("spinbutton", { name: "Default monthly cap" }),
+      await screen.findByRole("textbox", { name: "Default monthly cap" }),
       {
         target: { value: "" },
       },
@@ -378,6 +378,37 @@ describe("Budgets", () => {
     );
   });
 
+  it("flags an invalid amount and shows the saved amount once the field is left", async () => {
+    vi.mocked(fetch).mockResolvedValue(respond(status));
+    renderBudgets();
+
+    const cap = await screen.findByRole("textbox", {
+      name: "Default monthly cap",
+    });
+    fireEvent.change(cap, { target: { value: "-1" } });
+
+    expect(cap).toHaveAttribute("aria-invalid", "true");
+    expect(mockUpdateConfigValue).not.toHaveBeenCalled();
+
+    fireEvent.blur(cap);
+
+    expect(cap).toHaveValue("20");
+    expect(cap).toHaveAttribute("aria-invalid", "false");
+  });
+
+  it("shows spend as unknown until budgets report it", async () => {
+    vi.mocked(fetch).mockResolvedValue(respond({ enabled: false }));
+    renderBudgets();
+
+    const bob = (
+      await screen.findByRole("textbox", {
+        name: "Monthly cap for @bob:example.org",
+      })
+    ).closest("tr")!;
+    expect(within(bob).getByText("—")).toBeInTheDocument();
+    expect(within(bob).getByText("Waiting for spend")).toBeInTheDocument();
+  });
+
   it("turns budgets on with the cheapest priced model as fallback", async () => {
     setStore(budgetConfig({ budgets: undefined }));
     vi.mocked(fetch).mockResolvedValue(respond({ enabled: false }));
@@ -391,7 +422,7 @@ describe("Budgets", () => {
       fallback_model: "luna",
     });
     expect(
-      screen.queryByRole("spinbutton", { name: "Default monthly cap" }),
+      screen.queryByRole("textbox", { name: "Default monthly cap" }),
     ).not.toBeInTheDocument();
   });
 
@@ -414,7 +445,7 @@ describe("Budgets", () => {
     renderBudgets();
 
     fireEvent.change(
-      await screen.findByRole("spinbutton", {
+      await screen.findByRole("textbox", {
         name: "local input price",
       }),
       { target: { value: "0.5" } },
@@ -427,7 +458,7 @@ describe("Budgets", () => {
     );
 
     fireEvent.change(
-      screen.getByRole("spinbutton", { name: "astra cache read price" }),
+      screen.getByRole("textbox", { name: "astra cache read price" }),
       {
         target: { value: "0.5" },
       },
@@ -442,7 +473,7 @@ describe("Budgets", () => {
     );
 
     fireEvent.change(
-      screen.getByRole("spinbutton", { name: "luna input price" }),
+      screen.getByRole("textbox", { name: "luna input price" }),
       {
         target: { value: "" },
       },
@@ -471,7 +502,7 @@ describe("Budgets", () => {
     renderBudgets();
 
     fireEvent.change(
-      await screen.findByRole("spinbutton", { name: "luna input price" }),
+      await screen.findByRole("textbox", { name: "luna input price" }),
       {
         target: { value: "" },
       },
@@ -499,13 +530,13 @@ describe("Budgets", () => {
 
     expect(await screen.findByText(/Spend is unavailable/)).toBeInTheDocument();
     expect(
-      screen.getByRole("spinbutton", { name: "Default monthly cap" }),
-    ).toHaveValue(20);
+      screen.getByRole("textbox", { name: "Default monthly cap" }),
+    ).toHaveValue("20");
     expect(
-      screen.getByRole("spinbutton", {
+      screen.getByRole("textbox", {
         name: "Monthly cap for @bob:example.org",
       }),
-    ).toHaveValue(100);
+    ).toHaveValue("100");
   });
 
   it("saves the draft config", async () => {
