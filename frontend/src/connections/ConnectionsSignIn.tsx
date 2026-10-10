@@ -1,103 +1,118 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { signInWithMatrix, type MatrixSignInResult } from "./matrixSignIn";
 
 const SESSION_PATH = "/api/connections/session";
+const READY_MESSAGE = "mindroom:connections-ready";
+const OPENID_MESSAGE = "mindroom:connections-openid";
+const ANSWER_TIMEOUT_MS = 30000;
 const OPEN_FROM_CHAT =
   "Open Connections from MindRoom Chat (Settings, General) to sign in.";
 const NOT_AVAILABLE = "Connections are not available for this account.";
-const NOT_ENABLED = "Connections are not enabled on this server.";
-const TRY_AGAIN = "Could not sign in. Try again.";
 const REJECTED = "MindRoom did not accept the sign-in from MindRoom Chat.";
+const RELOAD = "Could not sign in. Reload this page to try again.";
 
 type Gate =
   | { state: "checking" }
   | { state: "signed-in"; user: string }
-  | { state: "blocked"; message: string; retry?: boolean };
+  | { state: "blocked"; message: string };
 
 const blocked = (message: string): Gate => ({ state: "blocked", message });
-const TRY_AGAIN_GATE: Gate = {
-  state: "blocked",
-  message: TRY_AGAIN,
-  retry: true,
-};
 
-async function signedInUser(response: Response): Promise<string | null> {
+async function readBody(response: Response): Promise<Record<string, unknown>> {
   try {
-    const body = (await response.json()) as { matrix_user_id?: unknown };
-    return typeof body.matrix_user_id === "string" ? body.matrix_user_id : null;
+    const body: unknown = await response.json();
+    return typeof body === "object" && body !== null
+      ? (body as Record<string, unknown>)
+      : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
-/** Ask the server who is signed in; `null` means the browser has no session yet. */
-async function probeSession(signal: AbortSignal): Promise<Gate | null> {
-  const response = await fetch(SESSION_PATH, {
-    method: "GET",
-    signal,
-    credentials: "same-origin",
-  });
-  if (response.status === 401) return null;
-  if (response.status === 403) return blocked(NOT_AVAILABLE);
-  if (response.status === 404) return blocked(NOT_ENABLED);
-  const user = response.ok ? await signedInUser(response) : null;
-  return user ? { state: "signed-in", user } : TRY_AGAIN_GATE;
+async function signedIn(response: Response): Promise<Gate> {
+  const { matrix_user_id: user } = await readBody(response);
+  return typeof user === "string" && user
+    ? { state: "signed-in", user }
+    : blocked(RELOAD);
 }
 
-const isRejection = (result: MatrixSignInResult) =>
-  result.status === 401 || result.status === 403;
+/** Ask the window that opened the portal for a Matrix OpenID token; `null` means no answer in time or aborted. */
+function askOpener(opener: Window, signal: AbortSignal) {
+  type Answer = { token: object; origin: string };
+  return new Promise<Answer | null>((resolve) => {
+    const finish = (answer: Answer | null) => {
+      clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      resolve(answer);
+    };
+    const onMessage = (event: MessageEvent) => {
+      const { type, openid_token: token } = (event.data ?? {}) as {
+        type?: unknown;
+        openid_token?: unknown;
+      };
+      if (event.source !== opener || type !== OPENID_MESSAGE) return;
+      if (typeof token !== "object" || token === null) return;
+      finish({ token, origin: event.origin });
+    };
+    const timer = setTimeout(() => finish(null), ANSWER_TIMEOUT_MS);
+    signal.addEventListener("abort", () => finish(null), { once: true });
+    window.addEventListener("message", onMessage);
+    // The ready message carries no secret; the backend checks the reply's origin against its allowlist.
+    opener.postMessage({ type: READY_MESSAGE }, "*");
+  });
+}
 
-function signInFailure(result: MatrixSignInResult): Gate {
-  // Without a status, Chat never answered, so only opening the portal from Chat can help.
-  if (result.status === undefined) return blocked(OPEN_FROM_CHAT);
-  if (isRejection(result)) return blocked(result.detail ?? REJECTED);
-  if (result.status === 404) return blocked(NOT_ENABLED);
-  return TRY_AGAIN_GATE;
+async function signIn(signal: AbortSignal): Promise<Gate> {
+  const opener: Window | null = window.opener;
+  if (!opener) {
+    // Trusted-upstream deployments and direct visits with a live session have no handshake to run.
+    const response = await fetch(SESSION_PATH, {
+      signal,
+      credentials: "same-origin",
+    });
+    if (response.status === 401) return blocked(OPEN_FROM_CHAT);
+    if (response.status === 403) return blocked(NOT_AVAILABLE);
+    return response.ok ? signedIn(response) : blocked(RELOAD);
+  }
+  const answer = await askOpener(opener, signal);
+  if (!answer) return blocked(OPEN_FROM_CHAT);
+  const response = await fetch(SESSION_PATH, {
+    method: "POST",
+    signal,
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      openid_token: answer.token,
+      client_origin: answer.origin,
+    }),
+  });
+  if (response.ok) return signedIn(response);
+  if (response.status !== 401 && response.status !== 403)
+    return blocked(RELOAD);
+  const { detail } = await readBody(response);
+  return blocked(typeof detail === "string" && detail ? detail : REJECTED);
 }
 
 /**
  * Render the portal for the Matrix user signed in to MindRoom Chat.
  *
- * When MindRoom Chat opened the portal, the portal asks it for a Matrix OpenID token and trades it for a session,
- * even if the browser still holds a session, so the account signed in to Chat replaces another account's session.
+ * When MindRoom Chat opened the portal, its OpenID handshake is the only way in and the portal ignores any existing
+ * session, so another account's session can never show. Without an opener, the portal shows the session the server reports.
  *
- * @param children - Portal content shown after sign-in, remounted when the signed-in user changes.
+ * @param children - Portal content shown only after sign-in succeeds.
  */
 export function ConnectionsSignIn({ children }: { children: ReactNode }) {
   const [gate, setGate] = useState<Gate>({ state: "checking" });
-  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    const run = async () => {
-      const probed = await probeSession(signal);
-      if (signal.aborted) return;
-      const hasSession = probed?.state === "signed-in";
-      if (probed) setGate(probed);
-      if (probed && !hasSession) return;
-      if (!window.opener) {
-        if (!hasSession) setGate(blocked(OPEN_FROM_CHAT));
-        return;
-      }
-      const result = await signInWithMatrix(window, signal);
-      if (signal.aborted) return;
-      if (!result.ok) {
-        // An existing session survives a silent or unreachable Chat, but not a rejected Chat account.
-        if (!hasSession || isRejection(result)) setGate(signInFailure(result));
-        return;
-      }
-      const next = (await probeSession(signal)) ?? TRY_AGAIN_GATE;
-      if (signal.aborted) return;
-      // The key on the portal content remounts it only when the signed-in user changes.
-      setGate(next);
-    };
-    void run().catch(() => {
-      if (!signal.aborted) setGate(TRY_AGAIN_GATE);
-    });
+    void signIn(signal)
+      .catch(() => blocked(RELOAD))
+      .then((next) => {
+        if (!signal.aborted) setGate(next);
+      });
     return () => controller.abort();
-  }, [attempt]);
+  }, []);
 
   if (gate.state === "signed-in")
     return (
@@ -107,7 +122,7 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
             Signed in as {gate.user}
           </p>
         </div>
-        <Fragment key={gate.user}>{children}</Fragment>
+        {children}
       </>
     );
   return (
@@ -119,23 +134,7 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
           </p>
         ) : (
           <Alert>
-            <AlertDescription>
-              <p>{gate.message}</p>
-              {gate.retry ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="mt-3"
-                  onClick={() => {
-                    setGate({ state: "checking" });
-                    setAttempt((count) => count + 1);
-                  }}
-                >
-                  Try again
-                </Button>
-              ) : null}
-            </AlertDescription>
+            <AlertDescription>{gate.message}</AlertDescription>
           </Alert>
         )}
       </div>
