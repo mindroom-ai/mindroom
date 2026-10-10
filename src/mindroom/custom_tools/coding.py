@@ -744,6 +744,10 @@ class CodingTools(Toolkit):
     def apply_patch(self, input: str) -> str:  # noqa: A002 - Codex names the patch argument input
         """Apply a patch in the apply_patch format, adding, updating, moving, and deleting files.
 
+        A patch starts with ``*** Begin Patch`` and ends with ``*** End Patch``. Between them, ``*** Add File: <path>``
+        is followed by the new lines, each prefixed with ``+``; ``*** Delete File: <path>`` stands alone; and
+        ``*** Update File: <path>``, optionally followed by ``*** Move to: <path>``, is followed by ``@@`` hunks whose
+        lines start with a space for context, ``-`` for removed, or ``+`` for added lines. Paths are relative.
         Every hunk is checked against the files before anything is written, so a patch that does not
         apply changes nothing.
 

@@ -1221,6 +1221,34 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["duckduckgo"] is None
 
 
+def test_shared_toolkit_builder_drops_apply_patch_gated_unlike_the_edit_tools(tmp_path: Path) -> None:
+    """Every consumer of the shared builder, such as the MCP gateway, gets apply_patch only when approval agrees."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match=name, action="require_approval") for name in ("edit_file", "write_file")],
+    )
+    config = _bind_runtime_paths(config, runtime_paths)
+    agent_runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    toolkit = build_agent_toolkit(
+        "coding",
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        agent_runtime=agent_runtime,
+        execution_identity=None,
+    )
+
+    assert toolkit is not None
+    names = {*toolkit.functions, *toolkit.async_functions}
+    assert "apply_patch" not in names
+    assert {"edit_file", "write_file"} <= names
+
+
 def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_path: Path) -> None:
     """MindRoom-owned direct toolkits should use the same central output-file wrapper."""
     runtime_paths = _runtime_paths(tmp_path)

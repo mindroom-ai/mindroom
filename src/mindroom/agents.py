@@ -903,7 +903,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
-    return _build_registered_agent_tool(
+    toolkit = _build_registered_agent_tool(
         tool_name,
         runtime_paths,
         credentials_manager,
@@ -920,6 +920,15 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         execution_identity,
         runtime_overrides,
         config,
+    )
+    # Every consumer, including the MCP gateway and script grants, decides approval per function, so a function
+    # that does what a differently gated one does would let calls around the rules written for it.
+    return without_implied_exclusions(
+        toolkit,
+        removed=set(),
+        gated={name for name in _function_names(toolkit) if tool_may_require_approval(config, name)},
+        registered_tool_name=tool_name,
+        config=config,
     )
 
 
@@ -1301,9 +1310,11 @@ def _function_names(toolkit: Toolkit) -> set[str]:
     return {*toolkit.functions, *toolkit.async_functions}
 
 
-def _without_implied_exclusions(
+def without_implied_exclusions(
     toolkit: Toolkit,
+    *,
     removed: set[str],
+    gated: set[str],
     registered_tool_name: str,
     config: Config,
 ) -> Toolkit | None:
@@ -1311,15 +1322,10 @@ def _without_implied_exclusions(
 
     Approval rules are usually written for edit_file and write_file, so the model falls back to those whenever
     apply_patch would be hidden less or gated differently than they are, or a script written for other tools
-    would decide it.
+    would decide it. *removed* names functions this surface already hid and *gated* those that need approval.
     """
     metadata = TOOL_METADATA.get(registered_tool_name)
     present = _function_names(toolkit)
-    gated = {
-        name
-        for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
-        if function.requires_confirmation is True
-    }
     hidden = {
         name
         for key, names in (metadata.implied_exclusions or {} if metadata is not None else {}).items()
@@ -1627,7 +1633,17 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         if toolkit:
             # A function hidden or gated by the channel filter or approval takes away what does the same, like
             # apply_patch, so an edit rule written for edit_file and write_file still gates every model's edits.
-            toolkit = _without_implied_exclusions(toolkit, built - _function_names(toolkit), tool_name, config)
+            toolkit = without_implied_exclusions(
+                toolkit,
+                removed=built - _function_names(toolkit),
+                gated={
+                    name
+                    for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
+                    if function.requires_confirmation is True
+                },
+                registered_tool_name=tool_name,
+                config=config,
+            )
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
             toolkit = attach_computer_announcement(
@@ -2234,4 +2250,5 @@ __all__ = [
     "resolve_runtime_worker_tools",
     "set_toolkit_owner",
     "show_tool_calls_for_agent",
+    "without_implied_exclusions",
 ]

@@ -2530,6 +2530,56 @@ def test_participant_model_presents_tools_in_its_dialect(tmp_path: Path) -> None
     ]
 
 
+def test_participant_drops_an_apply_patch_gated_unlike_the_edit_tools(tmp_path: Path) -> None:
+    """A rule gating only apply_patch hides it, as for configured agents, instead of refusing the workflow."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": ["coding"]}}, "coding"],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+            tool_approval={"rules": [{"match": "apply_patch", "action": "require_approval"}]},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    tool = DynamicWorkflowTools()
+    agent_mock = Mock(return_value=_fake_stream_agent(content="done"))
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "ephemeral_agent",
+                "name": "Writer",
+                "model": "claude-sonnet-5",
+                "tools": ["coding"],
+            },
+        ],
+    )
+    spec["permissions"] = {**cast("dict[str, object]", spec["permissions"]), "tools": ["coding"]}
+
+    with (
+        tool_runtime_context(context),
+        patch.object(
+            dynamic_workflow_module.model_loading,
+            "get_model_instance",
+            return_value=FakeModel(id="participant-model", provider="fake"),
+        ),
+        patch.object(dynamic_workflow_module, "Agent", agent_mock),
+    ):
+        _tool_payload(tool.create_workflow(spec))
+        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert run_payload["status"] == "completed"
+    [toolkit] = agent_mock.call_args.kwargs["tools"]
+    assert "apply_patch" not in toolkit.get_async_functions()
+    assert "edit_file" in toolkit.get_async_functions()
+
+
 def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
     """Participant failures from Agno should become failed workflow steps, not normal content."""
     context = _make_context(tmp_path)
