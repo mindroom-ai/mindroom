@@ -339,7 +339,13 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
         learning=False,
         memory_backend="file",
     )
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+    runtime = replace(
+        runtime,
+        orchestrator=SimpleNamespace(
+            agent_cli_registry=TurnToolRegistry(),
+            budgets=BudgetMonitor(runtime_paths=runtime.runtime_paths, config_provider=lambda: runtime.config),
+        ),
+    )
     shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
     install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
