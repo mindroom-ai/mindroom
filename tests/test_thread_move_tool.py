@@ -87,20 +87,34 @@ def test_plan_posts_entity_messages_as_their_own_account() -> None:
     assert ORIGINAL_SENDER_KEY not in copy.content
 
 
-def test_plan_keeps_trusted_relay_attribution_of_managed_senders() -> None:
-    """A managed sender's relay, such as the router's voice transcript, stays attributed to the person who spoke."""
-    voice_echo = {"msgtype": "m.text", "body": "🎤 fix the parser", ORIGINAL_SENDER_KEY: HUMAN_ID}
-    own, relayed = _plan(
-        _message("@mindroom_router:example.org", voice_echo),
-        _message(ABSENT_ID, {"msgtype": "m.text", "body": "relayed", ORIGINAL_SENDER_KEY: HUMAN_ID}),
+@pytest.mark.parametrize(
+    "body",
+    ["🎤 fix the parser", "@code could you help with this?", "Dominic: hi from an earlier move"],
+)
+def test_plan_reposts_the_routers_own_relays_as_they_appeared(body: str) -> None:
+    """Voice transcripts, handoffs, and earlier move copies keep who they speak for, without a second name."""
+    [copy] = _plan(
+        _message("@mindroom_router:example.org", {"msgtype": "m.text", "body": body, ORIGINAL_SENDER_KEY: HUMAN_ID}),
     )
 
-    assert own.poster == ROUTER_AGENT_NAME
-    assert own.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert own.content["body"] == "Dominic: 🎤 fix the parser"
-    assert relayed.poster == ROUTER_AGENT_NAME
-    assert relayed.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
-    assert relayed.content["body"] == "Dominic: relayed"
+    assert copy.poster == ROUTER_AGENT_NAME
+    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy.content["body"] == body
+
+
+def test_plan_names_the_poster_of_a_relayed_delegation() -> None:
+    """An absent agent's post on someone's behalf is shown as the agent's words and still speaks for that person."""
+    [copy] = _plan(
+        _message(
+            ABSENT_ID,
+            {"msgtype": "m.text", "body": "@code please check the logs", ORIGINAL_SENDER_KEY: HUMAN_ID},
+        ),
+        display_names={HUMAN_ID: "Dominic", ABSENT_ID: "Research"},
+    )
+
+    assert copy.poster == ROUTER_AGENT_NAME
+    assert copy.content[ORIGINAL_SENDER_KEY] == HUMAN_ID
+    assert copy.content["body"] == "Research: @code please check the logs"
 
 
 def test_plan_ignores_relay_attribution_claimed_by_a_human() -> None:
@@ -176,6 +190,11 @@ def test_plan_copies_only_allowlisted_keys() -> None:
     [
         {"msgtype": "m.location", "body": "Office", "geo_uri": "geo:52.37,4.89"},
         {
+            "msgtype": "m.text",
+            "body": "Report ready",
+            "com.mindroom.message_extras": {"version": 2, "sections": [{"title": "Logs", "content": "ok"}]},
+        },
+        {
             "msgtype": "m.audio",
             "body": "voice.ogg",
             "url": "mxc://example.org/voice",
@@ -184,8 +203,8 @@ def test_plan_copies_only_allowlisted_keys() -> None:
         },
     ],
 )
-def test_plan_keeps_fields_clients_need_to_render_locations_and_voice_notes(content: dict[str, Any]) -> None:
-    """A moved location still shows its map and a moved voice note still plays as a voice note."""
+def test_plan_keeps_fields_clients_need_to_render_the_copy(content: dict[str, Any]) -> None:
+    """Locations keep their map, collapsible sections stay, and voice notes still play as voice notes."""
     [copy] = _plan(_message(CODE_ID, content))
 
     assert {key: copy.content[key] for key in content} == content
@@ -505,7 +524,7 @@ async def test_move_thread_rejects_incomplete_history(tmp_path: Path) -> None:
     with _matrix(move, _thread(move), full_history=False) as mocks:
         payload = await _run()
 
-    assert payload["message"] == "This thread is too long to move."
+    assert payload["message"] == "This thread could not be read in full, so it cannot be moved."
     mocks.send.assert_not_awaited()
 
 

@@ -38,6 +38,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.media import MATRIX_MEDIA_MSGTYPES
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
+from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -62,6 +63,7 @@ _COPIED_CONTENT_KEYS = (
     "info",
     "filename",
     "geo_uri",
+    MINDROOM_MESSAGE_EXTRAS_KEY,
     "org.matrix.msc3245.voice",
     "org.matrix.msc1767.audio",
     TOOL_TRACE_CONTENT_KEY,
@@ -88,10 +90,9 @@ def _plan_thread_copy(
 ) -> list[_PlannedCopy]:
     """Return the posts that recreate one thread's conversation in another room.
 
-    An entity that can post in the target room re-posts its own messages, so
-    each agent still sees its earlier replies as its own turns. Everyone else
-    is relayed by the router, and every copy that speaks for someone other
-    than its poster names them visibly.
+    An entity that can post in the target room re-posts its own messages as
+    they appeared, so each agent still sees its earlier replies as its own
+    turns. Everyone else is relayed by the router with their name visible.
     """
     plan: list[_PlannedCopy] = []
     for message in messages:
@@ -102,22 +103,23 @@ def _plan_thread_copy(
         content[SKIP_MENTIONS_KEY] = True
         content["m.mentions"] = {}
         entity = entity_name_for_sender(message.sender)
-        author = message.sender
-        relayed_author = message.content.get(ORIGINAL_SENDER_KEY)
-        if entity is not None and isinstance(relayed_author, str) and relayed_author:
-            # A managed sender's own relay, such as the router's voice transcript, speaks for who said it.
-            author = relayed_author
+        speaks_for = message.content.get(ORIGINAL_SENDER_KEY)
+        if entity is not None and isinstance(speaks_for, str) and speaks_for:
+            # MindRoom's own posts on someone's behalf (voice transcripts,
+            # handoffs, earlier move copies) keep who they speak for, because
+            # prompts label them with that person.
+            content[ORIGINAL_SENDER_KEY] = speaks_for
         poster = entity if entity is not None and entity in target_posters else ROUTER_AGENT_NAME
-        if poster != entity or author != message.sender:
-            _attribute_relay(content, author, display_names.get(author, author))
+        if poster != entity:
+            _attribute_relay(content, message.sender, display_names.get(message.sender, message.sender))
         plan.append(_PlannedCopy(poster=poster, content=content))
     return plan
 
 
 def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
-    """Name the original author on a copy posted by someone else."""
+    """Name the original poster on a router-posted copy."""
     # No source kind: the relay is attributed in prompts but never becomes a human turn.
-    content[ORIGINAL_SENDER_KEY] = sender
+    content.setdefault(ORIGINAL_SENDER_KEY, sender)
     body = str(content.get("body", ""))
     if content.get("msgtype") in MATRIX_MEDIA_MSGTYPES:
         # With a filename present, clients show the body as the caption.
@@ -238,7 +240,7 @@ async def _prepare_move(  # noqa: PLR0911
         return "Not authorized to access the target room."
     history = await complete_thread_history(context.conversation_reader, context.room_id, root_id)
     if not history.is_full_history:
-        return "This thread is too long to move."
+        return "This thread could not be read in full, so it cannot be moved."
     encryption_error = await _encryption_error(context.client, context.room_id, target_room_id)
     if encryption_error is not None:
         return encryption_error
