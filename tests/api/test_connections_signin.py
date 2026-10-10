@@ -403,3 +403,42 @@ async def test_session_mutations_require_same_origin(signin: dict[str, Any]) -> 
         await auth.authenticate_user(request, None)
     assert rejected.value.status_code == 403
     assert rejected.value.detail == "Browser changes require a same-origin request"
+
+
+def _complete_callback(client: TestClient, state: str) -> None:
+    """Finish one OAuth flow in the popup: provider callback, then the success page."""
+    callback = client.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        follow_redirects=False,
+    )
+    assert callback.status_code in {302, 303, 307}, callback.text
+    assert client.get(callback.headers["location"]).status_code == 200
+
+
+def test_dashboard_oauth_flow_completes_with_portal_session_present(signin: dict[str, Any]) -> None:
+    """A dashboard-started flow finishes as the dashboard requester even when the browser also holds a portal session."""
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    assert client.post("/api/auth/session", json={"api_key": "dashboard-key"}).status_code == 200
+    connect = client.post(
+        "/api/oauth/google_drive/connect",
+        params={"agent_name": "personal"},
+        headers={"Origin": PORTAL_ORIGIN},
+    )
+    assert connect.status_code == 200, connect.text
+    _complete_callback(client, parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0])
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@owner:example.org") is not None
+    assert stored(requester_id="@alice:example.org") is None
+
+
+def test_portal_oauth_flow_completes_with_dashboard_login_present(signin: dict[str, Any]) -> None:
+    """A portal-started flow finishes as the portal user even when the browser also holds a dashboard login."""
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    assert client.post("/api/auth/session", json={"api_key": "dashboard-key"}).status_code == 200
+    _complete_callback(client, _connect_state(client))
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@alice:example.org") is not None
+    assert stored(requester_id="@owner:example.org") is None

@@ -57,6 +57,8 @@ _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 # Ticket IDs already exchanged by this runtime, mapped to their expiry.
 _used_platform_sso_ticket_ids: dict[str, int] = {}
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+# Set only by server code; ASGI scope keys cannot come from the client.
+_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
 _TRUSTED_UPSTREAM_JWT_MAX_BYTES = 16 * 1024
@@ -929,16 +931,24 @@ def _is_oauth_popup_path(path: str, actions: frozenset[str]) -> bool:
     return len(parts) == 5 and parts[1:3] == ["api", "oauth"] and bool(parts[3]) and parts[4] in actions
 
 
-def _is_connections_session_path(path: str) -> bool:
-    """Recognize the portal paths plus the OAuth popup routes that finish a portal-started flow."""
-    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"callback", "success"}))
+def allow_connections_session_for_oauth_callback(request: Request) -> None:
+    """Let this OAuth callback authenticate with the Connections session, because a session started its flow."""
+    request.scope[_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY] = True
+
+
+def _connections_session_path_honored(request: Request) -> bool:
+    """Honor sessions on portal paths and OAuth success pages, and on callbacks only for session-started flows."""
+    path = request.scope["path"]
+    if _is_oauth_popup_path(path, frozenset({"callback"})):
+        return request.scope.get(_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY) is True
+    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
 
 
 def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
     """Return the Connections session identity, honored only on portal paths while the portal is enabled."""
     snapshot = _bind_authenticated_request_snapshot(request)
-    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") or not _is_connections_session_path(
-        request.scope["path"],
+    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") or not _connections_session_path_honored(
+        request,
     ):
         return None
     token = request.cookies.get(CONNECTIONS_SESSION_COOKIE)
