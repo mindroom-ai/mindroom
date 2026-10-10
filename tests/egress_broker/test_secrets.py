@@ -73,6 +73,21 @@ def test_user_agent_secret_lands_in_primary_runtime_scope(tmp_path: Path) -> Non
         assert list(workers_dir.rglob("egress_github*")) == []
 
 
+@pytest.mark.parametrize("name", ["x_oauth", "x_oauth_client"])
+@pytest.mark.parametrize("worker_scope", ["user_agent", "user", "shared"])
+def test_oauth_suffixed_secret_never_lands_in_worker_store(tmp_path: Path, name: str, worker_scope: str) -> None:
+    """A service name ending in an OAuth suffix still keeps its secret out of workers/."""
+    manager = _manager(tmp_path)
+    target = _claims(worker_scope=worker_scope).to_worker_target()
+
+    save_secret(manager, target, name, "secret-value")
+
+    stored = list(tmp_path.rglob(f"egress_{name}_credentials.json"))
+    assert len(stored) == 1
+    assert "workers" not in stored[0].relative_to(tmp_path).parts
+    assert load_secret(manager, target, name) == "secret-value"
+
+
 def test_shared_secret_lands_in_agent_scope(tmp_path: Path) -> None:
     """Shared scope secrets must go to for_primary_runtime_agent_scope(agent)."""
     manager = _manager(tmp_path)

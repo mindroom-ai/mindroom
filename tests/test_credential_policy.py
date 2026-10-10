@@ -118,6 +118,19 @@ def test_egress_services_are_primary_only_and_not_grantable(scope: str) -> None:
         assert not policy.uses_local_shared_credentials
 
 
+@pytest.mark.parametrize("service", ["egress_x_oauth", "egress_x_oauth_client"])
+@pytest.mark.parametrize("scope", ["shared", "user", "user_agent", None])
+def test_egress_services_with_oauth_suffixes_stay_primary_only(service: str, scope: str | None) -> None:
+    """An OAuth-looking suffix never turns an egress service into an OAuth token or client service."""
+    policy = credential_service_policy(service, scope)
+    assert policy.primary_built_tool
+    assert not policy.worker_grantable_supported
+    assert not policy.uses_primary_runtime_global_credentials
+    assert not policy.uses_local_shared_credentials
+    assert policy.uses_primary_runtime_agent_scoped_credentials is (scope == "shared")
+    assert policy.uses_primary_runtime_scoped_credentials is (scope in {"user", "user_agent"})
+
+
 @pytest.mark.parametrize(
     "service",
     [

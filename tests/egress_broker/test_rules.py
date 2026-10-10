@@ -384,6 +384,25 @@ def test_invalid_service_name_rejected() -> None:
         EgressBrokerConfig(services={"a b": service})
 
 
+@pytest.mark.parametrize("name", ["x_oauth", "x_oauth_client", "oauth", "oauth_client"])
+def test_service_name_with_oauth_suffix_rejected(name: str) -> None:
+    """Names whose `egress_<name>` credential service ends like an OAuth service are rejected."""
+    service = EgressService(
+        rules=[EgressRule(host="example.com", auth=EgressAuth(type="bearer"))],
+    )
+    with pytest.raises(ValueError, match="OAuth"):
+        EgressBrokerConfig(services={name: service})
+
+
+@pytest.mark.parametrize("name", ["oauth_proxy", "my-oauth", "xoauth"])
+def test_service_name_mentioning_oauth_elsewhere_accepted(name: str) -> None:
+    """Only the OAuth suffixes are reserved, not the word itself."""
+    service = EgressService(
+        rules=[EgressRule(host="example.com", auth=EgressAuth(type="bearer"))],
+    )
+    assert name in EgressBrokerConfig(services={name: service}).services
+
+
 def test_host_strips_trailing_dot() -> None:
     """Host with trailing dot (FQDN notation) should be normalized."""
     rule = EgressRule(host="api.example.com.", auth=EgressAuth(type="bearer"))

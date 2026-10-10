@@ -99,11 +99,13 @@ def credential_service_policy(
     ``primary_built_tool`` marks the settings of a tool the primary process builds for this agent.
     Worker code can write the worker store, so those settings never come from it.
     """
-    # Egress broker services are always primary-only and not worker-grantable
+    # Egress broker services are always primary-only and not worker-grantable.
+    # The prefix wins over the OAuth suffixes, so `egress_x_oauth_client` is never
+    # treated as a global OAuth client config that falls back to the worker store.
     egress_service = is_egress_broker_service(service)
 
-    oauth_token_service = is_oauth_token_service(service)
-    is_primary_runtime_global = is_oauth_client_config_service(service)
+    oauth_token_service = not egress_service and is_oauth_token_service(service)
+    is_primary_runtime_global = not egress_service and is_oauth_client_config_service(service)
     local_only_service = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service
     # Local-only and OAuth services keep their own placement outside worker stores.
     # Egress services also stay primary-only like primary-built tool settings.

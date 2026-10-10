@@ -120,6 +120,46 @@ def test_load_or_create_persists_key_with_0600(tmp_path: Path) -> None:
     assert signer2.verify(token) == claims
 
 
+@pytest.mark.parametrize("size", [0, 31, 33])
+def test_load_or_create_rejects_key_of_wrong_length(tmp_path: Path, size: int) -> None:
+    """A key file that is not exactly 32 bytes stops the broker instead of signing with it."""
+    key_path = tmp_path / "token.key"
+    key_path.write_bytes(b"\xab" * size)
+
+    with pytest.raises(ValueError, match=r"token\.key") as exc_info:
+        TokenSigner.load_or_create(key_path)
+
+    # The error names the file but never echoes its contents.
+    assert "ab" not in str(exc_info.value).replace(str(tmp_path), "")
+    assert key_path.read_bytes() == b"\xab" * size
+
+
+def test_constructor_rejects_key_of_wrong_length() -> None:
+    """An empty key would let anyone forge tokens, so the signer refuses it."""
+    with pytest.raises(ValueError, match="32 bytes"):
+        TokenSigner(b"")
+
+
+def test_load_or_create_leaves_no_partial_key_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed first write publishes nothing, so the next start creates a fresh full key."""
+    key_path = tmp_path / "token.key"
+
+    def fail_fsync(_fd: int) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("os.fsync", fail_fsync)
+        with pytest.raises(OSError, match="disk full"):
+            TokenSigner.load_or_create(key_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+    TokenSigner.load_or_create(key_path)
+    assert len(key_path.read_bytes()) == 32
+    assert key_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_from_worker_target_drops_room_thread_session() -> None:
     """from_worker_target drops room_id, thread_id, session_id."""
     identity = ToolExecutionIdentity(

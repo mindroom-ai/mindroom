@@ -6,12 +6,14 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 - Required at runtime for load_or_create parameter
 from typing import Literal
 
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 _TOKEN_PREFIX = "mrb1"  # noqa: S105
@@ -91,6 +93,10 @@ class TokenSigner:
 
     def __init__(self, key: bytes, *, ttl_seconds: int = 604800) -> None:
         """Initialize token signer with signing key and TTL."""
+        # A short key, above all an empty one, would let anyone forge tokens.
+        if len(key) != _KEY_SIZE:
+            msg = f"Token signing key must be exactly {_KEY_SIZE} bytes"
+            raise ValueError(msg)
         self._key = key
         self._ttl_seconds = ttl_seconds
 
@@ -99,20 +105,33 @@ class TokenSigner:
         """Load existing key from path or create new 32-byte key with mode 0600.
 
         Parent directory is created with mode 0700 if it does not exist.
+        A new key is published atomically, so a crash never leaves a partial file.
+        Raises ValueError, naming the file but never its contents, when the key
+        is not exactly 32 bytes.
         """
         # Ensure parent directory exists with mode 0700
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-        if path.exists():
-            key = path.read_bytes()
-        else:
-            key = secrets.token_bytes(_KEY_SIZE)
-            # Write with restricted permissions
-            path.touch(mode=0o600)
-            path.write_bytes(key)
-            # Ensure mode is set correctly (touch may be affected by umask)
-            path.chmod(0o600)
+        if not path.exists():
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                atomic_write_bytes_at(
+                    directory_fd,
+                    path.name,
+                    secrets.token_bytes(_KEY_SIZE),
+                    file_mode=0o600,
+                    temp_prefix=f".{path.name}.",
+                )
+            finally:
+                os.close(directory_fd)
 
+        key = path.read_bytes()
+        if len(key) != _KEY_SIZE:
+            msg = (
+                f"Egress broker token key file {path} holds {len(key)} bytes instead of {_KEY_SIZE}; "
+                "delete it so the broker creates a new key"
+            )
+            raise ValueError(msg)
         return TokenSigner(key, ttl_seconds=ttl_seconds)
 
     def mint(self, claims: WorkerClaims, *, now: float | None = None) -> str:
