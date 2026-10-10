@@ -686,7 +686,7 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
             "Length limit: keep the summary under 32,000 tokens. "
             "The response, including any reasoning, is cut off at 64,000 tokens, "
             "and a cut-off summary is discarded. "
-            "When <previous_summary> is already near that size, condense it and drop its least important detail "
+            "When <previous_summary> is already near or above the target, condense it and drop its least important detail "
             "instead of restating it in full.",
         ),
         ("user", "conversation payload"),
@@ -1452,6 +1452,48 @@ async def test_retry_helper_retries_output_limit_at_progress_minimum_with_shorte
     assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [initial_input] * 2
     assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == [2, 4]
     assert [run.run_id for run in generated.included_runs] == ["run-1"]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_bounds_shorter_summary_retries_by_max_attempts() -> None:
+    """A second output-limit failure propagates instead of asking for an ever shorter summary."""
+    runs = [_completed_run("run-1", padding=2_000)]
+    initial_input, initial_runs = build_summary_input(
+        previous_summary="prior facts",
+        compacted_runs=runs,
+        history_settings=_HISTORY_SETTINGS,
+        max_input_tokens=10_000,
+        token_estimator=_chars_per_token_estimator,
+    )
+    final_error = CompactionSummaryOutputLimitError("shorter summary still hit the cap", output_token_limit=4_096)
+    generate_summary = AsyncMock(
+        side_effect=[
+            CompactionSummaryOutputLimitError("summary hit the cap", output_token_limit=4_096),
+            final_error,
+        ],
+    )
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
+        pytest.raises(CompactionSummaryOutputLimitError) as raised,
+    ):
+        await _generate_compaction_summary_with_retry(
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 10_000),
+            previous_summary="prior facts",
+            compactable_runs=runs,
+            initial_summary_input=initial_input,
+            initial_included_runs=initial_runs,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        )
+
+    assert raised.value is final_error
+    assert generate_summary.await_count == DEFAULT_SUMMARY_RETRY_POLICY.max_attempts == 2
+    assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == [2, 4]
 
 
 @pytest.mark.asyncio

@@ -7,18 +7,24 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.exceptions import ModelProviderError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from anthropic import AsyncAnthropic, AsyncAnthropicBedrockMantle, AsyncAnthropicVertex
 from google.oauth2.credentials import Credentials
 
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry
 from mindroom.history.summary_call import (
     CompactionSummaryIncompleteError,
     CompactionSummaryOutputLimitError,
     generate_compaction_summary,
 )
+from mindroom.history.summary_input import build_summary_input
+from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 
 if TYPE_CHECKING:
@@ -117,8 +123,15 @@ async def test_summary_rejects_output_capped_at_effective_request_limit(
 
 @pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
 @pytest.mark.parametrize("raw_body", [False, True])
-async def test_summary_request_states_length_target_from_effective_output_cap(provider: str, *, raw_body: bool) -> None:
-    """The length target follows the cap actually sent, so the model can keep the summary under it."""
+@pytest.mark.parametrize(("summary_length_divisor", "target"), [(2, "512"), (4, "256")])
+async def test_summary_request_states_length_target_from_effective_output_cap(
+    provider: str,
+    summary_length_divisor: int,
+    target: str,
+    *,
+    raw_body: bool,
+) -> None:
+    """The length target follows the cap actually sent and the retry's divisor, so the model can stay under it."""
     params = {"extra_body": {"max_tokens": 1024}} if raw_body else {"max_tokens": 1024}
     requests: list[dict[str, Any]] = []
 
@@ -133,13 +146,14 @@ async def test_summary_request_states_length_target_from_effective_output_cap(pr
             summary_input="Conversation",
             summary_prompt="Summarize",
             timeout_seconds=10,
+            summary_length_divisor=summary_length_divisor,
         )
     finally:
         await model.async_client.close()
     assert requests[0]["max_tokens"] == 1024
     system = json.dumps(requests[0]["system"])
     assert "Summarize" in system
-    assert "keep the summary under 512 tokens." in system
+    assert f"keep the summary under {target} tokens." in system
     assert "cut off at 1,024 tokens" in system
 
 
@@ -256,7 +270,7 @@ async def test_summary_preserves_lazy_transport_phase_timeouts(transport_field: 
 @pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
 @pytest.mark.parametrize("stop_reason", ["end_turn", "stop_sequence", "model_context_window_exceeded"])
 async def test_summary_uses_stop_reason_and_raw_body_precedence(provider: str, stop_reason: str) -> None:
-    """A normal stop at the cap is complete; a context stop below it is incomplete."""
+    """A normal stop at the cap is complete; a context stop below it is an input-size failure."""
     requests = []
     params = {"max_tokens": 4096, "extra_body": {"max_tokens": 1024}}
 
@@ -278,7 +292,7 @@ async def test_summary_uses_stop_reason_and_raw_body_precedence(provider: str, s
             )
             assert result.summary == "Project facts"
         else:
-            with pytest.raises(CompactionSummaryOutputLimitError):
+            with pytest.raises(ContextWindowExceededError):
                 await generate_compaction_summary(
                     model=model,
                     summary_input="Conversation",
@@ -289,6 +303,68 @@ async def test_summary_uses_stop_reason_and_raw_body_precedence(provider: str, s
         await model.async_client.close()
     assert requests[0]["max_tokens"] == 1024
     assert params == {"max_tokens": 4096, "extra_body": {"max_tokens": 1024}}
+
+
+@pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
+async def test_context_window_stop_retries_with_a_smaller_input(provider: str) -> None:
+    """A context-window stop retries with fewer runs, not the same input with a shorter target.
+
+    Regression: this stop reason was classified like a ``max_tokens`` stop, so the
+    retry resent an input that already filled the context window.
+    """
+    runs = [
+        RunOutput(
+            run_id=f"run-{index}",
+            agent_id="agent",
+            status=RunStatus.completed,
+            messages=[
+                Message(role="user", content=f"question {index} {'u' * 4_000}"),
+                Message(role="assistant", content=f"answer {index} {'a' * 4_000}"),
+            ],
+        )
+        for index in range(3)
+    ]
+    history_settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    initial_input, initial_runs = build_summary_input(
+        previous_summary="prior facts",
+        compacted_runs=runs,
+        history_settings=history_settings,
+        max_input_tokens=100_000,
+        token_estimator=len,
+    )
+    assert len(initial_runs) == 3
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _response(
+            output_tokens=100,
+            stop_reason="model_context_window_exceeded" if len(requests) == 1 else "end_turn",
+        )
+
+    model = _model(provider, httpx.MockTransport(respond), {"max_tokens": 1024})
+    try:
+        generated = await _generate_compaction_summary_with_retry(
+            summary_model=SummaryModel(model, "summary-model", 100_000),
+            previous_summary="prior facts",
+            compactable_runs=runs,
+            initial_summary_input=initial_input,
+            initial_included_runs=initial_runs,
+            session_id="session-1",
+            scope=HistoryScope(kind="agent", scope_id="agent"),
+            history_settings=history_settings,
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+        )
+    finally:
+        await model.async_client.close()
+    assert generated.summary.summary == "Project facts"
+    first_input, retry_input = (json.dumps(request["messages"]) for request in requests)
+    assert len(retry_input) < len(first_input)
+    assert "run-2" in first_input
+    assert "run-2" not in retry_input
+    assert [run.run_id for run in generated.included_runs] == ["run-0"]
+    assert ["keep the summary under 512 tokens." in json.dumps(request["system"]) for request in requests] == [True] * 2
 
 
 @pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])

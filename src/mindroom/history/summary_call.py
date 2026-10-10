@@ -171,7 +171,7 @@ def build_summary_request_messages(
             f"Length limit: keep the summary under {target_tokens:,} tokens. "
             f"The response, including any reasoning, is cut off at {output_token_limit:,} tokens, "
             "and a cut-off summary is discarded. "
-            "When <previous_summary> is already near that size, condense it and drop its least important detail "
+            "When <previous_summary> is already near or above the target, condense it and drop its least important detail "
             "instead of restating it in full."
         )
     return [
@@ -303,6 +303,9 @@ async def generate_compaction_summary(
         )
         raise _CompactionSummaryEmptyResultError(msg)
     completion = summary_completion_status(response, output_token_limit=summary_output_limit)
+    if completion == "context_limit":
+        msg = "compaction summary filled the model context window; refusing to persist incomplete summary"
+        raise ContextWindowExceededError(message=msg, model_name=model.name, model_id=model.id)
     if completion == "output_limit":
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg, output_token_limit=summary_output_limit)
