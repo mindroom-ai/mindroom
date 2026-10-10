@@ -157,12 +157,13 @@ Shell handles do not appear in `job(action="list")` or keep a reply waiting, and
 | Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
 
 Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
-When a newer human message arrives in the conversation, or another turn is already queued for it, the foreground wait is released without pausing or cancelling the accepted work, and once the reply finishes its answer, its message holds that work.
+When a newer human message arrives in the conversation, or another turn is already queued for it, the foreground wait is released without pausing or cancelling the accepted work, and once the reply finishes its answer, its message waits for that work.
 The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
 
-Pressing **Stop** cancels the reply and requests cancellation of this agent's outstanding managed jobs in the same conversation, including jobs from earlier follow-ups.
+Pressing **Stop** cancels the reply and requests cancellation of the managed jobs it started; on a message that waits for background work, it also cancels the work it waits for, including jobs from earlier follow-ups it took over.
 Their outcomes are no longer offered to later replies, and a restart does not resume them.
-Jobs belonging to other requesters, conversations, agents, or newer human turns remain unaffected.
+Jobs belonging to other requesters, conversations, agents, or newer messages remain unaffected.
+Deleting the message a reply answers cancels that reply's jobs the same way.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
 Saved results remain available for explicit retrieval.
 Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
@@ -198,8 +199,8 @@ Removing a toolkit, changing its execution scope or provenance, or excluding a f
 Remote service availability alone does not revoke access to a saved result.
 
 A managed child that needs approval stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
-The message holding the job shows that it waits for approval; pressing **Stop** or cancelling the job denies its open cards.
-A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job; the held message then reports the interruption.
+The job's cards show that it waits for approval; pressing **Stop** on the waiting message or cancelling the job denies its open cards.
+A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job; the waiting message then continues with that interrupted outcome.
 These cards offer no automatic approval option.
 Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
@@ -207,19 +208,19 @@ Their schemas omit the shared waiting option, and supplying a non-null nested wa
 Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
 Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
 
-While background work is outstanding in a conversation, the agent's latest reply holds it.
 After its own work, a reply continues with every ready outcome of this agent and requester in the conversation, including outcomes of jobs that earlier replies started, without repeated model polling.
-When work is still running, the reply finishes and its message keeps a waiting notice and its **Stop** button, while the conversation's other messages are answered as usual.
-When held work finishes, the same message continues: the agent retrieves the results with the native result-retrieval tool, and the message shows its earlier text and tool traces followed by the new answer.
-Pressing **Stop** on a held message cancels the work it holds and marks the message as stopped.
-When a newer reply of the agent, with the same participants, finishes, it takes the outstanding work over, and the older message drops its waiting notice; a turn that never finishes a reply of its own, such as another agent's reply, leaves the message holding.
-Resuming an approved tool follows the same behavior.
+When work is still running, the reply finishes its answer and its message waits for that work: it shows "⏳ Waiting for background work…" below the answer and keeps its **Stop** button, while the conversation's other messages are answered as usual.
+When the work finishes, the same message continues below its answer: the agent retrieves the results with the native result-retrieval tool and answers with them.
+Pressing **Stop** on a waiting message cancels the work it waits for and marks the message as stopped; editing your message stops it the same way and answers the edit in its place.
+When a newer reply of the agent, with the same participants, ends with that work still running, it takes the work over, and the older message drops its waiting notice.
+A reply that resumes an approved tool does not wait; the agent's next reply takes the work it leaves.
 A message continues with ready results at most 20 times; the requester's next answered message then takes the remaining work.
 A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
 No job completion starts a new reply by itself.
-Held messages survive a restart, and the interruption a restart causes is reported in the message that held the interrupted work.
-A message holds only work its reply may retrieve: jobs of its requester, and of its own agent or its team's members, so another requester's or an absent member's results wait for a later reply that can retrieve them.
-Silent scheduled work retains its quiet delivery policy and run receipts across later replies and restarts.
+Waiting messages survive a restart, and an interruption the restart causes reaches the waiting message as that job's outcome.
+A message waits only for work its reply may retrieve: jobs of its requester, and of its own agent or its team's members, so another requester's or an absent member's results wait for a later reply that can retrieve them.
+Turning background jobs off ends waiting messages at the next start, keeping their answers.
+Silent scheduled work never makes a message wait; it retains its quiet delivery policy and run receipts across later replies and restarts.
 Automatic joins keep quiet and ordinary results separate.
 As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
 

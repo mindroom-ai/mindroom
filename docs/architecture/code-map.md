@@ -120,11 +120,12 @@ Matrix sync callback
 | `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
 | `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
-| `tool_jobs/completion.py` | The response boundary: ready job results a reply continues with |
+| `tool_jobs/completion.py` | The response boundary: ready job results a reply continues with, or the key of the work its answer waits for |
+| `tool_jobs/wakes.py` | A waiting reply's wake: its journal source and identity, and the envelope of the turn that continues the reply |
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |
 | `custom_tools/job.py` | Reserved job discovery/control tool and native delegation-wait projection |
-| `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, card denial, and retention |
+| `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, recorded job Stops, card denial, wakes of waiting replies, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |
