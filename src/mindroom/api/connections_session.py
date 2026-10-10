@@ -66,7 +66,10 @@ def _enabled_portal_paths(request: Request) -> RuntimePaths:
 
 
 def _portal_paths(request: Request) -> RuntimePaths:
-    """Gate the request before its body is parsed, so a refused request never reads the token."""
+    """Gate the request before its body is validated, so a refused request never has its token validated or verified.
+
+    FastAPI has already read and JSON-parsed the body by the time dependencies run.
+    """
     paths = _enabled_portal_paths(request)
     require_connections_same_origin(request, paths)
     return paths
@@ -104,6 +107,14 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
 async def current_session(request: Request, response: Response) -> _SignedIn:
     """Tell the portal page which Matrix user is signed in, or 401 so it signs in."""
     _enabled_portal_paths(request)
-    auth_user = await require_connections_user(request)
+    try:
+        auth_user = await require_connections_user(request)
+    except HTTPException as error:
+        # The sign-in probe answer depends on the browser's cookies, so no cache may keep it.
+        raise HTTPException(
+            error.status_code,
+            error.detail,
+            headers={**(error.headers or {}), **CONNECTIONS_HEADERS},
+        ) from error
     response.headers.update(CONNECTIONS_HEADERS)
     return _SignedIn(matrix_user_id=auth_user["matrix_user_id"])

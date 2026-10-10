@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
+import jwt
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
@@ -16,6 +17,12 @@ from mindroom.api import auth, config_lifecycle, connections_session, frontend, 
 from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE, ConnectionsSessionStore
 from mindroom.matrix_openid import MatrixOpenIDError
 from mindroom.oauth import registry as oauth_registry
+from tests.api.test_api import (
+    _trusted_upstream_jwks,
+    _trusted_upstream_jwt,
+    _trusted_upstream_jwt_key,
+    _trusted_upstream_strict_jwt_env,
+)
 from tests.api.test_oauth_api import (
     _fake_provider,
     _publish_config,
@@ -228,7 +235,11 @@ def test_session_reads_catalog_as_matrix_user(signin: dict[str, Any]) -> None:
     """A portal session authenticates the catalog and reports its Matrix user."""
     client = signin["client"]
     assert client.get("/api/connections").status_code == 401
-    assert client.get("/api/connections/session").status_code == 401
+    anonymous = client.get("/api/connections/session")
+    assert anonymous.status_code == 401
+    assert anonymous.json() == {"detail": "Connections sign-in required"}
+    assert "no-store" in anonymous.headers["cache-control"]
+    assert anonymous.headers["referrer-policy"] == "no-referrer"
 
     assert sign_in(client, "alice").status_code == 200
     catalog = client.get("/api/connections")
@@ -263,9 +274,10 @@ def test_two_session_users_connect_under_their_own_ids_not_owner(signin: dict[st
 
     state = _connect_state(alice)
     wrong_user = bob.get(callback_url, params={"code": "test-code", "state": state}, follow_redirects=False)
-    assert wrong_user.status_code in {400, 403}
+    assert wrong_user.status_code == 403
+    assert wrong_user.json() == {"detail": "OAuth state does not belong to the current user"}
 
-    state = _connect_state(alice)
+    # Bob's attempt did not consume the state, so alice still finishes her own flow with it.
     callback = alice.get(callback_url, params={"code": "test-code", "state": state}, follow_redirects=False)
     assert callback.status_code in {302, 303, 307}, callback.text
     assert alice.get(callback.headers["location"]).status_code == 200
@@ -325,12 +337,35 @@ def test_live_session_ignored_once_portal_is_disabled(signin: dict[str, Any], mo
     assert client.get("/api/oauth/google_drive/success").status_code == 401
 
 
-def test_session_cookie_ignored_for_admin_on_dashboard_routes(signin: dict[str, Any]) -> None:
-    """Even an administrator's portal session never opens administrator routes."""
-    _serve(signin, {**signin["payload"], "administrators": ["@alice:example.org"]})
-    client = signin["client"]
+def test_session_cookie_ignored_for_admin_on_dashboard_routes(
+    signin: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even an administrator's portal session never opens administrator routes; their signed upstream identity does."""
+    key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    env = {name: value for name, value in signin["paths"].process_env.items() if name != "MINDROOM_API_KEY"}
+    env.update(_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"))
+    paths = replace(signin["paths"], process_env=env)
+    main.initialize_api_app(main.app, paths)
+    _publish_config(main.app, paths, {**signin["payload"], "administrators": ["@alice:example.org"]})
+    _use_runtime_auth_settings(main.app)
+    client = TestClient(main.app, base_url=PORTAL_ORIGIN)
+
     assert sign_in(client, "alice").status_code == 200
+    assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
     assert client.get("/api/config/agents").status_code == 401
+    upstream = {
+        "X-Trusted-User": "alice",
+        "X-Trusted-Jwt": _trusted_upstream_jwt(
+            key,
+            user_id="alice",
+            email="alice@example.org",
+            matrix_user_id="@alice:example.org",
+        ),
+    }
+    assert client.get("/api/config/agents", headers=upstream).status_code == 200
 
 
 def test_expired_session_is_rejected(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -439,6 +474,64 @@ def test_portal_oauth_flow_completes_with_dashboard_login_present(signin: dict[s
     assert sign_in(client, "alice").status_code == 200
     assert client.post("/api/auth/session", json={"api_key": "dashboard-key"}).status_code == 200
     _complete_callback(client, _connect_state(client))
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@alice:example.org") is not None
+    assert stored(requester_id="@owner:example.org") is None
+
+
+def _dashboard_client() -> TestClient:
+    """Return a browser holding only a dashboard login."""
+    client = TestClient(main.app, base_url=PORTAL_ORIGIN)
+    assert client.post("/api/auth/session", json={"api_key": "dashboard-key"}).status_code == 200
+    return client
+
+
+def _dashboard_connect_state(client: TestClient) -> str:
+    """Start a dashboard OAuth flow and return its pending state."""
+    connect = client.post(
+        "/api/oauth/google_drive/connect",
+        params={"agent_name": "personal"},
+        headers={"Origin": PORTAL_ORIGIN},
+    )
+    assert connect.status_code == 200, connect.text
+    return parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
+
+
+def test_dashboard_flow_callback_rejects_portal_session_only(signin: dict[str, Any]) -> None:
+    """A portal session cannot finish a dashboard-started flow, and the refusal leaves the state usable."""
+    dashboard = _dashboard_client()
+    state = _dashboard_connect_state(dashboard)
+    portal = signin["client"]
+    assert sign_in(portal, "alice").status_code == 200
+
+    rejected = portal.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 401
+
+    _complete_callback(dashboard, state)
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@owner:example.org") is not None
+    assert stored(requester_id="@alice:example.org") is None
+
+
+def test_portal_flow_callback_rejects_dashboard_login_only(signin: dict[str, Any]) -> None:
+    """A dashboard login cannot finish a portal-started flow, and the refusal leaves the state usable."""
+    portal = signin["client"]
+    assert sign_in(portal, "alice").status_code == 200
+    state = _connect_state(portal)
+
+    rejected = _dashboard_client().get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 403
+    assert rejected.json() == {"detail": "OAuth state does not belong to the current user"}
+
+    _complete_callback(portal, state)
     stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
     assert stored(requester_id="@alice:example.org") is not None
     assert stored(requester_id="@owner:example.org") is None
