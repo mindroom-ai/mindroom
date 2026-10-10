@@ -113,6 +113,7 @@ def installed():
     return (
         Model.process_response_stream,
         Model.aprocess_response_stream,
+        Model._aprocess_model_response,
         Model._populate_assistant_message,
         Model._populate_assistant_message_from_stream_data,
         agent_run.flush_in_flight_messages_on_error,
