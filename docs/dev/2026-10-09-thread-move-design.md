@@ -72,8 +72,6 @@ Each plan entry holds the posting entity name and the content without its thread
   Media copies keep their media fields, set `filename` to the original filename (or the original body when there is none), and use `Name: <caption or filename>` as the body, which Matrix clients show as the caption.
   Names come from `room_member_display_names` for the source room, falling back to the Matrix user ID.
 
-- **People in the thread:** a message one of MindRoom's own accounts posted on someone's behalf counts that person when deciding whether a thread has several people, so agents stay quiet on untagged messages in a moved thread that several people took part in, as they did in the original.
-
 ### Execution
 
 1. Post the plan in order.
@@ -109,6 +107,8 @@ Messages posted in the source thread after the move starts are not copied.
 
 ## Known Limitations
 
+- Router-posted copies do not count as people in a thread, so until two people have posted in the moved thread, agents treat it as a one-person thread and may answer untagged messages.
+  Counting the person named in `com.mindroom.original_sender` would also count scheduled-task creators, trigger owners, and delegation requesters who never posted, which silences agents in ordinary threads, so the limit stays.
 - Copies have new timestamps, edits are flattened to their latest revision, and reactions and in-thread reply targets are not copied.
 
 ## Testing

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom import authorization
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.room_membership import room_membership_is_complete
 from mindroom.matrix.visible_body import visible_content_from_content
@@ -188,22 +188,15 @@ def has_multiple_non_agent_users_in_thread(
 
     Senders that are MindRoom agents or listed in ``config.bot_accounts`` are
     excluded from the count. Human bridge aliases count as their canonical
-    identity, without changing the original message sender. A message that one
-    of MindRoom's own accounts posted on someone's behalf counts that person,
-    so a thread whose people were re-posted by the router, such as a moved
-    thread, still knows who took part.
+    identity, without changing the original message sender.
     """
     non_agent_senders: set[str] = set()
     if current_sender_id and is_human_requester_id(current_sender_id, config, runtime_paths):
         non_agent_senders.add(resolve_human_requester_alias(current_sender_id, config, runtime_paths))
-    internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
     for msg in thread_history:
-        participant = msg.sender
-        speaks_for = msg.content.get(ORIGINAL_SENDER_KEY)
-        if participant in internal_sender_ids and isinstance(speaks_for, str) and speaks_for:
-            participant = speaks_for
-        if participant and is_human_requester_id(participant, config, runtime_paths):
-            non_agent_senders.add(resolve_human_requester_alias(participant, config, runtime_paths))
+        sender = msg.sender
+        if sender and is_human_requester_id(sender, config, runtime_paths):
+            non_agent_senders.add(resolve_human_requester_alias(sender, config, runtime_paths))
             if len(non_agent_senders) > 1:
                 return True
     return False
