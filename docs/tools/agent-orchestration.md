@@ -237,23 +237,18 @@ Silent scheduled work never makes a message wait; it retains its quiet delivery 
 Automatic joins keep quiet and ordinary results separate.
 As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
 
-A result is consumed only after exact persisted parent tool-result evidence is verified.
-Listing jobs does not consume it.
+Listing jobs does not count as reading their results.
 If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
 Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
 A reply that a crash or shutdown cuts short is answered again in place and told which calls its stopped attempt already finished, including detached job starts with their job IDs; interrupted jobs' outcomes reach it at its response boundary.
-Reading an already consumed result returns its original output without reapplying session-state changes.
-Consumed results remain available for 30 days after their last acknowledged read.
-Hourly cleanup then removes the whole job, only after the originating turn has finished and the conversation has no pending approval continuation.
-Active jobs, unread results, and approval-owned results remain available; missing source-completion evidence also prevents expiry.
-An expired job is unavailable like any unknown job; its originating turn is complete, so the original tool call cannot run again.
-Retained plugin jobs require the same plugin installation path and current grants; moving the plugin directory invalidates that recorded callable provenance.
+Reading a result again returns its original output and does not repeat its effects.
+A result remains available for 30 days after it was last read; the job is then deleted once its turn has finished and no approval is pending in the conversation.
+Active jobs and unread results are never deleted.
+A deleted job is unavailable like any unknown job, and its original tool call cannot run again.
+Jobs of a plugin tool require the same plugin installation path and current grants; moving the plugin directory makes them unavailable.
 
-A job stores its full result once, together with its session-state updates and stream replay, in one durable envelope with a 64 MiB encoded JSON limit, including base64 expansion and artifacts.
-That envelope is a file of its own, read only when the result is retrieved.
-Job metadata keeps only a summary of at most 500 characters, and tool arguments are stored separately, so this is not a limit on total job storage.
-A result that exceeds this limit becomes a failed job with a size-limit error.
-Artifact files are read within the result's remaining budget, so a file that cannot fit is rejected before it is read; the configured large-output policy can save eligible text to a file before result encoding.
+A job's full result, including media and files, may be up to 64 MiB; a larger result makes the job fail with a size-limit error.
+The configured large-output policy can save long text to a file before that limit applies.
 
 ## [`dynamic_workflow`]
 
