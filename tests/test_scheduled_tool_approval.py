@@ -2346,6 +2346,21 @@ def test_harness_named_calls_schedule_as_canonical_calls(
     assert stored["args"] == "./backup.sh"
 
 
+def test_harness_named_call_with_a_repeated_argument_is_refused() -> None:
+    """A repeated key in a harness-named call is refused as JSON, not resolved to its last value."""
+    toolkit = _ShellTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = "shell"
+    model = OpenAIChat()
+    install_tool_dialect(model, CODEX_DIALECT)
+    agent = Agent(id="general", model=model, tools=[toolkit])
+
+    result = prepare_scheduled_call(agent, "exec_command", '{"cmd": "./backup.sh", "cmd": "./wipe.sh"}')
+
+    assert isinstance(result, str)
+    assert "duplicate key" in result
+
+
 @pytest.mark.asyncio
 async def test_scheduling_a_harness_named_call_binds_the_canonical_call() -> None:
     """A Claude model schedules Bash, and approval, the stored binding, and its trigger all use run_shell_command."""

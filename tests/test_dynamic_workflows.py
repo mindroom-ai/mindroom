@@ -2488,7 +2488,7 @@ def test_participant_model_presents_tools_in_its_dialect(tmp_path: Path) -> None
                     tools=[{"dynamic_workflow": {"allowed_tools": ["coding"]}}, "coding"],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
         ),
         context.runtime_paths,
     )
@@ -2502,12 +2502,16 @@ def test_participant_model_presents_tools_in_its_dialect(tmp_path: Path) -> None
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Writer",
-                "model": "claude-sonnet-5",
+                "model": "claude-sonnet-5-5",
                 "tools": ["coding"],
             },
         ],
     )
-    spec["permissions"] = {**cast("dict[str, object]", spec["permissions"]), "tools": ["coding"]}
+    spec["permissions"] = {
+        **cast("dict[str, object]", spec["permissions"]),
+        "models": ["claude-sonnet-5-5"],
+        "tools": ["coding"],
+    }
 
     with (
         tool_runtime_context(context),
@@ -2541,7 +2545,7 @@ def test_participant_drops_an_apply_patch_gated_unlike_the_edit_tools(tmp_path: 
                     tools=[{"dynamic_workflow": {"allowed_tools": ["coding"]}}, "coding"],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
             tool_approval={"rules": [{"match": "apply_patch", "action": "require_approval"}]},
         ),
         context.runtime_paths,
@@ -2555,12 +2559,16 @@ def test_participant_drops_an_apply_patch_gated_unlike_the_edit_tools(tmp_path: 
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Writer",
-                "model": "claude-sonnet-5",
+                "model": "claude-sonnet-5-5",
                 "tools": ["coding"],
             },
         ],
     )
-    spec["permissions"] = {**cast("dict[str, object]", spec["permissions"]), "tools": ["coding"]}
+    spec["permissions"] = {
+        **cast("dict[str, object]", spec["permissions"]),
+        "models": ["claude-sonnet-5-5"],
+        "tools": ["coding"],
+    }
 
     with (
         tool_runtime_context(context),

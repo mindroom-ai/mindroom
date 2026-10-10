@@ -146,6 +146,10 @@ def _canonical_call(agent: Agent, tool_name: str, arguments_json: str) -> tuple[
     dialect = installed_tool_dialect(agent.model) if isinstance(agent.model, Model) else None
     if dialect is None:
         return tool_name, arguments_json
+    # Translation re-serializes the arguments, so check the model's own JSON strictly first.
+    arguments = _parse_arguments(arguments_json)
+    if isinstance(arguments, str):
+        return arguments
     functions = {
         name: function
         for tool in (agent.tools if isinstance(agent.tools, list) else ())
