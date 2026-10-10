@@ -423,10 +423,12 @@ def _capped_persona(
     """Validate a persona's tools against the caller and ``cap``; a persona without tools inherits ``cap``.
 
     ``available_toolkits`` lists the caller's toolkits at the copy's depth, so a copy at the maximum
-    depth inherits ``cap`` without ``delegate``.
+    depth inherits ``cap`` without ``delegate``; any other inherited tool the caller lost still refuses.
     """
     if persona.tools is None and cap is not None:
-        persona = replace(persona, tools=tuple(entry for entry in cap if entry.partition(".")[0] in available_toolkits))
+        keep_delegate = "delegate" in available_toolkits
+        tools = tuple(entry for entry in cap if keep_delegate or entry.partition(".")[0] != "delegate")
+        persona = replace(persona, tools=tools)
     validate_persona_tools(persona.tools, available_toolkits, cap)
     return persona
 

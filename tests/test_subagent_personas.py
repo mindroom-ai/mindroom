@@ -403,3 +403,14 @@ def test_mcp_function_entries_are_not_checked_against_bridge_metadata(monkeypatc
     validate_persona_tools(("mcp_demo.demo_echo",), ["mcp_demo"])
     with pytest.raises(PersonaError):
         validate_persona_tools(("mcp_other.demo_echo",), ["mcp_demo"])
+
+
+def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path) -> None:
+    """A copy without tools inherits its parent's cap minus delegate at the maximum depth, and refuses any other loss."""
+    at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=("delegate", "file"), available_toolkits=lambda: ["file"])
+    lost_file = _resolve(tmp_path, system_prompt="Q", cap=("delegate", "file"), available_toolkits=lambda: ["delegate"])
+
+    assert isinstance(at_max_depth, PersonaRequest)
+    assert at_max_depth.persona is not None
+    assert at_max_depth.persona.tools == ("file",)
+    assert lost_file == "Cannot delegate: unknown tool 'file'. Your tools: delegate, file."
