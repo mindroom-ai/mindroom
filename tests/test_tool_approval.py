@@ -263,7 +263,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
     cards.is_terminal_approval_card = AsyncMock(return_value=False)
     cards.load_matrix_delivery = AsyncMock(return_value=delivery)
     cards.acknowledge_matrix_delivery = AsyncMock(
-        return_value=DeliveryAcknowledgement(settled_event_id="$approval", bound=True),
+        return_value=DeliveryAcknowledgement(settled_event_id="$approval"),
     )
     resolve_action = AsyncMock(return_value="approval-card-1")
     manager = ApprovalManager(
@@ -1179,7 +1179,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         claim_matrix_delivery=AsyncMock(side_effect=claim_notice),
         record_matrix_delivery_device=AsyncMock(),
         acknowledge_matrix_delivery=AsyncMock(
-            return_value=DeliveryAcknowledgement(settled_event_id="$notice", bound=True),
+            return_value=DeliveryAcknowledgement(settled_event_id="$notice"),
         ),
     )
     journal = MagicMock(

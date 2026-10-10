@@ -25,8 +25,6 @@ def _rollback_json(rollback: Rollback | None) -> str | None:
         {
             "presentation": rollback.presentation,
             "state": rollback.state.value,
-            "possibly_shown": rollback.possibly_shown,
-            "possibly_shown_seq": rollback.possibly_shown_seq,
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -45,12 +43,7 @@ def _rollback(stored: str | None) -> Rollback | None:
     if not isinstance(presentation, str) or not isinstance(data["state"], str):
         msg = "Stored rollback snapshot is malformed"
         raise TypeError(msg)
-    return Rollback(
-        presentation=presentation,
-        state=ReplyState(data["state"]),
-        possibly_shown=shown if isinstance((shown := data.get("possibly_shown")), str) else None,
-        possibly_shown_seq=shown_seq if isinstance((shown_seq := data.get("possibly_shown_seq")), int) else None,
-    )
+    return Rollback(presentation=presentation, state=ReplyState(data["state"]))
 
 
 def _sources(transaction: Transaction, principal_id: str, span_id: str) -> ResponseSources:

@@ -317,18 +317,11 @@ def approval_released(
     whose span a restart already ended only loses the approval's hold.
     """
     reply = lock_paused_reply(transaction, principal_id, continuation)
-    if reply is None:
+    # It runs before the continuation is deleted, so the approval still holds its reply (I13).
+    if reply is None or reply.approval_id != continuation.approval_id:
         return None
-    holds = reply.approval_id == continuation.approval_id
-    if reply.current_span_id is None:
-        if not holds:
-            return None
-        return apply(transaction, principal_id, rl.approval_released(reply, None, now_ns=time.time_ns()))
-    span = reply_spans.load(transaction, principal_id, reply.current_span_id)
-    resumes = (
-        span is not None and span.kind is rl.SpanKind.APPROVAL_RESUME and span.approval_id == continuation.approval_id
-    )
-    if span is None or not (resumes or holds):
+    span = None if reply.current_span_id is None else reply_spans.load(transaction, principal_id, reply.current_span_id)
+    if reply.current_span_id is not None and span is None:
         return None
     return apply(transaction, principal_id, rl.approval_released(reply, span, now_ns=time.time_ns()))
 

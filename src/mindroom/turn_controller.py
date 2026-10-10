@@ -475,8 +475,12 @@ class TurnController:
         """
         if envelope.origin.intent not in {TurnIntent.ROUTER_HANDOFF, TurnIntent.TRUSTED_INTERNAL_RELAY}:
             return True
+        return self._addressed_to_this_agent(room, event.source)
+
+    def _addressed_to_this_agent(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool:
+        """Return whether a message mentions this agent, or no other agent or person."""
         mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-            event.source,
+            source,
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
@@ -579,14 +583,7 @@ class TurnController:
             target,
         ):
             return
-        mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-            source,
-            self.deps.matrix_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            room=room,
-        )
-        if not am_i_mentioned and (mentioned_agents or has_non_agent_mentions):
+        if not self._addressed_to_this_agent(room, source):
             # A message for another agent or person does not wait for this one.
             return
         create_background_task(

@@ -40,7 +40,7 @@ _HELD_BY = """(
 _REPLY_COLUMNS = f"""
     reply_id, entity_name, room_id, thread_id, membership_epoch,
     event_id, state, current_span_id, last_span_id, presentation_json,
-    possibly_shown_json, possibly_shown_seq, confirmed_seq, revision,
+    possibly_shown_json, confirmed_seq, revision,
     placeholder_only, stop_receipt_order, stop_applied_receipt_order, stop_button_event_id,
     redaction_pending_json, owed_write_json, reply_sequence, {_HELD_BY} AS approval_id, created_at_ns, updated_at_ns
 """
@@ -107,7 +107,6 @@ def _reply(row: Row) -> Reply:
         event_id=cast("str | None", row["event_id"]),
         current_span_id=cast("str | None", row["current_span_id"]),
         possibly_shown=cast("str | None", row["possibly_shown_json"]),
-        possibly_shown_seq=_optional_int(row["possibly_shown_seq"]),
         confirmed_seq=_optional_int(row["confirmed_seq"]),
         placeholder_only=bool(row["placeholder_only"]),
         stop_receipt_order=_optional_int(row["stop_receipt_order"]),
@@ -389,10 +388,10 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
         INSERT INTO reply_messages (
             principal_id, reply_id, entity_name, room_id, thread_id, membership_epoch, event_id, state,
             current_span_id, last_span_id, presentation_json, possibly_shown_json,
-            possibly_shown_seq, confirmed_seq, revision, placeholder_only, stop_receipt_order,
+            confirmed_seq, revision, placeholder_only, stop_receipt_order,
             stop_applied_receipt_order, stop_button_event_id, redaction_pending_json,
             owed_write_json, reply_sequence, created_at_ns, updated_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, reply_id) DO UPDATE SET
             membership_epoch = excluded.membership_epoch,
             event_id = excluded.event_id,
@@ -401,7 +400,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             last_span_id = excluded.last_span_id,
             presentation_json = excluded.presentation_json,
             possibly_shown_json = excluded.possibly_shown_json,
-            possibly_shown_seq = excluded.possibly_shown_seq,
             confirmed_seq = excluded.confirmed_seq,
             revision = excluded.revision,
             placeholder_only = excluded.placeholder_only,
@@ -426,7 +424,6 @@ def _save(transaction: Transaction, principal_id: str, reply: Reply) -> None:
             reply.last_span_id,
             reply.presentation,
             reply.possibly_shown,
-            reply.possibly_shown_seq,
             reply.confirmed_seq,
             reply.revision,
             reply.placeholder_only,

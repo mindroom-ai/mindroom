@@ -1596,7 +1596,7 @@ class FakeOutbox:
             # First-writer-wins, like the real store: a loser is told the event
             # the row already names rather than its own, and told it bound
             # nothing -- which stays true even when the two events are equal.
-            return DeliveryAcknowledgement(settled_event_id=already, bound=False)
+            return DeliveryAcknowledgement(settled_event_id=already)
         self.rows[key] = replace(
             self.rows[key],
             acknowledged_event_id=event_id,
@@ -1604,7 +1604,7 @@ class FakeOutbox:
         )
         self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
-        return DeliveryAcknowledgement(settled_event_id=event_id, bound=True, terminal_turn=terminal_turn)
+        return DeliveryAcknowledgement(settled_event_id=event_id, terminal_turn=terminal_turn)
 
     async def unacknowledged_matrix_deliveries(
         self,

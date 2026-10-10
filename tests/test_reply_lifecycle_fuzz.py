@@ -209,13 +209,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             return
         if transition.row is not None:
             self.model.writes[(reply.reply_id, transition.row.sequence)] = "ends" if reply.terminal else "open"
-        elif (
-            before is not None
-            and before.reply_id == reply.reply_id
-            and reply.possibly_shown_seq is not None
-            and reply.possibly_shown_seq > (before.possibly_shown_seq or 0)
-        ):
-            self.model.writes.setdefault((reply.reply_id, reply.possibly_shown_seq), "open")
+        elif before is not None and before.reply_id == reply.reply_id and reply.reply_sequence > before.reply_sequence:
+            self.model.writes.setdefault((reply.reply_id, reply.reply_sequence), "open")
 
     def _apply_effect(self, effect: rl.Effect) -> None:
         match effect:
@@ -1172,7 +1167,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         reply = self.model.reply
         if reply is None:
             return
-        assert (reply.possibly_shown_seq or 0) <= reply.reply_sequence
         assert (reply.confirmed_seq or 0) <= reply.reply_sequence
         for row in self.model.rows:
             assert row.intent.sequence <= reply.reply_sequence

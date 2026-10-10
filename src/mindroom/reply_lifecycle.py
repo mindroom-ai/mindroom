@@ -129,9 +129,6 @@ class Rollback:
     presentation: str
     # A finished state: only a finished answer is ever restored.
     state: ReplyState
-    # What the room may show before the regeneration wrote, and that write's sequence.
-    possibly_shown: str | None = None
-    possibly_shown_seq: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +189,6 @@ class Reply:
     event_id: str | None = None
     current_span_id: str | None = None
     possibly_shown: str | None = None
-    possibly_shown_seq: int | None = None
     confirmed_seq: int | None = None
     placeholder_only: bool = False
     stop_receipt_order: int | None = None
@@ -216,10 +212,8 @@ class Reply:
 
     @property
     def confirmed(self) -> bool:
-        """Return whether Matrix acknowledged the reply's latest write."""
-        if self.possibly_shown_seq is None:
-            return True
-        return self.confirmed_seq is not None and self.confirmed_seq >= self.possibly_shown_seq
+        """Return whether Matrix acknowledged the reply's latest write; every write takes the next sequence."""
+        return (self.confirmed_seq or 0) >= self.reply_sequence
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +387,7 @@ def _row(
 ) -> tuple[Reply, _RowIntent]:
     """Allocate the next write sequence for one durable row and record what it may show."""
     reply, sequence = _next_sequence(reply)
-    reply = replace(reply, possibly_shown=shown, possibly_shown_seq=sequence)
+    reply = replace(reply, possibly_shown=shown)
     return reply, _RowIntent(stage=stage, sequence=sequence, span_id=span.span_id)
 
 
@@ -421,7 +415,7 @@ def _check_revision(reply: Reply, prepared_revision: int) -> Transition | None:
 
 def _wrote_anything(reply: Reply, span: Span) -> bool:
     """Return whether the span recorded any write, which Matrix may show though no confirmation says so yet."""
-    return reply.possibly_shown_seq is not None and reply.possibly_shown_seq > span.base_sequence
+    return reply.reply_sequence > span.base_sequence
 
 
 def _kept_answer(reply: Reply, span: Span) -> Rollback | None:
@@ -464,16 +458,12 @@ def _gone(reply: Reply, now_ns: int) -> Reply:
 def _restore(reply: Reply, span: Span, rollback: Rollback, now_ns: int) -> Reply:
     """Restore a regeneration's rollback snapshot, a finished answer.
 
-    The old answer stands, so a Stop recorded during the regeneration is satisfied by it.
+    The old answer stands, so a Stop recorded during the regeneration is
+    satisfied by it. The regeneration wrote nothing (``_kept_answer``), so
+    what the room may show is still the old answer.
     """
-    # A row Matrix refused for good shows nothing: the room shows what it did before the regeneration.
-    restored = replace(
-        _stop_applied(_clear_current(reply, span.span_id)),
-        possibly_shown=rollback.possibly_shown,
-        possibly_shown_seq=rollback.possibly_shown_seq,
-    )
     return _set_state(
-        restored,
+        _stop_applied(_clear_current(reply, span.span_id)),
         rollback.state,
         now_ns,
         presentation=rollback.presentation,
@@ -623,12 +613,7 @@ def _make_current(reply: Reply, span: Span, now_ns: int, **changes: object) -> R
 
 
 def _rollback_of(reply: Reply) -> Rollback:
-    return Rollback(
-        presentation=reply.presentation,
-        state=reply.state,
-        possibly_shown=reply.possibly_shown,
-        possibly_shown_seq=reply.possibly_shown_seq,
-    )
+    return Rollback(presentation=reply.presentation, state=reply.state)
 
 
 def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: C901, PLR0911, PLR0912
@@ -793,11 +778,11 @@ class ProgressConfirmation:
 
 def confirm_progress(reply: Reply, confirmation: ProgressConfirmation | None) -> Reply:
     """Record that the latest direct edit landed, as the next write-ahead or durable transition does."""
-    if confirmation is None or reply.possibly_shown_seq is None:
+    if confirmation is None or reply.reply_sequence == 0:
         return reply
     updated = replace(
         reply,
-        confirmed_seq=max(reply.confirmed_seq or 0, reply.possibly_shown_seq),
+        confirmed_seq=max(reply.confirmed_seq or 0, reply.reply_sequence),
         placeholder_only=confirmation.placeholder_only,
     )
     if updated.event_id is None:
@@ -827,8 +812,8 @@ def write_ahead(
         return stale
     if durable_write_debt:
         return _unchanged(Outcome.DEFERRED, reply)
-    updated, sequence = _next_sequence(confirm_progress(reply, previous))
-    updated = _touch(updated, now_ns, possibly_shown=shown, possibly_shown_seq=sequence)
+    updated, _ = _next_sequence(confirm_progress(reply, previous))
+    updated = _touch(updated, now_ns, possibly_shown=shown)
     return Transition(outcome=Outcome.APPLIED, reply=updated)
 
 
@@ -878,7 +863,7 @@ def write_acknowledged(
                 updated = _with_redactions(updated, event_id)
     if updated.confirmed_seq is None or write.sequence > updated.confirmed_seq:
         updated = replace(updated, confirmed_seq=write.sequence)
-        if write.sequence >= (updated.possibly_shown_seq or 0):
+        if write.sequence >= updated.reply_sequence:
             updated = replace(updated, placeholder_only=write.placeholder_only)
     if updated == reply:
         return _unchanged(Outcome.DUPLICATE, reply)
@@ -893,7 +878,7 @@ def write_failed(reply: Reply, span: Span, write: WriteFacts, *, now_ns: int) ->
         reply.state is ReplyState.PAUSED
         and reply.approval_id is not None
         and span.span_id == reply.last_span_id
-        and write.sequence == reply.possibly_shown_seq
+        and write.sequence == reply.reply_sequence
     ):
         return _failed_pause(reply, span, now_ns=now_ns)
     # A refused create leaves the span running and a later row creates the
@@ -1648,7 +1633,7 @@ def _ended_by_restart(reply: Reply, updated: Reply, last: Span, ended: tuple[Spa
     """End a reply whose sources settled while no instance ran its span."""
     if (kept := _kept_answer(reply, last)) is not None:
         return Transition(outcome=Outcome.APPLIED, reply=_restore(updated, last, kept, now_ns), spans=ended)
-    if reply.event_id is None and reply.possibly_shown_seq is None:
+    if reply.event_id is None and reply.reply_sequence == 0:
         # It never wrote anything: a restart note would be a message of its own.
         return Transition(outcome=Outcome.APPLIED, reply=_set_state(updated, ReplyState.GONE, now_ns), spans=ended)
     owed = OwedWrite(last.span_id, NoteKind.RESTART)

@@ -2010,13 +2010,14 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
 
-    assert resolution is None
+    # The error note replaces the placeholder, which stays the reply's visible message.
+    assert resolution == "$thinking"
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
     assert (
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
             "visible_response_event_id"
         ]
-        is None
+        == "$thinking"
     )
     assert (
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[

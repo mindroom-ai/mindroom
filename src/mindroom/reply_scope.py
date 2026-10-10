@@ -404,9 +404,11 @@ class ReplyRuntime:
         The debt of the replies it ended is now due.
         """
         endings = await self.store.replies.take_deletion_endings()
+        # Every cancel lands before an awaited wake can fail.
         for ending in endings:
             if ending.span_id is not None:
                 self.spans.cancel(ending.span_id, cancel_source=None)
+        for ending in endings:
             reply = await self.store.replies.load(ending.reply_id)
             if reply is not None and reply.approval_id is not None:
                 # Its settlement expires the cards and settles the sources the approval holds.

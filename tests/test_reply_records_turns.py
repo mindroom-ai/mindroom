@@ -139,7 +139,7 @@ async def test_streamed_answer_completes_its_reply(tmp_path: Path) -> None:
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED]
     assert render_body(decode_presentation(reply.presentation))[0] == "Hello there, friend."
     # Every write took the reply's sequence, and Matrix acknowledged the last one.
-    assert reply.possibly_shown_seq == reply.reply_sequence == reply.confirmed_seq
+    assert reply.reply_sequence == reply.confirmed_seq
     assert reply.reply_sequence >= 3
     principal = bot._reply_runtime.store
     initial = await principal.load_matrix_delivery(delivery_id="$event", stage=DeliveryStage.INITIAL)
@@ -179,6 +179,27 @@ async def test_a_streamed_answer_that_fails_after_showing_content_reports_it(tmp
     reply = await _reply(bot)
     assert event_id == reply.event_id is not None
     assert "Hello there, friend." in render_body(decode_presentation(reply.presentation))[0]
+
+
+async def test_a_streamed_turn_that_fails_before_streaming_ends_with_its_error(tmp_path: Path) -> None:
+    """A failure after the placeholder but before the stream starts edits the placeholder into the error."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with (
+        patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing),
+        patch.object(
+            ResponseRunner,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=RuntimeError("setup failed")),
+        ),
+    ):
+        await runner.generate_response(_plain_request(_target()))
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.FAILED
+    assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.FAILED]
+    assert _sent_bodies(bot) == ["Thinking...", "**[Response interrupted by an error: setup failed]**"]
+    assert not await bot._reply_runtime.store.is_pending("$event")
 
 
 async def test_blocking_answer_completes_its_reply(tmp_path: Path) -> None:
@@ -436,7 +457,7 @@ async def test_streamed_team_answer_completes_its_reply(tmp_path: Path) -> None:
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
     assert render_body(decode_presentation(reply.presentation))[0] == _sent_bodies(bot)[-1]
-    assert reply.possibly_shown_seq == reply.reply_sequence == reply.confirmed_seq
+    assert reply.reply_sequence == reply.confirmed_seq
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED]
 
 

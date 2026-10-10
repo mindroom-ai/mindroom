@@ -456,11 +456,9 @@ _TABLES = (
         current_span_id TEXT,
         last_span_id TEXT NOT NULL,
         presentation_json TEXT NOT NULL,
-        -- What the latest write, durable or direct, may have shown, and its
-        -- place in the reply's write sequence. Matrix acknowledged it when
-        -- confirmed_seq has reached possibly_shown_seq.
+        -- What the latest write, durable or direct, may have shown. Matrix
+        -- acknowledged it when confirmed_seq has reached reply_sequence.
         possibly_shown_json TEXT,
-        possibly_shown_seq BIGINT,
         confirmed_seq BIGINT,
         -- Bumped by every transition that changes what a payload would hold.
         revision BIGINT NOT NULL,

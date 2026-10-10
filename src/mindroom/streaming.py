@@ -1511,10 +1511,9 @@ class StreamingResponse:
     ) -> bool:
         """Send a new event or edit the existing one.
 
-        ``is_final`` here means "this edit carries the turn's answer", which is
-        narrower than "this is the last edit". A cancelled or failed stream
-        also ends with a terminal edit, and that edit is a notice rather than
-        an answer, so it must not claim the turn's durable delivery.
+        ``is_final`` selects the terminal delivery callbacks: the turn's answer,
+        and for a durable reply also its cancelled or error notice. A cancelled
+        or failed stream of any other kind ends with a direct edit.
         """
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
         for attempt in range(1, total_attempts + 1):

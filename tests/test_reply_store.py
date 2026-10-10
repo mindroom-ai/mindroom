@@ -111,7 +111,6 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
         transition.reply,
         event_id="$reply",
         possibly_shown='{"shown":true}',
-        possibly_shown_seq=4,
         confirmed_seq=3,
         placeholder_only=True,
         stop_receipt_order=9,
@@ -442,7 +441,7 @@ async def test_terminal_row_settles_sources_and_its_ack_binds_the_reply(journal_
         event_id="$answer",
         delivered_projections=(),
     )
-    assert acknowledged.bound
+    assert acknowledged.settled_event_id == "$answer"
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.state is ReplyState.COMPLETED

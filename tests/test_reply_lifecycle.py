@@ -371,7 +371,7 @@ def test_write_ahead_allocates_the_next_sequence_and_confirms_the_previous_edit(
         now_ns=NOW,
     )
     assert first.reply is not None
-    assert first.reply.possibly_shown_seq == 1
+    assert first.reply.reply_sequence == 1
     assert not first.reply.confirmed
     second = rl.write_ahead(
         first.reply,
@@ -384,7 +384,7 @@ def test_write_ahead_allocates_the_next_sequence_and_confirms_the_previous_edit(
     )
     assert second.reply is not None
     assert second.reply.confirmed_seq == 1
-    assert second.reply.possibly_shown_seq == 2
+    assert second.reply.reply_sequence == 2
     assert second.reply.event_id == "$reply"
     assert second.reply.revision == reply.revision
 
@@ -707,7 +707,7 @@ def test_a_refused_final_of_a_regeneration_ends_the_reply_failed_with_its_note()
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
     shown = replace(reply, state=ReplyState.COMPLETED, presentation="old", event_id="$reply")
-    shown = replace(shown, possibly_shown="old", possibly_shown_seq=1, reply_sequence=1, confirmed_seq=1)
+    shown = replace(shown, possibly_shown="old", reply_sequence=1, confirmed_seq=1)
     claimed = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(shown, span))
     assert claimed.reply is not None
     assert claimed.claimed is not None
@@ -1430,7 +1430,7 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert CancelSpan("span-2") in kept.effects
     assert _span_after(kept, "span-2").outcome is SpanOutcome.RESTORED
     # Written ahead, so Matrix may show it though no confirmation says so yet.
-    shown = replace(regeneration.reply, possibly_shown_seq=regeneration.reply.reply_sequence + 1)
+    shown = replace(regeneration.reply, reply_sequence=regeneration.reply.reply_sequence + 1)
     removed = rl.sources_deleted(shown, regeneration.claimed, now_ns=NOW)
     assert removed.reply is not None
     assert removed.reply.state is ReplyState.GONE
@@ -1658,7 +1658,7 @@ def test_a_dropped_replay_ends_the_reply_its_earlier_span_left() -> None:
     # Settling again is idempotent, and it is what records the turn answered.
     assert dropped.effects == (SettleSources(span.span_id, answered=False),)
     # A placeholder is removed, unless an edit Matrix has not confirmed may show more.
-    unconfirmed = replace(reply, placeholder_only=True, possibly_shown_seq=3, confirmed_seq=2)
+    unconfirmed = replace(reply, placeholder_only=True, reply_sequence=3, confirmed_seq=2)
     shown = rl.replay_dropped(unconfirmed, span, sources_pending=False, now_ns=NOW)
     assert shown.reply is not None
     assert shown.reply.state is ReplyState.FAILED
@@ -1969,15 +1969,15 @@ def test_progress_confirmation_clears_placeholder_only_before_a_failed_final() -
 
 
 def test_regeneration_replaces_a_frozen_display() -> None:
-    """A regenerated answer is shown, not the old post-hook display; the rollback keeps the old one."""
+    """A regenerated answer is shown, not the old post-hook display, which the room shows until it writes."""
     reply, span = _turn()
     reply, span = _ended(reply, span, SpanOutcome.COMPLETED)
-    reply = replace(reply, state=ReplyState.COMPLETED, possibly_shown="old frozen", possibly_shown_seq=1)
+    reply = replace(reply, state=ReplyState.COMPLETED, possibly_shown="old frozen", reply_sequence=1)
     regen = rl.claim(_request("span-2", delivery_id="$edit", driving_edit_id="$edit"), _context(reply, span))
     assert regen.reply is not None
     assert regen.claimed is not None
     assert regen.claimed.rollback is not None
-    assert regen.claimed.rollback.possibly_shown == "old frozen"
+    assert regen.reply.possibly_shown == "old frozen"
     final = rl.finish(regen.reply, regen.claimed, _write(regen.reply, ReplyState.COMPLETED, "new"), now_ns=NOW)
     assert final.reply is not None
     assert final.reply.presentation == "new"
@@ -2037,7 +2037,7 @@ def test_interactive_acknowledgement_records_its_create() -> None:
     assert created.row.stage is WriteStage.INITIAL
     assert created.reply is not None
     assert created.reply.possibly_shown == "ack"
-    assert created.reply.possibly_shown_seq == created.row.sequence == 1
+    assert created.reply.reply_sequence == created.row.sequence == 1
 
 
 def test_stop_after_restart_during_an_approval_resume_fences_the_approval() -> None:

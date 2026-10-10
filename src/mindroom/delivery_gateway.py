@@ -2477,7 +2477,7 @@ class DeliveryGateway:
 
         return transform
 
-    async def _finalize_placeholder_only_stream_error(
+    def _finalize_placeholder_only_stream_error(
         self,
         request: FinalizeStreamedResponseRequest,
         *,
@@ -2486,16 +2486,7 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome:
         """Finalize a failed stream whose only visible event is still the placeholder."""
         placeholder_event_id = stream_outcome.last_physical_stream_event_id
-        if placeholder_event_id is None:
-            return FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=None,
-                failure_reason=failure_reason,
-                tool_trace=tuple(request.tool_trace or ()),
-                extra_content=request.extra_content,
-            )
-
-        if _is_placeholder_delivery_failure(failure_reason):
+        if placeholder_event_id is not None and _is_placeholder_delivery_failure(failure_reason):
             # The reply's answer row stays owed; only its permanent refusal writes the failure note.
             return FinalDeliveryOutcome(
                 terminal_status="error",
@@ -2505,10 +2496,12 @@ class DeliveryGateway:
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
             )
-
-        return await self._cleanup_completed_placeholder_only_stream(
+        # The runner ends the reply's span with the error note, which replaces the placeholder.
+        return FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id=None,
             failure_reason=failure_reason,
-            tool_trace=request.tool_trace,
+            tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,
         )
 
@@ -2575,7 +2568,7 @@ class DeliveryGateway:
                 return outcome(event_id=existing_visible_event_id, is_visible_response=True)
         if stream_outcome.visible_body_state == "placeholder_only":
             if not cancelled:
-                return await self._finalize_placeholder_only_stream_error(
+                return self._finalize_placeholder_only_stream_error(
                     request,
                     stream_outcome=stream_outcome,
                     failure_reason=failure_reason,

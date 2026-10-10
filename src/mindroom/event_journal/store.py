@@ -1057,7 +1057,6 @@ class PrincipalStore:
                 )
                 return DeliveryAcknowledgement(
                     settled_event_id=event_id,
-                    bound=True,
                     terminal_turn=committed_terminal,
                     reply_effects=() if reply_applied is None else reply_applied.post_commit,
                 )
@@ -1075,7 +1074,6 @@ class PrincipalStore:
             )
             return DeliveryAcknowledgement(
                 settled_event_id=None if settled is None else str(settled["acknowledged_event_id"]),
-                bound=False,
             )
 
         return await self._backend.write(acknowledge)

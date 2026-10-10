@@ -2286,7 +2286,7 @@ class TestProjectedInteractivePrompts:
             ts=3_000,
         )
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt")
         assert await alice.claim_interactive_reaction(source_event_id="$reaction") == InteractiveSelection(
             question_event_id="$prompt",
             question_text="Choose?",
@@ -2332,7 +2332,7 @@ class TestProjectedInteractivePrompts:
         )
         await admit_room_membership(alice, ROOM, "join")
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer")
         assert await bodies(alice, thread_id="$thread") == []
         records = await journal_store.turn_records("general").load_all()
         assert records == (), "retired membership cannot publish new terminal proof"
@@ -2361,7 +2361,7 @@ class TestProjectedInteractivePrompts:
             delivered_projections=(projection("$answer", sender="alice", ts=2_000, content=content),),
         )
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer")
         assert await bodies(alice) == []
 
     async def test_delivery_marker_fences_an_old_device_echo_without_a_transaction_id(
@@ -2437,7 +2437,7 @@ class TestProjectedInteractivePrompts:
             delivered_projections=(projection("$late-echo", sender="alice", ts=2_000, content=stored.payload),),
         )
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$late-echo", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$late-echo")
         assert await bodies(alice) == []
 
     async def test_retiring_an_edit_removes_an_echo_that_won_the_race(
@@ -2582,7 +2582,7 @@ class TestProjectedInteractivePrompts:
         if not echo_before_ack:
             await admit_echo()
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt")
         assert await bodies(alice, thread_id="$thread") == []
 
     async def test_interactive_source_waits_for_an_attempted_delivery_to_be_projected(
@@ -3492,7 +3492,7 @@ class TestProjectedInteractivePrompts:
 
         assert acknowledgement_waited, "acknowledgement bypassed the refetch membership claim"
         assert installed
-        assert acknowledged == DeliveryAcknowledgement(settled_event_id="$old-edit", bound=True)
+        assert acknowledged == DeliveryAcknowledgement(settled_event_id="$old-edit")
         page = await refetch_store.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         assert page.messages == ()
         assert page.refresh_pending == ()
@@ -5505,7 +5505,7 @@ class TestOutbox:
             delivered_projections=(),
             terminal_turn=terminal,
         )
-        assert retry.bound
+        assert retry.settled_event_id == "$answer"
         assert retry.terminal_turn is None
         rows = await store.deps.turn_records.load_all()
         assert {index for index, _, _ in rows} == {"$a", "$source"}
@@ -6070,7 +6070,7 @@ class TestOutbox:
         assert [acknowledged.settled_event_id for acknowledged in reported] == [winner, winner], (
             "a caller reported an event it did not bind the row to"
         )
-        assert [acknowledged.bound for acknowledged in reported].count(True) == 1, (
+        assert [acknowledged.terminal_turn is not None for acknowledged in reported].count(True) == 1, (
             "both callers were told their own write is what bound the row"
         )
         rows = await rival_stores.first.turn_records("general").load_all()
