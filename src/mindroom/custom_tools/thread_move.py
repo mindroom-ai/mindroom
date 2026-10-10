@@ -37,6 +37,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_MSGTYPES
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -178,7 +179,7 @@ class ThreadMoveTools(Toolkit):
                 content,
                 operation="thread_move",
             )
-            if delivered is None:
+            if delivered is None or _lost_text(content, delivered.content_sent):
                 # The source thread stays untouched, so the user can retry or delete the partial copy.
                 partial = {} if new_root_id is None else {"link": _permalink(prepared.target_room_id, new_root_id, via)}
                 return self._payload(
@@ -366,6 +367,11 @@ async def _mark_source_moved(
         )
     except ThreadTagsError as exc:
         warnings.append(f"Could not mark the original thread resolved: {exc}")
+
+
+def _lost_text(content: dict[str, Any], content_sent: dict[str, Any]) -> bool:
+    """Return whether a long message went out cut short because its full text could not be attached."""
+    return content_sent.get("body") != content.get("body") and not holds_unresolved_sidecar(content_sent)
 
 
 def _permalink(room_id: str, event_id: str, via: str) -> str:

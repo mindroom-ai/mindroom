@@ -636,8 +636,17 @@ async def test_move_thread_copies_tags_posts_notice_and_resolves_source(tmp_path
 async def test_move_thread_reports_partial_copy_on_send_failure(tmp_path: Path) -> None:
     """A failed send stops the move and leaves the original thread untouched."""
     move = _move(tmp_path)
-    delivered = _delivered_sends()
-    send = AsyncMock(side_effect=[await delivered(None, TARGET_ROOM_ID, {}), None])
+    sends = _delivered_sends()
+
+    async def fail_second(
+        client: object,
+        room_id: str,
+        content: dict[str, Any],
+        **kwargs: object,
+    ) -> DeliveredMatrixEvent | None:
+        return None if send.await_count == 2 else await sends(client, room_id, content, **kwargs)
+
+    send = AsyncMock(side_effect=fail_second)
     with _matrix(move, _thread(move), send=send) as mocks:
         payload = await _run()
 
@@ -695,3 +704,48 @@ async def test_move_thread_reports_each_follow_up_failure_as_a_warning(tmp_path:
         "Could not copy tag ideas: forbidden",
         "Could not post the move notice in the original thread.",
     ]
+
+
+@pytest.mark.asyncio
+async def test_move_thread_stops_when_a_long_message_was_shortened(tmp_path: Path) -> None:
+    """A long message whose full text could not be attached would arrive cut short, so the move stops there."""
+    move = _move(tmp_path)
+    sends = _delivered_sends()
+
+    async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
+        delivered = await sends(client, room_id, content, **kwargs)
+        if content.get("body") == "@research found it?":
+            return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent={**content, "body": "@research fo…"})
+        return delivered
+
+    with _matrix(move, _thread(move), send=AsyncMock(side_effect=send)) as mocks:
+        payload = await _run()
+
+    assert payload["status"] == "error"
+    assert payload["message"] == "Copied 1 of 3 messages before a send failed."
+    mocks.set_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_move_thread_accepts_a_long_message_sent_with_its_full_text_attached(tmp_path: Path) -> None:
+    """A preview that carries the full text as an attachment is a complete copy."""
+    move = _move(tmp_path)
+    sends = _delivered_sends()
+
+    async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
+        delivered = await sends(client, room_id, content, **kwargs)
+        if content.get("body") == "@research found it?":
+            preview = {
+                **content,
+                "body": "@research fo…",
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                "url": "mxc://localhost/full",
+            }
+            return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent=preview)
+        return delivered
+
+    with _matrix(move, _thread(move), send=AsyncMock(side_effect=send)):
+        payload = await _run()
+
+    assert payload["status"] == "ok"
+    assert payload["copied"] == 3
