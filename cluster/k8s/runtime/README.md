@@ -887,6 +887,46 @@ The broker connects directly from the primary pod, unless the primary's `HTTPS_P
 If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
 The broker shares the primary's lifecycle, so a primary restart interrupts brokered connections that are in flight.
 
+### Self-service for users
+
+In a full Kubernetes deployment with this chart, most users have no dashboard access.
+With the broker on, each of them still gets the personal Connections page at `/connections/egress`:
+
+- The egress services of every agent they may use, with the state of their own keys and accounts.
+- Their own services: add, edit, and delete them on `user` and `user_agent` agents, including a GitHub "Limit to repositories" helper. On shared and unscoped agents only administrators and the agent's `credential_managers` change services.
+- Their own keys, and **Connect** and **Disconnect** for their Google, GitHub, and Atlassian accounts.
+- Their own request log, a **Recent requests** table per agent.
+
+Services from `config.yaml` appear read-only as "Added by your administrator".
+Users' services can narrow what the administrator allows but never widen it; see [User services](../../../docs/deployment/egress-broker.md#user-services).
+
+The page needs these settings, which the chart does not render for you:
+
+- **Trusted upstream auth with JWT.** The Connections routes accept only a signed Matrix identity, so the gateway in front of the runtime must authenticate users and sign a JWT. This chart has no values for it; set the `MINDROOM_TRUSTED_UPSTREAM_*` variables through `env.extra`, as below (the instance chart's `trustedUpstreamAuth` values are the equivalent there). Header-only mode is not enough, and `MINDROOM_PUBLIC_URL` must be an HTTPS origin because every change checks the browser's `Origin` against it.
+- **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service. The chart creates no ingress.
+- **A private agent for the portal, `MINDROOM_CONNECTIONS_AGENT`.** It must use `private.per: user` or `user_agent`. Setting it keeps ordinary dashboard routes limited to `administrators`; without it, every user the gateway admits can read and change dashboard configuration.
+- **Dedicated workers for personal GitHub and Atlassian accounts.** The broker already needs `workers.backend: kubernetes`. Personal GitHub and Atlassian accounts work for agents with `worker_scope: user` or `user_agent`; on shared and unscoped agents they need `oauth_on_shared_workers: true` on the service. Google accounts follow the agent's worker scope.
+- **OAuth clients.** The administrator configures the providers' OAuth clients once; see [Built-In Providers](../../../docs/oauth-framework.md#built-in-providers).
+
+```yaml
+env:
+  extra:
+    MINDROOM_PUBLIC_URL: "https://assistant.example.org"
+    MINDROOM_CONNECTIONS_AGENT: personal
+    MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED: "true"
+    MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER: X-MindRoom-User-Id
+    MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT: "true"
+    MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER: X-Trusted-Jwt
+    MINDROOM_TRUSTED_UPSTREAM_JWKS_URL: https://gateway.example.com/.well-known/jwks.json
+    MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE: mindroom-dashboard
+    MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER: https://gateway.example.com
+    MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM: sub
+    MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: matrix_user_id
+```
+
+See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every variable, the Matrix identity options, and the Connections portal.
+Without trusted upstream auth with JWT, only administrators can manage keys and accounts, on the dashboard Credentials tab, and users cannot add services or see their requests.
+
 ## Matrix Managed Account Authentication
 
 `matrix.managedAccountAuth` selects how MindRoom creates and logs in its router, agent, team, and internal-user Matrix accounts.

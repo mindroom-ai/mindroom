@@ -216,10 +216,11 @@ def test_reports_configured_status_per_requester_scope(tmp_path: Path) -> None:
 
     assert alice["tool"] == "egress_credentials"
     assert alice["services"] == [
-        {"name": "github", "display_name": "GitHub", "configured": True, "active_source": "key"},
+        {"name": "github", "display_name": "GitHub", "source": "config", "configured": True, "active_source": "key"},
         {
             "name": "openai",
             "display_name": "openai",
+            "source": "config",
             "configured": False,
             "active_source": None,
             "can_connect_account": False,
@@ -250,7 +251,14 @@ def test_lists_the_scopes_own_services_next_to_config_services(tmp_path: Path) -
     alice = _list(EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target()), context)
     bob = _list(EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target("@bob:example.org")), context)
 
-    assert _entry(alice, "mine") == {"name": "mine", "display_name": "Mine", "configured": True, "active_source": "key"}
+    assert _entry(alice, "mine") == {
+        "name": "mine",
+        "display_name": "Mine",
+        "source": "user",
+        "configured": True,
+        "active_source": "key",
+    }
+    assert _entry(alice, "github")["source"] == "config"
     assert _statuses(alice) == {"github": False, "openai": False, "mine": True}
     assert _statuses(bob) == {"github": False, "openai": False}
 
@@ -269,6 +277,49 @@ def test_user_services_are_listed_without_config_services(tmp_path: Path) -> Non
 
     assert _statuses(payload) == {"mine": False}
     assert "No egress services" not in str(payload["note"])
+
+
+def test_every_entry_says_who_defined_the_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`source` is `config` for the administrator's services and `user` for the scope's own, also when a status fails."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    context = _context(runtime_paths)
+    mine = EgressService.model_validate({"rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]})
+    save_user_service(
+        manager,
+        _target(),
+        "mine",
+        mine,
+        config_services=context.config.egress_broker.services,
+        oauth_providers=(),
+    )
+    tool = EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target())
+
+    payload = _list(tool, context)
+
+    assert {entry["name"]: entry["source"] for entry in payload["services"]} == {
+        "github": "config",
+        "openai": "config",
+        "mine": "user",
+    }
+    assert "`source` is `config` for a service the administrator defined and `user` for one the user added" in str(
+        payload["note"],
+    )
+
+    def failing_status(*_args: object, **_kwargs: object) -> None:
+        msg = "status exploded"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(egress_credentials_module, "service_status", failing_status)
+
+    fallback = _list(tool, context)
+
+    assert {entry["name"]: entry["source"] for entry in fallback["services"]} == {
+        "github": "config",
+        "openai": "config",
+        "mine": "user",
+    }
+    assert all(entry["configured"] is False for entry in fallback["services"])
 
 
 def test_unscoped_target_reads_the_global_store(tmp_path: Path) -> None:
@@ -372,6 +423,7 @@ def test_no_configured_services_says_so(tmp_path: Path) -> None:
 
     assert payload["services"] == []
     assert "No egress services" in str(payload["note"])
+    assert "users can add services of their own" in str(payload["note"])
 
 
 def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
@@ -409,6 +461,7 @@ def test_connected_account_is_the_active_source_without_a_key(tmp_path: Path) ->
     assert _entry(alice, "github") == {
         "name": "github",
         "display_name": "GitHub",
+        "source": "config",
         "configured": True,
         "active_source": "oauth",
     }
@@ -435,6 +488,7 @@ def test_github_account_is_not_offered_where_requesters_share_a_worker(
     assert _entry(alice, "github") == {
         "name": "github",
         "display_name": "GitHub",
+        "source": "config",
         "configured": False,
         "active_source": None,
         "can_connect_account": False,
@@ -456,6 +510,7 @@ def test_github_account_is_not_offered_on_the_static_runner_without_the_opt_in(t
     assert _entry(refused, "github") == {
         "name": "github",
         "display_name": "GitHub",
+        "source": "config",
         "configured": False,
         "active_source": None,
         "can_connect_account": False,
@@ -502,6 +557,7 @@ def test_explicit_key_wins_over_a_connected_account(tmp_path: Path) -> None:
     assert _entry(payload, "github") == {
         "name": "github",
         "display_name": "GitHub",
+        "source": "config",
         "configured": True,
         "active_source": "key",
     }
@@ -517,6 +573,7 @@ def test_unconfigured_service_says_whether_an_account_can_be_connected(tmp_path:
     assert _entry(payload, "github") == {
         "name": "github",
         "display_name": "GitHub",
+        "source": "config",
         "configured": False,
         "active_source": None,
         "can_connect_account": True,
@@ -525,6 +582,7 @@ def test_unconfigured_service_says_whether_an_account_can_be_connected(tmp_path:
     assert _entry(payload, "openai") == {
         "name": "openai",
         "display_name": "OpenAI",
+        "source": "config",
         "configured": False,
         "active_source": None,
         "can_connect_account": False,
@@ -552,6 +610,7 @@ def test_shared_service_account_is_not_injected_so_it_is_not_connected(tmp_path:
     assert _entry(payload, "drive") == {
         "name": "drive",
         "display_name": "Google Drive",
+        "source": "config",
         "configured": False,
         "active_source": None,
         "can_connect_account": False,
@@ -605,6 +664,7 @@ def test_one_failing_provider_does_not_fail_the_whole_listing(
     assert _entry(payload, "github") == {
         "name": "github",
         "display_name": "GitHub",
+        "source": "config",
         "configured": False,
         "active_source": None,
         "can_connect_account": False,
@@ -646,6 +706,7 @@ def test_unknown_oauth_provider_is_ignored(tmp_path: Path) -> None:
     assert _entry(payload, "acme") == {
         "name": "acme",
         "display_name": "acme",
+        "source": "config",
         "configured": False,
         "active_source": None,
         "can_connect_account": False,

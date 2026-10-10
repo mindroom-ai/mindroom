@@ -3,16 +3,17 @@
 When a brokered request fails with ``credential_not_configured``, the agent
 calls this tool to tell the user which services the egress broker can inject
 credentials for, which of them have a key or a connected account in this
-agent's scope, and where to add the missing ones. The tool reports names and
-flags only; it never reads a secret, access token, or connect link into its
-output.
+agent's scope, and where to add the missing ones. Each service says whether
+the administrator defined it (``source: "config"``) or the user added it in
+this scope (``source: "user"``). The tool reports names and flags only; it
+never reads a secret, access token, or connect link into its output.
 """
 
 from __future__ import annotations
 
 import functools
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from agno.tools import Toolkit
 
@@ -39,8 +40,10 @@ _NO_WORKER_NOTE = (
 )
 _NO_CONFIG_NOTE = "The egress broker configuration is not available in this context, so no services can be listed."
 _NO_SERVICES_NOTE = (
-    "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml."
+    "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml, "
+    "and users can add services of their own on the egress page where it is available."
 )
+type _Source = Literal["config", "user"]
 
 
 class EgressCredentialsTools(Toolkit):
@@ -62,6 +65,7 @@ class EgressCredentialsTools(Toolkit):
         Call this when a request fails with `credential_not_configured`, or before telling the user
         which credential they need. Returns each configured service with whether this agent has a
         credential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).
+        `source` says who defined the service: `config` for the administrator, `user` for the user's own.
         A service with nothing configured also says whether the user can connect an account instead of
         adding a key (`can_connect_account`, with the account's `provider` when it can). The result carries the link
         where the user connects accounts and adds or replaces keys. Never ask the user to paste a key into
@@ -79,7 +83,16 @@ class EgressCredentialsTools(Toolkit):
         services = effective_config(config.egress_broker, manager, self._worker_target).services
         if not services:
             return self._payload([], link, _NO_SERVICES_NOTE)
-        entries = [self._entry(manager, config, name, service) for name, service in services.items()]
+        entries = [
+            self._entry(
+                manager,
+                config,
+                name,
+                service,
+                "config" if name in config.egress_broker.services else "user",
+            )
+            for name, service in services.items()
+        ]
         return self._payload(entries, link, self._note(link))
 
     def _entry(
@@ -88,6 +101,7 @@ class EgressCredentialsTools(Toolkit):
         config: Config,
         name: str,
         service: EgressService,
+        source: _Source,
     ) -> dict[str, str | bool | None]:
         """Describe one service's credential sources in this agent's scope, as the broker would use them.
 
@@ -113,6 +127,7 @@ class EgressCredentialsTools(Toolkit):
             return {
                 "name": name,
                 "display_name": service.display_name or name,
+                "source": source,
                 "configured": False,
                 "active_source": None,
                 "can_connect_account": False,
@@ -121,6 +136,7 @@ class EgressCredentialsTools(Toolkit):
         entry: dict[str, str | bool | None] = {
             "name": name,
             "display_name": service.display_name or name,
+            "source": source,
             "configured": status.configured,
             "active_source": status.active_source,
         }
@@ -144,6 +160,7 @@ class EgressCredentialsTools(Toolkit):
             "Services with `configured: false` have neither an API key nor a connected account in this agent's scope, "
             "so brokered requests to them fail with `credential_not_configured`. "
             "`active_source` names what a configured service uses; an API key wins over a connected account. "
+            "`source` is `config` for a service the administrator defined and `user` for one the user added themselves. "
             f"When `can_connect_account` is true, the user can connect their `provider` account {where}; "
             "otherwise, or to use their own key instead, they can add an API key there. "
             "Never ask the user to paste a key into the chat."

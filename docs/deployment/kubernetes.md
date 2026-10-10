@@ -195,6 +195,17 @@ It runs in two modes:
 It requires `workers.backend: kubernetes` and cannot be combined with `workers.kubernetes.agentVault`.
 [Brokered Worker Egress](egress-broker.md#kubernetes) has the topology table, what the chart renders, and the migration from Agent Vault.
 
+Users who have no dashboard access still manage their own egress on the personal Connections page at `/connections/egress`:
+
+- Their own services, which can narrow the administrator's egress policy but never widen it, including a GitHub "Limit to repositories" helper. On shared and unscoped agents only administrators and credential managers change services.
+- Their own keys, and their Google, GitHub, and Atlassian account connections.
+- Their own request log, a **Recent requests** table per agent.
+
+This needs [trusted upstream auth](trusted-upstream-auth.md) with JWT, set through `env.extra` because the runtime chart has no values for it, an HTTPS `MINDROOM_PUBLIC_URL`, and a gateway that forwards `/connections`, `/api/connections`, and `/api/oauth` to the runtime.
+Setting `MINDROOM_CONNECTIONS_AGENT` keeps ordinary dashboard routes limited to administrators.
+Personal GitHub and Atlassian accounts also need agents with `worker_scope: user` or `user_agent` on the Kubernetes worker backend.
+The runtime chart's [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section has the variables and an example.
+
 ### Knowledge Source Visibility
 
 Dedicated workers can read the knowledge-base source directories assigned to the agents they serve, mounted read-only at the same path relative to the worker storage mount.

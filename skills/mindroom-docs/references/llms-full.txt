@@ -13767,7 +13767,14 @@ A `shared` or unscoped worker, and every worker on the static runner, runs every
 A service's `oauth_on_shared_workers: true` removes that gate: every user of such a shared sandbox can then act with any other user's connected account until that user's proxy token expires, and the egress pages warn about it.
 The `connect_url` that a 403 response carries goes only to the worker whose proxy token has that scope; it is the same short-lived single-use connect link that conversation OAuth uses, and it starts a connection for that one scope after the recheck of the requester's permission. The link also requires the browser to be signed in to MindRoom as that requester. A shared-scope link would skip that sign-in, and any process in a shared worker could read it, so the broker never puts one in a response; users of a shared agent connect its account from the egress pages instead.
 A shared Google service account (`GOOGLE_SERVICE_ACCOUNT_FILE`) is never injected, so the broker cannot be used to spend it.
-On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated `user` or `user_agent` workers when requesters must not be able to use each other's brokered credentials, because a dedicated `shared` or unscoped worker also runs every requester's commands in one sandbox. Personal GitHub and Atlassian accounts follow the same line: only `user` and `user_agent` workers on the Docker or Kubernetes backend get them, and the static runner needs the service's `oauth_on_shared_workers` opt-in.
+On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated `user` or `user_agent` workers when requesters must not be able to use each other's brokered credentials, because a dedicated `shared` or unscoped worker also runs every requester's commands in one sandbox.
+Personal GitHub and Atlassian accounts follow the same line: only `user` and `user_agent` workers on the Docker or Kubernetes backend get them, and the static runner needs the service's `oauth_on_shared_workers` opt-in.
+Users can define egress services of their own, and those stay per scope and never widen operator policy.
+A user service is stored in the same primary-only store as that scope's keys, so it applies only to the workers of that scope: a requester's own on `user` and `user_agent` agents, and the agent's (or the global scope's) on shared and unscoped agents, where only administrators and credential managers may write them.
+It routes only that scope's own keys and accounts, and it cannot take a config service's name or set `oauth_on_shared_workers`.
+Under `unmatched_hosts: deny` a user rule applies only on hosts that an operator service names, and on a host where an operator service sets `restrict_to_rules` only operator rules decide which paths are allowed, so a user service can narrow operator policy but never open a host or path the operator refuses.
+A user service can use a connected account only in a personal scope, and its placeholder variables are limited to credential-like names and plain values, because a shared agent's services set variables in every requester's sandbox.
+`restrict_to_rules` is not a network boundary: under `passthrough` a worker can reach the same server by IP address through a tunnel the broker does not intercept, which carries no credential, so the real boundary stays the token's own permissions on the upstream side.
 
 The egress broker listener (when `MINDROOM_EGRESS_BROKER_PORT` is set) is a worker-reachable primary runtime surface: workers must reach it to make brokered requests, so it must be accessible from the worker network (Docker `docker0` interface or the Kubernetes broker Service).
 The hosted `static_runner` sidecar shares the primary pod's network instead, so there the broker binds only loopback (`127.0.0.1`) and is reachable from no other pod.
@@ -16645,6 +16652,17 @@ It runs in two modes:
 It requires `workers.backend: kubernetes` and cannot be combined with `workers.kubernetes.agentVault`.
 [Brokered Worker Egress](https://docs.mindroom.chat/deployment/egress-broker/#kubernetes) has the topology table, what the chart renders, and the migration from Agent Vault.
 
+Users who have no dashboard access still manage their own egress on the personal Connections page at `/connections/egress`:
+
+- Their own services, which can narrow the administrator's egress policy but never widen it, including a GitHub "Limit to repositories" helper. On shared and unscoped agents only administrators and credential managers change services.
+- Their own keys, and their Google, GitHub, and Atlassian account connections.
+- Their own request log, a **Recent requests** table per agent.
+
+This needs [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT, set through `env.extra` because the runtime chart has no values for it, an HTTPS `MINDROOM_PUBLIC_URL`, and a gateway that forwards `/connections`, `/api/connections`, and `/api/oauth` to the runtime.
+Setting `MINDROOM_CONNECTIONS_AGENT` keeps ordinary dashboard routes limited to administrators.
+Personal GitHub and Atlassian accounts also need agents with `worker_scope: user` or `user_agent` on the Kubernetes worker backend.
+The runtime chart's [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section has the variables and an example.
+
 ### Knowledge Source Visibility
 
 Dedicated workers can read the knowledge-base source directories assigned to the agents they serve, mounted read-only at the same path relative to the worker storage mount.
@@ -17330,7 +17348,8 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 The **egress broker** runs inside the primary runtime and intercepts outbound HTTP(S) requests from worker code, injecting secrets the worker never sees.
 Use it when workers need to call APIs with credentials (GitHub, Google, Atlassian, OpenAI, cloud providers) while keeping those secrets out of worker code, environment variables, and container memory.
 Each service gets its credential from an API key you store or from an account you connect with a few clicks, and built-in presets define the common services in one line.
-This page covers how the broker works, configuration and presets, secret sources and connected accounts, deployment, secret management, error codes, migration from Agent Vault, and current limitations.
+Users can also add services of their own, limit GitHub access to chosen repositories, and see their own recent requests on a personal page, without dashboard access.
+This page covers how the broker works, configuration and presets, secret sources and connected accounts, user services, per-repo control, the personal request log, deployment, secret management, error codes, migration from Agent Vault, and current limitations.
 
 ## How it works
 
@@ -17467,6 +17486,7 @@ egress_broker:
 | `placeholder_env` | No | Placeholder environment variables for workers |
 | `oauth_provider` | No | MindRoom OAuth provider id (such as `github`, `google_drive`, `atlassian`) whose connected account supplies the secret when no API key is stored; see [Secret sources](#secret-sources) |
 | `oauth_on_shared_workers` | No | Default `false`. Set `true` to use a requester's own GitHub or Atlassian account in shared sandboxes too (`shared` and unscoped agents, and every agent on the static runner), which lets every user of such a sandbox act with other users' connected accounts; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes). Presets never set it |
+| `restrict_to_rules` | No | Default `false`. Set `true` to refuse a request with 403 `path_not_allowed` when its path matches no rule of any service on that host, instead of forwarding it without credentials; see [Limiting paths and repositories](#limiting-paths-and-repositories). Presets never set it |
 
 **Rule fields:**
 
@@ -17474,7 +17494,7 @@ egress_broker:
 |-------|----------|-------------|
 | `host` | Yes | Host to match; exact, IP address, or one-level wildcard such as `*.example.com` |
 | `port` | No | Port to match, 1 to 65535; omit to match any port |
-| `path_prefix` | No | Path prefix to match by whole segments; defaults to `/`; selects a rule but is not an access boundary (see below) |
+| `path_prefix` | No | Path prefix to match by whole segments; defaults to `/`; selects a rule but is not an access boundary (see [Limiting paths and repositories](#limiting-paths-and-repositories)) |
 | `auth` | Yes | Authentication configuration for this rule |
 
 **Auth types:**
@@ -17495,13 +17515,64 @@ Service names use up to 63 lowercase letters, digits, `_`, and `-`, start with a
 - Prefer `bearer`, `basic`, or `header` auth. The broker returns upstream responses to the worker, so any response that echoes the request can reveal the secret to worker code.
 - `query` auth puts the secret in the URL. A redirect `Location` header, an error page, or a log line that echoes the URL can hand it back to the worker; use it only for APIs that accept nothing else.
 - `header` and `bearer` secrets are exposed the same way by upstream debug endpoints that echo request headers (such as `httpbin.org/headers`), so do not add rules for hosts that offer them.
-- `path_prefix` matches whole path segments: `/repos/o/r` matches `/repos/o/r` and `/repos/o/r/pulls` but not `/repos/o/r-old`, and a prefix ending in `/` matches every path under it. On a host with rules, a path gets 400 `bad_request` instead of being matched when it has empty segments (`//`) or raw backslashes, or when it or any percent-decoded form of it (up to four rounds) has a dot segment (`/../`, `%2e%2e`, `%252e%252e`), a NUL, or invalid UTF-8; so does a path still changing after four rounds of decoding. Encoded slashes such as `group%2Fproject` are allowed. A prefix still chooses which rule and secret apply rather than limiting access: other paths on the host are forwarded without credentials (or refused when a service sets `restrict_to_rules`), and the upstream's own permissions decide what the secret can reach.
+- `path_prefix` chooses which rule and secret apply; it does not limit what the secret can reach. See [Limiting paths and repositories](#limiting-paths-and-repositories) to refuse other paths.
 
 **Placeholder environment:**
 
 Services with `placeholder_env` set inject those variables into worker environments when a secret is available for that service in the worker's scope, either a stored API key or a connected account.
 Use this so CLIs that refuse to run without a token (such as `gh`) work without modification.
 The value can be any placeholder string; `mindroom-brokered` is the conventional choice.
+
+#### Limiting paths and repositories
+
+**Segment matching.** A `path_prefix` ending in `/` matches every path under it, so `/` matches everything.
+A prefix without a trailing slash matches the exact path or that path followed by `/`: `/repos/o/r` matches `/repos/o/r` and `/repos/o/r/pulls` but never `/repos/o/r-old`.
+Matching is case-sensitive, so `/repos/Alice/Repo` does not match a rule for `/repos/alice/repo`.
+That fails safe, because the request then gets no credential (or a 403 under `restrict_to_rules`), so write names as they appear in URLs.
+
+**Ambiguous paths.** On a host with rules, a path gets 400 `bad_request` instead of being matched when it has empty segments (`//`) or raw backslashes, or when it or any percent-decoded form of it (up to four rounds) has a dot segment (`/../`, `%2e%2e`, `%252e%252e`), a NUL, or invalid UTF-8; so does a path still changing after four rounds of decoding.
+Encoded slashes such as `group%2Fproject` are allowed.
+The broker refuses these paths instead of normalizing them, because servers disagree on how to normalize, so a raw-path trick cannot select a different rule.
+Hosts without rules are not checked.
+
+**Refusing unlisted paths.** By default a path that no rule matches is forwarded without credentials, and the upstream's own permissions decide what the secret can reach.
+With `restrict_to_rules: true` on a service, a request to a host and port that one of its rules names is refused with 403 `path_not_allowed` when its path matches no rule of any service on that host and port.
+A rule bound to another port never restricts this one.
+
+```yaml
+egress_broker:
+  services:
+    agent_cli:
+      display_name: GitHub (agent-cli only)
+      restrict_to_rules: true
+      rules:
+        - host: api.github.com
+          path_prefix: /repos/basnijholt/agent-cli
+          auth: { type: bearer }
+        - host: github.com
+          path_prefix: /basnijholt/agent-cli
+          auth: { type: basic, username: x-access-token }
+        - host: github.com
+          path_prefix: /basnijholt/agent-cli.git
+          auth: { type: basic, username: x-access-token }
+```
+
+GitHub's GraphQL endpoint (`api.github.com` `/graphql`) is refused under `restrict_to_rules` unless a rule lists it.
+Listing it opens every repository the credential can reach, because a GraphQL query names its repositories in the request body, which the broker never reads.
+
+**GitHub "Limit to repositories" helper.** The [services editor](#services-editor) writes these rules for you.
+Enter one `owner/repo` or `owner/*` per line and it replaces the service's rules and turns on `restrict_to_rules`:
+
+- `owner/repo` gives `api.github.com` `/repos/owner/repo` (bearer), plus `github.com` `/owner/repo` and `/owner/repo.git` (basic auth with username `x-access-token`, which git over HTTPS uses).
+- `owner/*` gives the owner-wide prefixes `/repos/owner/` and `/owner/`.
+- `uploads.github.com` (release assets) and `/graphql` stay off unless you tick them.
+- Other API paths, such as `/user` or search, stop working while the restriction is on.
+
+**What it cannot do:**
+
+- It cannot narrow a broader rule of another service on the same host, because a path that rule matches is allowed. With the `github` preset in the configuration (which matches `/` on `api.github.com`), a restricted service for one repository changes nothing on that host. The services editor warns when an administrator's GitHub service already covers those paths.
+- Under `unmatched_hosts: passthrough` it is not a network boundary. A worker can open a tunnel to the server's IP address, which the broker does not intercept. The tunnel carries no credential, but paths you did not list stay reachable through it. `unmatched_hosts: deny` refuses that tunnel.
+- The real boundary is the credential. Use a fine-grained personal access token limited to the repositories you want, or a GitHub App installed on selected repositories, so GitHub itself refuses everything else. The rules only decide what the broker injects and forwards.
 
 ## Secret sources
 
@@ -17612,7 +17683,8 @@ The status API returns, for each service and scope, whether a key is set and whe
 }
 ```
 
-The example is abbreviated: each service also has `display_name`, `description`, and `updated_at` (the key's timestamp, kept for older clients), and the personal API adds `is_shared` and `can_manage`.
+The example is abbreviated: each service also has `display_name`, `description`, and `updated_at` (the key's timestamp, kept for older clients), and `source`, which is `config` for a service in `config.yaml` and `user` for a [user service](#user-services).
+The personal listing adds `is_shared` and `can_manage` per service and `rules` (the `host`, `port`, and `path_prefix` of each rule, which clients use to warn about overlapping rules), and gives each agent `shared` (a shared or unscoped agent) and `can_manage` (the caller may change its keys and services), so a client can offer **Add service** only where it works.
 `oauth` is `null` for a service without an account provider.
 `unavailable_reason` is `"shared_sandbox"` when the scope runs in a shared sandbox (a shared or unscoped agent, or any agent on the static runner) and the provider is GitHub or Atlassian without `oauth_on_shared_workers`; the account part is then not connected and not connectable.
 `shared_worker_opt_in` is `true` on such a scope when the service sets `oauth_on_shared_workers` (see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes)).
@@ -17643,24 +17715,114 @@ The panel's scopes are shared and unscoped agents, which are shared sandboxes, s
 
 The personal egress page and its API, `/api/connections/egress`, authenticate with `require_connections_user`: they need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
 Without that signed identity gate, such as on a lab host that has no upstream proxy, only the dashboard can manage secrets.
-On the personal page, users manage their own secrets for `user` and `user_agent` agents, while secrets for shared and unscoped agents are managed only by administrators and the agent's `credential_managers`.
+On the personal page, users manage their own keys, accounts, and [services](#user-services) for `user` and `user_agent` agents, while keys, accounts, and services for shared and unscoped agents are managed only by administrators and the agent's `credential_managers`.
 
-**API routes** (all require dashboard authentication):
+**Dashboard API routes** (all require dashboard authentication):
 
 | Route | Method | Description |
 |-------|--------|-------------|
-| `/api/egress-broker/services?agent_name=<name>` | GET | List services with configured status; omit `agent_name` for global scope |
-| `/api/egress-broker/services/<name>/secret?agent_name=<name>` | PUT | Set a secret; body `{"secret": "<value>"}` |
+| `/api/egress-broker/services?agent_name=<name>` | GET | List services with configured status; omit `agent_name` for global scope. The list holds the config services, then the selected scope's own user services, read-only, each with `source` |
+| `/api/egress-broker/presets` | GET | List the built-in presets the services editor offers |
+| `/api/egress-broker/services/<name>/secret?agent_name=<name>` | PUT | Set a secret; body `{"secret": "<value>"}`. 404 when the name is neither a config service nor one of the scope's own services |
 | `/api/egress-broker/services/<name>/secret?agent_name=<name>` | DELETE | Delete a secret |
 | `/api/egress-broker/services/<name>/connect?agent_name=<name>` | POST | Start the OAuth login of the service's provider for that scope; returns the authorization URL. 404 when the service has no known provider, 409 while a shared service account replaces personal accounts |
 | `/api/egress-broker/services/<name>/disconnect?agent_name=<name>` | POST | Reset the connected account for that scope |
-| `/api/egress-broker/logs?agent_name=&host=&service=&limit=` | GET | Query request audit logs; returns 409 when the broker is not running |
+| `/api/egress-broker/logs?agent_name=&host=&service=&limit=` | GET | Query request audit logs for every requester; each row carries `code`; returns 409 when the broker is not running |
 | `/api/egress-broker/ca.pem` | GET | Download the broker's root CA certificate; returns 409 when the broker is not running |
+
+The dashboard has no route that writes service definitions: it edits the services in `config.yaml` through the config API that Settings uses (see [Services editor](#services-editor)), and the connect and disconnect routes work for config services only.
 
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
 
-The personal egress API has matching routes under `/api/connections/egress/agents/<agent>/<service>`: `PUT` and `DELETE` for the key, and `POST .../connect` and `POST .../disconnect` for the account.
-The connect and disconnect routes run the same eligibility, same-origin, and permission checks as the key routes, with the requester-scoped exception above, and then delegate to the OAuth connect and disconnect flows of the service's provider.
+**Personal API routes** (all under `/api/connections/egress`) need a signed Matrix identity and answer 403 without one.
+The routes that change something also need a same-origin request from an HTTPS `MINDROOM_PUBLIC_URL`, and answer 403 for any other origin.
+The routes that name an agent answer 404 for an unknown agent and for one the caller may not use:
+
+| Route | Method | Statuses and description |
+|-------|--------|--------------------------|
+| `/api/connections/egress` | GET | 200 with every agent the caller may use and its services (config services first, then the scope's own). 400 for any query parameter |
+| `/api/connections/egress/presets` | GET | 200 with the built-in presets the services editor offers |
+| `/api/connections/egress/logs?agent_name=&limit=` | GET | 200 with the caller's own rows, see [Personal request log](#personal-request-log). 400 for any other query parameter, 409 when the broker is not running, 422 for a non-integer `limit`, 503 when no config is loaded |
+| `/api/connections/egress/agents/<agent>/<service>` | PUT | Set a key; body `{"secret": "<value>"}`. 204; 403 without credential management on a shared or unscoped agent; 404 for a service that is neither a config service nor one of the scope's own; 422 for an invalid secret |
+| `/api/connections/egress/agents/<agent>/<service>` | DELETE | Delete a key. 204; 403 and 404 as for PUT |
+| `/api/connections/egress/agents/<agent>/<service>/connect` | POST | Start the OAuth login of the service's provider. Same checks as the key routes, with the requester-scoped exception above, then the provider's OAuth connect flow; 404 for a service without a known provider, 409 while a shared service account replaces personal accounts |
+| `/api/connections/egress/agents/<agent>/<service>/disconnect` | POST | Reset the connected account, with the same checks |
+| `/api/connections/egress/agents/<agent>/services/<name>` | GET | 200 with one of the scope's own services as authored, so a preset stays `{"preset": "github"}`. 404 for a config service or a name only another scope has. Any user of the agent may read it, because a service holds no secret |
+| `/api/connections/egress/agents/<agent>/services/<name>` | PUT | Create or replace one of the scope's own services; the body has the fields of a [config service](#custom-services) except `oauth_on_shared_workers`. 204; 403 for a user who cannot manage services there; 409 when a config service has the name; 413 for a body over 16 KiB; 422 for an invalid service or one of the limits and rules in [User services](#user-services) |
+| `/api/connections/egress/agents/<agent>/services/<name>` | DELETE | Delete one of the scope's own services together with its key. 204; 403 as for PUT; 404 when the scope has no such service; 409 for the name of a config service |
+
+The portal's catalog, `/api/connections`, lists the same egress rows, so each row has `source` there too.
+
+## User services
+
+A user service is a service the user defines for their own scope instead of an administrator defining it in `config.yaml`.
+Users manage them on the personal egress page at `/connections/egress`, which needs [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT.
+They have the same fields and validators as a config service (a preset or `rules`, `placeholder_env`, `oauth_provider`, `restrict_to_rules`), and only `oauth_on_shared_workers` stays operator-only: a request that sets it, even to `false`, is rejected with 422.
+
+**Who can add them:**
+
+- On `user` and `user_agent` agents, the requester themself. The service applies only to that requester's workers.
+- On `shared` and unscoped agents, administrators and the agent's `credential_managers`, the same rule as for keys. Other users of the agent can read the services but not change them.
+
+**Where they live.**
+A service is stored per scope, in the same primary-only store as that scope's keys, as one document under the reserved credential name `egress__services`; a service name starts with a letter or digit, so no key can take it.
+It follows the placement in the [scope table](#secret-management): per requester (and agent for `user_agent`), per agent for `shared`, and in the global store for unscoped agents, where every agent without a worker scope shares it.
+Workers never read that store.
+The broker merges the config services and the calling scope's own services per request, from a small per-scope cache that every save or delete clears, so a change applies to the next request without a restart.
+A user service routes only that scope's keys and accounts, so it cannot reach anyone else's credentials.
+
+**Rules about names and overlap:**
+
+- Config names win. Saving a name that a config service already uses returns 409, and a user entry that a config service later shadows is ignored. It can still be deleted, and its key then stays, because the config service uses that key.
+- On a host that both a config service and a user service name, the usual order applies (exact host, specific port, longest path prefix, then declaration order, with config services first), so a longer user prefix takes those paths for that user only.
+
+**Limits.** A scope can have at most 50 user services, a service at most 50 rules, a service at most 16 KiB (as stored, in its authored form), and all of a scope's services at most 256 KiB.
+Going over one of these is a 422, except that a request body over 16 KiB is refused with 413 before its fields are checked.
+
+**User services narrow operator policy and never widen it:**
+
+- Under `unmatched_hosts: deny`, only hosts that the operator's services name are allowed. A user rule applies only on a host and port that a config service also covers (a wildcard only where the same wildcard is configured, any port only where a config rule has any port), and a user rule on any other host is ignored at runtime. Saving such a service returns 422 naming the hosts.
+- On a host where an operator service sets `restrict_to_rules`, only operator rules decide which paths are allowed. A user rule only picks the credential for a path that is already allowed, so a user rule for `/` cannot open paths the operator refuses.
+- A user service can sign in with a connected account (`oauth_provider`, or a preset that has one) only on personal agents (`user` and `user_agent`). On a shared or unscoped agent, saving one with a provider returns 422, because a manager could otherwise route the agent's shared account to any host; set `oauth_provider: null` and use a key. A provider the registry does not know is refused too.
+
+**Keys.**
+Creating a user service clears any stored key with the same name in that scope first, so a new service never inherits an old key (for example one left behind by a removed config service); replacing a service keeps its key.
+Deleting a user service deletes its key, unless a config service now shadows the entry.
+
+**Placeholder variables.**
+A user service's `placeholder_env` has stricter rules than a config service's, because a shared agent's services set variables in every requester's sandbox:
+
+- The name matches `^[A-Z][A-Z0-9_]*$` and has `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `PAT`, `AUTH`, or `CREDENTIAL` as a whole word between underscores. `GH_TOKEN` qualifies, `PYTHONPATH` and `LD_PRELOAD` do not.
+- The name does not start with `SSH_` and has none of `COMMAND`, `CMD`, `FILE`, `DIR`, `PROVIDER`, `HELPER`, `OPTS`, `OPTIONS`, or `EXTENSIONS` as a word, because tools read such variables as programs or paths to run or load. The reserved names that apply to config services apply here too.
+- The value is 1 to 256 characters from letters, digits, `.`, `_`, `:`, and `-`, such as `mindroom-brokered`.
+- When a config service sets the same variable, the config value wins.
+
+A stored entry that no longer passes these rules is skipped (or loses the offending variable) with a warning that names the service and never the value.
+
+## Services editor
+
+One editor adds, edits, and deletes services in two places:
+
+- **Personal egress page** (`/connections/egress`): each agent has an **Add service** button where the caller may manage services (their own personal agents, and shared or unscoped agents they manage as an administrator or credential manager). A user's own services have **Edit service** and **Delete service**, and deleting also deletes the service's key. Services from `config.yaml` appear read-only with the label "Added by your administrator" and keep their key and account controls.
+- **Dashboard Credentials tab**: the egress panel has **Add service**, and **Edit service** and **Delete service** on the services of `config.yaml`. Deleting one removes it from the configuration but keeps its saved keys, which apply again if a service with the same name is added back. A save writes `config.yaml` through the same config API as Settings and keeps the preset form you wrote (`{preset: github}` is not expanded), so later preset updates still reach the service; because it saves the whole configuration draft, any other unsaved Settings changes are saved with it. The selected scope's user services show read-only with a "User service" badge, since users edit them on their own page.
+
+The fields are the name (fixed once saved), a preset or **Custom**, display name, description, the rules (host, path prefix, optional port, and auth type with its username, header name, query parameter, or template), the placeholder variables (under **Advanced**), `restrict_to_rules` with its GraphQL caveat, the account login (`oauth_provider`), and the GitHub **Limit to repositories** helper described in [Limiting paths and repositories](#limiting-paths-and-repositories).
+Rules you write next to a preset replace the preset's rules as a whole, which the form says when you tick **Replace the preset's rules with my own**.
+The preset dropdown comes from the presets routes (`GET /api/connections/egress/presets` and `GET /api/egress-broker/presets`), so it always lists the presets this MindRoom version knows.
+The editor checks what it can before saving, and shows the server's message for the rest (a name that is taken, a limit, or a rule the server refuses).
+
+## Personal request log
+
+`GET /api/connections/egress/logs?agent_name=&limit=` returns the caller's own brokered requests, newest first, at most 200.
+It returns only rows whose requester is the caller (after human-alias resolution, the identity worker tokens carry), so no query can show another user's rows, even on an agent several users share.
+`agent_name` narrows the rows to one agent (an empty value means all), `limit` is clamped to 1 to 200 (default 200), and any other query parameter is a 400.
+Administrators keep the full log, with host, service, and agent filters, at `/api/egress-broker/logs`.
+
+Each row has `at`, `kind` (`request`, `tunnel`, or `denied`), `scope`, `agent_name`, `requester_id`, `method`, `host`, `path` (without the query string), `service`, `status`, `bytes_up`, `bytes_down`, `duration_ms`, and `code`.
+`code` is the broker's refusal code, such as `path_not_allowed` or `bad_request`, or `null` for a request the broker did not refuse.
+
+On the personal egress page each agent has a collapsible **Recent requests** table with the time, method, host, path, service, and status of its latest requests, loaded when you open it, and the refusal code beside a refused status.
+While the broker is off, the table shows the server's "Egress broker is not running" message.
 
 ## Agent tool
 
@@ -17681,10 +17843,11 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 {
   "tool": "egress_credentials",
   "services": [
-    {"name": "github", "display_name": "GitHub", "configured": true, "active_source": "oauth"},
+    {"name": "github", "display_name": "GitHub", "source": "config", "configured": true, "active_source": "oauth"},
     {
       "name": "gmail",
       "display_name": "Gmail",
+      "source": "config",
       "configured": false,
       "active_source": null,
       "can_connect_account": true,
@@ -17693,6 +17856,7 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
     {
       "name": "openai",
       "display_name": "OpenAI",
+      "source": "user",
       "configured": false,
       "active_source": null,
       "can_connect_account": false,
@@ -17704,6 +17868,7 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 }
 ```
 
+- The tool lists the same services the broker matches for the calling scope: the services in `config.yaml`, then the user's own [user services](#user-services). `source` says which, `config` or `user`, so the agent can tell the user whether an administrator defined a service or they added it themselves.
 - `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`. An explicit key wins over a connected account. The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
 - A service with nothing configured also reports `can_connect_account`. When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id. It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection is unreadable and needs a reset first, or the agent runs in a shared sandbox (a shared or unscoped agent, or any agent on the static runner) and the provider is GitHub or Atlassian without `oauth_on_shared_workers`; `provider` is then `null`. A `true` value says the provider can be connected, not that this user may connect it: for providers that are not requester-scoped (the Google providers) on a shared agent, only administrators and credential managers can.
 - `display_name` falls back to the service name when the service sets none.
@@ -17749,6 +17914,7 @@ The broker needs no worker pod changes: the token and CA certificate travel in e
 Worker images must still come from a release that includes the broker (see [Worker images](#worker-images)).
 The primary's storage volume holds broker state under `egress_broker/`, which workers never mount.
 The runtime chart runs one primary replica, so there is one broker.
+Users without dashboard access get the personal egress page, their own services and keys, their account connections, and their own request log from it, once trusted upstream auth with JWT is set up; see [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users).
 
 The charts support these topologies:
 
@@ -17814,6 +17980,7 @@ The instance chart that the SaaS platform deploys runs tool code in a `static_ru
 Set `egressBroker.enabled: true` and the chart sets `MINDROOM_EGRESS_BROKER_PORT=8768`, `MINDROOM_EGRESS_BROKER_HOST=127.0.0.1`, and `MINDROOM_EGRESS_BROKER_URL=http://127.0.0.1:8768` on the primary container and on nothing else.
 The broker binds loopback, so the sidecar reaches it without a Service or NetworkPolicy, and nothing outside the pod can.
 Tenant secrets are then managed on the dashboard or the personal egress page like any other deployment.
+The sidecar is a static runner, so personal GitHub and Atlassian accounts there need `oauth_on_shared_workers` on the service (see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes)).
 The chart default is off, and the platform provisioner does not forward `egressBroker.enabled` yet.
 It runs `helm upgrade --install` with a fixed set of values and no `--reuse-values`, and every release deploy re-provisions all tenants, so a value set by hand (for example `--set egressBroker.enabled=true`) is overwritten by the next provision and brokered secrets then silently stop being injected.
 Until the provisioner forwards the value, which is a follow-up, treat a hand-set value as for testing only.
@@ -17858,7 +18025,7 @@ A 503 `oauth_refresh_failed` backs off per credential store: for 30 seconds afte
 The `connect_url` values are short-lived, single-use connect links, so treat the response bodies as sensitive and do not log them.
 
 The broker never logs header values, request bodies, query strings, tokens, connect links, or secrets.
-Audit records include timestamps, worker scope, agent name, requester ID, method, host, path (without query string), service name, status code, bytes transferred, and duration.
+Audit records include timestamps, worker scope, agent name, requester ID, method, host, path (without query string), service name, status code, refusal code (when the broker refused the request), bytes transferred, and duration.
 
 ## Verified behaviors
 
@@ -17959,6 +18126,17 @@ Check that the service has an `oauth_provider` (presets set it) and that the id 
 An API key stored for the scope wins over the account, so remove the key to use the account.
 A provider served by a shared service account shows "Uses a shared service account" and is never injected.
 A GitHub or Atlassian account is not used in a shared sandbox (a shared or unscoped agent, or any agent on the static runner) unless the service sets `oauth_on_shared_workers`; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
+
+**403 `path_not_allowed` errors:**
+
+A service on that host sets `restrict_to_rules` and no rule lists the path.
+Add a rule whose `path_prefix` covers it (a prefix such as `/repos/owner/repo` covers that path and everything below it), or turn the restriction off.
+GraphQL (`/graphql`) needs a rule of its own, and a user service cannot list a path that an operator's `restrict_to_rules` refuses.
+
+**400 `bad_request` on a path:**
+
+The host has rules and the path has an empty segment (`//`), a backslash, a dot segment (also percent-encoded), a NUL, or invalid UTF-8.
+Send the normalized path; the broker refuses ambiguous paths instead of guessing how the upstream reads them.
 
 **407 authentication errors:**
 
