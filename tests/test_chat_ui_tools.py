@@ -602,6 +602,58 @@ async def test_one_turn_sends_one_computer_notice(
 
 
 @pytest.mark.asyncio
+async def test_a_racing_request_sends_when_the_announcement_fails(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """A notice that is not delivered does not count as shown, even for a request that waited on it."""
+    context = replace(_context(tmp_path), correlation_id="$turn")
+    delivered = context.client.room_send.return_value
+    responses = [object(), delivered]
+
+    async def send(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0)
+        return responses.pop(0)
+
+    context.client.room_send.side_effect = send
+
+    with tool_runtime_context(context):
+        _announced, explicit = await asyncio.gather(show_computer_once(), computer_request())
+
+    assert context.client.room_send.await_count == 2
+    assert json.loads(explicit)["message"] == "UI action request sent."
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_request_does_not_count_as_shown(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """Stopping a reply while its notice is sending lets the next browser call announce the computer."""
+    context = replace(_context(tmp_path), correlation_id="$turn")
+    delivered = context.client.room_send.return_value
+    sending = asyncio.Event()
+
+    async def stalled_send(*_args: object, **_kwargs: object) -> object:
+        sending.set()
+        await asyncio.Event().wait()
+        return delivered
+
+    context.client.room_send.side_effect = stalled_send
+
+    with tool_runtime_context(context):
+        request = asyncio.create_task(computer_request())
+        await sending.wait()
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        context.client.room_send.side_effect = None
+        await show_computer_once()
+
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_a_later_turn_can_show_the_computer_again(
     tmp_path: Path,
     computer_request: Callable[[], Awaitable[str]],

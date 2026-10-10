@@ -9003,6 +9003,27 @@ async def test_overlapping_drains_keep_snapshot_ownership() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tools_get_the_reply_correlation_when_the_request_names_none(tmp_path: Path) -> None:
+    """Tools see the reply's identity even for requests without one, such as interactive selections."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    build_dispatch_context = coordinator.deps.tool_runtime.build_dispatch_context
+    observed: list[str | None] = []
+
+    def recording_build_dispatch_context(*args: object, correlation_id: str | None = None, **kwargs: object) -> object:
+        observed.append(correlation_id)
+        return build_dispatch_context(*args, correlation_id=correlation_id, **kwargs)
+
+    with patch.object(
+        coordinator.deps.tool_runtime,
+        "build_dispatch_context",
+        side_effect=recording_build_dispatch_context,
+    ):
+        await coordinator.prepare_response_runtime(_plain_request(_target(reply_to_event_id="$selection")))
+
+    assert observed == ["$selection"]
+
+
+@pytest.mark.asyncio
 async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path: Path) -> None:
     """A schedule uses its model even with a room override, without changing later turns."""
     bot = _bot(tmp_path)

@@ -7,6 +7,7 @@ import contextlib
 import html as html_lib
 import json
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, get_args
 
@@ -53,11 +54,22 @@ logger = get_logger(__name__)
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
 _SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
+
+
+@dataclass
+class _ComputerNotice:
+    """One conversation's show_computer notice: serialized sends and the reply that delivered it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    delivered: bool = False
+    reply: str | None = None
+
+
 # Conversations, keyed by agent Matrix user, requester, room, and thread (None for the room timeline),
-# that got the show_computer notice in this process, so the agent's first browser use announces it only
-# once. Each requester has their own computer and Chat shows only notices addressed to its own user.
-# Values are the reply (correlation ID) that sent the notice, so one reply never sends it twice.
-_SHOWN_COMPUTERS: dict[tuple[str, str, str, str | None], str | None] = {}
+# whose show_computer notice was sent or attempted in this process, so the agent's first browser use
+# announces it only once and one reply (correlation ID) never sends it twice. Each requester has their
+# own computer and Chat shows only notices addressed to its own user.
+_SHOWN_COMPUTERS: dict[tuple[str, str, str, str | None], _ComputerNotice] = {}
 # Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
 _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
@@ -386,26 +398,25 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        conversation = _computer_conversation(context, requester_id)
-        turn = context.correlation_id
-        was_shown = conversation in _SHOWN_COMPUTERS
-        shown_in = _SHOWN_COMPUTERS.get(conversation)
-        if turn is not None and was_shown and shown_in == turn:
-            # This reply's first browser call, or an earlier show_computer, already sent the notice.
-            return self._payload(
-                "ok",
-                action="show_computer",
-                message="The Computer panel was already shown in this reply.",
+        notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+        async with notice.lock:
+            if notice.delivered and context.correlation_id is not None and notice.reply == context.correlation_id:
+                # This reply's first browser call, or an earlier show_computer, already delivered the notice.
+                return self._payload(
+                    "ok",
+                    action="show_computer",
+                    message="The Computer panel was already shown in this reply.",
+                )
+            result = await self._send_validated_action(
+                context,
+                requester_id,
+                "show_computer",
+                _SHOW_COMPUTER_BODY,
+                {},
             )
-        # Claim the conversation before awaiting the send, so a browser call racing this one sends nothing.
-        _SHOWN_COMPUTERS[conversation] = turn
-        result = await self._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
-        if json.loads(result)["status"] != "ok" and _SHOWN_COMPUTERS.get(conversation) == turn:
-            if was_shown:
-                _SHOWN_COMPUTERS[conversation] = shown_in
-            else:
-                del _SHOWN_COMPUTERS[conversation]
-        return result
+            if json.loads(result)["status"] == "ok":
+                notice.delivered, notice.reply = True, context.correlation_id
+            return result
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
         """Open the user's MindRoom Chat Settings dialog at one section.
@@ -897,13 +908,12 @@ async def show_computer_once() -> None:
     if isinstance(validated, str):
         return
     context, requester_id = validated
-    conversation = _computer_conversation(context, requester_id)
-    if conversation in _SHOWN_COMPUTERS:
-        return
-    # Claim the conversation before awaiting the send, so concurrent first calls send one notice.
-    _SHOWN_COMPUTERS[conversation] = context.correlation_id
-    sent = False
-    try:
+    notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+    # Sends for one conversation take turns, so concurrent first calls send one notice. An
+    # undelivered or cancelled notice does not count, so the next browser call tries again.
+    async with notice.lock:
+        if notice.delivered:
+            return
         result = await ChatUITools._send_validated_action(
             context,
             requester_id,
@@ -912,18 +922,15 @@ async def show_computer_once() -> None:
             {},
         )
         payload = json.loads(result)
-        sent = payload["status"] == "ok"
-        if not sent:
-            logger.warning(
-                "The worker computer notice was not delivered",
-                reason=payload.get("message"),
-                room_id=context.room_id,
-                thread_id=context.resolved_thread_id,
-            )
-    finally:
-        # An undelivered notice does not count, so the next browser call tries again.
-        if not sent:
-            _SHOWN_COMPUTERS.pop(conversation, None)
+        if payload["status"] == "ok":
+            notice.delivered, notice.reply = True, context.correlation_id
+            return
+        logger.warning(
+            "The worker computer notice was not delivered",
+            reason=payload.get("message"),
+            room_id=context.room_id,
+            thread_id=context.resolved_thread_id,
+        )
 
 
 def _parsed_json(value: object) -> object:
