@@ -107,6 +107,7 @@ nav = [
     { "Docker" = "deployment/docker.md" },
     { "Kubernetes" = "deployment/kubernetes.md" },
     { "Workers & Sandboxing" = "deployment/sandbox-proxy.md" },
+    { "Brokered Worker Egress" = "deployment/egress-broker.md" },
     { "Approved Egress" = "deployment/approved-egress.md" },
     { "Trusted Upstream Auth" = "deployment/trusted-upstream-auth.md" },
     { "Data Storage & Journal" = "deployment/storage.md" },

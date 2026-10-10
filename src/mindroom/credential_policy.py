@@ -40,6 +40,8 @@ _OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
 # OAuth provider token services use the *_oauth naming contract. The separate
 # *_oauth_client app-client config contract intentionally does not match it.
 
+_EGRESS_BROKER_SERVICE_PREFIX = "egress_"
+
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
         "desktop",
@@ -67,6 +69,11 @@ def is_oauth_token_service(service: str) -> bool:
     return service.endswith(_OAUTH_TOKEN_SERVICE_SUFFIX)
 
 
+def is_egress_broker_service(service: str) -> bool:
+    """Return whether a service name is an egress broker service."""
+    return service.startswith(_EGRESS_BROKER_SERVICE_PREFIX)
+
+
 @dataclass(frozen=True, slots=True)
 class _CredentialServicePolicy:
     """Credential placement decisions for one service in one worker scope."""
@@ -92,11 +99,19 @@ def credential_service_policy(
     ``primary_built_tool`` marks the settings of a tool the primary process builds for this agent.
     Worker code can write the worker store, so those settings never come from it.
     """
-    oauth_token_service = is_oauth_token_service(service)
-    is_primary_runtime_global = is_oauth_client_config_service(service)
+    # Egress broker services are always primary-only and not worker-grantable.
+    # The prefix wins over the OAuth suffixes, so `egress_x_oauth_client` is never
+    # treated as a global OAuth client config that falls back to the worker store.
+    egress_service = is_egress_broker_service(service)
+
+    oauth_token_service = not egress_service and is_oauth_token_service(service)
+    is_primary_runtime_global = not egress_service and is_oauth_client_config_service(service)
     local_only_service = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service
     # Local-only and OAuth services keep their own placement outside worker stores.
-    primary_built_tool_config = primary_built_tool and not local_only_service and not is_primary_runtime_global
+    # Egress services also stay primary-only like primary-built tool settings.
+    primary_built_tool_config = (
+        (primary_built_tool or egress_service) and not local_only_service and not is_primary_runtime_global
+    )
     is_local_only = local_only_service or primary_built_tool_config
     # Scoped OAuth tokens and primary-built tool settings stay bound to their
     # agent even when its worker scope is shared.
@@ -113,6 +128,7 @@ def credential_service_policy(
         uses_primary_runtime_agent_scoped_credentials=uses_agent_scoped,
         worker_grantable_supported=not is_primary_runtime_global
         and not oauth_token_service
+        and not egress_service
         and service not in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     )
 

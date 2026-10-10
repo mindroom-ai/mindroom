@@ -107,3 +107,11 @@ def sample_agent_data() -> dict[str, Any]:
         "instructions": ["Do something", "Do something else"],
         "rooms": ["lobby", "dev"],
     }
+
+
+@pytest.fixture
+def test_ca_pem() -> str:
+    """Return a valid test CA certificate in PEM format."""
+    from tests.test_helpers import make_test_ca_pem  # noqa: PLC0415
+
+    return make_test_ca_pem()

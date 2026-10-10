@@ -63,11 +63,11 @@ class BrowserEgress:
     no_proxy: tuple[str, ...] = ()
     by_hostname: bool = False
 
-    def _upstream_for(self, port: int) -> _UpstreamProxy | None:
+    def upstream_for(self, port: int) -> _UpstreamProxy | None:
         """Return the upstream proxy for one destination port, like curl's per-scheme proxy variables."""
         return self.http if port == 80 else self.https
 
-    def _bypasses(self, host: str, address: _IPAddress) -> bool:
+    def bypasses(self, host: str, address: _IPAddress) -> bool:
         """Return whether NO_PROXY names this already-validated destination."""
         name = host.rstrip(".").lower()
         candidates = [address]
@@ -88,7 +88,7 @@ class BrowserEgress:
         return False
 
 
-def _env_setting(envs: tuple[Mapping[str, str], ...], name: str) -> str | None:
+def proxy_env_setting(envs: tuple[Mapping[str, str], ...], name: str) -> str | None:
     """Return one proxy variable, letting later mappings and lowercase spellings win like curl."""
     setting: str | None = None
     for env in envs:
@@ -139,12 +139,12 @@ def browser_egress(
     """
     envs = (runtime_env, browser_env)
     no_proxy = tuple(
-        entry for raw in (_env_setting(envs, "no_proxy") or "").split(",") if (entry := raw.strip().lower())
+        entry for raw in (proxy_env_setting(envs, "no_proxy") or "").split(",") if (entry := raw.strip().lower())
     )
     configured = {
-        name: value for name in ("all_proxy", "http_proxy", "https_proxy") if (value := _env_setting(envs, name))
+        name: value for name in ("all_proxy", "http_proxy", "https_proxy") if (value := proxy_env_setting(envs, name))
     }
-    unsupported = [name for name in ("auto_proxy", "socks_server") if _env_setting(envs, name) is not None]
+    unsupported = [name for name in ("auto_proxy", "socks_server") if proxy_env_setting(envs, name) is not None]
     if egress_control:
         if unsupported:
             msg = f"Browser cannot follow {unsupported[0]}; set all_proxy to the one HTTP(S) egress proxy to use."
@@ -181,7 +181,7 @@ _RUNNER_TUNNEL_REQUIREMENT = (
 )
 
 
-class _UpstreamTunnelRefusedError(OSError):
+class UpstreamTunnelRefusedError(OSError):
     """The operator's egress proxy denied a destination, so no other address or route is tried."""
 
     def __init__(self, status: str) -> None:
@@ -189,7 +189,7 @@ class _UpstreamTunnelRefusedError(OSError):
         self.status = status
 
 
-async def _open_upstream_tunnel(
+async def open_upstream_tunnel(
     upstream: _UpstreamProxy,
     target: str,
     port: int,
@@ -219,12 +219,13 @@ async def _open_upstream_tunnel(
         return reader, writer
     writer.transport.abort()
     if len(status) >= 2 and status[1].startswith(b"4"):
-        raise _UpstreamTunnelRefusedError(status[1].decode("ascii", "replace"))
+        raise UpstreamTunnelRefusedError(status[1].decode("ascii", "replace"))
     msg = "Browser upstream proxy could not open the tunnel."
     raise OSError(msg)
 
 
-def _is_loopback(address: _IPAddress) -> bool:
+def is_loopback(address: _IPAddress) -> bool:
+    """Return whether an address is loopback, including an IPv4-mapped IPv6 loopback address."""
     return address.is_loopback or (
         isinstance(address, ipaddress.IPv6Address)
         and address.ipv4_mapped is not None
@@ -381,16 +382,16 @@ class BrowserDestinationProxy:
         # An upstream proxy's loopback is another host, and NO_PROXY applies only to trusted private browsing.
         return (
             upstream is None
-            or _is_loopback(address)
-            or (self._allow_private_networks and self._egress._bypasses(host, address))
+            or is_loopback(address)
+            or (self._allow_private_networks and self._egress.bypasses(host, address))
         )
 
     async def _connect(self, host: str, port: int) -> tuple[StreamReader, StreamWriter]:
         addresses = await self._resolve(host, port)
-        if port == self._port and any(_is_loopback(address) for address in addresses):
+        if port == self._port and any(is_loopback(address) for address in addresses):
             msg = "Browser proxy cannot connect to itself."
             raise ValueError(msg)
-        upstream = self._egress._upstream_for(port)
+        upstream = self._egress.upstream_for(port)
         # Each target is dialed once: directly at its address, or through a tunnel when the address is None.
         attempts: dict[str, _IPAddress | None] = {}
         for address in addresses:
@@ -409,8 +410,8 @@ class BrowserDestinationProxy:
                             family=socket.AF_INET if direct.version == 4 else socket.AF_INET6,
                         )
                     assert upstream is not None
-                    return await _open_upstream_tunnel(upstream, target, port, self._upstream_tls)
-            except _UpstreamTunnelRefusedError as refused:
+                    return await open_upstream_tunnel(upstream, target, port, self._upstream_tls)
+            except UpstreamTunnelRefusedError as refused:
                 logger.warning(
                     "browser_egress_proxy_refused_tunnel",
                     destination=f"{target}:{port}",

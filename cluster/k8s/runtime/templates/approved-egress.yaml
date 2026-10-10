@@ -17,7 +17,7 @@ metadata:
 data:
   {{ .Values.approvedEgress.allowlist.key }}: {{ $allowlist | quote }}
 {{- end }}
-{{- if .Values.approvedEgress.parentProxy.enabled }}
+{{- if include "mindroom-runtime.approvedEgressParentEnabled" . }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -30,7 +30,7 @@ data:
 {{ include "mindroom-runtime.approvedEgressSquidConfig" . | nindent 4 }}
 {{- end }}
 {{- if .Values.approvedEgress.serviceAccount.create }}
-{{- if or (not .Values.approvedEgress.allowlist.existingConfigMap) .Values.approvedEgress.parentProxy.enabled }}
+{{- if or (not .Values.approvedEgress.allowlist.existingConfigMap) (include "mindroom-runtime.approvedEgressParentEnabled" .) }}
 ---
 {{- end }}
 apiVersion: v1
@@ -129,7 +129,7 @@ spec:
       {{- if not .Values.approvedEgress.allowlist.existingConfigMap }}
       {{- $_ := set $podAnnotations "checksum/allowlist" ($allowlist | sha256sum) }}
       {{- end }}
-      {{- if .Values.approvedEgress.parentProxy.enabled }}
+      {{- if include "mindroom-runtime.approvedEgressParentEnabled" . }}
       {{- $_ := set $podAnnotations "checksum/squid-config" (include "mindroom-runtime.approvedEgressSquidConfig" . | sha256sum) }}
       {{- end }}
       {{- with $podAnnotations }}
@@ -171,7 +171,7 @@ spec:
             - name: MINDROOM_APPROVED_EGRESS_LOG_LEVEL
               value: {{ .Values.approvedEgress.logLevel | quote }}
             {{- end }}
-            {{- if .Values.approvedEgress.parentProxy.enabled }}
+            {{- if include "mindroom-runtime.approvedEgressParentEnabled" . }}
             - name: MINDROOM_EGRESS_SQUID_CONFIG_PATH
               value: {{ include "mindroom-runtime.approvedEgressSquidConfigPath" . | quote }}
             {{- end }}
@@ -212,7 +212,7 @@ spec:
               readOnly: true
             - name: data
               mountPath: {{ .Values.approvedEgress.dataPath | quote }}
-            {{- if .Values.approvedEgress.parentProxy.enabled }}
+            {{- if include "mindroom-runtime.approvedEgressParentEnabled" . }}
             - name: squid-config
               mountPath: {{ include "mindroom-runtime.approvedEgressSquidConfigPath" . | quote }}
               subPath: "squid.conf"
@@ -229,7 +229,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if .Values.approvedEgress.parentProxy.enabled }}
+        {{- if include "mindroom-runtime.approvedEgressParentEnabled" . }}
         - name: squid-config
           configMap:
             name: {{ include "mindroom-runtime.approvedEgressSquidConfigMapName" . }}

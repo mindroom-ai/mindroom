@@ -28,6 +28,8 @@ from mindroom.matrix.personal_room_store import personal_room_record_path
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.db.base import BaseDb
 
 
@@ -93,12 +95,13 @@ def _render_instance_chart() -> list[dict[str, Any]]:
     return _render_chart(Path("cluster/k8s/instance"))
 
 
-def _render_runtime_chart() -> list[dict[str, Any]]:
+def _render_runtime_chart(*extra_set_args: str) -> list[dict[str, Any]]:
     return _render_chart(
         Path("cluster/k8s/runtime"),
         "workers.backend=kubernetes",
         "workers.sandbox.proxyToken.value=test-token",
         "eventCache.postgres.auth.password=test-password",
+        *extra_set_args,
         release_name="mindroom-runtime",
     )
 
@@ -125,13 +128,14 @@ def test_runtime_chart_exposes_exact_script_resource_profiles_to_primary() -> No
     }
 
 
-def _render_runtime_chart_with_separate_worker_namespace() -> list[dict[str, Any]]:
+def _render_runtime_chart_with_separate_worker_namespace(*extra_set_args: str) -> list[dict[str, Any]]:
     return _render_chart(
         Path("cluster/k8s/runtime"),
         "workers.backend=kubernetes",
         "workers.kubernetes.namespace=mindroom-workers",
         "workers.sandbox.proxyToken.value=test-token",
         "eventCache.postgres.auth.password=test-password",
+        *extra_set_args,
         release_name="mindroom-runtime",
     )
 
@@ -4450,3 +4454,454 @@ def test_instance_chart_static_runner_proxies_every_default_worker_execution_too
 
     assert env["MINDROOM_SANDBOX_EXECUTION_MODE"]["value"] == "selective"
     assert set(env["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"].split(",")) >= {"shell", "file", "python", "coding"}
+
+
+_EGRESS_BROKER_NAME = "mindroom-runtime-egress-broker"
+_EGRESS_BROKER_HOST = f"{_EGRESS_BROKER_NAME}.default.svc.cluster.local"
+_EGRESS_BROKER_PRIMARY_SELECTOR = {
+    "app.kubernetes.io/name": "mindroom-runtime",
+    "app.kubernetes.io/instance": "mindroom-runtime",
+    "app.kubernetes.io/component": "runtime",
+}
+_EGRESS_BROKER_WORKER_SELECTOR = {
+    "mindroom.ai/component": "worker",
+    "app.kubernetes.io/managed-by": "mindroom",
+    "app.kubernetes.io/name": "mindroom-worker",
+}
+_EGRESS_PROXY_VALUES = (
+    "egressProxy.enabled=true",
+    "egressProxy.networkPolicy.proxyPodSelector.matchLabels.app=egress-proxy",
+)
+
+
+def _egress_broker_resource_names(docs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return sorted(
+        (doc["kind"], doc["metadata"]["name"])
+        for doc in docs
+        if "egress-broker" in doc["metadata"]["name"] and doc["kind"] != "Deployment"
+    )
+
+
+def _broker_primary_env(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, str]]:
+    container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    return container, {name: entry.get("value", "") for name, entry in _env_by_name(container).items()}
+
+
+def test_runtime_chart_egress_broker_disabled_by_default() -> None:
+    """Without opting in, the chart renders no broker Service, policies, listener, or env."""
+    docs = _render_runtime_chart("networkPolicy.create=true", *_EGRESS_PROXY_VALUES)
+    container, env = _broker_primary_env(docs)
+
+    assert _egress_broker_resource_names(docs) == []
+    assert [port["name"] for port in container["ports"]] == ["api"]
+    assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+
+
+def test_runtime_chart_egress_broker_direct_mode_without_worker_egress_policy() -> None:
+    """Workers without an egress policy need no worker rule, and the primary admits only worker pods."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.kubernetes.namespace=mindroom-workers",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "networkPolicy.create=true",
+        "egressBroker.enabled=true",
+        release_name="mindroom-runtime",
+        namespace="mindroom",
+    )
+    container, env = _broker_primary_env(docs)
+
+    assert _egress_broker_resource_names(docs) == [
+        ("NetworkPolicy", _EGRESS_BROKER_NAME),
+        ("Service", _EGRESS_BROKER_NAME),
+    ]
+    service = _resource(docs, "Service", _EGRESS_BROKER_NAME)
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"]["selector"] == _EGRESS_BROKER_PRIMARY_SELECTOR
+    assert service["spec"]["ports"] == [
+        {"port": 8768, "targetPort": "egress-broker", "protocol": "TCP", "name": "egress-broker"},
+    ]
+    assert {"name": "egress-broker", "containerPort": 8768, "protocol": "TCP"} in container["ports"]
+
+    policy = _resource(docs, "NetworkPolicy", _EGRESS_BROKER_NAME)
+    assert policy["spec"]["podSelector"] == {"matchLabels": _EGRESS_BROKER_PRIMARY_SELECTOR}
+    assert policy["spec"]["policyTypes"] == ["Ingress"]
+    assert policy["spec"]["ingress"] == [
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-workers"}},
+                    "podSelector": {"matchLabels": _EGRESS_BROKER_WORKER_SELECTOR},
+                },
+            ],
+            "ports": [{"protocol": "TCP", "port": 8768}],
+        },
+    ]
+
+    assert env["MINDROOM_EGRESS_BROKER_PORT"] == "8768"
+    assert env["MINDROOM_EGRESS_BROKER_HOST"] == "0.0.0.0"  # noqa: S104
+    assert env["MINDROOM_EGRESS_BROKER_URL"] == f"http://{_EGRESS_BROKER_NAME}.mindroom.svc.cluster.local:8768"
+
+
+def test_runtime_chart_egress_broker_skips_ingress_policy_unless_network_policy_is_created() -> None:
+    """The primary ingress policy follows networkPolicy.create so an open control plane stays open."""
+    docs = _render_runtime_chart("egressBroker.enabled=true", "egressBroker.port=9100")
+
+    assert _egress_broker_resource_names(docs) == [("Service", _EGRESS_BROKER_NAME)]
+    service = _resource(docs, "Service", _EGRESS_BROKER_NAME)
+    assert service["spec"]["ports"][0]["port"] == 9100
+    _, env = _broker_primary_env(docs)
+    assert env["MINDROOM_EGRESS_BROKER_PORT"] == "9100"
+    assert env["MINDROOM_EGRESS_BROKER_URL"] == f"http://{_EGRESS_BROKER_HOST}:9100"
+
+
+@pytest.mark.parametrize(
+    ("render", "worker_namespace"),
+    [
+        (_render_runtime_chart, "default"),
+        (_render_runtime_chart_with_separate_worker_namespace, "mindroom-workers"),
+    ],
+)
+def test_runtime_chart_egress_broker_adds_worker_egress_rule_with_egress_proxy(
+    render: Callable[..., list[dict[str, Any]]],
+    worker_namespace: str,
+) -> None:
+    """A fenced worker may additionally open the primary's broker port and nothing else new."""
+    docs = render("egressBroker.enabled=true", *_EGRESS_PROXY_VALUES)
+
+    policy = _resource(docs, "NetworkPolicy", f"{_EGRESS_BROKER_NAME}-workers")
+    assert policy["metadata"]["namespace"] == worker_namespace
+    assert policy["spec"]["podSelector"] == {"matchLabels": _EGRESS_BROKER_WORKER_SELECTOR}
+    assert policy["spec"]["policyTypes"] == ["Egress"]
+    assert policy["spec"]["egress"] == [
+        {
+            "to": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                    "podSelector": {"matchLabels": _EGRESS_BROKER_PRIMARY_SELECTOR},
+                },
+            ],
+            "ports": [{"protocol": "TCP", "port": 8768}],
+        },
+    ]
+    assert _resource(docs, "Service", _EGRESS_BROKER_NAME)["spec"]["ports"][0]["port"] == 8768
+
+
+def test_runtime_chart_egress_broker_names_stay_distinct_for_the_longest_fullname() -> None:
+    """Truncation keeps every broker resource name within 63 characters and apart from the runtime Service."""
+    fullname = "x" * 63
+    docs = _render_runtime_chart(
+        "networkPolicy.create=true",
+        "egressBroker.enabled=true",
+        *_EGRESS_PROXY_VALUES,
+        f"fullnameOverride={fullname}",
+    )
+
+    names = _egress_broker_resource_names(docs)
+    assert names == [
+        ("NetworkPolicy", f"{'x' * 40}-egress-broker-workers"),
+        ("NetworkPolicy", f"{'x' * 48}-egress-broker"),
+        ("Service", f"{'x' * 48}-egress-broker"),
+    ]
+    assert max(len(name) for _, name in names) <= 63
+    assert fullname in [doc["metadata"]["name"] for doc in docs if doc["kind"] == "Service"]
+
+
+@pytest.mark.parametrize(
+    ("ttl_args", "expected"),
+    [
+        ((), None),
+        (("egressBroker.tokenTtlSeconds=3600",), "3600"),
+    ],
+)
+def test_runtime_chart_egress_broker_ttl_env_only_when_set(ttl_args: tuple[str, ...], expected: str | None) -> None:
+    """The token lifetime env var is omitted unless the operator sets it."""
+    _, env = _broker_primary_env(_render_runtime_chart("egressBroker.enabled=true", *ttl_args))
+
+    assert env.get("MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS") == expected
+
+
+@pytest.mark.parametrize(
+    ("set_args", "message"),
+    [
+        (
+            ("workers.backend=static_runner", "egressBroker.enabled=true"),
+            "egressBroker.enabled requires workers.backend=kubernetes",
+        ),
+        (
+            (
+                "workers.backend=kubernetes",
+                "egressBroker.enabled=true",
+                "workers.kubernetes.agentVault.enabled=true",
+            ),
+            "egressBroker and workers.kubernetes.agentVault cannot both be enabled: enter secrets on the egress page "
+            "first, then disable agentVault in the upgrade that enables egressBroker",
+        ),
+        (
+            ("workers.backend=kubernetes", "egressBroker.enabled=true", "egressBroker.port=8765"),
+            "egressBroker.port must differ from runtime.apiPort and scriptGateway.port",
+        ),
+        (
+            (
+                "workers.backend=kubernetes",
+                "egressBroker.enabled=true",
+                "runtime.apiPort=9000",
+                "egressBroker.port=9000",
+            ),
+            "egressBroker.port must differ from runtime.apiPort and scriptGateway.port",
+        ),
+        (
+            ("workers.backend=kubernetes", "egressBroker.enabled=true", "egressBroker.port=8767"),
+            "egressBroker.port must differ from runtime.apiPort and scriptGateway.port",
+        ),
+    ],
+)
+def test_runtime_chart_egress_broker_validation(set_args: tuple[str, ...], message: str) -> None:
+    """Unsupported broker configurations fail at render time with an actionable message."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        *set_args,
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
+def test_runtime_chart_egress_broker_skips_worker_egress_rule_when_the_egress_policy_is_off() -> None:
+    """Without the chart's worker egress policy workers are unfenced, so no additive broker rule renders."""
+    docs = _render_runtime_chart(
+        "egressBroker.enabled=true",
+        *_EGRESS_PROXY_VALUES,
+        "egressProxy.networkPolicy.create=false",
+    )
+
+    assert _egress_broker_resource_names(docs) == [("Service", _EGRESS_BROKER_NAME)]
+
+
+_EGRESS_PROXY_NAME = "mindroom-runtime-egress-proxy"
+_EGRESS_PROXY_URL = f"http://{_EGRESS_PROXY_NAME}.default.svc.cluster.local:3128"
+_EGRESS_SQUID_CONFIG_NAME = f"{_EGRESS_PROXY_NAME}-squid-config"
+_APPROVED_EGRESS_VALUES = ("approvedEgress.enabled=true", "approvedEgress.image.tag=v0.1.0")
+_EGRESS_BROKER_CHAIN_VALUES = ("egressBroker.enabled=true", *_APPROVED_EGRESS_VALUES)
+
+
+def _squid_chain_config(docs: list[dict[str, Any]]) -> str:
+    return _resource(docs, "ConfigMap", _EGRESS_SQUID_CONFIG_NAME)["data"]["squid.conf"]
+
+
+def test_runtime_chart_chain_renders_broker_cache_peer() -> None:
+    """Squid forwards token-bearing requests to the broker Service as its parent, like it did for Agent Vault."""
+    docs = _render_runtime_chart(*_EGRESS_BROKER_CHAIN_VALUES)
+    conf = _squid_chain_config(docs)
+    proxy = _resource(docs, "Deployment", _EGRESS_PROXY_NAME)
+    proxy_container = _container(proxy, "approved-egress-proxy")
+
+    assert f"cache_peer {_EGRESS_BROKER_HOST} parent 8768 0 no-query no-digest login=PASSTHRU" in conf
+    assert f"cache_peer_access {_EGRESS_BROKER_HOST} allow egress_has_token" in conf
+    assert f"cache_peer_access {_EGRESS_BROKER_HOST} deny all" in conf
+    assert "acl egress_has_token req_header Proxy-Authorization ." in conf
+    assert "never_direct allow egress_has_token" in conf
+    assert "always_direct allow !egress_has_token" in conf
+    assert "agent-vault" not in conf
+    assert _env_by_name(proxy_container)["MINDROOM_EGRESS_SQUID_CONFIG_PATH"]["value"] == (
+        "/etc/squid/mindroom-egress-chain.conf"
+    )
+    assert {
+        "name": "squid-config",
+        "mountPath": "/etc/squid/mindroom-egress-chain.conf",
+        "subPath": "squid.conf",
+        "readOnly": True,
+    } in proxy_container["volumeMounts"]
+    assert {"name": "squid-config", "configMap": {"name": _EGRESS_SQUID_CONFIG_NAME}} in proxy["spec"]["template"][
+        "spec"
+    ]["volumes"]
+    assert "checksum/squid-config" in proxy["spec"]["template"]["metadata"]["annotations"]
+
+
+def test_runtime_chart_chain_follows_the_broker_port() -> None:
+    """A custom broker port reaches the Squid parent line, with the broker Service naming the same port."""
+    docs = _render_runtime_chart(*_EGRESS_BROKER_CHAIN_VALUES, "egressBroker.port=9100")
+
+    assert f"cache_peer {_EGRESS_BROKER_HOST} parent 9100 0 no-query no-digest login=PASSTHRU" in _squid_chain_config(
+        docs,
+    )
+    assert _resource(docs, "Service", _EGRESS_BROKER_NAME)["spec"]["ports"][0]["port"] == 9100
+
+
+def test_runtime_chart_chain_ignores_the_agent_vault_parent_defaults() -> None:
+    """Enabling the legacy parent switch beside the broker still chains to the broker, not to agent-vault."""
+    docs = _render_runtime_chart(*_EGRESS_BROKER_CHAIN_VALUES, "approvedEgress.parentProxy.enabled=true")
+
+    conf = _squid_chain_config(docs)
+    assert f"cache_peer {_EGRESS_BROKER_HOST} parent 8768" in conf
+    assert "agent-vault" not in conf
+
+
+def test_runtime_chart_chain_points_workers_at_squid() -> None:
+    """Workers keep Squid as their first hop, so no worker rule for the broker port renders."""
+    docs = _render_runtime_chart(*_EGRESS_BROKER_CHAIN_VALUES, "networkPolicy.create=true")
+    _, env = _broker_primary_env(docs)
+
+    assert env["MINDROOM_EGRESS_BROKER_URL"] == _EGRESS_PROXY_URL
+    assert env["MINDROOM_EGRESS_BROKER_PORT"] == "8768"
+    assert _egress_broker_resource_names(docs) == [
+        ("NetworkPolicy", _EGRESS_BROKER_NAME),
+        ("Service", _EGRESS_BROKER_NAME),
+    ]
+
+
+def test_runtime_chart_chain_requires_both_features() -> None:
+    """Either feature alone keeps its own worker URL and renders no Squid parent."""
+    approved_only = _render_runtime_chart(*_APPROVED_EGRESS_VALUES)
+    broker_only = _render_runtime_chart("egressBroker.enabled=true")
+
+    assert not any(doc["metadata"]["name"] == _EGRESS_SQUID_CONFIG_NAME for doc in approved_only)
+    assert not [name for name in _broker_primary_env(approved_only)[1] if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert "checksum/squid-config" not in _resource(approved_only, "Deployment", _EGRESS_PROXY_NAME)["spec"][
+        "template"
+    ]["metadata"].get("annotations", {})
+    assert _broker_primary_env(broker_only)[1]["MINDROOM_EGRESS_BROKER_URL"] == f"http://{_EGRESS_BROKER_HOST}:8768"
+
+
+def test_runtime_chart_chain_ingress_admits_squid_not_workers() -> None:
+    """Only the approved-egress pods in the release namespace may reach the broker port on the primary."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.kubernetes.namespace=mindroom-workers",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "networkPolicy.create=true",
+        *_EGRESS_BROKER_CHAIN_VALUES,
+        release_name="mindroom-runtime",
+        namespace="mindroom",
+    )
+
+    policy = _resource(docs, "NetworkPolicy", _EGRESS_BROKER_NAME)
+    assert policy["spec"]["podSelector"] == {"matchLabels": _EGRESS_BROKER_PRIMARY_SELECTOR}
+    assert policy["spec"]["ingress"] == [
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": _EGRESS_PROXY_NAME,
+                            "app.kubernetes.io/instance": "mindroom-runtime",
+                            "app.kubernetes.io/component": "approved-egress-proxy",
+                        },
+                    },
+                },
+            ],
+            "ports": [{"protocol": "TCP", "port": 8768}],
+        },
+    ]
+
+
+def test_runtime_chart_chain_keeps_bypass_domains(tmp_path: Path) -> None:
+    """Bypass domains still skip the parent in the broker chain without enabling the legacy parent switch."""
+    values = {"approvedEgress": {"parentProxy": {"bypassDomains": ["downloads.example.test", ".objects.example.test"]}}}
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        *_EGRESS_BROKER_CHAIN_VALUES,
+        values_files=_values_files(tmp_path, values),
+        release_name="mindroom-runtime",
+    )
+    conf = _squid_chain_config(docs)
+
+    assert "acl egress_bypass_parent dstdomain -n downloads.example.test .objects.example.test" in conf
+    assert conf.index(f"cache_peer_access {_EGRESS_BROKER_HOST} deny egress_bypass_parent") < conf.index(
+        f"cache_peer_access {_EGRESS_BROKER_HOST} allow egress_has_token",
+    )
+    assert conf.index("always_direct allow egress_bypass_parent") < conf.index("always_direct allow !egress_has_token")
+
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        *_EGRESS_BROKER_CHAIN_VALUES,
+        set_string_args=("approvedEgress.parentProxy.bypassDomains[0]=https://downloads.example.test",),
+        release_name="mindroom-runtime",
+    )
+    assert completed.returncode != 0
+    assert "approvedEgress.parentProxy.bypassDomains[0] must be a domain name" in completed.stderr
+
+
+def test_runtime_chart_chain_restarts_squid_on_parent_change() -> None:
+    """The parent host and port live in the mounted Squid config, so changing them must roll the proxy pod."""
+    checksums = []
+    for port in ("8768", "9100"):
+        docs = _render_runtime_chart(*_EGRESS_BROKER_CHAIN_VALUES, f"egressBroker.port={port}")
+        proxy = _resource(docs, "Deployment", _EGRESS_PROXY_NAME)
+        checksums.append(proxy["spec"]["template"]["metadata"]["annotations"]["checksum/squid-config"])
+        assert f"parent {port} 0" in _squid_chain_config(docs)
+
+    assert checksums[0] != checksums[1]
+
+
+def test_runtime_chart_chain_rejects_custom_parent_host() -> None:
+    """A custom Agent Vault style parent would be dropped silently, so the chart refuses it."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        *_EGRESS_BROKER_CHAIN_VALUES,
+        "approvedEgress.parentProxy.enabled=true",
+        "approvedEgress.parentProxy.host=corporate-proxy",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "approvedEgress.parentProxy.host must stay at its default when egressBroker.enabled; "
+        "the chart chains Squid to the egress broker"
+    ) in completed.stderr
+
+
+_INSTANCE_EGRESS_BROKER_ENV = {
+    "MINDROOM_EGRESS_BROKER_PORT": "8768",
+    "MINDROOM_EGRESS_BROKER_HOST": "127.0.0.1",
+    "MINDROOM_EGRESS_BROKER_URL": "http://127.0.0.1:8768",
+}
+
+
+def _instance_resource_identities(docs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return sorted((doc["kind"], doc["metadata"]["name"]) for doc in docs)
+
+
+def test_instance_chart_egress_broker_env_on_primary_only() -> None:
+    """The broker binds loopback in the primary, which the same-pod sidecar reaches without a Service or policy."""
+    baseline = _render_chart(Path("cluster/k8s/instance"))
+    docs = _render_chart(Path("cluster/k8s/instance"), "egressBroker.enabled=true")
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    primary_env = _env_by_name(_container(deployment, "mindroom"))
+    runner_env = _env_by_name(_container(deployment, "sandbox-runner"))
+
+    for name, value in _INSTANCE_EGRESS_BROKER_ENV.items():
+        assert primary_env[name] == {"name": name, "value": value}
+    assert not [name for name in runner_env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert not [
+        name
+        for name in primary_env
+        if name.startswith("MINDROOM_EGRESS_BROKER_") and name not in _INSTANCE_EGRESS_BROKER_ENV
+    ]
+    assert _instance_resource_identities(docs) == _instance_resource_identities(baseline)
+    assert [port["name"] for port in _container(deployment, "mindroom")["ports"]] == ["api"]
+
+
+def test_instance_chart_egress_broker_disabled_by_default() -> None:
+    """Hosted tenants get no broker env unless the release opts in."""
+    deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
+
+    for container in ("mindroom", "sandbox-runner"):
+        env = _env_by_name(_container(deployment, container))
+        assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]

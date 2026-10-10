@@ -35,7 +35,7 @@ from mindroom.api.credentials_target import (
     save_credentials_for_target,
     target_primary_owns_tool_settings,
 )
-from mindroom.credential_policy import credential_service_policy, is_oauth_token_service
+from mindroom.credential_policy import credential_service_policy, is_egress_broker_service, is_oauth_token_service
 from mindroom.credentials import list_worker_grantable_shared_services, validate_service_name
 from mindroom.credentials_sync import canonical_provider_service, resolve_provider_service_api_key
 from mindroom.embedder_health import handle_embedder_credential_change
@@ -61,9 +61,16 @@ class _ActiveEmbedderRuntime:
 
 def _validated_service(service: str) -> str:
     try:
-        return validate_service_name(service)
+        validated = validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Reject egress broker services
+    if is_egress_broker_service(validated):
+        msg = "Egress broker secrets are managed through /api/egress-broker."
+        raise HTTPException(status_code=400, detail=msg)
+
+    return validated
 
 
 def _save_service(access: _DashboardCredentialAccess, service: str) -> str:
@@ -199,13 +206,15 @@ class _DashboardCredentialAccess:
             return credentials
         return credentials
 
+    def _dashboard_may_list(self, service: str) -> bool:
+        # Egress secrets are managed through /api/egress-broker, so the generic routes reject them.
+        return not is_egress_broker_service(service) and self.oauth_services.dashboard_may_show_service(service)
+
     def list_services(self) -> list[str]:
         """List dashboard-visible services for the resolved target."""
         if self.target.worker_scope is None:
             return [
-                service
-                for service in self.target.target_manager.list_services()
-                if self.oauth_services.dashboard_may_show_service(service)
+                service for service in self.target.target_manager.list_services() if self._dashboard_may_list(service)
             ]
         # Worker copies of primary-built tool settings are ignored, so they are not listed.
         worker_services = {
@@ -234,7 +243,7 @@ class _DashboardCredentialAccess:
             }
         services = worker_services | primary_runtime_global_services | primary_runtime_services | shared_services
         services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))
-        return sorted(service for service in services if self.oauth_services.dashboard_may_show_service(service))
+        return sorted(service for service in services if self._dashboard_may_list(service))
 
 
 class SetApiKeyRequest(BaseModel):

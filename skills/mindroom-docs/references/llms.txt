@@ -79,6 +79,7 @@
 - [Docker](https://docs.mindroom.chat/deployment/docker/)
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/)
 - [Workers & Sandboxing](https://docs.mindroom.chat/deployment/sandbox-proxy/)
+- [Brokered Worker Egress](https://docs.mindroom.chat/deployment/egress-broker/)
 - [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)
 - [Trusted Upstream Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/)
 - [Data Storage & Journal](https://docs.mindroom.chat/deployment/storage/)

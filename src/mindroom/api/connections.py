@@ -11,13 +11,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.auth import public_origin, require_connections_user, require_same_origin
+from mindroom.api.auth import require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
+    require_connections_same_origin,
     resolve_connection_agent,
     resolve_connection_user,
 )
+from mindroom.api.egress_credentials import EgressCredentialService, egress_services_for_agent
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.users import create_agent_http_client
@@ -66,6 +68,7 @@ class AgentConnections(BaseModel):
     can_use: bool
     services: list[ConnectionService]
     tools: list[ConnectionTool]
+    egress_services: list[EgressCredentialService] = []
 
 
 class ConnectionsCatalog(BaseModel):
@@ -176,6 +179,7 @@ def _agent_connections(
         )
         if tool_name not in service.tools:
             service.tools.append(tool_name)
+
     agent = config.agents[agent_name]
     return AgentConnections(
         agent_name=agent_name,
@@ -207,22 +211,40 @@ def _require_management(context: _Connections, agent_name: str, provider_id: str
 
 
 def _require_same_origin(request: Request, context: _Connections) -> None:
-    public_url = context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
-    expected = public_origin(public_url)
-    if expected is None or not expected.startswith("https://"):
-        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
-    require_same_origin(
-        request,
-        expected,
-        detail="Connection changes require a same-origin request",
-        headers=CONNECTIONS_HEADERS,
-    )
+    require_connections_same_origin(request, context.runtime_paths)
 
 
 @router.get("")
-async def catalog(context: _ConnectionsContext) -> ConnectionsCatalog:
-    """List allowed services without waiting for any upstream account status."""
-    return context.catalog
+async def catalog(request: Request, context: _ConnectionsContext) -> ConnectionsCatalog:
+    """List allowed services; the status of their accounts is loaded per card, not here.
+
+    Egress rows follow the personal egress API's eligibility rule, only agents the user may use, and carry the
+    stored OAuth state of their services. That state is read only here, so status, connect and disconnect of other
+    providers never depend on it, and one service whose state cannot be read is shown as not connectable. Reading it
+    skips the token refresh; resolving a provider's OAuth client can still bootstrap it over the network once when
+    none is stored.
+    """
+    user = context.user
+    memberships = config_lifecycle.app_state(request.app).agent_reply_memberships
+    manager = get_runtime_credentials_manager(context.runtime_paths)
+    agents = [
+        agent.model_copy(
+            update={
+                "egress_services": await egress_services_for_agent(
+                    request,
+                    agent.agent_name,
+                    user.owner.requester_id,
+                    user.config,
+                    context.runtime_paths,
+                    memberships,
+                    manager,
+                )
+                or [],
+            },
+        )
+        for agent in context.catalog.agents
+    ]
+    return ConnectionsCatalog(agents=agents)
 
 
 @router.get("/agents/{agent_name}/avatar")
@@ -282,14 +304,13 @@ async def status(agent_name: str, provider_id: str, request: Request, context: _
             "Connection status is unavailable",
             headers=CONNECTIONS_HEADERS,
         ) from exc
-    # Shared service accounts are runtime configuration, never a personal account.
-    personal = not result.has_service_account_config
+    view = oauth.personal_connection_view(result, can_manage=service.can_manage)
     return ConnectionStatus(
         provider=provider_id,
-        connected=result.connected and (personal or not service.can_manage),
-        can_connect=result.has_client_config and personal and service.can_manage,
-        reset_required=result.reset_required,
-        account_label=result.email if personal and service.can_manage else None,
+        connected=view.connected,
+        can_connect=view.can_connect,
+        reset_required=view.reset_required,
+        account_label=view.account_label,
     )
 
 

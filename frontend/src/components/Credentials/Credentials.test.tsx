@@ -8,6 +8,12 @@ vi.mock("@/components/ui/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
 
+// The egress panel has its own tests and fetches on mount, which would consume
+// the ordered fetch mocks below.
+vi.mock("./EgressBroker", () => ({
+  EgressBroker: () => <div data-testid="egress-broker" />,
+}));
+
 global.fetch = vi.fn();
 
 function deferred<T>() {
@@ -61,6 +67,18 @@ describe("Credentials", () => {
       expect(editor.value).toContain('"username": "x-access-token"');
       expect(editor.value).toContain('"token": "ghp_test"');
     });
+  });
+
+  it("renders the egress broker panel", async () => {
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    });
+
+    render(<Credentials />);
+
+    await screen.findByText(/No services found yet/);
+    expect(screen.getByTestId("egress-broker")).toBeInTheDocument();
   });
 
   it("hides credentials by default and reveals them on demand", async () => {

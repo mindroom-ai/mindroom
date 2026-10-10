@@ -1510,6 +1510,25 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.egress_broker"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.credentials_target",
+    "mindroom.api.egress_status",
+    "mindroom.api.oauth",
+    "mindroom.egress_broker.secrets",
+    "mindroom.egress_broker.service",
+]
+
+[[modules]]
+path = "mindroom.api.egress_status"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.oauth",
+    "mindroom.egress_broker.secrets",
+]
+
+[[modules]]
 path = "mindroom.api.external_triggers"
 depends_on = [
     "mindroom.bounded_bytes",
@@ -1636,6 +1655,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.oauth",
     "mindroom.api.connection_agents",
+    "mindroom.api.egress_credentials",
     "mindroom.constants",
     "mindroom.oauth",
     "mindroom.oauth.credential_lifecycle",
@@ -1647,11 +1667,26 @@ depends_on = [
 path = "mindroom.api.connection_agents"
 depends_on = [
     "mindroom.access_policy",
+    "mindroom.api.auth",
     "mindroom.authorization",
     "mindroom.matrix.identity",
     "mindroom.mcp_gateway.types",
     "mindroom.requester_identity",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.egress_credentials"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.auth",
+    "mindroom.api.connection_agents",
+    "mindroom.api.egress_status",
+    "mindroom.api.oauth",
+    "mindroom.authorization",
+    "mindroom.credentials",
+    "mindroom.egress_broker.secrets",
+    "mindroom.requester_identity",
 ]
 
 [[modules]]
@@ -1707,6 +1742,8 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.dynamic_workflows",
+    "mindroom.api.egress_broker",
+    "mindroom.api.egress_credentials",
     "mindroom.api.external_triggers",
     "mindroom.api.frontend",
     "mindroom.api.homeassistant_integration",
@@ -4849,6 +4886,7 @@ depends_on = [
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
+    "mindroom.credential_policy",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
@@ -4861,6 +4899,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.worker_proxy_client"
 depends_on = [
+    "mindroom.credential_policy",
     "mindroom.credentials",
     "mindroom.runtime_env_policy",
     "mindroom.workers.models",
@@ -7378,7 +7417,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.browser_proxy"
 depends_on = []
-visibility = ["mindroom.custom_tools.agno_compat_agentql", "mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.tools.crawl4ai", "mindroom.worker_computer.mcp_provider"]
+visibility = ["mindroom.custom_tools.agno_compat_agentql", "mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.egress_broker.dial", "mindroom.egress_broker.service", "mindroom.tools.crawl4ai", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"

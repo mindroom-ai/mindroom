@@ -21,6 +21,7 @@ Use this chart when MindRoom should run inside an existing platform.
 - [Control-Plane NetworkPolicy](#control-plane-networkpolicy)
 - [Worker Egress Proxy](#worker-egress-proxy)
 - [Background Script Gateway](#background-script-gateway)
+- [Egress Broker](#egress-broker)
 - [Matrix Managed Account Authentication](#matrix-managed-account-authentication)
 - [Existing Platform Example](#existing-platform-example)
 - [Notes](#notes)
@@ -816,6 +817,75 @@ The isolation attestation relies on the chart's worker egress NetworkPolicy, so 
 Keep `egressProxy.networkPolicy.extraEgress` and the egress proxy allowlist from opening the control-plane API port or the main runtime Service to workers.
 The Service is separate from the main runtime Service so `service.type` never exposes the gateway port outside the cluster.
 See [Background Python Scripts](../../../docs/tools/background-scripts.md#worker-and-network-requirements) for the script tool, its gateway contract, and run lifecycle.
+
+## Egress Broker
+
+The egress broker lets agents call authenticated HTTP APIs from Kubernetes workers without the worker ever holding the credential.
+The primary runs the broker on its own port, workers send their traffic through it, and it injects the stored credential for the matching service.
+The primary needs no extra pod, and workers need no changes: each call carries its own token and CA certificate.
+For configuration, secret management, and error codes, see [Brokered Worker Egress](../../../docs/deployment/egress-broker.md).
+
+The chart supports direct and chain modes:
+
+| Mode | Values | Worker to broker | Broker to internet |
+|---|---|---|---|
+| Direct | `egressBroker.enabled` | Worker pod to the `<fullname>-egress-broker` Service to the primary pod | Direct from the primary pod |
+| Direct with an operator proxy | `egressBroker.enabled` and `egressProxy.enabled` | Same, plus an additive worker egress NetworkPolicy for the broker port | Through the operator proxy only when the primary's env sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`; otherwise direct (see the warning below) |
+| Chain | `egressBroker.enabled` and `approvedEgress.enabled` | Worker to Squid (grant check by pod IP) to the broker as Squid's parent | Direct from the primary pod |
+
+> [!WARNING]
+> **Direct mode with `egressProxy` bypasses the operator proxy unless the primary uses it.**
+> Each `shell` and `python` call's broker environment replaces the `HTTP_PROXY` and `HTTPS_PROXY` that `egressProxy.injectWorkerProxyEnv` gives worker pods, so that traffic goes to the broker instead of the operator proxy.
+> The broker then dials from the primary pod: matched hosts always, and unmatched hosts too under the default `unmatched_hosts: passthrough`.
+> Unless the primary's own environment sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`, that traffic leaves the cluster directly instead of through the operator proxy.
+> Set the operator proxy on the primary through `env.extra`, or set `egress_broker.unmatched_hosts: deny` in the MindRoom config so only the configured services' hosts are reached directly.
+> The broker connects through the operator proxy to the IP address it validated, so the proxy must allow CONNECT to IP addresses on ports 80 and 443.
+> The chart does not enforce either setting yet.
+
+The broker's environment also replaces `NO_PROXY` for `shell` and `python` calls with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's callback URLs.
+`egressProxy.noProxy` entries no longer apply to those calls, so requests to other internal hosts go to the broker (through Squid in chain mode), which refuses private addresses with 403 `destination_blocked`.
+
+The SaaS instance chart (`cluster/k8s/instance`) has its own `egressBroker.enabled`, which sets the loopback env on the primary for its sandbox-runner sidecar and renders no Service or NetworkPolicy.
+
+Set `egressBroker.enabled` to have the primary serve that listener:
+
+```yaml
+workers:
+  backend: kubernetes
+
+egressBroker:
+  enabled: true
+  port: 8768
+  # Optional lifetime of the per-call worker tokens, in seconds.
+  tokenTtlSeconds: ""
+```
+
+The primary container then exposes an `egress-broker` port and gets `MINDROOM_EGRESS_BROKER_PORT`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, and `MINDROOM_EGRESS_BROKER_URL`, plus `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` when `egressBroker.tokenTtlSeconds` is set.
+The URL points workers at a `<fullname>-egress-broker` ClusterIP Service for that port.
+The Service is separate from the main runtime Service so `service.type` never exposes the broker port outside the cluster.
+Workers need no changes: each call carries its own token and CA certificate.
+Worker images must still come from a release that includes the broker, because older runners ignore the CA in the call's environment and requests to matched hosts then fail TLS verification.
+When `networkPolicy.create` is true, a `<fullname>-egress-broker` NetworkPolicy admits workers to that port on the control-plane pod.
+When the chart's worker egress NetworkPolicy exists (`egressProxy.enabled` with `egressProxy.networkPolicy.create=true`), a `<fullname>-egress-broker-workers` NetworkPolicy in the worker namespace adds egress from workers to the broker port on the control-plane pod.
+Without that policy workers already have unrestricted egress, so the chart adds no worker rule.
+
+With `approvedEgress.enabled` as well, workers keep the approved egress proxy (Squid) as their first hop, so Squid still enforces per-worker grants by pod IP.
+The chart then renders Squid's parent chain to the broker Service and port itself, without `approvedEgress.parentProxy.enabled`, the same way `parentProxy` chains Agent Vault: requests that carry a token go to the broker, and `parentProxy.bypassDomains` still skip it.
+`MINDROOM_EGRESS_BROKER_URL` is the Squid URL, the broker NetworkPolicy admits only the approved egress pods instead of workers, and no worker egress rule is added.
+Changing `egressBroker.port` rolls the Squid pod.
+Leave `approvedEgress.parentProxy.host` at its default in this setup, because the chart rejects a custom parent instead of dropping it silently.
+
+`egressBroker.enabled` requires `workers.backend=kubernetes`, and `egressBroker.port` must differ from `runtime.apiPort` and `scriptGateway.port`.
+It cannot be combined with `workers.kubernetes.agentVault`.
+To migrate from Agent Vault:
+
+1. Add the services to the deployment's `config.yaml` under `egress_broker.services`.
+2. Have users and credential managers enter secrets on `/connections/egress` or the dashboard while Agent Vault still serves traffic. The personal page needs trusted upstream auth with JWT; without it only the dashboard can manage secrets.
+3. Run one `helm upgrade` with `egressBroker.enabled=true` and `workers.kubernetes.agentVault.enabled=false`. If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in that upgrade.
+4. Verify with brokered calls from real workers, then delete the Agent Vault bootstrap Secret and PVC after a grace period.
+The broker connects directly from the primary pod, unless the primary's `HTTPS_PROXY`/`NO_PROXY` routes it through an operator proxy.
+If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
+The broker shares the primary's lifecycle, so a primary restart interrupts brokered connections that are in flight.
 
 ## Matrix Managed Account Authentication
 

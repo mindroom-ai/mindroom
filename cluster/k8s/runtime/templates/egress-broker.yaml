@@ -1,0 +1,85 @@
+{{- if .Values.egressBroker.enabled }}
+{{- $name := include "mindroom-runtime.egressBrokerName" . -}}
+{{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.egressBroker.port }}
+      targetPort: egress-broker
+      protocol: TCP
+      name: egress-broker
+  selector:
+    {{- include "mindroom-runtime.selectorLabels" . | nindent 4 }}
+{{- if and (not (include "mindroom-runtime.egressBrokerChainMode" .)) (include "mindroom-runtime.workerEgressPolicyEnabled" .) }}
+---
+# Additive to the worker egress policy: workers may also open the broker listener port.
+# Without that policy workers have unrestricted egress and need no rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-egress-broker-workers" (include "mindroom-runtime.fullname" . | trunc 40 | trimSuffix "-") }}
+  namespace: {{ $workerNamespace }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-runtime.workerPodLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.egressBroker.port }}
+{{- end }}
+{{- if .Values.networkPolicy.create }}
+---
+# Additive to the control-plane ingress policy: admit workers to the broker listener port,
+# or only the approved-egress proxy when Squid fronts the broker.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-runtime.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- if include "mindroom-runtime.egressBrokerChainMode" . }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 14 }}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $workerNamespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.workerPodLabels" . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.egressBroker.port }}
+{{- end }}
+{{- end }}

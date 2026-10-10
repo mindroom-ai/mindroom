@@ -33,6 +33,7 @@ dependencies = [
   "google-auth>=2.40.3",
   "google-genai>=2",
   "groq>=0.31",
+  "h11>=0.16",
   "httpx>=0.27",
   "httpx2>=2.13",
   "humanize>=4.12.3",
@@ -179,6 +180,7 @@ report_publishing = []
 e2b = [
   "e2b-code-interpreter",
 ]
+egress_credentials = []
 eleven_labs = [
   "elevenlabs",
 ]

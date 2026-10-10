@@ -40,6 +40,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.automations import Automation  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
+from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.judgment import LLMJudgmentConfig
@@ -403,6 +404,11 @@ class Config(BaseModel):
     _runtime_approved_egress_inherited_default_tools: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
+
+    egress_broker: EgressBrokerConfig = Field(
+        default_factory=EgressBrokerConfig,
+        description="Credential-injecting egress broker for worker shell and python traffic",
+    )
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {

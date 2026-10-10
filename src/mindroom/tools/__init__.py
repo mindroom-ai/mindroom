@@ -466,3 +466,28 @@ def _agent_vault_access_tools() -> type[Toolkit]:
     from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools
 
     return AgentVaultAccessTools
+
+
+@register_tool_with_metadata(
+    name="egress_credentials",
+    file_access=ToolFileAccess.NONE,
+    requires_primary_runtime=True,
+    display_name="Egress Credentials",
+    description="See which API keys and connected accounts this agent can use through the egress broker and where to add them",
+    category=ToolCategory.INTEGRATIONS,
+    icon="KeyRound",
+    icon_color="text-amber-600",
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
+    config_fields=[],
+    function_names=("list_egress_credentials",),
+)
+def _egress_credentials_tools() -> type[Toolkit]:
+    """Return the egress broker credential status tool."""
+    from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
+
+    return EgressCredentialsTools

@@ -13,11 +13,12 @@ import os
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import httpx
+import structlog
 
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
@@ -56,6 +57,8 @@ from mindroom.workers.runtime import (
     serialized_dedicated_worker_validation_snapshot,
     serialized_kubernetes_worker_config_snapshot,
 )
+
+logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -266,7 +269,9 @@ def _read_proxy_tools(
     return {part.strip() for part in raw_value.split(",") if part.strip()}
 
 
-def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
+def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:  # noqa: C901
+    from mindroom.credential_policy import is_egress_broker_service  # noqa: PLC0415
+
     raw_policy = (
         runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["credential_policy_json"], default="") or ""
     ).strip()
@@ -287,10 +292,22 @@ def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str,
             continue
         if not isinstance(services, list):
             continue
-        cleaned_services = tuple(
-            service.strip() for service in services if isinstance(service, str) and service.strip()
-        )
-        policy[selector.strip()] = cleaned_services
+        cleaned_services = []
+        dropped_egress = []
+        for service in services:
+            if isinstance(service, str) and service.strip():
+                stripped = service.strip()
+                if is_egress_broker_service(stripped):
+                    dropped_egress.append(stripped)
+                else:
+                    cleaned_services.append(stripped)
+        if dropped_egress:
+            logger.warning(
+                "Egress broker secrets are never leased to workers; dropping from credential policy",
+                selector=selector.strip(),
+                dropped_services=dropped_egress,
+            )
+        policy[selector.strip()] = tuple(cleaned_services)
     return policy
 
 
@@ -921,6 +938,47 @@ def primary_owns_tool_settings(tool_name: str, *, runtime_paths: RuntimePaths) -
     return tool_name in TOOL_METADATA and not sandbox_proxy_config(runtime_paths).runner_mode
 
 
+def _egress_broker_env(
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config | None,
+    worker_target: ResolvedWorkerTarget | None,
+    routed_worker_key: object,
+    call_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Return the egress broker env for one shell or python call routed to a worker.
+
+    An unscoped target has no worker key of its own. Its token names the dedicated worker this call was routed
+    to, or on the shared static runner the unscoped key a dedicated backend would give the agent.
+    """
+    # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
+    from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
+
+    if worker_target is not None and worker_target.worker_scope is None and worker_target.worker_key is None:
+        worker_key = routed_worker_key if isinstance(routed_worker_key, str) else _unscoped_worker_key(worker_target)
+        if worker_key is not None:
+            worker_target = replace(worker_target, worker_key=worker_key)
+    return execution_env_for_worker(
+        runtime_paths,
+        config=config,
+        worker_target=worker_target,
+        call_env=call_env,
+    )
+
+
+def _unscoped_worker_key(worker_target: ResolvedWorkerTarget) -> str | None:
+    identity = worker_target.execution_identity
+    agent_name = worker_target.routing_agent_name or (identity.agent_name if identity is not None else None)
+    if agent_name is None:
+        return None
+    return resolve_unscoped_worker_key(
+        agent_name=agent_name,
+        execution_identity=identity,
+        tenant_id=worker_target.tenant_id,
+        account_id=worker_target.account_id,
+    )
+
+
 def _call_proxy_sync(
     *,
     runtime_paths: RuntimePaths,
@@ -987,6 +1045,16 @@ def _call_proxy_sync(
         if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
             # A minimal response's grant travels with each command to the agent's own worker.
             execution_env = {**(execution_env or {}), **cli_env.env()}
+        if tool_name in EXECUTION_ENV_TOOL_NAMES and (
+            broker_env := _egress_broker_env(
+                runtime_paths,
+                config=manager_context.runtime_config,
+                worker_target=worker_target,
+                routed_worker_key=worker_payload.get("worker_key"),
+                call_env=execution_env,
+            )
+        ):
+            execution_env = {**(execution_env or {}), **broker_env}
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:
