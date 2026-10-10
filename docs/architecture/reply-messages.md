@@ -73,7 +73,7 @@ A claim runs under the conversation lock after the turn's first source gate and 
 
 The edit regenerator decides which edits reach a claim: only an edit of the latest message of its conversation, with no later message from someone other than an agent, whose reply showed something and is not `gone`.
 It records a Stop on that reply first when a span still runs for it or an approval holds it, and its claim then waits for the conversation lock that span holds and for the approval the Stop fenced to end.
-It hands the edit to a regeneration on a runner-owned task without waiting for its claim, because the claim waits for the conversation, which another reply of the agent may hold for as long as that reply runs; once the claim succeeds the regeneration records the edit's text and revision in the turn ledger and prunes the history run it replaces, and a regeneration that ends without a span owning the edit settles the edit itself, unless its claim was deferred.
+It hands the edit to a regeneration on a runner-owned task without waiting for its claim, because the claim waits for the conversation, which another reply of the agent may hold for as long as that reply runs; once the claim succeeds the regeneration records the edit's text and revision in the turn ledger and prunes the history run it replaces, and a regeneration that ends without a span owning the edit settles the edit itself, unless its claim was deferred or another instance took the replies over.
 An edit of a message still waiting in its coalescing queue changes that message's text instead and never reaches the regenerator.
 
 ## Writes

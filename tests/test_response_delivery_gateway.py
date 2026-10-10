@@ -43,9 +43,9 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import DepartureSource, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import DepartureSource, EventClass, EventKind, InboundEvent, TerminalTurnWrite
 from mindroom.event_journal.sqlite_backend import SqliteBackend
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.large_messages import (
@@ -85,7 +85,6 @@ if TYPE_CHECKING:
         MatrixDelivery,
         MatrixDeliveryView,
         PrincipalStore,
-        TerminalTurnWrite,
     )
     from mindroom.event_journal.backend import Transaction
     from mindroom.turn_store import TurnStore
@@ -2053,20 +2052,31 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         async def winning_send(_claimed: MatrixDelivery) -> str:
             return "$deduplicated"
 
-        losing_publishes: list[tuple[str, str]] = []
-        winning_publishes: list[tuple[str, str]] = []
+        losing_publishes: list[TerminalTurnWrite] = []
+        winning_publishes: list[TerminalTurnWrite] = []
 
-        async def losing_publish(turn_id: str, event_id: str, _committed: TerminalTurnWrite | None) -> None:
-            losing_publishes.append((turn_id, event_id))
+        def terminal_turn_for(_delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite:
+            record = TurnRecord.create(["$source"], response_event_id=event_id)
+            assert record.anchor_event_id is not None
+            return TerminalTurnWrite(
+                agent_name="agent",
+                index_event_ids=record.indexed_event_ids,
+                anchor_event_id=record.anchor_event_id,
+                record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
+            )
 
-        async def winning_publish(turn_id: str, event_id: str, _committed: TerminalTurnWrite | None) -> None:
-            winning_publishes.append((turn_id, event_id))
+        async def losing_publish(committed: TerminalTurnWrite) -> None:
+            losing_publishes.append(committed)
+
+        async def winning_publish(committed: TerminalTurnWrite) -> None:
+            winning_publishes.append(committed)
 
         losing = MatrixDeliveryWorker(
             store=alice,
             send=losing_send,
             observe_delivered=ignore_delivered_projection,
             sending_device_id="DEVICE1",
+            terminal_turn_for=terminal_turn_for,
             terminal_turn_committed=losing_publish,
         )
         winning = MatrixDeliveryWorker(
@@ -2074,6 +2084,7 @@ class TestARacedAcknowledgementSpeaksForTheRow:
             send=winning_send,
             observe_delivered=ignore_delivered_projection,
             sending_device_id="DEVICE1",
+            terminal_turn_for=terminal_turn_for,
             terminal_turn_committed=winning_publish,
         )
 
@@ -2083,7 +2094,7 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         finish_losing_send.set()
         assert await loser == "$deduplicated"
 
-        assert winning_publishes == [("turn-1", "$deduplicated")]
+        assert winning_publishes == [terminal_turn_for(None, "$deduplicated")]  # type: ignore[arg-type]
         assert losing_publishes == [], "a caller that bound nothing published a record anyway"
 
 

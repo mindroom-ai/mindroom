@@ -21,7 +21,7 @@ from mindroom.event_journal.models import DeliveryStage, UnreadableMatrixDeliver
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
     from mindroom.event_journal.models import MatrixDelivery, TerminalTurnWrite
     from mindroom.event_journal.projection import ProjectedEvent
@@ -54,7 +54,7 @@ type _TerminalTurnFor = Callable[[MatrixDelivery, str], "TerminalTurnWrite | Non
 # transaction committed can be re-asserted through whatever ordering the ledger
 # uses for every other write. A caller that lost the row is never told, because
 # it committed nothing to settle.
-type _TerminalTurnCommitted = Callable[[str, str, "TerminalTurnWrite | None"], Awaitable[None]]
+type _TerminalTurnCommitted = Callable[["TerminalTurnWrite"], Coroutine[object, object, None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +109,7 @@ class _FlushOutcome:
     """One locked send result and the callback it leaves for after unlock."""
 
     event_id: str | None
-    terminal_response_event_id: str | None = None
-    publish_committed_terminal: bool = False
+    # The terminal turn record a bound FINAL acknowledgement committed.
     committed_terminal: TerminalTurnWrite | None = None
     retry_required: bool = False
     propagate_cancellation: asyncio.CancelledError | None = field(default=None, repr=False, compare=False)
@@ -217,7 +216,7 @@ class MatrixDeliveryWorker:
                 edits_event_id=edits_event_id,
                 permanent_failure_reason=permanent_failure_reason,
             )
-        return await self._finish_flush(delivery_id, outcome)
+        return await self._finish_flush(outcome)
 
     async def deliver_reply_row(
         self,
@@ -255,7 +254,7 @@ class MatrixDeliveryWorker:
             outcome = await run_coroutine_until_complete(
                 self._flush(delivery_id=enqueued.delivery_id, stage=enqueued.stage),
             )
-        event_id = await self._finish_flush(enqueued.delivery_id, outcome)
+        event_id = await self._finish_flush(outcome)
         return ReplyRowDelivery(enqueue=enqueued, event_id=event_id)
 
     async def send_reply_rows(self, reply_id: str) -> bool:
@@ -274,7 +273,7 @@ class MatrixDeliveryWorker:
             before_sequence=before_sequence,
         ):
             outcome = await self._flush(delivery_id=delivery_id, stage=stage)
-            await self._finish_flush(delivery_id, outcome)
+            await self._finish_flush(outcome)
             if outcome.event_id is None and outcome.retry_required:
                 return False
         return not await self.store.unresolved_reply_rows(reply_id, before_sequence=before_sequence)
@@ -435,7 +434,7 @@ class MatrixDeliveryWorker:
                 process_shutdown_requested=lambda: process_shutdown_requested,
                 on_cancelled=note_cancellation,
             )
-        return await self._finish_flush(delivery_id, outcome)
+        return await self._finish_flush(outcome)
 
     async def _flush(
         self,
@@ -659,11 +658,8 @@ class MatrixDeliveryWorker:
         )
         if acknowledged.settled_event_id is None:
             return _FlushOutcome(event_id=event_id)
-        bound_terminal = acknowledged.bound and claimed.stage is DeliveryStage.FINAL
         return _FlushOutcome(
             event_id=acknowledged.settled_event_id,
-            terminal_response_event_id=terminal_response_event_id if bound_terminal else None,
-            publish_committed_terminal=bound_terminal,
             committed_terminal=acknowledged.terminal_turn,
             reply_effects=acknowledged.reply_effects,
         )
@@ -683,29 +679,13 @@ class MatrixDeliveryWorker:
             return ()
         return await self.observe_delivered(claimed, event_id)
 
-    async def _finish_flush(self, delivery_id: str, outcome: _FlushOutcome) -> str | None:
+    async def _finish_flush(self, outcome: _FlushOutcome) -> str | None:
         """Run post-lock bookkeeping and return the visible event."""
         event_id = outcome.event_id
         if outcome.reply_effects and self.run_reply_effects is not None:
             await self.run_reply_effects(outcome.reply_effects)
-        if (
-            outcome.publish_committed_terminal
-            and outcome.terminal_response_event_id is not None
-            and self.terminal_turn_committed is not None
-        ):
-
-            async def publish_committed_terminal() -> None:
-                assert self.terminal_turn_committed is not None
-                assert outcome.terminal_response_event_id is not None
-                await self.terminal_turn_committed(
-                    delivery_id,
-                    outcome.terminal_response_event_id,
-                    outcome.committed_terminal,
-                )
-
-            await run_coroutine_until_complete(
-                publish_committed_terminal(),
-            )
+        if outcome.committed_terminal is not None and self.terminal_turn_committed is not None:
+            await run_coroutine_until_complete(self.terminal_turn_committed(outcome.committed_terminal))
         if outcome.propagate_cancellation is not None:
             raise outcome.propagate_cancellation
         return event_id
@@ -839,7 +819,7 @@ class MatrixDeliveryWorker:
                     if outcome is None:
                         failed_deliveries.add((delivery.delivery_id, delivery.stage))
                         continue
-                    sent = await self._finish_flush(delivery.delivery_id, outcome)
+                    sent = await self._finish_flush(outcome)
                 except Exception:
                     logger.exception(
                         "matrix_delivery_recovery_failed",

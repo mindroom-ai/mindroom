@@ -332,7 +332,8 @@ class EditRegenerator:
         Its claim waits for the conversation, which another reply of this agent
         holds for as long as that reply runs, so the lane does not wait for it.
         A regeneration that ends with no span owning its edit settles the edit
-        itself, unless its claim was deferred to the wake that retries it.
+        itself, unless its claim was deferred to the wake that retries it or
+        another instance took the replies over.
         """
         claimed = False
         commit_edit = request.on_reply_claimed

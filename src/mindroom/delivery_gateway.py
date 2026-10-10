@@ -950,10 +950,9 @@ class DeliveryGateway:
 
         return self._response_delivery(send, handoff=None)
 
-    async def _publish_terminal_turn(self, turn_id: str, event_id: str, committed: TerminalTurnWrite | None) -> None:
+    async def _publish_terminal_turn(self, committed: TerminalTurnWrite) -> None:
         """Publish the transaction's exact proof through the ledger's conflict owner."""
-        del turn_id, event_id
-        if self.deps.terminal_turn_committed is None or committed is None:
+        if self.deps.terminal_turn_committed is None:
             return
         record = TurnRecordCodec._from_ledger_record(committed.index_event_ids[0], json.loads(committed.record_json))
         if record is not None:
