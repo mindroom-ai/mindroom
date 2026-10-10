@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { requestConnection } from "./request";
+import { type RequestErrorMessages, requestConnection } from "./request";
 import type { EgressCredentialService } from "./types";
 
 function statusLabel(service: EgressCredentialService): string {
@@ -27,10 +27,12 @@ function EgressServiceRow({
   path,
   service,
   onChanged,
+  errorMessages,
 }: {
   path: string;
   service: EgressCredentialService;
   onChanged: () => void;
+  errorMessages?: RequestErrorMessages;
 }) {
   const [editing, setEditing] = useState(false);
   const [secret, setSecret] = useState("");
@@ -55,9 +57,13 @@ function EgressServiceRow({
     setBusy("save");
     setError(null);
     try {
-      await requestConnection<void>(path, controller.signal, "PUT", {
-        secret,
-      });
+      await requestConnection<void>(
+        path,
+        controller.signal,
+        "PUT",
+        { secret },
+        errorMessages,
+      );
       if (controller.signal.aborted) return;
       closeEditor();
       onChanged();
@@ -80,7 +86,13 @@ function EgressServiceRow({
     setBusy("remove");
     setError(null);
     try {
-      await requestConnection<void>(path, controller.signal, "DELETE");
+      await requestConnection<void>(
+        path,
+        controller.signal,
+        "DELETE",
+        undefined,
+        errorMessages,
+      );
       if (!controller.signal.aborted) onChanged();
     } catch (cause) {
       if (!controller.signal.aborted)
@@ -203,9 +215,11 @@ function EgressServiceRow({
           <DialogHeader>
             <DialogTitle>Remove {keyLabel}?</DialogTitle>
             <DialogDescription>
-              {service.is_shared
-                ? "This deletes the shared key. Everyone using this agent loses access to this service until a key is set again."
-                : "This deletes your saved key. Your agent loses access to this service until you set a key again."}
+              {service.is_shared === null
+                ? "This deletes the saved key. The agent loses access to this service until a key is set again."
+                : service.is_shared
+                  ? "This deletes the shared key. Everyone using this agent loses access to this service until a key is set again."
+                  : "This deletes your saved key. Your agent loses access to this service until you set a key again."}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -242,10 +256,13 @@ function secretPathFor(target: SecretTarget, serviceName: string): string {
 export function EgressServiceRows({
   services,
   onChanged,
+  errorMessages,
   ...target
 }: SecretTarget & {
   services: EgressCredentialService[];
   onChanged: () => void;
+  /** Wording for 403 and 404 responses outside the Connections portal. */
+  errorMessages?: RequestErrorMessages;
 }) {
   return (
     <ul>
@@ -255,6 +272,7 @@ export function EgressServiceRows({
           path={secretPathFor(target, service.name)}
           service={service}
           onChanged={onChanged}
+          errorMessages={errorMessages}
         />
       ))}
     </ul>

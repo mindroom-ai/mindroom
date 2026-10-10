@@ -43,7 +43,8 @@ export interface EgressCredentialService {
   name: string;
   display_name: string;
   description: string;
-  is_shared: boolean;
+  /** `null` when the caller cannot tell whether the key is shared. */
+  is_shared: boolean | null;
   can_manage: boolean;
   configured: boolean;
   updated_at: string | null;

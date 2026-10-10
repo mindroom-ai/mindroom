@@ -2,11 +2,13 @@ import {
   type FormEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { EgressServiceRows } from "@/connections/EgressServiceRows";
+import type { RequestErrorMessages } from "@/connections/request";
 import type { EgressCredentialService } from "@/connections/types";
 import {
   API_ENDPOINTS,
@@ -25,10 +27,25 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { useConfigStore } from "@/store/configStore";
+import {
+  type Agent,
+  type Config,
+  resolveEffectiveDefaultTools,
+} from "@/types/config";
 
 const NOT_RUNNING_MESSAGE =
   "Egress broker is not running. Set MINDROOM_EGRESS_BROKER_PORT and MINDROOM_EGRESS_BROKER_URL.";
 const LOG_ERROR_MESSAGE = "Could not load the request log. Try again.";
+const LOG_TIMEOUT_MS = 30_000;
+const GLOBAL_OPTION = "Global (unscoped agents)";
+// Brokered traffic only exists for agents that can run commands.
+const EGRESS_TOOLS = ["shell", "python"];
+const SECRET_ERROR_MESSAGES: RequestErrorMessages = {
+  forbidden: "You are not allowed to change egress keys.",
+  notFound:
+    "This service is no longer configured. Reload the page to update the list.",
+};
 
 interface BrokerService {
   name: string;
@@ -72,8 +89,20 @@ const LOG_COLUMNS = [
   "Duration",
 ];
 
+const NO_FILTERS: LogFilters = { agent: "", host: "", service: "" };
+
 function errorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message ? cause.message : fallback;
+}
+
+function canUseEgress(agent: Agent, defaults: Config["defaults"]): boolean {
+  const inherited =
+    agent.include_default_tools === false
+      ? []
+      : resolveEffectiveDefaultTools(defaults);
+  return [...agent.tools, ...inherited].some((tool) =>
+    EGRESS_TOOLS.includes(tool),
+  );
 }
 
 function ServiceSection({ agentName }: { agentName: string | null }) {
@@ -90,13 +119,14 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
         withAgentName(API_ENDPOINTS.egressBroker.services, agentName),
       );
       if (request !== latest.current) return;
-      // Dashboard keys are never per-user: with no agent they are the shared
-      // secrets, so the dashboard operator manages every service.
+      // The dashboard operator manages every service. Without an agent the
+      // keys are the shared ones; for a selected agent the API does not report
+      // its scope, so the wording stays neutral.
       setServices(
         payload.services.map((service) => ({
           ...service,
           display_name: service.display_name ?? service.name,
-          is_shared: agentName === null,
+          is_shared: agentName === null ? true : null,
           can_manage: true,
         })),
       );
@@ -146,6 +176,7 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
             }
             services={services}
             onChanged={() => void load()}
+            errorMessages={SECRET_ERROR_MESSAGES}
           />
         </div>
       )}
@@ -209,12 +240,8 @@ function LogTable({ records }: { records: AuditRecord[] }) {
   );
 }
 
-function LogSection({ agentName }: { agentName: string | null }) {
-  const [filters, setFilters] = useState<LogFilters>({
-    agent: agentName ?? "",
-    host: "",
-    service: "",
-  });
+function LogSection() {
+  const [filters, setFilters] = useState<LogFilters>(NO_FILTERS);
   const [log, setLog] = useState<LogState>({ kind: "loading" });
   const operation = useRef<AbortController | null>(null);
 
@@ -222,6 +249,10 @@ function LogSection({ agentName }: { agentName: string | null }) {
     operation.current?.abort();
     const controller = new AbortController();
     operation.current = controller;
+    // A newer request or an unmount replaces `operation.current`; a timeout
+    // only aborts the controller, so it still reaches the error state.
+    const superseded = () => operation.current !== controller;
+    const timeout = setTimeout(() => controller.abort(), LOG_TIMEOUT_MS);
     setLog({ kind: "loading" });
     try {
       const response = await fetch(
@@ -232,7 +263,7 @@ function LogSection({ agentName }: { agentName: string | null }) {
         }),
         { credentials: "same-origin", signal: controller.signal },
       );
-      if (controller.signal.aborted) return;
+      if (superseded()) return;
       if (response.status === 409) {
         setLog({ kind: "not-running" });
         return;
@@ -242,18 +273,20 @@ function LogSection({ agentName }: { agentName: string | null }) {
         return;
       }
       const payload = (await response.json()) as { records: AuditRecord[] };
-      if (!controller.signal.aborted)
-        setLog({ kind: "ready", records: payload.records });
+      if (!superseded()) setLog({ kind: "ready", records: payload.records });
     } catch {
-      if (!controller.signal.aborted) setLog({ kind: "error" });
+      if (!superseded()) setLog({ kind: "error" });
+    } finally {
+      clearTimeout(timeout);
     }
   }, []);
 
   useEffect(() => {
-    void load(filters);
-    return () => operation.current?.abort();
-    // Filters apply on refresh, so only the first load runs from this effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void load(NO_FILTERS);
+    return () => {
+      operation.current?.abort();
+      operation.current = null;
+    };
   }, [load]);
 
   const submit = (event: FormEvent) => {
@@ -263,7 +296,7 @@ function LogSection({ agentName }: { agentName: string | null }) {
 
   const filterInput = (field: keyof LogFilters, label: string) => (
     <Input
-      aria-label={label}
+      aria-label={`Filter by ${label.toLowerCase()}`}
       placeholder={label}
       className="h-9 w-40"
       value={filters[field]}
@@ -308,12 +341,39 @@ function LogSection({ agentName }: { agentName: string | null }) {
         </Alert>
       )}
       {log.kind === "ready" && <LogTable records={log.records} />}
+      {/* The CA only exists while the broker runs, so the link would 409. */}
+      {log.kind === "not-running" ? (
+        <Button size="sm" variant="outline" disabled>
+          <Download className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+          Download CA certificate
+        </Button>
+      ) : (
+        <Button asChild size="sm" variant="outline">
+          <a href={API_ENDPOINTS.egressBroker.caPem} download>
+            <Download className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+            Download CA certificate
+          </a>
+        </Button>
+      )}
     </section>
   );
 }
 
-/** Shared egress broker secrets, the request log, and the CA download. */
-export function EgressBroker({ agentName }: { agentName: string | null }) {
+/** Egress broker secrets for the global scope or one agent, plus its request log. */
+export function EgressBroker() {
+  const agents = useConfigStore((state) => state.agents);
+  const defaults = useConfigStore((state) => state.config?.defaults);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const eligibleAgents = useMemo(
+    () => agents.filter((agent) => canUseEgress(agent, defaults)),
+    [agents, defaults],
+  );
+  // An agent that disappears from the config falls back to the global scope.
+  const agentName = eligibleAgents.some((agent) => agent.id === selected)
+    ? selected
+    : null;
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -324,14 +384,30 @@ export function EgressBroker({ agentName }: { agentName: string | null }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        <ServiceSection agentName={agentName} />
-        <LogSection agentName={agentName} />
-        <Button asChild size="sm" variant="outline">
-          <a href={API_ENDPOINTS.egressBroker.caPem} download>
-            <Download className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
-            Download CA certificate
-          </a>
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="egress-secret-target" className="text-sm font-medium">
+            Secrets for
+          </label>
+          <select
+            id="egress-secret-target"
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            value={agentName ?? ""}
+            onChange={(event) => setSelected(event.target.value || null)}
+          >
+            <option value="">{GLOBAL_OPTION}</option>
+            {eligibleAgents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.display_name || agent.id}
+              </option>
+            ))}
+          </select>
+        </div>
+        {/* Keyed so an unsaved secret never carries over to another target. */}
+        <ServiceSection
+          key={agentName === null ? "global" : `agent:${agentName}`}
+          agentName={agentName}
+        />
+        <LogSection />
       </CardContent>
     </Card>
   );

@@ -11,9 +11,7 @@ vi.mock("@/components/ui/use-toast", () => ({
 // The egress panel has its own tests and fetches on mount, which would consume
 // the ordered fetch mocks below.
 vi.mock("./EgressBroker", () => ({
-  EgressBroker: ({ agentName }: { agentName: string | null }) => (
-    <div data-testid="egress-broker" data-agent={String(agentName)} />
-  ),
+  EgressBroker: () => <div data-testid="egress-broker" />,
 }));
 
 global.fetch = vi.fn();
@@ -71,7 +69,7 @@ describe("Credentials", () => {
     });
   });
 
-  it("renders the shared egress broker panel without an agent", async () => {
+  it("renders the egress broker panel", async () => {
     (global.fetch as any).mockResolvedValue({
       ok: true,
       json: async () => [],
@@ -80,10 +78,7 @@ describe("Credentials", () => {
     render(<Credentials />);
 
     await screen.findByText(/No services found yet/);
-    expect(screen.getByTestId("egress-broker")).toHaveAttribute(
-      "data-agent",
-      "null",
-    );
+    expect(screen.getByTestId("egress-broker")).toBeInTheDocument();
   });
 
   it("hides credentials by default and reveals them on demand", async () => {

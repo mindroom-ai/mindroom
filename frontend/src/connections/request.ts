@@ -1,3 +1,9 @@
+/** Replacement messages for callers outside the Connections portal. */
+export interface RequestErrorMessages {
+  forbidden?: string;
+  notFound?: string;
+}
+
 /**
  * Send a same-origin Connections API request and parse its JSON response.
  *
@@ -5,6 +11,7 @@
  * @param signal - Abort signal for canceling the request.
  * @param method - HTTP method.
  * @param body - JSON object for POST and PUT requests, empty by default.
+ * @param messages - Optional wording for 403 and 404 responses.
  * @returns A `Promise<T>` that resolves to the parsed response payload, or
  * `undefined` for an empty `204` response.
  */
@@ -13,6 +20,7 @@ export async function requestConnection<T>(
   signal: AbortSignal,
   method = "GET",
   body: object = {},
+  messages: RequestErrorMessages = {},
 ): Promise<T> {
   let response: Response;
   try {
@@ -35,7 +43,11 @@ export async function requestConnection<T>(
       "Your session has expired. Reload this page to sign in again.",
     );
   if (response.status === 403)
-    throw new Error("Connections are not available for this account.");
+    throw new Error(
+      messages.forbidden ?? "Connections are not available for this account.",
+    );
+  if (response.status === 404 && messages.notFound)
+    throw new Error(messages.notFound);
   if (response.status === 422) {
     // Validation messages are written for the user and never echo submitted values.
     const detail = await response

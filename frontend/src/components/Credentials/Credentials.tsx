@@ -655,7 +655,7 @@ export function Credentials() {
           </Card>
         ) : null}
 
-        <EgressBroker agentName={null} />
+        <EgressBroker />
       </div>
     </div>
   );

@@ -271,4 +271,75 @@ describe("egress service rows", () => {
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.getByText("Managed by credential managers")).toBeVisible();
   });
+
+  it("says the key is not shared when the scope is unknown", async () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[{ ...openai, is_shared: null }]}
+        onChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove OpenAI API key" }),
+    );
+    expect(
+      await screen.findByText(
+        "This deletes the saved key. The agent loses access to this service until a key is set again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a forbidden save with the connections wording by default", async () => {
+    vi.mocked(fetch).mockImplementation(async () => json({}, 403));
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[github]}
+        onChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Set GitHub API key" }));
+    fireEvent.change(screen.getByLabelText("GitHub API key"), {
+      target: { value: "abc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(
+      await screen.findByText(
+        "Connections are not available for this account.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("uses the supplied wording for 403 and 404 responses", async () => {
+    render(
+      <EgressServiceRows
+        secretPath={(name) => `/custom/${name}/secret`}
+        errorMessages={{ forbidden: "No access.", notFound: "Gone." }}
+        services={[openai]}
+        onChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove OpenAI API key" }),
+    );
+    vi.mocked(fetch).mockImplementation(async () => json({}, 404));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Remove",
+      }),
+    );
+    expect(await screen.findByText("Gone.")).toBeInTheDocument();
+
+    vi.mocked(fetch).mockImplementation(async () => json({}, 403));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove OpenAI API key" }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Remove",
+      }),
+    );
+    expect(await screen.findByText("No access.")).toBeInTheDocument();
+  });
 });
