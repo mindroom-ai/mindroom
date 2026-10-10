@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.worker_computer.browser_proxy import BrowserEgress
 
     from .conftest import RawResponse, Upstream, UpstreamCA
 
@@ -556,8 +557,8 @@ async def test_dial_policy_follows_the_primary_proxy_env(
     """The broker dials upstreams through the primary's HTTPS_PROXY, honoring its NO_PROXY, and directly without them."""
     policies: list[DialPolicy] = []
 
-    def dial_policy(**kwargs: object) -> DialPolicy:
-        policies.append(DialPolicy(**kwargs))  # type: ignore[arg-type]
+    def dial_policy(*, egress: BrowserEgress | None = None) -> DialPolicy:
+        policies.append(DialPolicy(egress=egress))
         return policies[-1]
 
     monkeypatch.setattr(service, "DialPolicy", dial_policy)
@@ -572,27 +573,52 @@ async def test_dial_policy_follows_the_primary_proxy_env(
     assert policy.egress.upstream_for(80) is None
 
 
+@pytest.mark.usefixtures("no_proxy_env")
+@pytest.mark.parametrize(
+    ("env", "variable", "value"),
+    [
+        ({"HTTPS_PROXY": "socks5://x:1080"}, "HTTPS_PROXY", "socks5://x:1080"),
+        ({"https_proxy": "socks5://x:1080"}, "HTTPS_PROXY", "socks5://x:1080"),
+        ({"HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, "HTTPS_PROXY", "hunter2"),
+        ({"HTTP_PROXY": "http://proxy:3128/path"}, "HTTP_PROXY", "/path"),
+        # HTTP_PROXY alone leaves https without a proxy, but its own variable is the one that is broken.
+        ({"HTTP_PROXY": "ftp://proxy:3128", "HTTPS_PROXY": "http://proxy:3128"}, "HTTP_PROXY", "ftp://proxy"),
+        ({"ALL_PROXY": "socks5://x:1080"}, "ALL_PROXY", "socks5://x:1080"),
+        ({"ALL_PROXY": "http://user:hunter2@proxy:3128", "HTTP_PROXY": "http://proxy:3128"}, "ALL_PROXY", "hunter2"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_operator_proxy_error_stops_startup(
+async def test_unusable_operator_proxy_stops_startup(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    variable: str,
+    value: str,
 ) -> None:
-    """A proxy configuration error refuses to start the broker, rather than dialing around the operator proxy."""
-
-    def refuse(*_args: object, **_kwargs: object) -> None:
-        msg = "Browser cannot use https_proxy: it is not a valid proxy URL."
-        raise ValueError(msg)
-
-    monkeypatch.setattr(service, "browser_egress", refuse)
-    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
-    with pytest.raises(ValueError, match="Browser cannot use https_proxy"):
+    """A proxy variable the broker cannot use refuses startup, naming the variable and never its value."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()), **env)
+    with pytest.raises(ValueError, match=variable) as refused:
         async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
             pytest.fail("the broker must not start")
+    assert "only http:// or https:// proxies without credentials or paths" in str(refused.value)
+    assert value not in str(refused.value)
     assert _broker_threads() == []
     assert active_audit_log() is None
     assert not (tmp_path / "mindroom_data" / "egress_broker").exists()
+
+
+@pytest.mark.usefixtures("no_proxy_env")
+@pytest.mark.asyncio
+async def test_unused_all_proxy_does_not_stop_startup(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """ALL_PROXY only fills in schemes without their own variable, so a broken one beside both is never used."""
+    env = {"HTTP_PROXY": "http://proxy:3128", "HTTPS_PROXY": "http://proxy:3128", "ALL_PROXY": "socks5://x:1080"}
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()), **env)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
+        assert active_ca_pem() is not None
 
 
 @pytest.mark.asyncio

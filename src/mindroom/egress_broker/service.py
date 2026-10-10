@@ -25,7 +25,7 @@ from mindroom.runtime_env_policy import (
     EGRESS_BROKER_ENV_BY_KEY,
     credentials_encryption_key_value,
 )
-from mindroom.worker_computer.browser_proxy import browser_egress
+from mindroom.worker_computer.browser_proxy import browser_egress, proxy_env_setting
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 __all__ = [
     "active_audit_log",
@@ -122,6 +123,33 @@ def _broker_settings(runtime_paths: RuntimePaths) -> _BrokerSettings | None:
     )
 
 
+def _operator_egress(runtime_paths: RuntimePaths) -> BrowserEgress:
+    """Return the operator proxies the primary's own env names, refusing any it names but cannot use.
+
+    ``browser_egress`` ignores an unsupported proxy URL and dials directly. The broker must not: where the
+    operator proxy is the only route out, a silent direct dial would just fail, and where it is a policy,
+    it would be bypassed. So a proxy variable that is set but leaves its scheme without an upstream stops startup.
+    The error names the variable and never its value, which may hold credentials.
+    """
+    envs = (runtime_paths.process_env, os.environ)
+    egress = browser_egress(*envs, egress_control=False)
+    upstreams = {"http": egress.upstream_for(80), "https": egress.upstream_for(443)}
+    for scheme, variable in (("http", "HTTP_PROXY"), ("https", "HTTPS_PROXY")):
+        if proxy_env_setting(envs, variable.lower()) and upstreams[scheme] is None:
+            raise ValueError(_unusable_proxy_message(variable))
+    # Past the checks above, a scheme without an upstream has no variable of its own, so ALL_PROXY was its fallback.
+    if proxy_env_setting(envs, "all_proxy") and None in upstreams.values():
+        raise ValueError(_unusable_proxy_message("ALL_PROXY"))
+    return egress
+
+
+def _unusable_proxy_message(variable: str) -> str:
+    return (
+        f"{variable} cannot be used by the egress broker: "
+        "it supports only http:// or https:// proxies without credentials or paths."
+    )
+
+
 def manage_url(runtime_paths: RuntimePaths) -> str | None:
     """Return where a user sets a missing egress secret: the personal page behind trusted upstream auth, else the dashboard."""
     public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip().rstrip("/")
@@ -183,9 +211,7 @@ class _BrokerService:
     def start(self) -> None:
         """Load or create the broker state, then block until the listener is bound; re-raise the bind error."""
         # Upstream dials follow the primary's own HTTPS_PROXY and NO_PROXY, like its other outbound traffic.
-        dial_policy = DialPolicy(
-            egress=browser_egress(self._runtime_paths.process_env, os.environ, egress_control=False),
-        )
+        dial_policy = DialPolicy(egress=_operator_egress(self._runtime_paths))
         state_dir = self._runtime_paths.storage_root / "egress_broker"
         key = credentials_encryption_key_value(self._runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV))
         ca = BrokerCA.load_or_create(state_dir, key_password=None if key is None else key.encode())

@@ -88,7 +88,7 @@ class BrowserEgress:
         return False
 
 
-def _env_setting(envs: tuple[Mapping[str, str], ...], name: str) -> str | None:
+def proxy_env_setting(envs: tuple[Mapping[str, str], ...], name: str) -> str | None:
     """Return one proxy variable, letting later mappings and lowercase spellings win like curl."""
     setting: str | None = None
     for env in envs:
@@ -139,12 +139,12 @@ def browser_egress(
     """
     envs = (runtime_env, browser_env)
     no_proxy = tuple(
-        entry for raw in (_env_setting(envs, "no_proxy") or "").split(",") if (entry := raw.strip().lower())
+        entry for raw in (proxy_env_setting(envs, "no_proxy") or "").split(",") if (entry := raw.strip().lower())
     )
     configured = {
-        name: value for name in ("all_proxy", "http_proxy", "https_proxy") if (value := _env_setting(envs, name))
+        name: value for name in ("all_proxy", "http_proxy", "https_proxy") if (value := proxy_env_setting(envs, name))
     }
-    unsupported = [name for name in ("auto_proxy", "socks_server") if _env_setting(envs, name) is not None]
+    unsupported = [name for name in ("auto_proxy", "socks_server") if proxy_env_setting(envs, name) is not None]
     if egress_control:
         if unsupported:
             msg = f"Browser cannot follow {unsupported[0]}; set all_proxy to the one HTTP(S) egress proxy to use."
@@ -224,7 +224,8 @@ async def open_upstream_tunnel(
     raise OSError(msg)
 
 
-def _is_loopback(address: _IPAddress) -> bool:
+def is_loopback(address: _IPAddress) -> bool:
+    """Return whether an address is loopback, including an IPv4-mapped IPv6 loopback address."""
     return address.is_loopback or (
         isinstance(address, ipaddress.IPv6Address)
         and address.ipv4_mapped is not None
@@ -381,13 +382,13 @@ class BrowserDestinationProxy:
         # An upstream proxy's loopback is another host, and NO_PROXY applies only to trusted private browsing.
         return (
             upstream is None
-            or _is_loopback(address)
+            or is_loopback(address)
             or (self._allow_private_networks and self._egress.bypasses(host, address))
         )
 
     async def _connect(self, host: str, port: int) -> tuple[StreamReader, StreamWriter]:
         addresses = await self._resolve(host, port)
-        if port == self._port and any(_is_loopback(address) for address in addresses):
+        if port == self._port and any(is_loopback(address) for address in addresses):
             msg = "Browser proxy cannot connect to itself."
             raise ValueError(msg)
         upstream = self._egress.upstream_for(port)

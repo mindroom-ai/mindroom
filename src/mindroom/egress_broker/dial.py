@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import socket
 import ssl
 from dataclasses import dataclass
@@ -12,9 +11,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.server_fetch_url import validated_connect_addresses
-from mindroom.worker_computer.browser_proxy import UpstreamTunnelRefusedError, open_upstream_tunnel
+from mindroom.worker_computer.browser_proxy import UpstreamTunnelRefusedError, is_loopback, open_upstream_tunnel
 
 if TYPE_CHECKING:
+    import ipaddress
+
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
     _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -63,14 +64,6 @@ def _operator_proxy_tls() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
-def _is_loopback(address: _IPAddress) -> bool:
-    return address.is_loopback or (
-        isinstance(address, ipaddress.IPv6Address)
-        and address.ipv4_mapped is not None
-        and address.ipv4_mapped.is_loopback
-    )
-
-
 async def _dial(
     host: str,
     address: _IPAddress,
@@ -82,7 +75,7 @@ async def _dial(
     """Connect to one validated address, directly or through the operator proxy, then handshake TLS for `host`."""
     upstream = None
     # An operator proxy's loopback is another host, and NO_PROXY names destinations that skip it.
-    if (egress := policy.egress) is not None and not _is_loopback(address) and not egress.bypasses(host, address):
+    if (egress := policy.egress) is not None and not is_loopback(address) and not egress.bypasses(host, address):
         upstream = egress.upstream_for(port)
     if upstream is None:
         # Dial the validated IP address, not the hostname
