@@ -47,7 +47,8 @@ spec:
 {{- end }}
 {{- if .Values.networkPolicy.create }}
 ---
-# Additive to the control-plane ingress policy: admit workers to the broker listener port.
+# Additive to the control-plane ingress policy: admit workers to the broker listener port,
+# or only the approved-egress proxy when Squid fronts the broker.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -62,12 +63,21 @@ spec:
     - Ingress
   ingress:
     - from:
+        {{- if include "mindroom-runtime.egressBrokerChainMode" . }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 14 }}
+        {{- else }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $workerNamespace | quote }}
           podSelector:
             matchLabels:
               {{- include "mindroom-runtime.workerPodLabels" . | nindent 14 }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.egressBroker.port }}

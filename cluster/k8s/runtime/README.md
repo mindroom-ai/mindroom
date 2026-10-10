@@ -843,10 +843,16 @@ When `networkPolicy.create` is true, a `<fullname>-egress-broker` NetworkPolicy 
 When the chart's worker egress NetworkPolicy exists (`egressProxy.enabled` with `egressProxy.networkPolicy.create=true`), a `<fullname>-egress-broker-workers` NetworkPolicy in the worker namespace adds egress from workers to the broker port on the control-plane pod.
 Without that policy workers already have unrestricted egress, so the chart adds no worker rule.
 
+With `approvedEgress.enabled` as well, workers keep the approved egress proxy (Squid) as their first hop, so Squid still enforces per-worker grants by pod IP.
+The chart then renders Squid's parent chain to the broker Service and port itself, without `approvedEgress.parentProxy.enabled`, the same way `parentProxy` chains Agent Vault: requests that carry a token go to the broker, and `parentProxy.bypassDomains` still skip it.
+`MINDROOM_EGRESS_BROKER_URL` is the Squid URL, the broker NetworkPolicy admits only the approved egress pods instead of workers, and no worker egress rule is added.
+Changing `egressBroker.port` rolls the Squid pod.
+Leave `approvedEgress.parentProxy.host` at its default in this setup, because the chart rejects a custom parent instead of dropping it silently.
+
 `egressBroker.enabled` requires `workers.backend=kubernetes`, and `egressBroker.port` must differ from `runtime.apiPort` and `scriptGateway.port`.
 It cannot be combined with `workers.kubernetes.agentVault`.
 To migrate, enter secrets on the egress page first, then disable `workers.kubernetes.agentVault` in the same upgrade that enables `egressBroker`.
-The broker connects to the internet directly from the primary pod.
+The broker connects directly from the primary pod, unless the primary's `HTTPS_PROXY`/`NO_PROXY` routes it through an operator proxy.
 If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
 The broker shares the primary's lifecycle, so a primary restart interrupts brokered connections that are in flight.
 

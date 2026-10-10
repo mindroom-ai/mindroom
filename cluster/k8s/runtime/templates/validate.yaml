@@ -404,6 +404,9 @@
 {{- if or (lt $parentProxyPort 1) (gt $parentProxyPort 65535) -}}
 {{- fail "approvedEgress.parentProxy.port must be between 1 and 65535 when approvedEgress.parentProxy.enabled=true" -}}
 {{- end -}}
+{{- end -}}
+{{- /* Bypass domains also shape the broker chain, which renders without parentProxy.enabled. */ -}}
+{{- if include "mindroom-runtime.approvedEgressParentEnabled" . -}}
 {{- $bypassDomains := .Values.approvedEgress.parentProxy.bypassDomains -}}
 {{- if not (kindIs "invalid" $bypassDomains) -}}
 {{- if not (kindIs "slice" $bypassDomains) -}}
@@ -429,6 +432,9 @@
 {{- end -}}
 {{- if or (eq (int .Values.egressBroker.port) (int .Values.runtime.apiPort)) (eq (int .Values.egressBroker.port) (int .Values.scriptGateway.port)) -}}
 {{- fail "egressBroker.port must differ from runtime.apiPort and scriptGateway.port" -}}
+{{- end -}}
+{{- if and (include "mindroom-runtime.egressBrokerChainMode" .) .Values.approvedEgress.parentProxy.enabled (ne .Values.approvedEgress.parentProxy.host "agent-vault") -}}
+{{- fail "approvedEgress.parentProxy.host must stay at its default when egressBroker.enabled; the chart chains Squid to the egress broker" -}}
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}

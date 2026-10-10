@@ -452,7 +452,18 @@ cp -a "$1/." "$2/"
 /etc/squid/mindroom-egress-chain.conf
 {{- end -}}
 
+{{- /* Whether Squid chains token-bearing requests to a parent: the operator's Agent Vault parent or, in chain mode, the egress broker. */ -}}
+{{- define "mindroom-runtime.approvedEgressParentEnabled" -}}
+{{- if or .Values.approvedEgress.parentProxy.enabled (include "mindroom-runtime.egressBrokerChainMode" .) -}}true{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.approvedEgressSquidConfig" -}}
+{{- $parentHost := .Values.approvedEgress.parentProxy.host -}}
+{{- $parentPort := .Values.approvedEgress.parentProxy.port -}}
+{{- if include "mindroom-runtime.egressBrokerChainMode" . -}}
+{{- $parentHost = include "mindroom-runtime.egressBrokerHost" . -}}
+{{- $parentPort = .Values.egressBroker.port -}}
+{{- end -}}
 include /etc/squid/squid.conf
 
 acl egress_has_token req_header Proxy-Authorization .
@@ -460,12 +471,12 @@ acl egress_has_token req_header Proxy-Authorization .
 acl egress_bypass_parent dstdomain -n {{ join " " . }}
 {{- end }}
 dns_defnames on
-cache_peer {{ .Values.approvedEgress.parentProxy.host }} parent {{ .Values.approvedEgress.parentProxy.port }} 0 no-query no-digest login=PASSTHRU
+cache_peer {{ $parentHost }} parent {{ $parentPort }} 0 no-query no-digest login=PASSTHRU
 {{- if .Values.approvedEgress.parentProxy.bypassDomains }}
-cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny egress_bypass_parent
+cache_peer_access {{ $parentHost }} deny egress_bypass_parent
 {{- end }}
-cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} allow egress_has_token
-cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny all
+cache_peer_access {{ $parentHost }} allow egress_has_token
+cache_peer_access {{ $parentHost }} deny all
 nonhierarchical_direct off
 {{- if .Values.approvedEgress.parentProxy.bypassDomains }}
 always_direct allow egress_bypass_parent
