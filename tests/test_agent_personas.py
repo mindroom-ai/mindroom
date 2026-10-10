@@ -110,7 +110,7 @@ async def test_persona_system_message_is_verbatim(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> None:
-    """A compacted session's summary reaches an authored child beside its turn, leaving its prompt byte for byte."""
+    """A compacted session's summary follows an authored child's verbatim prompt, as Agno adds it for configured agents."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
     identity = build_execution_identity_from_runtime_context(runtime)
     old_run = RunOutput(
@@ -144,25 +144,24 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
         runtime_paths=runtime.runtime_paths,
         execution_identity=identity,
     ) as scope_context:
-        prepared = await ai._prepare_agent_and_prompt(
-            replace(_turn_context(), persona=inline_persona("P", None)),
+        turn = replace(_turn_context(), persona=inline_persona("P", None))
+        options = {"runtime_paths": runtime.runtime_paths, "config": runtime.config, "execution_identity": identity}
+        prepared = await ai._prepare_agent_and_prompt(turn, prompt="task", scope_context=scope_context, **options)
+        # A retried turn reuses the agent its first attempt prepared.
+        retried = await ai._prepare_agent_and_prompt(
+            turn,
             prompt="task",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=identity,
             scope_context=scope_context,
+            reusable_agent=prepared.agent,
+            **options,
         )
 
-    message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
+    message = await retried.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
     assert message is not None
-    assert message.content == "P"
-    *context, current = prepared.messages
-    assert "task" in str(current.content)
-    [summary] = [item for item in context if "<summary_of_previous_interactions>" in str(item.content)]
-    assert "<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>" in str(
-        summary.content,
-    )
-    assert summary.add_to_agent_memory is False
+    content = str(message.content)
+    assert content.startswith("P\n\n")
+    assert content.count("<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>") == 1
+    assert retried.prepared_history.prepared_context_tokens == prepared.prepared_history.prepared_context_tokens
 
 
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:

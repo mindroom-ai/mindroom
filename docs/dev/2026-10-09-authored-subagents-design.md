@@ -30,7 +30,7 @@ A persona is a typed value with these fields:
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `system_prompt` | string, 1 byte to 64 KiB UTF-8 | required | The child's entire system message, sent byte for byte |
+| `system_prompt` | string, 1 byte to 64 KiB UTF-8 | required | The child's entire system message, sent byte for byte; once compaction summarizes a standard child's older turns, that summary follows it |
 | `tools` | list of strings or null | null | Toolkit names (`gmail`) or single functions (`gmail.search_emails`); null means every tool the caller has, except for workflow participants, where it means none |
 | `model` | configured model alias or null | null | Same rule as today's `run_subagent(model=...)` |
 | `mode` | `standard` or `minimal` | `standard` | Same rule as today's `run_subagent(minimal=...)` |
@@ -128,6 +128,7 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 - The persona's `tools` compose with the existing `tool_function_filter` through each function's owning toolkit.
 - Agno learning is off and automatic memory recall is skipped, so no recalled memories enter the child's prompt; it uses memory only through memory tools in its subset, and delegated children never run automatic memory capture.
 - Session history stays on, so follow-ups see the child's earlier turns.
+  After compaction, a standard child's system message is the authored prompt followed by the summary block Agno adds for configured agents, so the summary also survives an approval resume, which replays the saved system message.
 - The task still arrives as the user message with the same per-turn framing delegated children receive today.
 
 ### Minimal personas
@@ -241,7 +242,7 @@ The primary reads profiles only through no-follow confinement with the count and
 ## Testing
 
 - Persona module: inline validation, profile parsing, invalid frontmatter, name rules, size and count caps, symlinked and non-regular files refused, and the tool-subset check against an effective caller tool list.
-- Agent construction: the system message equals the persona prompt byte for byte, including braces; only subset functions are visible; learning is off; minimal personas present the authored prompt and the extended Bash description.
+- Agent construction: the system message equals the persona prompt byte for byte, including braces, and a compacted session's summary follows it exactly once, including on a retried turn; only subset functions are visible; learning is off; minimal personas present the authored prompt and the extended Bash description.
 - Delegate tool: inline and profile start, self-only enforcement, parameter conflicts, profile overrides, follow-up after a profile edit keeps the snapshot, and restart recovery keeps the persona on both delegation paths.
 - Approvals: a standard persona pauses and resumes through the existing approval tests, and a minimal persona hides gated tools.
 - Workflows: the subset error closes the tool gap, participants write delegation records, a participant reused by two steps continues one session, gated tools are rejected or hidden as specified, and legacy revisions load, run, and update as `subagent` participants.
