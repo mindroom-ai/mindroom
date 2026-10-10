@@ -61,6 +61,7 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    SpanRecorder,
     assembled_function,
     lookup,
     pending_outcomes,
@@ -71,7 +72,6 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from pathlib import Path
 
     from agno.db.base import BaseDb
@@ -1138,24 +1138,6 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
         await runtime.shutdown()
 
 
-class _SpanRecorder:
-    """Stand in for the reply span's tool-call records, refusing every call once a Stop committed."""
-
-    def __init__(self, *, stopped: bool) -> None:
-        self.stopped = stopped
-        self.records: list[tuple[str, str, dict[str, object], object]] = []
-
-    async def started(self, tool_name: str, args: Mapping[str, object]) -> str | None:
-        if self.stopped:
-            raise asyncio.CancelledError
-        self.records.append(("started", tool_name, dict(args), None))
-        return "record-1"
-
-    async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
-        assert call_id == "record-1"
-        self.records.append(("finished", tool_name, dict(args), result))
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["waited", "released", "stopped"])
 async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path, case: str) -> None:
@@ -1183,7 +1165,7 @@ async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path
     )
     install_tool_job_execution(model)
     agent = Agent(id="leader", model=model, tools=[assembled_function(write_note)])
-    recorder = _SpanRecorder(stopped=case == "stopped")
+    recorder = SpanRecorder(stopped=case == "stopped")
     owner = build_execution_identity_from_runtime_context(context)
     try:
         async with execution_resources():

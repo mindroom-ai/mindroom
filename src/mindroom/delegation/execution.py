@@ -73,6 +73,7 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
+from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -774,8 +775,11 @@ async def _await_background_child(
     depth: int,
     wait_timeout: float | None,
     settle: Callable[[str], Awaitable[None]],
+    finished: Callable[[object], Awaitable[None]],
 ) -> None:
     """Hand a new child to its job, or find the job a crash left it with, then wait for it as the parent's call.
+
+    ``finished`` records on the reply what the parent's call returned.
 
     The parent's liveness claim ends once the job owns the child: the job claims liveness itself while it runs the
     child, and a parent claim held across the wait would block cancel cleanup.
@@ -795,13 +799,16 @@ async def _await_background_child(
             raise
         # Revoked access or a closed runtime ends this wait; the parent's call reports it.
         await settle(str(error))
+        await finished(str(error))
         return
     except BaseException:
         await background.release_wait(child.delegation_id, claim)
         raise
     try:
         result = await delegation_result(background, waited.job) if waited.claim is not None else None
-        await settle(result or format_job_handle(waited.job))
+        returned = result or format_job_handle(waited.job)
+        await settle(returned)
+        await finished(returned)
         if waited.claim is not None:
             await background.acknowledge_wait(child.delegation_id, waited.claim, source_event_id=source_event_id)
     finally:
@@ -1115,6 +1122,13 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     replace(call, tool_call_id=call.tool_call_id.removeprefix(prefix)) for call in approval_calls
                 )
             try:
+                # The reply records a background child's call before its job starts, as for any managed call: the
+                # child's own tools run unrecorded in its job, so a restart's account names the delegation.
+                finished = (
+                    await record_call(tool.tool_name or "run_subagent", application_arguments(tool.tool_args) or {})
+                    if background is not None
+                    else None
+                )
                 if fresh:
                     await start_child_turn(
                         child,
@@ -1127,6 +1141,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     # Persist the child before execution, with startup covered by cleanup.
                     await persist(state)
                 if background is not None:
+                    assert finished is not None
                     await _await_background_child(
                         background,
                         child,
@@ -1156,6 +1171,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             config=config,
                             runtime_paths=runtime_paths,
                         ),
+                        finished=finished,
                     )
                     return False
                 child_outcome = await _run_child(

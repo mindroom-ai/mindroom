@@ -4908,6 +4908,7 @@ depends_on = ["mindroom.constants"]
 path = "mindroom.tool_system.call_record"
 depends_on = []
 visibility = [
+    "mindroom.delegation.execution",
     "mindroom.reply_scope",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.runtime",
@@ -7009,6 +7010,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.error_handling",
     "mindroom.approval_tools",

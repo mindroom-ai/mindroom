@@ -394,3 +394,23 @@ async def awaiting_approval(runtime: ToolJobRuntime, job_id: str) -> BackgroundO
     await runtime.set_awaiting_approval(job_id, awaiting=True)
     await asyncio.Event().wait()
     raise AssertionError
+
+
+class SpanRecorder:
+    """Stand in for the reply span's tool-call records, refusing every call once a Stop committed."""
+
+    def __init__(self, *, stopped: bool) -> None:
+        self.stopped = stopped
+        self.records: list[tuple[str, str, dict[str, object], object]] = []
+
+    async def started(self, tool_name: str, args: Mapping[str, object]) -> str | None:
+        """Record a call before it runs, or refuse it after a Stop."""
+        if self.stopped:
+            raise asyncio.CancelledError
+        self.records.append(("started", tool_name, dict(args), None))
+        return "record-1"
+
+    async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+        """Record what a call returned."""
+        assert call_id == "record-1"
+        self.records.append(("finished", tool_name, dict(args), result))

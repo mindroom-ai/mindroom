@@ -52,6 +52,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     register_background_runtime,
 )
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -64,6 +65,7 @@ from tests.delegation_helpers import (
 )
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    SpanRecorder,
     intercept_job_saves,
     job_child,
     lookup,
@@ -450,6 +452,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         status = "denied" if approval == "denied" else "approved"
         cards.decision.set_result(BackgroundApprovalDecision(status, "Not now" if status == "denied" else None))
 
+    recorder = SpanRecorder(stopped=False)
     try:
         with (
             tool_runtime_context(
@@ -459,6 +462,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 ),
             ),
             queued_turn_signal_context(signal),
+            recording_tool_calls(recorder),
         ):
             current_parent = parent(
                 _call(
@@ -507,6 +511,17 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert "Exact child result" in first
                 assert child.subagent_id in first
             assert side_effects == (["written"] if approval == "approved" else [])
+            # The reply records the delegation before its job starts, and what the parent's call returned; the
+            # child's own tools run unrecorded in that job.
+            started, finished = recorder.records[:2]
+            assert started == ("started", "run_subagent", {"task": "Report", "agent_name": "code"}, None)
+            assert finished[:2] == ("finished", "run_subagent")
+            returned = str(finished[3])
+            if detach:
+                assert json.loads(returned)["job_id"] == child.delegation_id
+            else:
+                assert ("cancelled" if approval == "cancelled" else "Exact child result") in returned
+            assert "write_report" not in {record[1] for record in recorder.records}
             saved = await lookup(runtime, child.delegation_id, owner=identity, depth=0)
             assert saved.adapter["child"]["status"] == saved.status
             # Only the reader's own reply consumed the outcome, so that reply alone can still recover it.

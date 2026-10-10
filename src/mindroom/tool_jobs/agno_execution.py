@@ -58,7 +58,7 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_jobs.wait_timeout import ToolWaitMode, application_arguments, read_wait_timeout
-from mindroom.tool_system.call_record import tool_call_recorder
+from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
@@ -483,24 +483,6 @@ def _unaskable(call: FunctionCall) -> ToolCallResult:
     return _failed_call(call, ValueError("This call needs approval, which it cannot ask for here, so it did not run."))
 
 
-async def _record_start(call: FunctionCall) -> Callable[[FunctionCall], Awaitable[None]]:
-    """Record a managed call on the reply before its job starts, as an inline call's hooks do, and return its finish.
-
-    A restart's account then names the call, and a Stop committed first refuses it; the job body runs unrecorded.
-    """
-    recorder = tool_call_recorder()
-    arguments = dict(call.arguments or {})
-    record_id = None if recorder is None else await recorder.started(call.function.name, arguments)
-
-    async def finished(returned: FunctionCall) -> None:
-        if recorder is not None and record_id is not None:
-            # A released wait's call returned its job handle, which names the job the account points to.
-            outcome = returned.result if returned.error is None else returned.error
-            await recorder.finished(record_id, call.function.name, arguments, outcome)
-
-    return finished
-
-
 def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
     """Expose invalid framework arguments through Agno's ordinary tool failure contract."""
     with Timer() as timer:
@@ -578,7 +560,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         owned_call = isolated_function_call(call)
         owned_call.arguments = application_arguments(owned_call.arguments)
         baseline = deepcopy(run_context.session_state or {})
-        record_return = await _record_start(owned_call)
+        # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
+        record_return = await record_call(call.function.name, dict(owned_call.arguments or {}))
         reference = resources.acquire()
         approval = _job_approval(runtime, job_id, owned_call, owner, context) if job_approval else None
 
@@ -605,7 +588,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             else:
                 response = await _consume_result(runtime, waited.job, waited.claim, call, timer)
                 retained = True
-            await record_return(call)
+            # A released wait's call returned its job handle, which names the job a restart's account points to.
+            await record_return(call.result if call.error is None else call.error)
             return response
         finally:
             if not retained:
