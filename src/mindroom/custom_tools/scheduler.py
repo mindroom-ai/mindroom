@@ -144,7 +144,6 @@ class SchedulerTools(Toolkit):
             scheduled_by=context.requester_id,
             agent_name=context.agent_name,
             call=live,
-            tool_name=tool_name,
             arguments=arguments,
             execute_at=execute_at,
             description=description,

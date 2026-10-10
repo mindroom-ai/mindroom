@@ -753,7 +753,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
     ensure_tool_registry_loaded(context.runtime_paths, context.config)
     _reject_unavailable_workflow_tools(tool_names)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools, set_toolkit_owner  # noqa: PLC0415
 
     execution_identity = build_execution_identity_from_runtime_context(context)
     worker_tools = resolve_runtime_worker_tools(
@@ -781,6 +781,8 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."
             raise DynamicWorkflowError(msg)
+        # The participant's tool dialect presents a function only when it knows the function's toolkit.
+        set_toolkit_owner(toolkit, tool_name)
         toolkits[tool_name] = toolkit
     return toolkits
 

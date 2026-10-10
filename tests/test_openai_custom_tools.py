@@ -11,7 +11,7 @@ from agno.agent import Agent
 from agno.models.message import Message
 from openai import AsyncOpenAI
 
-from mindroom.agents import _set_toolkit_approval_origin
+from mindroom.agents import set_toolkit_owner
 from mindroom.codex_model import CodexResponses
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.openai_models import MindRoomOpenAIResponses
@@ -108,7 +108,7 @@ async def _run(
     codex: bool,
 ) -> None:
     coding = CodingTools(base_dir=str(workspace))
-    _set_toolkit_approval_origin(coding, "coding")
+    set_toolkit_owner(coding, "coding")
     async with AsyncOpenAI(
         api_key="test",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(provider.respond)),
@@ -180,7 +180,7 @@ async def test_stored_continuation_sends_custom_output(tmp_path: Path, *, stream
     """A stored-response continuation that omits the call still answers it with a custom tool output."""
     provider = _Provider([_CUSTOM_CALL])
     coding = CodingTools(base_dir=str(tmp_path))
-    _set_toolkit_approval_origin(coding, "coding")
+    set_toolkit_owner(coding, "coding")
     async with AsyncOpenAI(
         api_key="test",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(provider.respond)),

@@ -11,7 +11,7 @@ from agno.agent import Agent
 from agno.tools.toolkit import Toolkit
 from anthropic import AsyncAnthropic
 
-from mindroom.agents import _set_toolkit_approval_origin
+from mindroom.agents import set_toolkit_owner
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, _format_read_output
@@ -245,7 +245,7 @@ async def test_thinking_replay_keeps_wire_call_verbatim() -> None:
         return "a.txt"
 
     toolkit = Toolkit(name="shell", tools=[run_shell_command])
-    _set_toolkit_approval_origin(toolkit, "shell")
+    set_toolkit_owner(toolkit, "shell")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         model = MindRoomAnthropicClaude(
             id="claude-sonnet-5-5",

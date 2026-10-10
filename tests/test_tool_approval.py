@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import nio
 import pytest
 from pydantic import ValidationError
-from structlog.testing import capture_logs
 
 from mindroom import approval_manager, approval_transport, redaction
 from mindroom.approval_events import PendingApproval, parse_approval_datetime
@@ -26,7 +25,6 @@ from mindroom.approval_manager import (
 )
 from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ToolApprovalConfig, _warn_apply_patch_gap
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
@@ -2292,46 +2290,3 @@ async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_pa
         assert recovery._startup_cleanup_retry is None
     finally:
         await manager.shutdown()
-
-
-@pytest.mark.parametrize(
-    ("rules", "default", "warns"),
-    [
-        ([{"match": "edit_file", "action": "require_approval"}], "auto_approve", True),
-        ([{"match": "*_file", "action": "require_approval"}], "auto_approve", True),
-        (
-            [
-                {"match": "edit_file", "action": "require_approval"},
-                {"match": "apply_patch", "action": "require_approval"},
-            ],
-            "auto_approve",
-            False,
-        ),
-        ([{"match": "run_shell_command", "action": "require_approval"}], "auto_approve", False),
-        ([], "require_approval", False),
-    ],
-)
-def test_warns_when_file_edit_rules_leave_apply_patch_ungated(
-    rules: list[dict[str, str]],
-    default: str,
-    *,
-    warns: bool,
-) -> None:
-    """OpenAI models edit with apply_patch, so rules gating only edit_file or write_file draw a warning."""
-    _warn_apply_patch_gap.cache_clear()
-    with capture_logs() as logs:
-        ToolApprovalConfig.model_validate({"default": default, "rules": rules})
-
-    assert any("apply_patch" in entry["event"] for entry in logs) is warns
-
-
-def test_apply_patch_gap_warns_once_per_policy() -> None:
-    """Validating the same approval policy again does not repeat the warning."""
-    _warn_apply_patch_gap.cache_clear()
-    policy = {"rules": [{"match": "write_file", "action": "require_approval"}]}
-
-    with capture_logs() as logs:
-        ToolApprovalConfig.model_validate(policy)
-        ToolApprovalConfig.model_validate(policy)
-
-    assert sum("apply_patch" in entry["event"] for entry in logs) == 1

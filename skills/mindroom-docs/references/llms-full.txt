@@ -8324,8 +8324,9 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 Claude and OpenAI models see `shell` and `coding` under the names and arguments of the coding agents they were trained in, chosen by the model's [`tool_dialect`](https://docs.mindroom.chat/configuration/models/#tool-dialect).
 Claude models see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
 OpenAI GPT and Codex models see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
-When tool filters leave `apply_patch` out of `coding`, these models see `edit_file` and `write_file` instead.
-Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees.
+When tool filters or approval rules leave `apply_patch` out of `coding`, these models see `edit_file` and `write_file` instead.
+`exec_command` moves a command to the background after 10 seconds unless the model asks to wait longer (at most 30), and the model then polls it with `write_stdin`.
+Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees, so a hook that guards `edit_file` and `write_file` should also handle `apply_patch`.
 
 ## [`file`]
 
@@ -8477,7 +8478,7 @@ pip_install_package("rich")
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`, or pass `replace_all=True` to replace every match.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
-`apply_patch()` checks every file a patch touches before writing any of them, so a patch that does not apply changes nothing; if a write fails afterwards, for example on a read-only directory, the error lists the files already changed.
+`apply_patch()` checks every file a patch touches before writing any of them, so a patch that does not apply changes nothing.
 Excluding `edit_file` or `write_file` with `exclude_tools` also excludes `apply_patch()`, so a `coding` toolkit without them cannot change files.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()`, `edit_file()`, and `apply_patch()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
@@ -13252,7 +13253,7 @@ tool_approval:
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
-OpenAI models edit files with `apply_patch` instead of `edit_file` and `write_file`, so a rule that gates file edits should also match `apply_patch`; MindRoom logs a warning when the config gates `edit_file` or `write_file` but not `apply_patch`.
+OpenAI models edit files with `apply_patch` instead of `edit_file` and `write_file`, but a rule that gates `edit_file` or `write_file` hides an ungated `apply_patch`, so those models then edit with the gated `edit_file` and `write_file`; add a rule matching `apply_patch` to let them patch files with approval.
 
 ## Approving and Denying
 

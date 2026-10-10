@@ -1281,17 +1281,40 @@ def apply_tool_approval_capability(
                 function.requires_confirmation = True
                 function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         return toolkit
-    gated = [
+    toolkit.functions = {
+        name: function
+        for name, function in toolkit.functions.items()
+        if function.requires_confirmation is not True and not function_may_require_approval(function)
+    }
+    toolkit.async_functions = {
+        name: function
+        for name, function in toolkit.async_functions.items()
+        if function.requires_confirmation is not True and not function_may_require_approval(function)
+    }
+    return toolkit if toolkit.functions or toolkit.async_functions else None
+
+
+def _function_names(toolkit: Toolkit) -> set[str]:
+    return {*toolkit.functions, *toolkit.async_functions}
+
+
+def _without_implied_exclusions(toolkit: Toolkit, removed: set[str], registered_tool_name: str) -> Toolkit | None:
+    """Hide functions that do what a hidden or gated one does, such as apply_patch beside edit_file, unless gated too."""
+    metadata = TOOL_METADATA.get(registered_tool_name)
+    gated = {
         name
         for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
-        if function.requires_confirmation is True or function_may_require_approval(function)
-    ]
-    # A function that does what a hidden gated one does, such as apply_patch beside edit_file, goes with it.
-    metadata = TOOL_METADATA.get(registered_tool_name or "")
-    hidden = set(with_implied_exclusions(gated, metadata.implied_exclusions if metadata is not None else None))
-    toolkit.functions = {name: function for name, function in toolkit.functions.items() if name not in hidden}
+        if function.requires_confirmation is True
+    }
+    hidden = removed | gated
+    implied = (
+        set(with_implied_exclusions(hidden, metadata.implied_exclusions if metadata is not None else None)) - hidden
+    )
+    if not implied:
+        return toolkit
+    toolkit.functions = {name: function for name, function in toolkit.functions.items() if name not in implied}
     toolkit.async_functions = {
-        name: function for name, function in toolkit.async_functions.items() if name not in hidden
+        name: function for name, function in toolkit.async_functions.items() if name not in implied
     }
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
@@ -1437,7 +1460,7 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
-def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
+def set_toolkit_owner(toolkit: Toolkit, authored_name: str) -> None:
     """Attach the configured toolkit identity to its executable functions."""
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = authored_name
@@ -1568,15 +1591,20 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=dynamic_tool_continuation,
             )
-        if toolkit:
-            _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-            toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+        if not toolkit:
+            return None
+        _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
+        built = _function_names(toolkit)
         toolkit = apply_tool_approval_capability(
-            toolkit,
+            _prune_toolkit_functions(toolkit, tool_function_filter),
             config,
             supports_native_tool_approval=supports_native_tool_approval,
             registered_tool_name=tool_name,
         )
+        if toolkit:
+            # A function hidden or gated by the channel filter or approval takes away what does the same, like
+            # apply_patch, so an edit rule written for edit_file and write_file still gates every model's edits.
+            toolkit = _without_implied_exclusions(toolkit, built - _function_names(toolkit), tool_name)
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
             toolkit = attach_computer_announcement(
@@ -1586,7 +1614,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
+            set_toolkit_owner(toolkit, tool_entry.authored_name or tool_name)
         return toolkit
 
     cli_deferred = []
@@ -2181,5 +2209,6 @@ __all__ = [
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
     "resolve_runtime_worker_tools",
+    "set_toolkit_owner",
     "show_tool_calls_for_agent",
 ]

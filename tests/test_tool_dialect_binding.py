@@ -17,7 +17,7 @@ from agno.run.base import RunStatus
 from agno.tools.toolkit import Toolkit
 from openai import AsyncOpenAI
 
-from mindroom.agents import _set_toolkit_approval_origin
+from mindroom.agents import set_toolkit_owner
 from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
 from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
@@ -136,7 +136,7 @@ class _Provider:
 
 def _toolkit(name: str, *functions: Callable[..., str], confirm: tuple[str, ...] = ()) -> Toolkit:
     toolkit = Toolkit(name=name, tools=list(functions), requires_confirmation_tools=list(confirm))
-    _set_toolkit_approval_origin(toolkit, name)
+    set_toolkit_owner(toolkit, name)
     return toolkit
 
 

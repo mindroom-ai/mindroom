@@ -4038,29 +4038,6 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
     assert toolkit.async_functions == {}
 
 
-def test_non_resumable_tool_surface_hides_apply_patch_with_gated_file_edits() -> None:
-    """Hiding gated edit_file and write_file also hides apply_patch, the other way to change files."""
-    rules = [{"match": name, "action": "require_approval"} for name in ("edit_file", "write_file")]
-    config = Config.model_validate({"tool_approval": {"default": "auto_approve", "rules": rules}})
-    toolkit = Toolkit(
-        name="coding",
-        tools=[
-            Function(name=name, entrypoint=lambda: None)
-            for name in ("apply_patch", "edit_file", "write_file", "read_file")
-        ],
-    )
-
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=False,
-        registered_tool_name="coding",
-    )
-
-    assert filtered is toolkit
-    assert set(toolkit.functions) == {"read_file"}
-
-
 def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
     """An authored Agno confirmation must not escape onto a surface with no resume owner."""
     config = Config.model_validate({"tool_approval": {"default": "auto_approve"}})
@@ -4157,6 +4134,73 @@ async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_func
 
     assert "search_knowledge_base" in seen
     assert all(not isinstance(tool, Function) or tool.name != "search_knowledge_base" for tool in tools)
+
+
+@pytest.mark.parametrize("hidden_by", ["channel filter", "approval"])
+def test_create_agent_hides_apply_patch_with_hidden_file_edits(tmp_path: Path, hidden_by: str) -> None:
+    """Whatever hides edit_file and write_file from a channel also hides apply_patch, the other way to change files."""
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    if hidden_by == "approval":
+        config.tool_approval = ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match=name, action="require_approval") for name in ("edit_file", "write_file")],
+        )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+
+    agent = create_agent(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        supports_native_tool_approval=False,
+        tool_function_filter=(lambda function: function.name not in {"edit_file", "write_file"})
+        if hidden_by == "channel filter"
+        else None,
+    )
+
+    names = {
+        name
+        for toolkit in agent.tools or []
+        if isinstance(toolkit, Toolkit)
+        for name in (*toolkit.functions, *toolkit.async_functions)
+    }
+    assert "read_file" in names
+    assert not names & {"apply_patch", "edit_file", "write_file"}
+
+
+@pytest.mark.parametrize(
+    ("gated", "expected"),
+    [
+        (("write_file",), {"edit_file", "write_file"}),
+        (("write_file", "apply_patch"), {"apply_patch", "edit_file", "write_file"}),
+    ],
+    ids=["edit-rules-only", "apply-patch-rule-too"],
+)
+def test_gated_file_edits_hide_an_ungated_apply_patch(
+    tmp_path: Path,
+    gated: tuple[str, ...],
+    expected: set[str],
+) -> None:
+    """A rule that gates file edits keeps apply_patch away unless a rule gates apply_patch too."""
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match=name, action="require_approval") for name in gated],
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+
+    agent = create_agent("general", config, runtime_paths, execution_identity=None, supports_native_tool_approval=True)
+
+    functions = {
+        name: function
+        for toolkit in agent.tools or []
+        if isinstance(toolkit, Toolkit)
+        for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
+    }
+    assert set(functions) & {"apply_patch", "edit_file", "write_file"} == expected
+    assert all(functions[name].requires_confirmation is True for name in gated)
 
 
 def _config_with_workspace_skill(tmp_path: Path) -> Config:

@@ -2344,3 +2344,43 @@ def test_harness_named_calls_schedule_as_canonical_calls(
     live, stored = result
     assert live.function.name == "run_shell_command"
     assert stored["args"] == "./backup.sh"
+
+
+@pytest.mark.asyncio
+async def test_scheduling_a_harness_named_call_binds_the_canonical_call() -> None:
+    """A Claude model schedules Bash, and approval, the stored binding, and its trigger all use run_shell_command."""
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            tool_approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+            ),
+        ),
+    )
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+    toolkit = _ShellTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = "shell"
+    model = OpenAIChat()
+    install_tool_dialect(model, CLAUDE_DIALECT)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling._start_new_scheduled_task"),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        result = await SchedulerTools().schedule_tool_call(
+            tool_name="Bash",
+            arguments_json='{"command": "./backup.sh"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Nightly backup",
+            agent=Agent(id="general", model=model, tools=[toolkit]),
+        )
+
+    [(_status, record)] = _persisted_workflows(context)
+    [binding] = request.await_args.args
+    assert "approve" in result.lower()
+    assert binding.tool_name == "run_shell_command"
+    assert "`run_shell_command`" in record.workflow.message
