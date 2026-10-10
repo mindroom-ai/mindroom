@@ -101,7 +101,7 @@ async def test_summary_rejects_output_capped_at_effective_request_limit(
 
     model = _model(provider, httpx.MockTransport(respond), params)
     try:
-        with pytest.raises(CompactionSummaryOutputLimitError):
+        with pytest.raises(CompactionSummaryOutputLimitError) as raised:
             await generate_compaction_summary(
                 model=model,
                 summary_input="Conversation",
@@ -111,6 +111,7 @@ async def test_summary_rejects_output_capped_at_effective_request_limit(
     finally:
         await model.async_client.close()
     assert requests[0]["max_tokens"] == 1024
+    assert raised.value.output_token_limit == 1024
     assert params == ({"extra_body": {"max_tokens": 1024}} if raw_body else {"max_tokens": 1024})
 
 

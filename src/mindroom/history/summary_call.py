@@ -48,6 +48,11 @@ class _CompactionSummaryTimeoutError(TimeoutError):
 class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
 
+    def __init__(self, message: str, *, output_token_limit: int | None = None) -> None:
+        super().__init__(message)
+        # The cap the request stated as a length target, or None when it is unknown.
+        self.output_token_limit = output_token_limit
+
 
 class CompactionSummaryIncompleteError(RuntimeError):
     """Raised when a provider returns partial text without completing the summary."""
@@ -74,7 +79,7 @@ class SummaryRetryDecision:
     """One policy-owned retry action for the compaction summary caller."""
 
     budget: int
-    kind: Literal["shrink", "same-budget-transient"]
+    kind: Literal["shrink", "same-budget-transient", "shorter-summary"]
 
 
 @dataclass(frozen=True)
@@ -86,9 +91,11 @@ class SummaryRetryPolicy:
     and to the caller's smallest progress-preserving rebuild, while selected typed
     transient failures wait ``same_input_retry_delay_seconds`` and retry the
     same configured budget.
-    When the output cap is known, the first request asks for a summary under
-    the cap divided by ``summary_length_divisor``, and each output-limit
-    failure multiplies that divisor by ``shrink_divisor``.
+    When the output cap is known, requests ask for a summary under the cap
+    divided by ``summary_length_divisor``, and an output-limit failure retries
+    the same input with that divisor multiplied by ``shrink_divisor``: the
+    restated previous summary, not the new runs, overflows the cap, so dropping
+    runs would not help and would only force another compaction next turn.
     Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
@@ -96,16 +103,6 @@ class SummaryRetryPolicy:
     shrink_divisor: int = 2
     same_input_retry_delay_seconds: float = 1.0
     summary_length_divisor: int = 2
-
-    def retry_summary_length_divisor(self, divisor: int, error: Exception) -> int:
-        """Return the summary length divisor for the request after ``error``.
-
-        A smaller input does not shorten a summary that must restate a long
-        previous summary, so an output-limit failure also asks for a shorter one.
-        """
-        if isinstance(error, CompactionSummaryOutputLimitError):
-            return divisor * self.shrink_divisor
-        return divisor
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
@@ -126,13 +123,15 @@ class SummaryRetryPolicy:
 
         The decision kind is authoritative so callers cannot independently
         reclassify the error and apply shrink-only safeguards to a same-budget
-        transient retry. ``minimum_progress_input_tokens`` is the smallest budget
+        transient or shorter-summary retry. ``minimum_progress_input_tokens`` is the smallest budget
         at which the caller can rebuild without dropping the prior summary or
         every run; shrink targets clamp there so a granted shrink is issued only
         when it rebuilds to a strictly smaller request with summarizable content.
         """
         if isinstance(error, _CompactionSummaryUsageError) or attempt >= self.max_attempts:
             return None
+        if isinstance(error, CompactionSummaryOutputLimitError) and error.output_token_limit is not None:
+            return SummaryRetryDecision(budget=budget, kind="shorter-summary")
         if self.should_shrink(error):
             smaller_budget = min(
                 budget,
@@ -306,7 +305,7 @@ async def generate_compaction_summary(
     completion = summary_completion_status(response, output_token_limit=summary_output_limit)
     if completion == "output_limit":
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
-        raise CompactionSummaryOutputLimitError(msg)
+        raise CompactionSummaryOutputLimitError(msg, output_token_limit=summary_output_limit)
     if completion == "incomplete":
         msg = "provider returned an incomplete compaction summary; refusing to persist partial text"
         raise CompactionSummaryIncompleteError(msg)

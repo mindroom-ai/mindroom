@@ -526,7 +526,7 @@ def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_to
     }
 
 
-async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
+async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
     *,
     summary_model: SummaryModel,
     previous_summary: str | None,
@@ -609,7 +609,6 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            summary_length_divisor = retry_policy.retry_summary_length_divisor(summary_length_divisor, exc)
             # The attempt bound covers the fallback call too: a refusal after an
             # earlier shrink or transient retry propagates instead of issuing a
             # third provider call.
@@ -661,6 +660,10 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                     await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
                     attempt += 1
                     continue
+                if retry_decision.kind == "shorter-summary":
+                    summary_length_divisor *= retry_policy.shrink_divisor
+                    attempt += 1
+                    continue
                 rebuilt_input, rebuilt_runs = await asyncio.to_thread(
                     build_summary_input,
                     previous_summary=previous_summary,
@@ -671,7 +674,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 )
                 if rebuilt_runs:
                     rebuilt_input_tokens = await asyncio.to_thread(token_estimator, rebuilt_input)
-                    if retry_decision.kind == "shrink" and rebuilt_input_tokens >= summary_input_estimate:
+                    if rebuilt_input_tokens >= summary_input_estimate:
                         raise
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
