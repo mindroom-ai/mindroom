@@ -181,13 +181,14 @@ class DelegateTools(Toolkit):
     def _authoring_guidance(self) -> str:
         if not self._authoring:
             return ""
+        minimal = " or minimal=true" if self._agent_name in self._minimal_targets else ""
         return (
             "To author a fresh copy of yourself, pass system_prompt, its entire system prompt, and optionally tools, "
             "a subset of your toolkit names or toolkit.function entries; omit tools to keep all of yours. "
             "The child keeps your workspace, credentials, and approval rules but sees only that prompt and those tools. "
             "Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with "
             "description and optional tools, model, and mode, then the system prompt as the body. "
-            "An explicit model or minimal=true overrides the profile. "
+            f"An explicit model{minimal} overrides the profile. "
             "Follow-ups keep the subagent's prompt even if its profile later changes.\n"
             f"{self._profile_listing()}"
         )
