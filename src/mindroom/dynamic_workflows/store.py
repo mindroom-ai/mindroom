@@ -87,7 +87,7 @@ class DynamicWorkflowStore:
         owner_id: str,
         created_by: str,
         reason: str | None = None,
-        spec_validator: Callable[[dict[str, object]], None] | None = None,
+        spec_validator: Callable[[dict[str, object]], object] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create a workflow with revision 000001."""
         validated_spec = validate_workflow_spec(spec)
@@ -137,7 +137,7 @@ class DynamicWorkflowStore:
         patch: dict[str, object],
         updated_by: str,
         reason: str,
-        spec_validator: Callable[[dict[str, object]], None] | None = None,
+        spec_validator: Callable[[dict[str, object]], object] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create and publish a new revision by applying a recursive patch."""
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)

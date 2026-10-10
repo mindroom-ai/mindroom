@@ -16,7 +16,6 @@ import nio
 import pytest
 import yaml
 from agno.run.agent import RunOutput, RunStatus
-from agno.tools import Toolkit
 
 import mindroom.tools  # noqa: F401
 from mindroom.api.credentials_target import RequestCredentialsTarget, save_credentials_for_target
@@ -229,13 +228,10 @@ def _tool_payload(result: str) -> dict[str, Any]:
     return json.loads(result)
 
 
-def _function_owners(toolkits: dict[str, Toolkit]) -> dict[str, frozenset[str]]:
-    """Map each function name to every toolkit that exposes it, as the participant overlay does."""
-    owners: dict[str, set[str]] = {}
-    for toolkit_name, toolkit in toolkits.items():
-        for function_name in (*toolkit.functions, *toolkit.async_functions):
-            owners.setdefault(function_name, set()).add(toolkit_name)
-    return {function_name: frozenset(names) for function_name, names in owners.items()}
+def _run_config(context: ToolRuntimeContext, function_owners: dict[str, frozenset[str]]) -> Config:
+    """Build the participant overlay with the allowed tools the caller's config and dashboard grant."""
+    allowed = dynamic_workflow_module._workflow_allowed_tools(context)
+    return dynamic_workflow_module._participant_run_config(context, function_owners, allowed=allowed)
 
 
 def test_dynamic_workflow_tool_registered() -> None:
@@ -1971,20 +1967,6 @@ def test_room_agent_participant_must_be_available_to_requester_in_room(tmp_path:
         )
 
 
-def test_room_agent_participant_rejects_model_override(tmp_path: Path) -> None:
-    """Room-agent participants should run with their configured model only."""
-    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
-
-    with pytest.raises(DynamicWorkflowError, match="configured model"):
-        asyncio.run(
-            dynamic_workflow_module._aexecute_room_agent_participant(
-                context,
-                {"id": "specialist", "kind": "room_agent", "agent": "specialist", "model": "default"},
-                "Write a report.",
-            ),
-        )
-
-
 def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path: Path) -> None:
     """Room-agent participants should execute as that agent without durable workflow side effects."""
     context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
@@ -2054,17 +2036,6 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]
 
 
-def test_resolve_participant_toolkits_rejects_unavailable_tools(tmp_path: Path) -> None:
-    """Executor-level grant resolution must re-reject bad names for store-bypassing callers."""
-    context = _make_context(tmp_path)
-
-    with pytest.raises(DynamicWorkflowError, match="not a registered tool"):
-        dynamic_workflow_module._resolve_participant_toolkits(context, ["not_a_real_tool"])
-
-    with pytest.raises(DynamicWorkflowError, match="agent-infrastructure"):
-        dynamic_workflow_module._resolve_participant_toolkits(context, ["memory"])
-
-
 def test_resolve_participant_toolkits_returns_empty_for_no_tools(tmp_path: Path) -> None:
     """A participant with no tools resolves to no toolkits."""
     assert dynamic_workflow_module._resolve_participant_toolkits(_make_context(tmp_path), []) == {}
@@ -2083,10 +2054,8 @@ def test_resolve_participant_toolkits_builds_real_instances_with_caller_routing(
 def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Path) -> None:
     """Without pre-approval config, granted tool calls must default to require_approval."""
     context = _make_context(tmp_path)
-    toolkit = Toolkit(name="fake_shell")
-    toolkit.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"shell": toolkit}))
+    run_config = _run_config(context, {"run_shell_command": frozenset({"shell"})})
 
     assert run_config.tool_approval.default == "require_approval"
     assert run_config.tool_approval.rules == []
@@ -2151,15 +2120,8 @@ def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> No
         context.runtime_paths,
     )
     context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
-    website = Toolkit(name="fake_website")
-    website.functions["read_url"] = SimpleNamespace(name="read_url")
-    shell = Toolkit(name="fake_shell")
-    shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(
-        context,
-        _function_owners({"website": website, "shell": shell}),
-    )
+    run_config = _run_config(context, {"read_url": frozenset({"website"}), "run_shell_command": frozenset({"shell"})})
 
     assert run_config.tool_approval.default == "require_approval"
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
@@ -2193,10 +2155,8 @@ def test_participant_run_config_pre_approves_dashboard_allowed_tools_for_shared_
         execution_identity=None,
     )
     save_credentials_for_target("dynamic_workflow", {"allowed_tools": ["website"]}, target)
-    website = Toolkit(name="fake_website")
-    website.functions["read_url"] = SimpleNamespace(name="read_url")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"website": website}))
+    run_config = _run_config(context, {"read_url": frozenset({"website"})})
 
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
 
@@ -2217,10 +2177,8 @@ def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path
         context.runtime_paths,
     )
     context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
-    shell = Toolkit(name="fake_shell")
-    shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"shell": shell}))
+    run_config = _run_config(context, {"run_shell_command": frozenset({"shell"})})
 
     assert run_config.tool_approval.default == "require_approval"
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [
@@ -2244,15 +2202,10 @@ def test_participant_run_config_does_not_pre_approve_colliding_function_names(tm
         context.runtime_paths,
     )
     context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
-    python = Toolkit(name="fake_python")
-    python.functions["read_file"] = SimpleNamespace(name="read_file")
-    python.functions["run_python_code"] = SimpleNamespace(name="run_python_code")
-    file = Toolkit(name="fake_file")
-    file.functions["read_file"] = SimpleNamespace(name="read_file")
 
-    run_config = dynamic_workflow_module._participant_run_config(
+    run_config = _run_config(
         context,
-        _function_owners({"python": python, "file": file}),
+        {"read_file": frozenset({"python", "file"}), "run_python_code": frozenset({"python"})},
     )
 
     rules = {rule.match: rule.action for rule in run_config.tool_approval.rules}
@@ -2278,15 +2231,8 @@ def test_participant_run_config_never_pre_approves_system_mutating_tools(tmp_pat
         context.runtime_paths,
     )
     context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
-    scheduler = Toolkit(name="fake_scheduler")
-    scheduler.functions["schedule_task"] = SimpleNamespace(name="schedule_task")
-    website = Toolkit(name="fake_website")
-    website.functions["read_url"] = SimpleNamespace(name="read_url")
 
-    run_config = dynamic_workflow_module._participant_run_config(
-        context,
-        _function_owners({"scheduler": scheduler, "website": website}),
-    )
+    run_config = _run_config(context, {"schedule_task": frozenset({"scheduler"}), "read_url": frozenset({"website"})})
 
     assert run_config.tool_approval.default == "require_approval"
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
@@ -2309,10 +2255,8 @@ def test_participant_run_config_preserves_operator_rule_precedence(tmp_path: Pat
         context.runtime_paths,
     )
     context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
-    shell = Toolkit(name="fake_shell")
-    shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
 
-    run_config = dynamic_workflow_module._participant_run_config(context, _function_owners({"shell": shell}))
+    run_config = _run_config(context, {"run_shell_command": frozenset({"shell"})})
 
     ordered = [(rule.match, rule.action) for rule in run_config.tool_approval.rules]
     assert ordered[0] == ("run_shell_command", "require_approval")

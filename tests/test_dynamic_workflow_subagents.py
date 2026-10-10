@@ -511,6 +511,21 @@ async def test_participant_naming_a_filtered_function_fails_its_step(
 
 
 @pytest.mark.asyncio
+async def test_create_checks_grants_against_the_normalized_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant with surrounding whitespace grants its tool at create time, as it does when the workflow runs."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config())
+
+    created = await workflow.create(
+        _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["file"]}], tools=[" file "]),
+    )
+
+    assert created["status"] == "ok", created
+
+
+@pytest.mark.asyncio
 async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant turn that fails still links its step to the delegation record it wrote."""
     workflow = _Workflow(tmp_path, monkeypatch, _config(), responses=[])

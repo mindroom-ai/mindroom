@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 from typing import cast
 
 
@@ -28,19 +27,21 @@ def upgrade_legacy_participants(spec: dict[str, object]) -> dict[str, object]:
     # Legacy format: A saved revision participant with kind ephemeral_agent and optional name, role, instructions, and tools; validation always stored an explicit kind.
     # Last legacy release: v2026.10.226; replacement: the next release saves subagent participants with a system_prompt.
     # Handling: The store renders name, role, and instructions into system_prompt when it reads a revision, keeps id, description, model, and tools, and reads absent tools as no tools, so a revision runs again unless current participant rules refuse it, such as a toolkit that is not pre-approved or one the caller lacks, and the next update writes the current format.
-    # Coverage: tests/test_dynamic_workflow_subagents.py::test_legacy_revision_loads_as_subagent, tests/test_dynamic_workflow_subagents.py::test_update_of_legacy_revision_writes_current_format.
+    # Coverage: tests/test_dynamic_workflow_subagents.py::test_legacy_revision_loads_as_subagent, tests/test_dynamic_workflow_subagents.py::test_legacy_revision_runs_as_subagent, tests/test_dynamic_workflow_subagents.py::test_update_of_legacy_revision_writes_current_format.
     participants = spec.get("participants")
     if not isinstance(participants, list):
         return spec
     entries = cast("list[object]", participants)
     if not any(_is_legacy(participant) for participant in entries):
         return spec
-    upgraded = copy.deepcopy(spec)
-    upgraded["participants"] = [
-        _upgrade_participant(cast("dict[str, object]", participant)) if _is_legacy(participant) else participant
-        for participant in copy.deepcopy(entries)
-    ]
-    return upgraded
+    # The store passes a freshly read revision, so its participants can be reused without copying.
+    return {
+        **spec,
+        "participants": [
+            _upgrade_participant(cast("dict[str, object]", participant)) if _is_legacy(participant) else participant
+            for participant in entries
+        ],
+    }
 
 
 def _is_legacy(participant: object) -> bool:
@@ -60,5 +61,5 @@ def _upgrade_participant(participant: dict[str, object]) -> dict[str, object]:
     for key in ("description", "model"):
         if participant.get(key) is not None:
             upgraded[key] = participant[key]
-    upgraded["tools"] = copy.deepcopy(participant.get("tools") or [])
+    upgraded["tools"] = participant.get("tools") or []
     return upgraded

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
+    from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
 # a durable agent runtime; they can never be granted to workflow participants.
@@ -82,8 +83,16 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
     },
 )
 
-# Each participant's validated persona request, frozen when a run starts.
-type _ResolvedParticipants = dict[str, PersonaRequest]
+
+@dataclass
+class _WorkflowRun:
+    """One run's participant state: requests frozen at start, continuing children, and cached function owners."""
+
+    scope: str
+    requests: dict[str, PersonaRequest] = field(default_factory=dict)
+    children: dict[str, DelegationChild] = field(default_factory=dict)
+    function_owners: dict[str, dict[str, frozenset[str]]] = field(default_factory=dict)
+
 
 _MINIMAL_SPEC_EXAMPLE = (
     '{"schema_version": 1, "kind": "workflow", "id": "my_flow", "name": "My Flow", '
@@ -225,6 +234,20 @@ class DynamicWorkflowTools(Toolkit):
         )
 
     @classmethod
+    def _run_payload(cls, run: DynamicWorkflowRun, **fields: object) -> str:
+        return cls._payload(
+            run.status,
+            workflow_id=run.workflow_id,
+            run_id=run.run_id,
+            revision=run.revision,
+            report_url=run.report_url,
+            artifacts=run.artifacts,
+            outputs=run.outputs,
+            error=run.error,
+            **fields,
+        )
+
+    @classmethod
     def _spec_errors_payload(cls, spec_errors: list[str]) -> str:
         return cls._payload(
             "error",
@@ -247,13 +270,13 @@ class DynamicWorkflowTools(Toolkit):
             return self._spec_errors_payload(spec_errors)
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            _validate_workflow_policy_for_context(context, spec)
             summary = store.create_workflow(
                 spec=spec,
                 scope=scope,
                 owner_id=owner_id,
                 created_by=context.agent_name,
                 reason=reason,
+                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
@@ -274,8 +297,8 @@ class DynamicWorkflowTools(Toolkit):
         if spec_errors := collect_workflow_spec_errors(spec):
             return self._spec_errors_payload(spec_errors)
         try:
-            _validate_workflow_policy_for_context(context, spec)
             validated = dynamic_workflow_store(context).validate_workflow(spec)
+            _validate_workflow_policy_for_context(context, validated)
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
         return self._payload("ok", workflow_id=validated["id"], name=validated["name"])
@@ -323,13 +346,13 @@ class DynamicWorkflowTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        resolved: _ResolvedParticipants = {}
+        state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             service = DynamicWorkflowService(
                 store,
-                participant_executor=_participant_executor(context, workflow_id, resolved),
-                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec, resolved),
+                participant_executor=_participant_executor(context, state),
+                spec_validator=lambda spec: state.requests.update(_validate_workflow_policy_for_context(context, spec)),
             )
             run = service.run_workflow(
                 workflow_id=workflow_id,
@@ -341,17 +364,7 @@ class DynamicWorkflowTools(Toolkit):
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
-        return self._payload(
-            run.status,
-            workflow_id=run.workflow_id,
-            run_id=run.run_id,
-            revision=run.revision,
-            report_url=run.report_url,
-            artifacts=run.artifacts,
-            outputs=run.outputs,
-            error=run.error,
-            step_count=len(run.steps),
-        )
+        return self._run_payload(run, step_count=len(run.steps))
 
     def get_workflow_run(
         self,
@@ -374,17 +387,7 @@ class DynamicWorkflowTools(Toolkit):
             authorize_dynamic_workflow_run(context, run)
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
-        return self._payload(
-            run.status,
-            workflow_id=run.workflow_id,
-            run_id=run.run_id,
-            revision=run.revision,
-            report_url=run.report_url,
-            artifacts=run.artifacts,
-            outputs=run.outputs,
-            error=run.error,
-            steps=run.steps,
-        )
+        return self._run_payload(run, steps=run.steps)
 
     def list_workflows(self, scope: str = "agent") -> str:
         """List Dynamic Workflows available in one scope."""
@@ -461,13 +464,13 @@ class DynamicWorkflowTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        resolved: _ResolvedParticipants = {}
+        state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             service = DynamicWorkflowService(
                 store,
-                async_participant_executor=_aparticipant_executor(context, workflow_id, resolved),
-                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec, resolved),
+                async_participant_executor=_aparticipant_executor(context, state),
+                spec_validator=lambda spec: state.requests.update(_validate_workflow_policy_for_context(context, spec)),
             )
             run = await service.arun_workflow(
                 workflow_id=workflow_id,
@@ -479,17 +482,7 @@ class DynamicWorkflowTools(Toolkit):
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
-        return self._payload(
-            run.status,
-            workflow_id=run.workflow_id,
-            run_id=run.run_id,
-            revision=run.revision,
-            report_url=run.report_url,
-            artifacts=run.artifacts,
-            outputs=run.outputs,
-            error=run.error,
-            step_count=len(run.steps),
-        )
+        return self._run_payload(run, step_count=len(run.steps))
 
     async def aget_workflow_run(
         self,
@@ -509,15 +502,7 @@ class DynamicWorkflowTools(Toolkit):
         return self.list_workflow_revisions(workflow_id, scope=scope)
 
 
-def _participant_executor(
-    context: ToolRuntimeContext,
-    workflow_id: str,
-    resolved: _ResolvedParticipants,
-) -> ParticipantExecutor:
-    run_scope = f"{workflow_id}:{uuid4().hex}"
-    children: dict[str, DelegationChild] = {}
-    approvals: dict[str, dict[str, frozenset[str]]] = {}
-
+def _participant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> ParticipantExecutor:
     def execute(
         *,
         participant: dict[str, object],
@@ -526,30 +511,12 @@ def _participant_executor(
         step_outputs: dict[str, object],
     ) -> ParticipantOutput:
         del input_data, step_outputs
-        return asyncio.run(
-            _aexecute_participant(
-                context,
-                participant,
-                prompt,
-                run_scope=run_scope,
-                children=children,
-                resolved=resolved,
-                approvals=approvals,
-            ),
-        )
+        return asyncio.run(_aexecute_participant(context, participant, prompt, state))
 
     return execute
 
 
-def _aparticipant_executor(
-    context: ToolRuntimeContext,
-    workflow_id: str,
-    resolved: _ResolvedParticipants,
-) -> AsyncParticipantExecutor:
-    run_scope = f"{workflow_id}:{uuid4().hex}"
-    children: dict[str, DelegationChild] = {}
-    approvals: dict[str, dict[str, frozenset[str]]] = {}
-
+def _aparticipant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> AsyncParticipantExecutor:
     async def execute(
         *,
         participant: dict[str, object],
@@ -558,15 +525,7 @@ def _aparticipant_executor(
         step_outputs: dict[str, object],
     ) -> ParticipantOutput:
         del input_data, step_outputs
-        return await _aexecute_participant(
-            context,
-            participant,
-            prompt,
-            run_scope=run_scope,
-            children=children,
-            resolved=resolved,
-            approvals=approvals,
-        )
+        return await _aexecute_participant(context, participant, prompt, state)
 
     return execute
 
@@ -575,28 +534,13 @@ async def _aexecute_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
-    *,
-    run_scope: str,
-    children: dict[str, DelegationChild],
-    resolved: _ResolvedParticipants,
-    approvals: dict[str, dict[str, frozenset[str]]],
+    state: _WorkflowRun,
 ) -> ParticipantOutput:
-    participant_kind = str(participant.get("kind", "subagent")).strip() or "subagent"
-    if participant_kind == "room_agent":
+    if participant["kind"] == "room_agent":
         return ParticipantOutput(
-            await _aexecute_room_agent_participant(context, participant, prompt, run_scope=run_scope),
+            await _aexecute_room_agent_participant(context, participant, prompt, run_scope=state.scope),
         )
-    if participant_kind == "subagent":
-        return await _aexecute_subagent_participant(
-            context,
-            participant,
-            prompt,
-            children=children,
-            resolved=resolved,
-            approvals=approvals,
-        )
-    msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
-    raise DynamicWorkflowError(msg)
+    return await _aexecute_subagent_participant(context, participant, prompt, state)
 
 
 async def _aexecute_room_agent_participant(
@@ -609,14 +553,8 @@ async def _aexecute_room_agent_participant(
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
-    runtime_model = context.config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=context.room_id,
-        thread_id=context.resolved_thread_id,
-        runtime_paths=context.runtime_paths,
-    )
-    active_model_name = runtime_model.model_name
-    session_id = _participant_session_id(context, participant_id, run_scope=run_scope)
+    active_model_name = _runtime_model_name(context, agent_name)
+    session_id = f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
     participant_context = replace(
         context,
         agent_name=agent_name,
@@ -678,19 +616,12 @@ def _validate_room_agent_reference_for_context(
     participant: dict[str, object],
 ) -> str:
     context = replace(context, config=context.current_config, config_provider=None)
-    raw_agent_name = participant.get("agent") or participant.get("agent_name")
-    if not isinstance(raw_agent_name, str) or not raw_agent_name.strip():
-        msg = "Room agent participants must declare an 'agent' field."
-        raise DynamicWorkflowError(msg)
-    agent_name = raw_agent_name.strip()
+    agent_name = _required_participant_text(participant, "agent")
     if agent_name not in context.config.agents:
         msg = f"Dynamic Workflow participant references unknown room agent '{agent_name}'."
         raise DynamicWorkflowError(msg)
     if agent_name not in _available_room_agent_names(context):
         msg = f"Dynamic Workflow room agent participant '{agent_name}' is not available to this requester in this room."
-        raise DynamicWorkflowError(msg)
-    if participant.get("model") not in (None, ""):
-        msg = "Room agent participants use their configured model; model overrides are only available to subagent participants."
         raise DynamicWorkflowError(msg)
     return agent_name
 
@@ -699,34 +630,28 @@ async def _aexecute_subagent_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
-    *,
-    children: dict[str, DelegationChild],
-    resolved: _ResolvedParticipants,
-    approvals: dict[str, dict[str, frozenset[str]]],
+    state: _WorkflowRun,
 ) -> ParticipantOutput:
     """Run one step as a turn of this participant's subagent, an authored copy of the caller.
 
-    The first step runs the persona validated when the run started, so a profile edited
+    Every step runs the persona validated when the run started, so a profile edited
     during the run cannot change its prompt, tools, or model.
     """
     context = replace(context, config=context.current_config, config_provider=None)
     participant_id = _required_participant_text(participant, "id")
-    previous = children.get(participant_id)
-    request = (
-        resolved[participant_id]
-        if previous is None
-        else PersonaRequest(persona=previous.persona, model=None, agent_mode=previous.agent_mode)
-    )
+    request = state.requests[participant_id]
+    previous = state.children.get(participant_id)
     persona = cast("SubagentPersona", request.persona)
     missing = missing_persona_tool(persona.tools, _participant_available_toolkits(context), _participant_cap(context))
     if missing is not None:
         msg = f"Dynamic Workflow participant '{participant_id}' tool '{missing}' is no longer available to you."
         raise DynamicWorkflowExecutionError(msg)
     # Recheck approvals against the current config each step; only the function ownership is cached.
-    _reject_unapproved_participant_tools(context, persona.tools or (), allowed=_workflow_allowed_tools(context))
-    if participant_id not in approvals:
-        approvals[participant_id] = await _participant_function_owners(context, persona)
-    approval_config = _participant_run_config(context, approvals[participant_id])
+    allowed = _workflow_allowed_tools(context)
+    _reject_unapproved_participant_tools(context, persona.tools or (), allowed=allowed)
+    if participant_id not in state.function_owners:
+        state.function_owners[participant_id] = await _participant_function_owners(context, persona)
+    approval_config = _participant_run_config(context, state.function_owners[participant_id], allowed=allowed)
     owner = build_execution_identity_from_runtime_context(context)
     child = prepare_child_turn(
         context.agent_name,
@@ -763,7 +688,7 @@ async def _aexecute_subagent_participant(
         raise DynamicWorkflowExecutionError(msg, delegation_id=child.delegation_id) from exc
     except SubagentSessionError as exc:
         raise DynamicWorkflowExecutionError(str(exc)) from exc
-    children[participant_id] = child
+    state.children[participant_id] = child
     if not result.completed:
         raise DynamicWorkflowExecutionError(result.text, delegation_id=child.delegation_id)
     return ParticipantOutput(result.text, child.delegation_id)
@@ -889,7 +814,8 @@ def _participant_request(
                 source_kind="workflow",
                 source_name=source_name,
             )
-            raw_model, mode = participant.get("model"), cast("AgentMode", participant.get("mode") or "standard")
+            raw_model = cast("str | None", participant.get("model"))
+            mode = cast("AgentMode", participant.get("mode") or "standard")
         persona = replace(persona, tools=persona.tools or ())
         validate_persona_tools(persona.tools, available, cap)
         require_minimal_shell(persona, mode)
@@ -904,7 +830,6 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
     if not tool_names:
         return {}
     ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    _reject_unavailable_workflow_tools(tool_names)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
 
@@ -948,12 +873,17 @@ def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
             raise DynamicWorkflowError(msg)
 
 
-def _participant_run_config(context: ToolRuntimeContext, function_owners: Mapping[str, frozenset[str]]) -> Config:
+def _participant_run_config(
+    context: ToolRuntimeContext,
+    function_owners: Mapping[str, frozenset[str]],
+    *,
+    allowed: frozenset[str],
+) -> Config:
     """Return the participant policy: approval by default, with the caller's allowed tools pre-approved."""
     return build_automation_approval_config(
         context.config,
         function_owners=function_owners,
-        preapproved_toolkits=_workflow_allowed_tools(context),
+        preapproved_toolkits=allowed,
         never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
     )
 
@@ -987,7 +917,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
 
 
 async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
-    # Stream the run: the participant inherits the caller's model and the workflow's runtime
+    # Stream the run: the room agent runs on its configured model within the workflow's runtime
     # budget, and the Anthropic/Vertex SDK refuses a non-streaming request whose budget could
     # exceed 10 minutes. Consuming the event stream drives tool calls; yield_run_output makes
     # the final RunOutput the last streamed item, which works without a db.
@@ -1025,21 +955,14 @@ async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) ->
     return content
 
 
-def _participant_session_id(context: ToolRuntimeContext, participant_id: str, *, run_scope: str) -> str:
-    return f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
-
-
 def _resolve_participant_model_name(
     context: ToolRuntimeContext,
-    raw_model: object,
+    raw_model: str | None,
     *,
     default_model: str,
 ) -> str:
     if raw_model is None:
         return default_model
-    if not isinstance(raw_model, str) or not raw_model.strip():
-        msg = "Dynamic Workflow participant model must be a non-empty string."
-        raise DynamicWorkflowError(msg)
     model_ref = raw_model.strip()
     if model_ref in context.config.models:
         return model_ref
@@ -1053,30 +976,34 @@ def _resolve_participant_model_name(
 def _validate_workflow_policy_for_context(
     context: ToolRuntimeContext,
     spec: dict[str, object],
-    resolved: _ResolvedParticipants | None = None,
-) -> None:
-    """Check participants against the caller's current policy, keeping each validated request in ``resolved``."""
+) -> dict[str, PersonaRequest]:
+    """Check a normalized spec's participants against the caller's current policy.
+
+    Returns each subagent participant's validated request, which a run freezes when it starts.
+    """
     context = replace(context, config=context.current_config, config_provider=None)
-    _validate_workflow_tool_policy_for_context(context, spec)
-    permission_models = _workflow_permission_model_refs(context, spec)
-    granted_tools = _workflow_permission_tools(spec)
-    workflow_id = str(spec.get("id", ""))
-    for participant in _workflow_participants(spec):
-        if str(participant.get("kind", "subagent")).strip() == "room_agent":
-            agent_name = _validate_room_agent_reference_for_context(context, participant)
-            model_name = context.config.resolve_runtime_model(
-                entity_name=agent_name,
-                room_id=context.room_id,
-                thread_id=context.resolved_thread_id,
-                runtime_paths=context.runtime_paths,
-            ).model_name
+    permissions = cast("dict[str, Any]", spec["permissions"])
+    participants = cast("list[dict[str, object]]", spec["participants"])
+    granted_tools = set(permissions["tools"])
+    named = (cast("list[str]", participant.get("tools") or []) for participant in participants)
+    tool_names = [*granted_tools, *(tool for tools in named for tool in tools)]
+    if tool_names:
+        ensure_tool_registry_loaded(context.runtime_paths, context.config)
+        _reject_unavailable_workflow_tools(tool_names)
+    permission_models = _workflow_permission_model_refs(context, permissions.get("models") or [])
+    requests: dict[str, PersonaRequest] = {}
+    for participant in participants:
+        if participant["kind"] == "room_agent":
+            model_name = _runtime_model_name(context, _validate_room_agent_reference_for_context(context, participant))
         else:
-            request = _participant_request(context, participant, workflow_id=workflow_id)
+            request = _participant_request(context, participant, workflow_id=str(spec["id"]))
             participant_id = _required_participant_text(participant, "id")
-            named_tools = request.persona.tools if request.persona is not None else None
-            require_granted_participant_tools(participant_id, named_tools or (), granted_tools)
-            if resolved is not None:
-                resolved[participant_id] = request
+            require_granted_participant_tools(
+                participant_id,
+                cast("SubagentPersona", request.persona).tools or (),
+                granted_tools,
+            )
+            requests[participant_id] = request
             model_name = cast("str", request.model)
         if permission_models and _model_refs(context, model_name).isdisjoint(permission_models):
             msg = (
@@ -1084,62 +1011,25 @@ def _validate_workflow_policy_for_context(
                 "Add the model to workflow permissions before running this revision."
             )
             raise DynamicWorkflowError(msg)
+    return requests
 
 
-def _validate_workflow_tool_policy_for_context(context: ToolRuntimeContext, spec: dict[str, object]) -> None:
-    """Reject tool grants that name unregistered or agent-infrastructure tools."""
-    tool_names = _spec_tool_names(spec)
-    if not tool_names:
-        return
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    _reject_unavailable_workflow_tools(tool_names)
-
-
-def _spec_tool_names(spec: dict[str, object]) -> list[str]:
-    """Collect declared tool grant names from a possibly un-normalized spec."""
-    tool_lists: list[object] = []
-    raw_permissions = spec.get("permissions")
-    if isinstance(raw_permissions, dict):
-        tool_lists.append(cast("dict[str, object]", raw_permissions).get("tools"))
-    tool_lists.extend(participant.get("tools") for participant in _workflow_participants(spec))
-    tool_names: list[str] = []
-    for raw_tools in tool_lists:
-        if not isinstance(raw_tools, list):
-            continue
-        for raw_tool in raw_tools:
-            if isinstance(raw_tool, str) and raw_tool.strip() and raw_tool.strip() not in tool_names:
-                tool_names.append(raw_tool.strip())
-    return tool_names
-
-
-def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
-    if context.active_model_name:
-        return context.active_model_name
+def _runtime_model_name(context: ToolRuntimeContext, agent_name: str) -> str:
     return context.config.resolve_runtime_model(
-        entity_name=context.agent_name,
+        entity_name=agent_name,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id,
         runtime_paths=context.runtime_paths,
     ).model_name
 
 
-def _workflow_permission_model_refs(context: ToolRuntimeContext, spec: dict[str, object]) -> set[str]:
-    raw_permissions = spec.get("permissions")
-    if raw_permissions is None:
-        return set()
-    if not isinstance(raw_permissions, dict):
-        return set()
-    permissions = cast("dict[str, object]", raw_permissions)
-    raw_models = permissions.get("models")
-    if raw_models is None:
-        return set()
-    if not isinstance(raw_models, list):
-        return set()
+def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
+    return context.active_model_name or _runtime_model_name(context, context.agent_name)
+
+
+def _workflow_permission_model_refs(context: ToolRuntimeContext, models: list[str]) -> set[str]:
     refs: set[str] = set()
-    for raw_model in raw_models:
-        if not isinstance(raw_model, str) or not raw_model.strip():
-            continue
-        model_ref = raw_model.strip()
+    for model_ref in models:
         refs.add(model_ref)
         if model_ref in context.config.models:
             refs.update(_model_refs(context, model_ref))
@@ -1151,31 +1041,12 @@ def _workflow_permission_model_refs(context: ToolRuntimeContext, spec: dict[str,
     return refs
 
 
-def _workflow_permission_tools(spec: dict[str, object]) -> set[str]:
-    permissions = spec.get("permissions")
-    tools = cast("dict[str, object]", permissions).get("tools") if isinstance(permissions, dict) else None
-    return {tool for tool in cast("list[object]", tools) if isinstance(tool, str)} if isinstance(tools, list) else set()
-
-
 def _model_refs(context: ToolRuntimeContext, model_name: str) -> set[str]:
     refs = {model_name}
     model_config = context.config.models.get(model_name)
     if model_config is not None:
         refs.add(model_config.id)
     return refs
-
-
-def _workflow_participants(spec: dict[str, object]) -> list[dict[str, object]]:
-    raw_participants = spec.get("participants", [])
-    if not isinstance(raw_participants, list):
-        return []
-    participants: list[dict[str, object]] = []
-    for raw_participant in raw_participants:
-        if not isinstance(raw_participant, dict):
-            continue
-        participant: dict[str, object] = {key: value for key, value in raw_participant.items() if isinstance(key, str)}
-        participants.append(participant)
-    return participants
 
 
 def _required_participant_text(participant: dict[str, object], field_name: str) -> str:
