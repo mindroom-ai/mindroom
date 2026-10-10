@@ -17,6 +17,7 @@ from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
     SKILL_REVIEW_NOTICE_CONTENT_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -76,7 +77,10 @@ _NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
 _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
     "in_progress": "You (reply still streaming)",
+    "awaiting_approval": "You (reply waiting for approval)",
 }
+# A waiting reply is edited into the final answer once the requester decides.
+_AWAITING_APPROVAL_FALLBACK_BODY = "Waiting for approval."
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
 # Notices that are not turns: lifecycle notices describe the runtime, a Chat UI request is a tool
 # call's fallback text for other clients (answers and error reports name the canvas themselves),
@@ -94,6 +98,7 @@ class _PartialReplyKind(str, Enum):
 
     IN_PROGRESS = "in_progress"
     INTERRUPTED = "interrupted"
+    AWAITING_APPROVAL = "awaiting_approval"
 
 
 @dataclass(frozen=True)
@@ -184,6 +189,9 @@ def _classify_partial_reply(
     if status == STREAM_STATUS_COMPLETED:
         return None
 
+    if status == STREAM_STATUS_APPROVAL_PENDING:
+        return _PartialReplyKind.AWAITING_APPROVAL
+
     partial_kind: _PartialReplyKind | None = None
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}:
         partial_kind = _PartialReplyKind.INTERRUPTED
@@ -203,6 +211,14 @@ def _classify_partial_reply(
 def _clean_partial_reply_body(body: str) -> str:
     """Strip live status notes before the canonical interrupted replay marker is added."""
     return clean_partial_reply_text(body)
+
+
+def _partial_reply_body(body: str, partial_kind: _PartialReplyKind) -> str:
+    """Return the cleaned partial reply; a reply waiting for approval is never dropped."""
+    cleaned_body = _clean_partial_reply_body(body)
+    if not cleaned_body and partial_kind is _PartialReplyKind.AWAITING_APPROVAL:
+        return _AWAITING_APPROVAL_FALLBACK_BODY
+    return cleaned_body
 
 
 def _without_untrusted_original_senders(
@@ -277,13 +293,18 @@ def _build_unseen_messages_header(
     config: Config,
 ) -> str:
     """Choose the unseen-context guidance for the partial-reply mix present."""
-    if not partial_reply_kinds:
-        return config.get_prompt("DEFAULT_UNSEEN_MESSAGES_HEADER")
-    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
-        return config.get_prompt("INTERRUPTED_PARTIAL_REPLY_HEADER")
-    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
-        return config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")
-    return config.get_prompt("MIXED_PARTIAL_REPLY_HEADER")
+    streaming_kinds = partial_reply_kinds - {_PartialReplyKind.AWAITING_APPROVAL}
+    if not streaming_kinds:
+        header = config.get_prompt("DEFAULT_UNSEEN_MESSAGES_HEADER")
+    elif streaming_kinds == {_PartialReplyKind.INTERRUPTED}:
+        header = config.get_prompt("INTERRUPTED_PARTIAL_REPLY_HEADER")
+    elif streaming_kinds == {_PartialReplyKind.IN_PROGRESS}:
+        header = config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")
+    else:
+        header = config.get_prompt("MIXED_PARTIAL_REPLY_HEADER")
+    if _PartialReplyKind.AWAITING_APPROVAL in partial_reply_kinds:
+        header = f"{header}\n{config.get_prompt('APPROVAL_PENDING_PARTIAL_REPLY_NOTICE')}"
+    return header
 
 
 def _context_message_from_visible_message(
@@ -744,11 +765,12 @@ def _get_unseen_messages_for_sender(
             if partial_kind is _PartialReplyKind.INTERRUPTED:
                 continue
             if partial_kind is not None:
-                cleaned_body = _clean_partial_reply_body(msg.body)
+                cleaned_body = _partial_reply_body(msg.body, partial_kind)
                 if not cleaned_body:
                     continue
                 partial_reply_kinds.add(partial_kind)
-                if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
+                # Both are edited into a final reply later, so neither may be recorded as already read.
+                if partial_kind in {_PartialReplyKind.IN_PROGRESS, _PartialReplyKind.AWAITING_APPROVAL} and event_id:
                     in_progress_event_ids.add(event_id)
                 unseen.append(
                     replace_visible_message(

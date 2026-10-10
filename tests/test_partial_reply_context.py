@@ -14,6 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     SKILL_REVIEW_NOTICE_CONTENT_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -434,6 +435,78 @@ class TestUnseenMessagesPartialReplies:
             event_id="e2",
         )
         assert context_messages[2].content == "Answer the new question."
+
+    def test_reply_paused_for_approval_is_shown_so_the_next_turn_does_not_redo_it(self) -> None:
+        """A newer message must see that the earlier request's reply is waiting on an approval card."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
+
+        thread_history = [
+            _make_visible_message(event_id="e1", sender="@user:localhost", body="Post it to #general"),
+            _make_visible_message(
+                event_id="e2",
+                sender=agent_id,
+                body="Waiting for approval: `post_message`",
+                stream_status=STREAM_STATUS_APPROVAL_PENDING,
+            ),
+            _make_visible_message(event_id="e3", sender="@user:localhost", body="thanks"),
+        ]
+
+        context_messages, unseen_event_ids = _build_unseen_context_messages(
+            "thanks",
+            thread_history,
+            seen_event_ids=set(),
+            current_event_id="e3",
+            active_event_ids=set(),
+            response_sender_id=agent_id,
+            config=config,
+        )
+
+        assert unseen_event_ids == ["e1"]
+        assert [message.role for message in context_messages] == ["user", "user", "user", "user"]
+        header = str(context_messages[0].content)
+        assert "waiting for the requester to approve" in header
+        assert "Do NOT repeat" in header
+        assert context_messages[2].content == render_msg_tag(
+            sender=agent_id,
+            body="You (reply waiting for approval): Waiting for approval: `post_message`",
+            event_id="e2",
+        )
+
+    def test_reply_paused_for_approval_without_text_is_still_shown(self) -> None:
+        """A waiting reply whose visible text cleans to nothing must not vanish from the next turn."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
+
+        thread_history = [
+            _make_visible_message(event_id="e1", sender="@user:localhost", body="Post it"),
+            _make_visible_message(
+                event_id="e2",
+                sender=agent_id,
+                body="...",
+                stream_status=STREAM_STATUS_APPROVAL_PENDING,
+            ),
+            _make_visible_message(event_id="e3", sender="@user:localhost", body="thanks"),
+        ]
+
+        context_messages, _ = _build_unseen_context_messages(
+            "thanks",
+            thread_history,
+            seen_event_ids=set(),
+            current_event_id="e3",
+            active_event_ids=set(),
+            response_sender_id=agent_id,
+            config=config,
+        )
+
+        assert "waiting for the requester to approve" in str(context_messages[0].content)
+        assert context_messages[2].content == render_msg_tag(
+            sender=agent_id,
+            body="You (reply waiting for approval): Waiting for approval.",
+            event_id="e2",
+        )
 
     def test_replay_fallback_sanitizer_matches_unseen_context_rules(self) -> None:
         """Full-thread fallback replay should not reintroduce synthetic notices or stale partial replies."""
