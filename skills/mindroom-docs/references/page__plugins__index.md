@@ -66,6 +66,7 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 
 MindRoom ships the `research_check` plugin, which catches replies that recommend or state specific real-world things, such as places, businesses, products, prices, or opening hours, without having looked them up.
 After each reply, a judgment backend reads the person's message, the tool calls made for that reply with shortened, redacted argument and result previews, and the reply itself.
+Opinions, descriptions of quality, and general suggestions do not count.
 When it finds claims that no lookup supported, the agent gets a visible follow-up in the same conversation asking it to verify each claim with its search or browsing tools, correct anything that does not hold up, and name its sources.
 
 Enable it with its `python:` spec; nothing needs installing:

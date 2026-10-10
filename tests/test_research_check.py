@@ -300,11 +300,33 @@ async def test_request_lists_tool_calls_redacted_and_clipped(harness: _Harness) 
     assert "web_search" in tools["text"]
     assert "query=coffee utrecht" in tools["text"]
     assert secret not in tools["text"]
-    assert "x" * 200 not in tools["text"]
+    assert "x" * 600 not in tools["text"]
     assert "tool_39" in tools["text"]
     assert "more" not in tools["text"]
     assert request.body is not None
     assert json.loads(request.body)["guidance"] == "Be strict."
+
+
+@pytest.mark.asyncio
+async def test_judge_sees_the_whole_search_result_preview(harness: _Harness) -> None:
+    """Every hit in MindRoom's 500-character result preview reaches the judge, so a supported reply is not flagged."""
+    hits = (
+        '[{"title": "Koffiebar Noir - Oudegracht 12, Utrecht", "body": "Specialty coffee bar on the Oudegracht, open daily 8:00-17:00."}, '
+        '{"title": "Bocca Coffee Utrecht", "body": "Roastery and cafe at Ganzenmarkt 2, open 8:30-17:30."}]'
+    )
+    trace = (
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="duckduckgo_search",
+            args_preview="query=coffee",
+            result_preview=hits,
+        ),
+    )
+
+    await research_check.check_research(harness.context(tool_trace=trace))
+
+    [request] = harness.requests
+    assert "Ganzenmarkt 2, open 8:30-17:30" in _conversation(request)[1]["text"]
 
 
 @pytest.mark.asyncio

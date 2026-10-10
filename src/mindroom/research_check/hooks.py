@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.events import ToolTraceEntry
 
-_MAX_PREVIEW_CHARS = 150
+# MindRoom already caps tool result previews at 500 characters; keep all of it so the judge sees every hit.
+_MAX_PREVIEW_CHARS = 500
 # Leaves room in the judgment request for the person's message and a long reply.
 _MAX_TOOL_CHARS = 6_000
 _CHECKED_RESPONSE_KINDS = ("ai", "team")
@@ -29,13 +30,13 @@ _RESEARCH_CHECK_QUESTION = JudgmentQuestion(
         "The assistant message that lists tool calls shows every lookup made for this reply."
     ),
     when_true=(
-        "The reply recommends or asserts specific real-world things a person could act on, such as named places, "
-        "businesses, products, events, prices, opening hours, availability, or other current facts, "
-        "and the listed tool calls did not look them up or their results do not support them."
+        "The reply states checkable facts a person would act on about specific real-world places, businesses, products, "
+        "or events, such as that they exist, where they are, when they are open or happening, what they cost, or whether "
+        "they are available, and the listed tool calls did not look those facts up or their results do not support them."
     ),
     when_false=(
-        "The reply makes no such specific claims, the listed tool calls looked up and support its specific claims, "
-        "the user supplied the facts, or the claims are stable common knowledge."
+        "The reply makes no such factual claims, the listed tool results support them, the person supplied them, they are "
+        "stable common knowledge, or the only unsupported parts are opinions, descriptions of quality, or general suggestions."
     ),
 )
 
