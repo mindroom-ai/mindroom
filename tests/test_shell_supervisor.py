@@ -1320,6 +1320,7 @@ def test_shell_run_timeout_seconds_parses_kwargs() -> None:
     assert helper(prepared("run_shell_command", {"timeout": "nope"})) == 120.0
     assert helper(prepared("check_shell_command", {"timeout": 300})) == 0.0
     assert helper(prepared("check_shell_command", {"wait": 60})) == 60.0
+    assert helper(prepared("check_shell_command", {"wait": 600})) == 60.0
 
 
 def test_shell_subprocess_dispatch_context_injects_socket_and_budget(

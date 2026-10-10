@@ -24,12 +24,10 @@ from mindroom.tool_dialects.codex import CODEX_DIALECT
 from mindroom.tool_dialects.types import (
     APPLY_PATCH,
     FILE_EDITS,
-    MINDROOM_WIRE_KEY,
     DialectArgumentError,
     DialectName,
     ToolDialect,
     WireFunction,
-    without_wire_record,
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 
@@ -235,11 +233,7 @@ def _with_output_path(source: dict[str, Any], target: dict[str, Any]) -> dict[st
     return {**target, OUTPUT_PATH_ARGUMENT: source[OUTPUT_PATH_ARGUMENT]}
 
 
-def _translate_call(
-    dialect: ToolDialect,
-    call: dict[str, Any],
-    wire_function: WireFunction,
-) -> dict[str, Any] | _ToolCallError:
+def _translate_call(call: dict[str, Any], wire_function: WireFunction) -> dict[str, Any] | _ToolCallError:
     name = wire_function.wire_name
     raw_arguments = call["function"].get("arguments") or "{}"
     try:
@@ -249,11 +243,9 @@ def _translate_call(
             raise DialectArgumentError(msg)  # noqa: TRY301
         canonical_arguments = _with_output_path(arguments, wire_function.to_canonical(arguments))
     except (json.JSONDecodeError, DialectArgumentError) as exc:
-        # A same-named function's call keeps a canonical name, so only the record replays it as the model sent it.
-        recorded = {**call, MINDROOM_WIRE_KEY: {"dialect": dialect.name, "name": name, "arguments": raw_arguments}}
         reason = f"Invalid JSON arguments for {name}: {exc}" if isinstance(exc, json.JSONDecodeError) else str(exc)
-        return _ToolCallError(call=recorded, name=name, message=f"Error: {reason}")
-    translated = {
+        return _ToolCallError(call=call, name=name, message=f"Error: {reason}")
+    return {
         **call,
         "function": {
             **call["function"],
@@ -261,10 +253,6 @@ def _translate_call(
             "arguments": json.dumps(canonical_arguments, ensure_ascii=False),
         },
     }
-    if _with_output_path(canonical_arguments, wire_function.to_wire(canonical_arguments)) != arguments:
-        # The translation dropped or reshaped something, so keep what the model sent for same-dialect replay.
-        translated[MINDROOM_WIRE_KEY] = {"dialect": dialect.name, "name": name, "arguments": raw_arguments}
-    return translated
 
 
 def canonical_tool_calls(
@@ -276,7 +264,7 @@ def canonical_tool_calls(
 
     A call naming a function that exists keeps its name, so a wire name demoted by a collision still
     reaches the colliding function.
-    Untranslatable calls stay in the returned list, with their wire record, so history keeps every call.
+    Untranslatable calls stay in the returned list unchanged, so history keeps every call.
     """
     by_wire_name = {wire_function.wire_name: wire_function for wire_function in dialect.functions}
     translated: list[dict[str, Any]] = []
@@ -291,52 +279,38 @@ def canonical_tool_calls(
         if wire_function is None or function is None or not _is_canonical(function, wire_function.key):
             translated.append(call)
             continue
-        result = _translate_call(dialect, call, wire_function)
+        result = _translate_call(call, wire_function)
         if isinstance(result, _ToolCallError):
             errors.append(result)
-            translated.append(result.call)
+            translated.append(call)
         else:
             translated.append(result)
     return translated, errors
 
 
-def _wire_call(dialect: ToolDialect, mapped: Mapping[str, WireFunction], call: dict[str, Any]) -> dict[str, Any]:
-    """Return *call* as this request presents it, never carrying the wire record to the provider."""
-    stripped = without_wire_record(call)
+def _wire_call(mapped: Mapping[str, WireFunction], call: dict[str, Any]) -> dict[str, Any]:
+    """Return a stored canonical *call* as this request presents it."""
     function = call.get("function")
     if not isinstance(function, dict):
-        return stripped
+        return call
     wire_function = mapped.get(function.get("name", ""))
     if wire_function is None:
-        return stripped
-    wire = call.get(MINDROOM_WIRE_KEY)
-    if isinstance(wire, dict) and wire.get("dialect") == dialect.name and wire.get("name") == wire_function.wire_name:
-        return {**stripped, "function": {**function, "name": wire["name"], "arguments": wire["arguments"]}}
+        return call
     try:
         arguments = json.loads(function.get("arguments") or "{}")
     except json.JSONDecodeError:
-        return stripped
+        return call
     if not isinstance(arguments, dict):
-        return stripped
+        return call
     wire_arguments = json.dumps(_with_output_path(arguments, wire_function.to_wire(arguments)), ensure_ascii=False)
-    return {**stripped, "function": {**function, "name": wire_function.wire_name, "arguments": wire_arguments}}
+    return {**call, "function": {**function, "name": wire_function.wire_name, "arguments": wire_arguments}}
 
 
 def _wire_result(message: Message, wire_function: WireFunction) -> Message:
-    """Return a tool result under the wire name, with fixed MindRoom templates reworded for the dialect."""
-    render = wire_function.render_result
-    update: dict[str, Any] = {"tool_name": wire_function.wire_name}
-    if render is not None:
-        update.update(
-            {
-                field: render(value)
-                for field in ("content", "compressed_content")
-                if isinstance(value := getattr(message, field), str)
-            },
-        )
-    if all(getattr(message, field) == value for field, value in update.items()):
+    """Return a tool result under the wire name its call is presented with, which some providers pair by name."""
+    if message.tool_name == wire_function.wire_name:
         return message
-    return message.model_copy(update=update)
+    return message.model_copy(update={"tool_name": wire_function.wire_name})
 
 
 def _is_wire_definition(tool: dict[str, Any], wire_function: WireFunction) -> bool:
@@ -369,15 +343,14 @@ def _presented_wire_functions(dialect: ToolDialect, tools: Sequence[dict[str, An
 def wire_messages(dialect: ToolDialect, messages: list[Message], tools: Sequence[dict[str, Any]]) -> list[Message]:
     """Return *messages* rendered for one provider request that presents the formatted *tools*.
 
-    Only functions the request presents in wire form render; a call recorded in the active dialect under
-    the same wire name replays its exact wire form, and other calls translate by canonical name.
+    Only functions the request presents in wire form render, translated by canonical name.
     Messages that change are copied, so stored history stays canonical.
     """
     mapped = _presented_wire_functions(dialect, tools)
     rendered: list[Message] = []
     for message in messages:
         if message.role == "assistant" and message.tool_calls:
-            calls = [_wire_call(dialect, mapped, call) for call in message.tool_calls]
+            calls = [_wire_call(mapped, call) for call in message.tool_calls]
             rendered.append(
                 message if calls == message.tool_calls else message.model_copy(update={"tool_calls": calls}),
             )

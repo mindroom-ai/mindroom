@@ -25,7 +25,6 @@ from mindroom.shell_output_capture import (
     ShellOutputDestination,
     format_shell_completion,
 )
-from mindroom.text_templates import FLOAT_FIELD, INT_FIELD, template_pattern
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
@@ -39,99 +38,6 @@ _POST_EXIT_READER_GRACE_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 # Waits stay inside the default 120-second worker proxy request budget with room for the supervisor relay.
 MAX_CHECK_WAIT_SECONDS = 60
-_HANDLE_FIELD = r"shell:[0-9a-f]+"
-
-
-_BACKGROUND_HANDLE_TEMPLATE = (
-    "Command timed out after {timeout}s. Still running (PID {pid}).\n"
-    "Handle: {handle}\n"
-    "Use check_shell_command('{handle}') to poll or kill_shell_command('{handle}') to stop."
-)
-_BACKGROUND_HANDLE = template_pattern(
-    _BACKGROUND_HANDLE_TEMPLATE,
-    timeout=FLOAT_FIELD,
-    pid=INT_FIELD,
-    handle=_HANDLE_FIELD,
-)
-_KILL_TEMPLATE = "{action} process {pid} ({signal} sent). Use check_shell_command('{handle}') to confirm exit."
-_KILL = template_pattern(
-    _KILL_TEMPLATE,
-    action="Terminated|Force-killed",
-    pid=INT_FIELD,
-    signal="SIGTERM|SIGKILL",
-    handle=_HANDLE_FIELD,
-)
-_FINISHED_HEADER_TEMPLATE = "Status: FINISHED (exit code {code}, ran for {elapsed}s)\n"
-_FINISHED_WITH_STDERR_TEMPLATE = _FINISHED_HEADER_TEMPLATE + "Stderr:\n{stderr}\nOutput:\n{output}"
-_FINISHED_TEMPLATE = _FINISHED_HEADER_TEMPLATE + "Output:\n{output}"
-_RUNNING_HEADER_TEMPLATE = "Status: RUNNING (PID {pid}, elapsed {elapsed}s)\n"
-_RUNNING_TEMPLATE = _RUNNING_HEADER_TEMPLATE + "Partial output ({buffered} lines buffered):\n{output}"
-# Program output can repeat a section label, so parsers read the status line and keep the report verbatim.
-_FINISHED = template_pattern(
-    _FINISHED_HEADER_TEMPLATE + "{report}",
-    code=INT_FIELD,
-    elapsed=FLOAT_FIELD,
-    report=r"(?:Stderr|Output):\n[\s\S]*",
-)
-_RUNNING = template_pattern(
-    _RUNNING_HEADER_TEMPLATE + "{report}",
-    pid=INT_FIELD,
-    elapsed=FLOAT_FIELD,
-    report=r"Partial output \(\d+ lines buffered\):\n[\s\S]*",
-)
-_UNKNOWN_HANDLE_TEMPLATE = "Error: Unknown handle '{handle}'"
-_UNKNOWN_HANDLE = template_pattern(_UNKNOWN_HANDLE_TEMPLATE, handle=_HANDLE_FIELD)
-
-
-@dataclass(frozen=True)
-class _BackgroundHandle:
-    """Fields of the message returned when a command moves to the background."""
-
-    timeout: float
-    pid: int
-    handle: str
-
-
-@dataclass(frozen=True)
-class _CheckStatus:
-    """Fields of one ``check_command`` status report."""
-
-    running: bool
-    exit_code: int | None
-    elapsed: float
-    pid: int | None
-    report: str
-    """The labeled output sections after the status line, verbatim."""
-
-
-def _format_background_handle_message(timeout: float, pid: int, handle: str) -> str:
-    """Return the message for a command that outlived its timeout."""
-    return _BACKGROUND_HANDLE_TEMPLATE.format(timeout=timeout, pid=pid, handle=handle)
-
-
-def parse_background_handle_message(text: str) -> _BackgroundHandle | None:
-    """Return the fields of a background-handle message, or None for any other text."""
-    match = _BACKGROUND_HANDLE.fullmatch(text)
-    if match is None:
-        return None
-    return _BackgroundHandle(timeout=float(match["timeout"]), pid=int(match["pid"]), handle=match["handle"])
-
-
-def _format_finished_status(*, return_code: int, elapsed: float, stderr: str, output: str) -> str:
-    """Return the status report of a finished background command."""
-    if return_code != 0 and stderr:
-        return _FINISHED_WITH_STDERR_TEMPLATE.format(
-            code=return_code,
-            elapsed=f"{elapsed:.1f}",
-            stderr=stderr,
-            output=output,
-        )
-    return _FINISHED_TEMPLATE.format(code=return_code, elapsed=f"{elapsed:.1f}", output=output)
-
-
-def _format_running_status(*, pid: int, elapsed: float, buffered_lines: int, partial: str) -> str:
-    """Return the status report of a still-running background command."""
-    return _RUNNING_TEMPLATE.format(pid=pid, elapsed=f"{elapsed:.1f}", buffered=buffered_lines, output=partial)
 
 
 @dataclass
@@ -491,7 +397,11 @@ async def _background_process(
             await monitor_task
         raise
     return ShellRunResult(
-        message=_format_background_handle_message(timeout, process.pid, handle),
+        message=(
+            f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
+            f"Handle: {handle}\n"
+            "Poll this handle for its output, or stop the command with it."
+        ),
         handle=handle,
         output_file_handled=output_capture is not None,
     )
@@ -511,62 +421,26 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     """Poll the status of a backgrounded shell command in *registry*."""
     record = registry.get(handle)
     if record is None or record.namespace != namespace:
-        return _UNKNOWN_HANDLE_TEMPLATE.format(handle=handle)
+        return f"Error: Unknown handle '{handle}'"
 
     elapsed = time.monotonic() - record.started_at
 
     if record.finished:
         if record.output_receipt is not None:
             return record.output_receipt
-        assert record.return_code is not None
-        return _format_finished_status(
-            return_code=record.return_code,
-            elapsed=elapsed,
-            stderr=record.stderr_buf.render(),
-            output=record.stdout_buf.render(tail=record.tail),
-        )
+        output = record.stdout_buf.render(tail=record.tail)
+        errors = record.stderr_buf.render()
+        result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
+        if record.return_code != 0 and errors:
+            result += f"Stderr:\n{errors}\n"
+        result += f"Output:\n{output}"
+        return result
 
-    return _format_running_status(
-        pid=record.pid,
-        elapsed=elapsed,
-        buffered_lines=len(record.stdout_buf),
-        partial=record.stdout_buf.render(tail=50),
+    partial = record.stdout_buf.render(tail=50)
+    return (
+        f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)\n"
+        f"Partial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
     )
-
-
-def parse_check_status(text: str) -> _CheckStatus | None:
-    """Return the fields of a ``check_command`` status report, or None for any other text."""
-    if (match := _RUNNING.fullmatch(text)) is not None:
-        return _CheckStatus(
-            running=True,
-            exit_code=None,
-            elapsed=float(match["elapsed"]),
-            pid=int(match["pid"]),
-            report=match["report"],
-        )
-    if (match := _FINISHED.fullmatch(text)) is not None:
-        return _CheckStatus(
-            running=False,
-            exit_code=int(match["code"]),
-            elapsed=float(match["elapsed"]),
-            pid=None,
-            report=match["report"],
-        )
-    return None
-
-
-def parse_kill_message(text: str) -> tuple[str, int, str, str] | None:
-    """Return the action, PID, signal, and handle of a kill confirmation, or None for any other text."""
-    match = _KILL.fullmatch(text)
-    if match is None:
-        return None
-    return match["action"], int(match["pid"]), match["signal"], match["handle"]
-
-
-def parse_unknown_handle_error(text: str) -> str | None:
-    """Return the handle of an unknown-handle error, or None for any other text."""
-    match = _UNKNOWN_HANDLE.fullmatch(text)
-    return match["handle"] if match is not None else None
 
 
 async def wait_for_command(
@@ -588,7 +462,7 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
     """Kill a backgrounded shell command tracked in *registry*."""
     record = registry.get(handle)
     if record is None or record.namespace != namespace:
-        return _UNKNOWN_HANDLE_TEMPLATE.format(handle=handle)
+        return f"Error: Unknown handle '{handle}'"
 
     if record.finished:
         return f"Process already finished (exit code {record.return_code})"
@@ -598,7 +472,7 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
         return f"Process {record.pid} already exited"
 
     action = "Force-killed" if force else "Terminated"
-    return _KILL_TEMPLATE.format(action=action, pid=record.pid, signal=sig_name, handle=handle)
+    return f"{action} process {record.pid} ({sig_name} sent). Poll its handle to confirm it exited."
 
 
 def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:

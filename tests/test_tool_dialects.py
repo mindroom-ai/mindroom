@@ -20,7 +20,7 @@ from mindroom.tool_dialects.translation import (
     wire_messages,
     wire_tools,
 )
-from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
+from mindroom.tool_dialects.types import DialectArgumentError, ToolDialect, WireFunction
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -46,7 +46,6 @@ _TOY = ToolDialect(
             parameters={"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
             to_canonical=_run_to_canonical,
             to_wire=lambda arguments: {"cmd": arguments["args"]},
-            render_result=lambda text: text.replace("check_shell_command", "Poll"),
         ),
     ),
     replaced={_EDIT: (_PATCH,)},
@@ -178,8 +177,8 @@ def test_wire_name_collision_warns_once() -> None:
     assert sum("collides" in entry["event"] for entry in logs) == 1
 
 
-def test_canonical_tool_calls_translate_lossless_calls_without_a_wire_record() -> None:
-    """A call whose wire form re-renders exactly becomes canonical without storing it twice."""
+def test_canonical_tool_calls_translate_wire_calls() -> None:
+    """A wire call becomes the canonical call with canonical arguments."""
     functions = {"run_shell_command": _function("run_shell_command", "shell")}
     call = _call("call_1", "Run", {"cmd": "ls -la"}, call_id="call_1")
 
@@ -194,18 +193,6 @@ def test_canonical_tool_calls_translate_lossless_calls_without_a_wire_record() -
             "function": {"name": "run_shell_command", "arguments": json.dumps({"args": "ls -la"})},
         },
     ]
-
-
-def test_canonical_tool_calls_keep_the_wire_form_of_lossy_calls() -> None:
-    """A call whose translation drops information keeps its exact wire form for same-dialect replay."""
-    functions = {"run_shell_command": _function("run_shell_command", "shell")}
-    raw = '{"cmd": "ls",  "note": "x"}'
-    call = _call("a", "Run", {}) | {"function": {"name": "Run", "arguments": raw}}
-
-    [translated], _errors = canonical_tool_calls(_TOY, [call], functions)
-
-    assert translated["function"] == {"name": "run_shell_command", "arguments": json.dumps({"args": "ls"})}
-    assert translated[MINDROOM_WIRE_KEY] == {"dialect": "claude", "name": "Run", "arguments": raw}
 
 
 def test_canonical_tool_calls_accept_preset_owned_functions() -> None:
@@ -230,7 +217,7 @@ def test_canonical_tool_calls_leave_existing_and_foreign_names() -> None:
 
 
 def test_untranslatable_call_returns_tool_call_error() -> None:
-    """Arguments the dialect cannot translate become a tool error for that exact call, which keeps what was sent."""
+    """Arguments the dialect cannot translate become a tool error for that exact call, kept as sent."""
     functions = {"run_shell_command": _function("run_shell_command", "shell")}
     calls = [
         _call("bad", "Run", {"command": "ls"}),
@@ -239,11 +226,8 @@ def test_untranslatable_call_returns_tool_call_error() -> None:
 
     translated, errors = canonical_tool_calls(_TOY, calls, functions)
 
-    assert translated == [
-        call | {MINDROOM_WIRE_KEY: {"dialect": "claude", "name": "Run", "arguments": call["function"]["arguments"]}}
-        for call in calls
-    ]
-    assert [(error.call is translated[index], error.name) for index, error in enumerate(errors)] == [
+    assert translated == calls
+    assert [(error.call is calls[index], error.name) for index, error in enumerate(errors)] == [
         (True, "Run"),
         (True, "Run"),
     ]
@@ -265,31 +249,14 @@ def _canonical_only(name: str) -> list[dict[str, Any]]:
     return [{"type": "function", "function": {"name": name, "parameters": {"type": "object", "properties": {}}}}]
 
 
-def test_wire_messages_same_dialect_is_verbatim_without_the_record() -> None:
-    """A lossy call made in the active dialect replays as sent, and the wire record never reaches the provider."""
-    wire = {"dialect": "claude", "name": "Run", "arguments": '{"cmd": "ls",  "note": 1}'}
-    message = _assistant(_call("a", "run_shell_command", {"args": "ls"}, **{MINDROOM_WIRE_KEY: wire}))
+def test_wire_messages_translate_canonical_calls_by_name() -> None:
+    """Stored canonical calls render through the active dialect."""
+    message = _assistant(_call("a", "run_shell_command", {"args": "pwd"}))
 
     [rendered] = wire_messages(_TOY, [message], _PRESENTED)
 
     assert rendered.tool_calls == [
-        {"id": "a", "type": "function", "function": {"name": "Run", "arguments": '{"cmd": "ls",  "note": 1}'}},
-    ]
-
-
-def test_wire_messages_other_dialect_translates_by_name() -> None:
-    """Calls made in another dialect, or with no wire record, render through the active dialect."""
-    other = {"dialect": "codex", "name": "exec_command", "arguments": "{}"}
-    messages = [
-        _assistant(_call("a", "run_shell_command", {"args": "pwd"}, **{MINDROOM_WIRE_KEY: other})),
-        _assistant(_call("b", "run_shell_command", {"args": "ls"})),
-    ]
-
-    rendered = wire_messages(_TOY, messages, _PRESENTED)
-
-    assert [message.tool_calls for message in rendered] == [
-        [{"id": "a", "type": "function", "function": {"name": "Run", "arguments": json.dumps({"cmd": "pwd"})}}],
-        [{"id": "b", "type": "function", "function": {"name": "Run", "arguments": json.dumps({"cmd": "ls"})}}],
+        {"id": "a", "type": "function", "function": {"name": "Run", "arguments": json.dumps({"cmd": "pwd"})}},
     ]
 
 
@@ -338,37 +305,16 @@ def test_wire_messages_leaves_unmapped_calls() -> None:
 
 def test_wire_messages_does_not_mutate_inputs() -> None:
     """Rendering copies the messages it changes and leaves stored history canonical."""
-    wire = {"dialect": "claude", "name": "Run", "arguments": "{}"}
-    message = _assistant(_call("a", "run_shell_command", {"args": "ls"}, **{MINDROOM_WIRE_KEY: wire}))
-    result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="use check_shell_command")
+    message = _assistant(_call("a", "run_shell_command", {"args": "ls"}))
+    result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="a.txt")
 
     rendered = wire_messages(_TOY, [message, result], _PRESENTED)
 
     assert message.tool_calls is not None
     assert message.tool_calls[0]["function"]["name"] == "run_shell_command"
-    assert MINDROOM_WIRE_KEY in message.tool_calls[0]
-    assert result.content == "use check_shell_command"
+    assert result.tool_name == "run_shell_command"
     assert rendered[0] is not message
-    assert (rendered[1].content, rendered[1].tool_name) == ("use Poll", "Run")
-
-
-def test_render_result_applies_only_to_mapped_tool_results() -> None:
-    """Only results of mapped tools render; other tool results and non-text content pass through."""
-    other = Message(role="tool", tool_call_id="b", tool_name="ls", content="check_shell_command")
-    media = Message(role="tool", tool_call_id="c", tool_name="run_shell_command", content=[{"type": "image"}])
-    compressed = Message(
-        role="tool",
-        tool_call_id="d",
-        tool_name="run_shell_command",
-        content="check_shell_command",
-        compressed_content="check_shell_command short",
-    )
-
-    rendered = wire_messages(_TOY, [other, media, compressed], _PRESENTED)
-
-    assert rendered[0] is other
-    assert (rendered[1].content, rendered[1].tool_name) == ([{"type": "image"}], "Run")
-    assert (rendered[2].content, rendered[2].compressed_content) == ("Poll", "Poll short")
+    assert (rendered[1].content, rendered[1].tool_name) == ("a.txt", "Run")
 
 
 def test_wire_definition_carries_notes_present_on_the_canonical_function() -> None:
@@ -419,7 +365,6 @@ def test_output_path_argument_survives_translation() -> None:
     assert isinstance(presented, dict)
     assert presented["function"]["parameters"]["properties"][OUTPUT_PATH_ARGUMENT]["description"] == "save"
     assert json.loads(translated["function"]["arguments"]) == {"args": "ls -R", OUTPUT_PATH_ARGUMENT: "out.txt"}
-    assert MINDROOM_WIRE_KEY not in translated
     assert rendered.tool_calls is not None
     assert json.loads(rendered.tool_calls[0]["function"]["arguments"]) == {
         "cmd": "ls -R",
@@ -427,26 +372,16 @@ def test_output_path_argument_survives_translation() -> None:
     }
 
 
-def test_wire_record_is_ignored_when_the_tool_is_not_presented_in_wire_form() -> None:
-    """A recorded wire call replays as a canonical call when this request presents the tool canonically."""
-    wire = {"dialect": "claude", "name": "Run", "arguments": '{"cmd": "ls", "note": 1}'}
-    call = _call("a", "run_shell_command", {"args": "ls"}, **{MINDROOM_WIRE_KEY: wire})
-
-    [rendered] = wire_messages(_TOY, [_assistant(call)], _canonical_only("run_shell_command"))
-
-    assert rendered.tool_calls == [_call("a", "run_shell_command", {"args": "ls"})]
-
-
-def test_identity_named_functions_render_results_when_presented() -> None:
-    """A dialect function that keeps its canonical name still renders its results."""
+def test_identity_named_functions_keep_their_results_when_presented() -> None:
+    """A dialect function that keeps its canonical name passes its results through unchanged."""
     same_name = replace(_TOY.functions[0], wire_name="run_shell_command")
     dialect = ToolDialect(name="codex", functions=(same_name,))
-    result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="check_shell_command")
+    result = Message(role="tool", tool_call_id="a", tool_name="run_shell_command", content="done")
 
     ours = {"type": "function", "function": {"name": "run_shell_command", "parameters": same_name.parameters}}
     [rendered] = wire_messages(dialect, [result], [ours])
 
-    assert rendered.content == "Poll"
+    assert rendered is result
 
 
 def test_same_named_dialect_function_translates_its_arguments() -> None:

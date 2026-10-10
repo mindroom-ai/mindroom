@@ -205,7 +205,6 @@ Matrix sync callback
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
-| `text_templates.py` | Regex patterns derived from fixed tool-output templates so formatters and parsers share one source |
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |

@@ -30,7 +30,6 @@ from agno.tools import Toolkit
 from mindroom.custom_tools.apply_patch import AddFile, DeleteFile, PatchError, PatchHunk, parse_patch, updated_contents
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
-from mindroom.text_templates import INT_FIELD, template_pattern
 from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
@@ -54,24 +53,6 @@ _DEFAULT_GREP_LIMIT = 100
 _DEFAULT_FIND_LIMIT = 1000
 _DEFAULT_LS_LIMIT = 500
 _DIFF_CONTEXT_LINES = 4
-
-EDIT_NOT_FOUND_ERROR = "Error: old_text not found in file."
-_EDIT_MULTIPLE_MATCHES_TEMPLATE = (
-    "Error: old_text matches {count} locations. "
-    "Provide more context to make the match unique, or set replace_all to replace every match."
-)
-_EDIT_MULTIPLE_MATCHES = template_pattern(_EDIT_MULTIPLE_MATCHES_TEMPLATE, count=INT_FIELD)
-_READ_LINE_TEMPLATE = "{number}| {line}"
-# Line numbers are right-aligned to the widest number shown.
-_READ_LINE = re.compile(" *" + template_pattern(_READ_LINE_TEMPLATE, number=INT_FIELD, line=".*").pattern)
-_READ_MORE_HINT_TEMPLATE = "\n\n[Showing lines {start}-{end} of {total}. Use offset={next} to continue.]"
-_READ_LAST_HINT_TEMPLATE = "\n\n[Showing lines {start}-{end} of {total}.]"
-_READ_HINTS = tuple(
-    re.compile(
-        template_pattern(template, start=INT_FIELD, end=INT_FIELD, total=INT_FIELD, next=INT_FIELD).pattern + r"\Z",
-    )
-    for template in (_READ_MORE_HINT_TEMPLATE, _READ_LAST_HINT_TEMPLATE)
-)
 
 
 @dataclass
@@ -445,9 +426,7 @@ def _format_read_output(content: str, offset: int | None, limit: int | None) -> 
     selected, end = _apply_byte_limit(selected, start, end)
 
     width = len(str(start + len(selected) - 1))
-    numbered = "\n".join(
-        _READ_LINE_TEMPLATE.format(number=f"{start + i:>{width}}", line=line) for i, line in enumerate(selected)
-    )
+    numbered = "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(selected))
     return numbered + _pagination_hint(start, end, total_lines)
 
 
@@ -468,45 +447,22 @@ def _apply_byte_limit(selected: list[str], start: int, end: int) -> tuple[list[s
 def _pagination_hint(start: int, end: int, total: int) -> str:
     """Build a pagination hint suffix for truncated file reads."""
     if end < total:
-        return _READ_MORE_HINT_TEMPLATE.format(start=start, end=end, total=total, next=end + 1)
+        return f"\n\n[Showing lines {start}-{end} of {total}. Use offset={end + 1} to continue.]"
     if start > 1:
-        return _READ_LAST_HINT_TEMPLATE.format(start=start, end=end, total=total)
+        return f"\n\n[Showing lines {start}-{end} of {total}.]"
     return ""
 
 
 def _edit_match_error(match_count: int, *, replace_all: bool) -> str | None:
     """Return the edit error for *match_count* matches, or None when the edit may proceed."""
     if match_count == 0:
-        return EDIT_NOT_FOUND_ERROR
+        return "Error: old_text not found in file."
     if match_count > 1 and not replace_all:
-        return _EDIT_MULTIPLE_MATCHES_TEMPLATE.format(count=match_count)
+        return (
+            f"Error: old_text matches {match_count} locations. "
+            "Provide more context to make the match unique, or set replace_all to replace every match."
+        )
     return None
-
-
-def split_read_output(text: str) -> tuple[list[tuple[int, str]], str] | None:
-    """Return the numbered lines and pagination hint of ``read_file`` output, or None for any other text."""
-    if not text:
-        return None
-    body, hint = text, ""
-    for pattern in _READ_HINTS:
-        if (match := pattern.search(text)) is not None:
-            body, hint = text[: match.start()], text[match.start() :]
-            break
-    lines: list[tuple[int, str]] = []
-    for raw_line in body.split("\n"):
-        match = _READ_LINE.fullmatch(raw_line)
-        if match is None:
-            return None
-        lines.append((int(match["number"]), match["line"]))
-    if any(number != lines[0][0] + index for index, (number, _line) in enumerate(lines)):
-        return None
-    return lines, hint
-
-
-def parse_edit_multiple_matches_error(text: str) -> int | None:
-    """Return the match count of the ``edit_file`` multiple-matches error, or None for any other text."""
-    match = _EDIT_MULTIPLE_MATCHES.fullmatch(text)
-    return int(match["count"]) if match is not None else None
 
 
 def _list_directory(target: Path, limit: int) -> str:
@@ -747,7 +703,8 @@ class CodingTools(Toolkit):
         A patch starts with ``*** Begin Patch`` and ends with ``*** End Patch``. Between them, ``*** Add File: <path>``
         is followed by the new lines, each prefixed with ``+``; ``*** Delete File: <path>`` stands alone; and
         ``*** Update File: <path>``, optionally followed by ``*** Move to: <path>``, is followed by ``@@`` hunks whose
-        lines start with a space for context, ``-`` for removed, or ``+`` for added lines. Paths are relative.
+        lines start with a space for context, ``-`` for removed, or ``+`` for added lines. Paths are relative to
+        the working directory, or absolute.
         Every hunk is checked against the files before anything is written, so a patch that does not
         apply changes nothing.
 

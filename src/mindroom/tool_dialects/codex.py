@@ -13,14 +13,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from mindroom.shell_execution import (
-    MAX_CHECK_WAIT_SECONDS,
-    MAX_OUTPUT_LINES,
-    parse_background_handle_message,
-    parse_check_status,
-    parse_kill_message,
-    parse_unknown_handle_error,
-)
+from mindroom.shell_execution import MAX_CHECK_WAIT_SECONDS, MAX_OUTPUT_LINES
 from mindroom.tool_dialects.types import (
     APPLY_PATCH,
     FILE_EDITS,
@@ -33,9 +26,8 @@ from mindroom.tool_dialects.types import (
     wire_argument,
 )
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
+from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE
 
-_HANDLE_PREFIX = "shell:"
 # Codex yields a command after 10 seconds by default, between 250 ms and 30 seconds, and waits at least
 # 5 seconds on an empty poll; MindRoom caps a poll's wait at MAX_CHECK_WAIT_SECONDS.
 _EMPTY_POLL_WAIT_SECONDS = (5, MAX_CHECK_WAIT_SECONDS)
@@ -62,58 +54,6 @@ eof_line: "*** End of File" LF
 """
 
 
-def _session_id(handle: str) -> int | None:
-    digits = handle.removeprefix(_HANDLE_PREFIX)
-    if not handle.startswith(_HANDLE_PREFIX) or not digits:
-        return None
-    try:
-        return int(digits, 16)
-    except ValueError:
-        return None
-
-
-def _handle(session_id: int) -> str:
-    return f"{_HANDLE_PREFIX}{session_id:08x}"
-
-
-def _render_exec(text: str) -> str:
-    prefix, rest = split_cwd_prefix(text)
-    background = parse_background_handle_message(rest)
-    if background is None:
-        return text
-    session_id = _session_id(background.handle)
-    return (
-        f"{prefix}Wall time: {background.timeout:g} seconds\n"
-        f"Process running with session ID {session_id} (PID {background.pid}); "
-        f"poll it with write_stdin or stop it with kill_shell_command(session_id={session_id})\nOutput:\n"
-    )
-
-
-def _render_poll(text: str) -> str:
-    if (unknown := _render_unknown_handle(text)) is not None:
-        return unknown
-    status = parse_check_status(text)
-    if status is None:
-        return text
-    state = f"Process running (PID {status.pid})" if status.running else f"Process exited with code {status.exit_code}"
-    return f"Wall time: {status.elapsed:g} seconds\n{state}\n{status.report}"
-
-
-def _render_unknown_handle(text: str) -> str | None:
-    handle = parse_unknown_handle_error(text)
-    return f"Error: Unknown session ID {_session_id(handle)}" if handle is not None else None
-
-
-def _render_kill(text: str) -> str:
-    if (unknown := _render_unknown_handle(text)) is not None:
-        return unknown
-    kill = parse_kill_message(text)
-    if kill is None:
-        return text
-    action, pid, signal, handle = kill
-    return f"{action} process {pid} ({signal} sent). Use write_stdin(session_id={_session_id(handle)}) to confirm exit."
-
-
 def _exec_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
     # Like Codex, output arrives whole up to the byte cap, which notes any cut, so max_output_tokens is not forwarded.
     canonical: dict[str, Any] = {"args": wire_argument(arguments, "exec_command", "cmd"), "tail": MAX_OUTPUT_LINES}
@@ -130,29 +70,25 @@ def _exec_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
     wire: dict[str, Any] = {"cmd": shell_command_text(canonical.get("args"))}
     if canonical.get("workdir") is not None:
         wire["workdir"] = canonical["workdir"]
-    _minimum, default, _maximum = _YIELD_MS
-    # Omitting Codex's default keeps a call that left it unset lossless, so history stores it once.
-    if isinstance(timeout := canonical.get("timeout"), int | float) and timeout * 1000 != default:
+    if isinstance(timeout := canonical.get("timeout"), int | float):
         wire["yield_time_ms"] = int(timeout * 1000)
     return wire
 
 
 def _write_stdin_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
-    session_id = wire_argument(arguments, "write_stdin", "session_id", kind=int)
+    handle = wire_argument(arguments, "write_stdin", "session_id")
     if wire_argument(arguments, "write_stdin", "chars", required=False):
         msg = "write_stdin cannot send input; pass empty chars to poll, or stop a session with kill_shell_command"
         raise DialectArgumentError(msg)
     yield_ms = wire_argument(arguments, "write_stdin", "yield_time_ms", kind=float, required=False)
     minimum, maximum = _EMPTY_POLL_WAIT_SECONDS
     wait = minimum if yield_ms is None else min(max(math.ceil(yield_ms / 1000), minimum), maximum)
-    return {"handle": _handle(session_id), "wait": wait}
+    return {"handle": handle, "wait": wait}
 
 
 def _write_stdin_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
-    handle = str(canonical.get("handle", ""))
-    session_id = _session_id(handle)
-    wire: dict[str, Any] = {"session_id": session_id if session_id is not None else handle}
-    if isinstance(wait := canonical.get("wait"), int | float) and wait != _EMPTY_POLL_WAIT_SECONDS[0]:
+    wire: dict[str, Any] = {"session_id": canonical.get("handle")}
+    if isinstance(wait := canonical.get("wait"), int | float):
         wire["yield_time_ms"] = int(wait * 1000)
     return wire
 
@@ -161,7 +97,7 @@ _EXEC_COMMAND = WireFunction(
     key=ToolKey("shell", "run_shell_command"),
     wire_name="exec_command",
     description=(
-        "Runs a shell command and returns its output, or a session ID when it is still running after "
+        "Runs a shell command and returns its output, or a session handle when it is still running after "
         "`yield_time_ms`.\n"
         "- Every call starts a fresh non-login bash in `workdir`, which defaults to the working directory.\n"
         "- Poll a running session with write_stdin and empty `chars`."
@@ -186,7 +122,6 @@ _EXEC_COMMAND = WireFunction(
     ),
     to_canonical=_exec_to_canonical,
     to_wire=_exec_to_wire,
-    render_result=_render_exec,
     carried_notes=(WORKSPACE_CWD_NOTE, WORKING_METHOD_NOTE),
 )
 _WRITE_STDIN = WireFunction(
@@ -199,7 +134,7 @@ _WRITE_STDIN = WireFunction(
     parameters=object_schema(
         {
             "chars": {"type": "string", "description": "Must be empty; writing input is not supported."},
-            "session_id": {"type": "number", "description": "Identifier of the running exec_command session."},
+            "session_id": {"type": "string", "description": "Handle of the running exec_command session."},
             "yield_time_ms": {
                 "type": "number",
                 "description": "Wait up to this long for the session to finish. Defaults to 5000 ms, at most 60000 ms.",
@@ -209,7 +144,6 @@ _WRITE_STDIN = WireFunction(
     ),
     to_canonical=_write_stdin_to_canonical,
     to_wire=_write_stdin_to_wire,
-    render_result=_render_poll,
 )
 _APPLY_PATCH = WireFunction(
     key=APPLY_PATCH,
@@ -244,20 +178,15 @@ _KILL_SHELL_COMMAND = WireFunction(
     parameters=object_schema(
         {
             "force": {"type": "boolean", "description": "Send SIGKILL at once instead of SIGTERM."},
-            "session_id": {"type": "number", "description": "Identifier of the running exec_command session."},
+            "session_id": {"type": "string", "description": "Handle of the running exec_command session."},
         },
         "session_id",
     ),
     to_canonical=lambda arguments: {
-        "handle": _handle(wire_argument(arguments, "kill_shell_command", "session_id", kind=int)),
+        "handle": wire_argument(arguments, "kill_shell_command", "session_id"),
         "force": bool(wire_argument(arguments, "kill_shell_command", "force", kind=bool, required=False)),
     },
-    # Omitting the default force keeps a call that left it unset lossless, so history stores it once.
-    to_wire=lambda canonical: {
-        "session_id": _session_id(str(canonical.get("handle", ""))),
-        **({"force": True} if canonical.get("force") else {}),
-    },
-    render_result=_render_kill,
+    to_wire=lambda canonical: {"session_id": canonical.get("handle"), "force": bool(canonical.get("force"))},
 )
 
 CODEX_DIALECT = ToolDialect(

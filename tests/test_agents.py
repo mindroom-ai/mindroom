@@ -4200,28 +4200,25 @@ def test_create_agent_hides_apply_patch_with_hidden_file_edits(tmp_path: Path, h
 @pytest.mark.parametrize(
     ("default", "rules", "expected"),
     [
+        ("auto_approve", {}, {"apply_patch", "edit_file", "write_file"}),
         ("auto_approve", {"write_file": "require_approval"}, {"edit_file", "write_file"}),
+        ("auto_approve", {"apply_patch": "require_approval"}, {"edit_file", "write_file"}),
         (
             "auto_approve",
             {"edit_file": "require_approval", "write_file": "require_approval", "apply_patch": "require_approval"},
-            {"apply_patch", "edit_file", "write_file"},
-        ),
-        (
-            "auto_approve",
-            {"write_file": "require_approval", "apply_patch": "require_approval"},
             {"edit_file", "write_file"},
         ),
         ("require_approval", {"edit_file": "auto_approve", "write_file": "auto_approve"}, {"edit_file", "write_file"}),
     ],
-    ids=["edit-rules-only", "all-gated", "edit-file-ungated", "allowlist-of-edits"],
+    ids=["ungated", "write-gated", "patch-gated", "all-gated", "allowlist-of-edits"],
 )
-def test_apply_patch_shows_only_when_gated_like_the_file_edits(
+def test_apply_patch_shows_only_when_no_file_edit_needs_approval(
     tmp_path: Path,
     default: str,
     rules: dict[str, str],
     expected: set[str],
 ) -> None:
-    """apply_patch shows only when approval treats it like edit_file and write_file, which models then fall back to."""
+    """Any approval on file edits keeps apply_patch away, so models edit with the gated edit_file and write_file."""
     config = _test_config()
     config.agents["general"].tools = ["coding"]
     config.tool_approval = ToolApprovalConfig.model_validate(
@@ -4243,42 +4240,6 @@ def test_apply_patch_shows_only_when_gated_like_the_file_edits(
         (functions[name].requires_confirmation is True) == (rules.get(name, default) == "require_approval")
         for name in expected
     )
-
-
-@pytest.mark.parametrize(
-    ("patch_rule", "expected"),
-    [(False, {"edit_file", "write_file"}), (True, {"apply_patch", "edit_file", "write_file"})],
-    ids=["catch-all-script", "patch-aware-script"],
-)
-def test_script_decided_apply_patch_shows_only_with_its_own_rule(
-    tmp_path: Path,
-    *,
-    patch_rule: bool,
-    expected: set[str],
-) -> None:
-    """A script written for other tools may not understand patches, so apply_patch needs a rule of its own."""
-    script = tmp_path / "policy.py"
-    script.write_text(
-        "def check(tool_name, arguments, agent_name):\n    return tool_name in {'edit_file', 'write_file'}\n",
-    )
-    rules = [{"match": "*", "script": str(script)}]
-    if patch_rule:
-        rules.insert(0, {"match": "apply_patch", "script": str(script)})
-    config = _test_config()
-    config.agents["general"].tools = ["coding"]
-    config.tool_approval = ToolApprovalConfig.model_validate({"rules": rules})
-    runtime_paths = _runtime_paths(tmp_path)
-    config = _bind_runtime_paths(config, runtime_paths)
-
-    agent = create_agent("general", config, runtime_paths, execution_identity=None, supports_native_tool_approval=True)
-
-    names = {
-        name
-        for toolkit in agent.tools or []
-        if isinstance(toolkit, Toolkit)
-        for name in (*toolkit.functions, *toolkit.async_functions)
-    }
-    assert names & {"apply_patch", "edit_file", "write_file"} == expected
 
 
 def _config_with_workspace_skill(tmp_path: Path) -> Config:

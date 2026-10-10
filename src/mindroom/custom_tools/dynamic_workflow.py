@@ -743,7 +743,6 @@ def _approval_consistent_toolkits(toolkits: dict[str, Toolkit], config: Config) 
             removed=set(),
             gated={function for function in names if tool_may_require_approval(config, function)},
             registered_tool_name=name,
-            config=config,
         )
         if kept is not None:
             consistent[name] = kept

@@ -6617,7 +6617,6 @@ expose = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
-    "approval_script_rule_match",
     "arm_scheduled_call_approval",
     "claim_scheduled_call",
     "evaluate_tool_approval",

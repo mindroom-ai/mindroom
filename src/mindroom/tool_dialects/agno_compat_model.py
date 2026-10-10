@@ -43,7 +43,7 @@ _TOOL_DIALECT_INVOKE_MARKER = "_mindroom_tool_dialect_invoke"
 # history calls, and incoming calls while dispatching the original Function.
 # Coverage: tests/test_tool_dialect_binding.py::test_wire_call_dispatches_canonical_function;
 # tests/test_tool_dialect_binding.py::test_switching_dialect_rerenders_history;
-# tests/test_tool_dialect_binding.py::test_chat_completions_payload_carries_no_wire_record;
+# tests/test_tool_dialect_binding.py::test_chat_completions_replays_calls_in_wire_form;
 # tests/test_tool_dialect_binding.py::test_overrides_bind_to_deepcopied_model.
 def install_tool_dialect(model: Model, dialect: ToolDialect) -> None:
     """Present this model's canonical tools in *dialect*, as freeform tools where the Responses API allows them."""

@@ -33,8 +33,7 @@ tool_approval:
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
-OpenAI models edit files with `apply_patch` instead of `edit_file` and `write_file`, but only when approval treats `apply_patch` like `edit_file` and `write_file`; otherwise they edit with `edit_file` and `write_file` under your rules for those, so add a matching rule for `apply_patch` when you gate both of them.
-Behind a script rule, they see `apply_patch` only when that rule's `match` is exactly `apply_patch`, and its script receives the whole patch in `input`, so a script that checks paths must read the `*** Add File:`, `*** Update File:`, `*** Delete File:`, and `*** Move to:` lines.
+OpenAI models edit files with `apply_patch` only when none of `edit_file`, `write_file`, and `apply_patch` can need approval; when a rule can gate any of them, they edit with `edit_file` and `write_file` under your rules for those.
 
 ## Approving and Denying
 

@@ -216,6 +216,11 @@ async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the
         )
         assert started.handle is not None
         record = registry[started.handle]
+        assert started.message == (
+            f"Command timed out after 0.2s. Still running (PID {record.pid}).\n"
+            f"Handle: {started.handle}\n"
+            "Poll this handle for its output, or stop the command with it."
+        )
 
         def vanished(_pid: int, _signal: int) -> None:
             raise ProcessLookupError
@@ -228,7 +233,7 @@ async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the
             )
         assert capture.incomplete is False
         assert kill_command(registry, namespace="test", handle=started.handle) == (
-            f"Terminated process {record.pid} (SIGTERM sent). Use check_shell_command('{started.handle}') to confirm exit."
+            f"Terminated process {record.pid} (SIGTERM sent). Poll its handle to confirm it exited."
         )
         assert capture.incomplete is True
         assert await _wait_until_gone(record.pid)

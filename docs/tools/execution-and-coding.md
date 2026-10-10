@@ -79,7 +79,7 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 Claude and OpenAI models see `shell` and `coding` under the names and arguments of the coding agents they were trained in, chosen by the model's [`tool_dialect`](../configuration/models.md#tool-dialect).
 Claude models see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
 OpenAI GPT and Codex models see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
-When tool filters leave `apply_patch` out of `coding`, or approval rules treat it differently from `edit_file` and `write_file`, these models see `edit_file` and `write_file` instead.
+When tool filters leave `apply_patch` out of `coding`, or an approval rule can gate any file edit, these models see `edit_file` and `write_file` instead.
 `exec_command` moves a command to the background after 10 seconds unless the model asks to wait longer (at most 30), and the model then polls it with `write_stdin`.
 Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees, so a hook that guards `edit_file` and `write_file` should also handle `apply_patch`.
 

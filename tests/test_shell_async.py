@@ -21,7 +21,6 @@ from mindroom.tools.shell import (
     _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
     shell_tools,
-    split_cwd_prefix,
 )
 
 if TYPE_CHECKING:
@@ -508,7 +507,7 @@ async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> No
     assert result.startswith(f"[cwd: {tmp_path}]\n")
     assert "timed out" in result.lower()
     assert "Handle: shell:" in result
-    assert "check_shell_command" in result
+    assert "Poll this handle" in result
 
     # Extract handle and clean up
     handle = result.split("Handle: ")[1].split("\n")[0]
@@ -1249,9 +1248,3 @@ async def test_check_shell_command_wait_returns_when_finished(tmp_path: Path) ->
     assert status.startswith("Status: FINISHED (exit code 0")
     assert "waited" in status
     assert time.monotonic() - started < 4
-
-
-def test_split_cwd_prefix_inverts_prefix() -> None:
-    """The cwd prefix splits off exactly once."""
-    assert split_cwd_prefix("[cwd: /w]\nout\n[cwd: /x]") == ("[cwd: /w]\n", "out\n[cwd: /x]")
-    assert split_cwd_prefix("out") == ("", "out")

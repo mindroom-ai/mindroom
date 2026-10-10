@@ -18,14 +18,6 @@ type DialectName = Literal["mindroom", "claude", "codex"]
 APPLY_PATCH = ToolKey("coding", "apply_patch")
 FILE_EDITS = (ToolKey("coding", "edit_file"), ToolKey("coding", "write_file"))
 
-# Tool-call dict key recording the exact wire form of a lossy translated call: dialect, name, arguments.
-MINDROOM_WIRE_KEY = "mindroom_wire"
-
-
-def without_wire_record(call: dict[str, Any]) -> dict[str, Any]:
-    """Return a stored tool call without its wire record, which only provider replay reads."""
-    return {key: value for key, value in call.items() if key != MINDROOM_WIRE_KEY}
-
 
 class DialectArgumentError(ValueError):
     """A wire tool call whose arguments cannot become a canonical call."""
@@ -43,8 +35,6 @@ class WireFunction:
     """Translate wire arguments to canonical arguments; raises DialectArgumentError."""
     to_wire: Callable[[dict[str, Any]], dict[str, Any]]
     """Translate canonical arguments to wire arguments for history recorded in another dialect."""
-    render_result: Callable[[str], str] | None = None
-    """Rewrite fixed MindRoom result templates into the dialect's wording; everything else passes through."""
     custom_format: dict[str, Any] | None = None
     """Responses API freeform tool format; the call's raw text arrives as the canonical ``input`` argument."""
     carried_notes: tuple[str, ...] = ()

@@ -21,7 +21,7 @@ from mindroom.agents import set_toolkit_owner
 from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
 from mindroom.tool_dialects.translation import resolve_tool_dialect
-from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
+from mindroom.tool_dialects.types import DialectArgumentError, ToolDialect, WireFunction
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
@@ -48,7 +48,6 @@ _CLAUDE_TOY = ToolDialect(
             parameters={"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
             to_canonical=lambda arguments: {"args": _require(arguments, "cmd", "Run")},
             to_wire=lambda arguments: {"cmd": arguments.get("args")},
-            render_result=lambda text: text.replace("ran ", "Run finished: "),
         ),
         WireFunction(
             key=ToolKey("coding", "read_file"),
@@ -214,25 +213,24 @@ async def test_wire_call_dispatches_canonical_function() -> None:
     assert executions == ["ls"]
     assert [(tool.tool_name, tool.tool_args) for tool in result.tools or []] == [("run_shell_command", {"args": "ls"})]
     assert provider.items(1, "function_call_output") == [
-        {"type": "function_call_output", "call_id": "c1", "output": "Run finished: ls"},
+        {"type": "function_call_output", "call_id": "c1", "output": "ran ls"},
     ]
 
 
 @pytest.mark.asyncio
-async def test_second_request_replays_same_dialect_call_verbatim() -> None:
-    """The follow-up request repeats the model's call exactly as it was sent."""
-    provider = _Provider([_function_call("c1", "Run", '{"cmd":   "ls", "note": "kept"}')])
+async def test_second_request_replays_the_call_in_wire_form() -> None:
+    """The follow-up request repeats the model's call in the dialect's shape, rendered from the canonical call."""
+    provider = _Provider([_function_call("c1", "Run", '{"cmd":   "ls", "note": "dropped"}')])
 
     await _run(provider, [_shell([])], _CLAUDE_TOY)
 
     [call] = provider.items(1, "function_call")
-    assert (call["name"], call["arguments"]) == ("Run", '{"cmd":   "ls", "note": "kept"}')
-    assert MINDROOM_WIRE_KEY not in json.dumps(provider.requests[1])
+    assert (call["name"], call["arguments"]) == ("Run", json.dumps({"cmd": "ls"}))
 
 
 @pytest.mark.asyncio
-async def test_session_reload_keeps_mindroom_wire(tmp_path: Path) -> None:
-    """Stored history keeps the canonical call and its wire record across a database reload."""
+async def test_session_reload_keeps_the_canonical_call(tmp_path: Path) -> None:
+    """Stored history keeps only the canonical call across a database reload."""
     db = SqliteDb(db_file=str(tmp_path / "sessions.db"))
     provider = _Provider([_function_call("c1", "Run", '{"cmd": "ls", "note": "kept"}')])
 
@@ -245,8 +243,6 @@ async def test_session_reload_keeps_mindroom_wire(tmp_path: Path) -> None:
     assert session is not None
     [call] = [call for message in session.runs[0].messages or [] for call in message.tool_calls or []]
     assert call["function"] == {"name": "run_shell_command", "arguments": json.dumps({"args": "ls"})}
-    assert call[MINDROOM_WIRE_KEY]["dialect"] == "claude"
-    assert call[MINDROOM_WIRE_KEY]["name"] == "Run"
 
 
 @pytest.mark.asyncio
@@ -429,8 +425,8 @@ async def test_closing_the_stream_closes_the_provider_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_payload_carries_no_wire_record() -> None:
-    """Chat Completions sends stored tool calls verbatim, so the wire record must be stripped first."""
+async def test_chat_completions_replays_calls_in_wire_form() -> None:
+    """Chat Completions sends stored tool calls as the request presents their tools."""
     requests: list[dict[str, Any]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -469,5 +465,4 @@ async def test_chat_completions_payload_carries_no_wire_record() -> None:
         await Agent(model=model, tools=[_shell([])], telemetry=False).arun("Go.")
 
     [assistant] = [message for message in requests[1]["messages"] if message.get("tool_calls")]
-    assert assistant["tool_calls"][0]["function"] == {"name": "Run", "arguments": '{"cmd": "ls", "note": "kept"}'}
-    assert MINDROOM_WIRE_KEY not in json.dumps(requests[1])
+    assert assistant["tool_calls"][0]["function"] == {"name": "Run", "arguments": json.dumps({"cmd": "ls"})}

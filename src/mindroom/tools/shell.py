@@ -34,7 +34,6 @@ from mindroom.shell_supervisor import (
     poll_command_via_supervisor,
     run_command_via_supervisor,
 )
-from mindroom.text_templates import template_pattern
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -106,17 +105,6 @@ WORKING_METHOD_NOTE = (
     "spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run "
     "available tests, and recheck suspicious results such as a zero count."
 )
-
-_CWD_PREFIX = "[cwd: {cwd}]\n"
-_CWD_PREFIX_PATTERN = template_pattern(_CWD_PREFIX, cwd="[^\n]*")
-
-
-def split_cwd_prefix(text: str) -> tuple[str, str]:
-    """Return the working-directory line ``run_shell_command`` puts first (or "") and the rest of the result."""
-    match = _CWD_PREFIX_PATTERN.match(text)
-    if match is None:
-        return "", text
-    return text[: match.end()], text[match.end() :]
 
 
 # Module-level process registry shared across all MindRoomShellTools instances.
@@ -513,7 +501,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 return ToolOutputFileHandled(message)
             if cwd is None:
                 return message
-            return _CWD_PREFIX.format(cwd=cwd) + message
+            return f"[cwd: {cwd}]\n{message}"
 
         async def check_shell_command(self, handle: str, wait: int = 0) -> str:
             """Poll the status of a backgrounded shell command.

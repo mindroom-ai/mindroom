@@ -14,8 +14,7 @@ from anthropic import AsyncAnthropic
 from mindroom.agents import set_toolkit_owner
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.models import ModelConfig
-from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, _format_read_output
-from mindroom.shell_execution import MAX_OUTPUT_LINES, _format_background_handle_message
+from mindroom.shell_execution import MAX_OUTPUT_LINES
 from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
 from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_dialects.translation import resolve_tool_dialect
@@ -25,12 +24,6 @@ from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE
 
 def _wire(name: str) -> WireFunction:
     return next(function for function in CLAUDE_DIALECT.functions if function.wire_name == name)
-
-
-def _render(name: str, text: str) -> str:
-    render = _wire(name).render_result
-    assert render is not None
-    return render(text)
 
 
 def test_bash_maps_command_timeout_background() -> None:
@@ -63,18 +56,13 @@ def test_bash_output_and_kill_shell_map_handles() -> None:
     }
 
 
-def test_read_offset_zero_and_tab_rendering() -> None:
-    """Read starts at line 1 for offset 0 and renders line numbers followed by a tab."""
-    content = "\n".join(f"line {number}" for number in range(1, 13))
-
+def test_read_offset_zero_starts_at_line_one() -> None:
+    """Read starts at line 1 for offset 0."""
     assert _wire("Read").to_canonical({"file_path": "a.py", "offset": 0, "limit": 5}) == {
         "path": "a.py",
         "offset": 1,
         "limit": 5,
     }
-    assert _render("Read", _format_read_output(content, 9, 2)) == (
-        "9\tline 9\n10\tline 10\n\n[Showing lines 9-10 of 12. Use offset=11 to continue.]"
-    )
 
 
 def test_edit_and_write_map_arguments() -> None:
@@ -139,59 +127,6 @@ def test_history_args_render_as_the_command_that_ran(args: object, command: str)
 def test_history_argv_with_non_strings_still_renders() -> None:
     """A recorded call whose argv holds non-strings, which the shell tool rejected, still renders as a command."""
     assert _wire("Bash").to_wire({"args": ["head", "-n", 5, "f"]}) == {"command": "head -n 5 f"}
-
-
-def test_background_handle_renders_claude_wording() -> None:
-    """A command moved to the background tells the model to use BashOutput and KillShell."""
-    message = "[cwd: /w]\n" + _format_background_handle_message(120, 77, "shell:0123abcd")
-    immediate = _format_background_handle_message(0, 78, "shell:4567cdef")
-
-    assert _render("Bash", message) == (
-        "[cwd: /w]\nCommand did not finish within 120s and keeps running in the background (PID 77) with ID: "
-        'shell:0123abcd. Poll it with BashOutput(bash_id="shell:0123abcd") or stop it with '
-        'KillShell(shell_id="shell:0123abcd").'
-    )
-    assert _render("Bash", immediate) == (
-        'Command running in the background (PID 78) with ID: shell:4567cdef. Poll it with BashOutput(bash_id="'
-        'shell:4567cdef") or stop it with KillShell(shell_id="shell:4567cdef").'
-    )
-    assert _render(
-        "KillShell",
-        "Terminated process 77 (SIGTERM sent). Use check_shell_command('shell:0123abcd') to confirm exit.",
-    ) == ('Terminated process 77 (SIGTERM sent). Use BashOutput(bash_id="shell:0123abcd") to confirm exit.')
-
-
-def test_program_output_naming_shell_tools_is_not_rewritten() -> None:
-    """Only MindRoom's own messages are reworded; command output that mentions the tools stays as printed."""
-    printed = "[cwd: /w]\ngrep hit: check_shell_command('shell:0123abcd')"
-    status = "Status: FINISHED (exit code 0, ran for 1.0s)\nOutput:\nkill_shell_command('shell:0123abcd')"
-
-    assert _render("Bash", printed) == printed
-    assert _wire("BashOutput").render_result is None or _render("BashOutput", status) == status
-
-
-def test_edit_errors_render_claude_wording() -> None:
-    """Edit match errors use Claude Code's wording, including the replace_all hint."""
-    multiple = (
-        "Error: old_text matches 3 locations. "
-        "Provide more context to make the match unique, or set replace_all to replace every match."
-    )
-
-    assert _render("Edit", EDIT_NOT_FOUND_ERROR) == "Error: String to replace not found in file."
-    assert _render("Edit", multiple) == (
-        "Error: Found 3 matches of the string to replace, but replace_all is false. "
-        "Set replace_all to true or provide more context to make the match unique."
-    )
-
-
-def test_unrelated_results_pass_through() -> None:
-    """Output that is not a fixed MindRoom template stays byte for byte."""
-    for name, text in [
-        ("Bash", "[cwd: /w]\nhello\n"),
-        ("Read", "Error: File not found: a.py"),
-        ("Edit", "Applied edit"),
-    ]:
-        assert _render(name, text) == text
 
 
 def test_resolve_tool_dialect_returns_claude_for_anthropic() -> None:

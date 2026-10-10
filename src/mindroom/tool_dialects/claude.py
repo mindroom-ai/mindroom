@@ -9,13 +9,7 @@ from __future__ import annotations
 import shlex
 from typing import Any
 
-from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, parse_edit_multiple_matches_error, split_read_output
-from mindroom.shell_execution import (
-    DEFAULT_RUN_TIMEOUT_SECONDS,
-    MAX_OUTPUT_LINES,
-    parse_background_handle_message,
-    parse_kill_message,
-)
+from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS, MAX_OUTPUT_LINES
 from mindroom.tool_dialects.types import (
     APPLY_PATCH,
     FILE_EDITS,
@@ -27,32 +21,7 @@ from mindroom.tool_dialects.types import (
     wire_argument,
 )
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE, split_cwd_prefix
-
-
-def _render_kill(text: str) -> str:
-    kill = parse_kill_message(text)
-    if kill is None:
-        return text
-    action, pid, signal, handle = kill
-    return f'{action} process {pid} ({signal} sent). Use BashOutput(bash_id="{handle}") to confirm exit.'
-
-
-def _render_bash(text: str) -> str:
-    prefix, rest = split_cwd_prefix(text)
-    background = parse_background_handle_message(rest)
-    if background is None:
-        return text
-    handle = background.handle
-    poll = f'Poll it with BashOutput(bash_id="{handle}") or stop it with KillShell(shell_id="{handle}").'
-    if background.timeout > 0:
-        status = (
-            f"Command did not finish within {background.timeout:g}s and keeps running in the background "
-            f"(PID {background.pid}) with ID: {handle}."
-        )
-    else:
-        status = f"Command running in the background (PID {background.pid}) with ID: {handle}."
-    return f"{prefix}{status} {poll}"
+from mindroom.tools.shell import WORKING_METHOD_NOTE, WORKSPACE_CWD_NOTE
 
 
 def _bash_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -94,14 +63,6 @@ def _read_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
     return wire
 
 
-def _render_read(text: str) -> str:
-    parsed = split_read_output(text)
-    if parsed is None:
-        return text
-    lines, hint = parsed
-    return "\n".join(f"{number}\t{line}" for number, line in lines) + hint
-
-
 def _edit_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
     canonical: dict[str, Any] = {
         "path": wire_argument(arguments, "Edit", "file_path", "path"),
@@ -122,18 +83,6 @@ def _edit_to_wire(canonical: dict[str, Any]) -> dict[str, Any]:
     if canonical.get("replace_all") is not None:
         wire["replace_all"] = canonical["replace_all"]
     return wire
-
-
-def _render_edit(text: str) -> str:
-    if text == EDIT_NOT_FOUND_ERROR:
-        return "Error: String to replace not found in file."
-    count = parse_edit_multiple_matches_error(text)
-    if count is None:
-        return text
-    return (
-        f"Error: Found {count} matches of the string to replace, but replace_all is false. "
-        "Set replace_all to true or provide more context to make the match unique."
-    )
 
 
 def _write_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -168,7 +117,6 @@ _BASH = WireFunction(
     ),
     to_canonical=_bash_to_canonical,
     to_wire=_bash_to_wire,
-    render_result=_render_bash,
     carried_notes=(WORKSPACE_CWD_NOTE, WORKING_METHOD_NOTE),
 )
 _BASH_OUTPUT = WireFunction(
@@ -192,13 +140,12 @@ _KILL_SHELL = WireFunction(
     ),
     to_canonical=lambda arguments: {"handle": wire_argument(arguments, "KillShell", "shell_id"), "force": False},
     to_wire=lambda canonical: {"shell_id": canonical.get("handle")},
-    render_result=_render_kill,
 )
 _READ = WireFunction(
     key=ToolKey("coding", "read_file"),
     wire_name="Read",
     description=(
-        "Read a file and return its lines numbered from 1, each number followed by a tab.\n"
+        "Read a file and return its lines numbered from 1, as `number| line`.\n"
         "- Reads up to 2000 lines by default; pass `offset` (the line to start from) and `limit` for larger files.\n"
         "- `file_path` may be absolute or relative to the working directory."
     ),
@@ -212,14 +159,13 @@ _READ = WireFunction(
     ),
     to_canonical=_read_to_canonical,
     to_wire=_read_to_wire,
-    render_result=_render_read,
 )
 _EDIT = WireFunction(
     key=ToolKey("coding", "edit_file"),
     wire_name="Edit",
     description=(
         "Replace exact text in a file and return a diff of the change.\n"
-        "- `old_string` must match the file without Read's line-number prefix (the number and tab) and must be "
+        "- `old_string` must match the file without Read's line-number prefix (the number and `| `) and must be "
         "unique unless `replace_all` is true.\n"
         "- Small whitespace and Unicode differences are tolerated."
     ),
@@ -236,7 +182,6 @@ _EDIT = WireFunction(
     ),
     to_canonical=_edit_to_canonical,
     to_wire=_edit_to_wire,
-    render_result=_render_edit,
 )
 _WRITE = WireFunction(
     key=ToolKey("coding", "write_file"),
