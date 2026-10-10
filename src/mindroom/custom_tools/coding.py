@@ -605,6 +605,19 @@ def _resolve_and_read(
         return f"Error reading file: {e}"
 
 
+def _names_one_entry(entry: Path, target: Path) -> bool:
+    """Return whether *target* spells *entry*'s own directory entry, as a case-only rename does on macOS.
+
+    Hard links share a file too, but under names that differ beyond case.
+    """
+    return (
+        entry.parent == target.parent
+        and entry.name.casefold() == target.name.casefold()
+        and target.exists()
+        and os.path.samestat(entry.lstat(), target.lstat())
+    )
+
+
 class CodingTools(Toolkit):
     """Ergonomic coding tools for LLM agents.
 
@@ -801,8 +814,7 @@ class CodingTools(Toolkit):
                 new_contents = updated_contents(self._patch_source(source, hunk.path), hunk.path, hunk.chunks)
                 self._check_patch_target(target, hunk.move_to or hunk.path)
                 writes.append((target, new_contents.encode("utf-8")))
-                # On a case-insensitive filesystem a case-only rename names the moved file itself.
-                if entry != target and not (target.exists() and os.path.samestat(entry.lstat(), target.lstat())):
+                if entry != target and not _names_one_entry(entry, target):
                     writes.append((entry, None))
                 modified.append(f"M {hunk.move_to or hunk.path}")
         return writes, [*added, *modified, *deleted]
@@ -841,7 +853,9 @@ class CodingTools(Toolkit):
     def _patch_entry(self, path: str) -> Path:
         """Return the entry a delete or move removes: a link itself, not its target, as in Codex."""
         link = self._patch_path(str(Path(path).parent)) / Path(path).name
-        if link.is_symlink() and not is_git_metadata_path(link):
+        if link.is_symlink():
+            if is_git_metadata_path(link):
+                raise PatchError(git_metadata_reason(path))
             return link
         return self._patch_path(path)
 

@@ -204,7 +204,7 @@ def wire_function_name(
     dialect: ToolDialect,
     toolkit_name: str,
     function_name: str,
-    taken: Collection[str] = (),
+    taken: Collection[str],
 ) -> str:
     """Return the wire name of a canonical function, or its canonical name when *dialect* does not map it.
 

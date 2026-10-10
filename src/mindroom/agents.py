@@ -50,7 +50,6 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
     ToolFileAccess,
-    with_implied_exclusions,
 )
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
@@ -1299,22 +1298,29 @@ def _function_names(toolkit: Toolkit) -> set[str]:
 
 
 def _without_implied_exclusions(toolkit: Toolkit, removed: set[str], registered_tool_name: str) -> Toolkit | None:
-    """Hide functions that do what a hidden or gated one does, such as apply_patch beside edit_file, unless gated too."""
+    """Hide a function that does what another does, such as apply_patch, unless approval treats both alike.
+
+    Approval rules are usually written for edit_file and write_file, so the model falls back to those whenever
+    apply_patch would be hidden less or gated differently than they are.
+    """
     metadata = TOOL_METADATA.get(registered_tool_name)
+    present = _function_names(toolkit)
     gated = {
         name
         for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
         if function.requires_confirmation is True
     }
-    hidden = removed | gated
-    implied = (
-        set(with_implied_exclusions(hidden, metadata.implied_exclusions if metadata is not None else None)) - hidden
-    )
-    if not implied:
+    hidden = {
+        name
+        for key, names in (metadata.implied_exclusions or {} if metadata is not None else {}).items()
+        for name in names
+        if name in present and (key in removed or (key in present and (key in gated) != (name in gated)))
+    }
+    if not hidden:
         return toolkit
-    toolkit.functions = {name: function for name, function in toolkit.functions.items() if name not in implied}
+    toolkit.functions = {name: function for name, function in toolkit.functions.items() if name not in hidden}
     toolkit.async_functions = {
-        name: function for name, function in toolkit.async_functions.items() if name not in implied
+        name: function for name, function in toolkit.async_functions.items() if name not in hidden
     }
     return toolkit if toolkit.functions or toolkit.async_functions else None
 

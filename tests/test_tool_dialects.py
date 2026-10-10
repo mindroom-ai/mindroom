@@ -138,8 +138,9 @@ def test_wire_tools_renames_and_hides() -> None:
 
 def test_wire_function_name_maps_only_dialect_functions() -> None:
     """Deferred-tool names follow the dialect for mapped functions and stay canonical otherwise."""
-    assert wire_function_name(_TOY, "shell", "run_shell_command") == "Run"
-    assert wire_function_name(_TOY, "coding", "ls") == "ls"
+    assert wire_function_name(_TOY, "shell", "run_shell_command", ()) == "Run"
+    assert wire_function_name(_TOY, "coding", "ls", ()) == "ls"
+    assert wire_function_name(_TOY, "shell", "run_shell_command", {"Run"}) == "run_shell_command"
 
 
 def test_wire_tools_skips_function_with_other_owner() -> None:

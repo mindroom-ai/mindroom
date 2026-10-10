@@ -201,18 +201,18 @@ def test_deleting_a_link_and_updating_its_target_both_apply(tmp_path: Path) -> N
     assert (tmp_path / "real" / "config.txt").read_text() == "changed\n"
 
 
-def test_moving_onto_another_name_for_the_same_file_keeps_it(tmp_path: Path) -> None:
-    """A move whose destination names the moved file itself, as a case-only rename does on macOS, deletes nothing."""
-    (tmp_path / "readme.md").write_text("x\n")
-    (tmp_path / "README.md").hardlink_to(tmp_path / "readme.md")
+def test_moving_onto_a_hard_link_of_the_file_removes_the_source(tmp_path: Path) -> None:
+    """Two hard links are two directory entries, so moving one onto the other still removes the source entry."""
+    (tmp_path / "a.txt").write_text("x\n")
+    (tmp_path / "b.txt").hardlink_to(tmp_path / "a.txt")
 
     result = CodingTools(base_dir=str(tmp_path)).apply_patch(
-        "*** Begin Patch\n*** Update File: readme.md\n*** Move to: README.md\n@@\n-x\n+y\n*** End Patch",
+        "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n@@\n-x\n+y\n*** End Patch",
     )
 
-    assert result == "Success. Updated the following files:\nM README.md"
-    assert (tmp_path / "README.md").read_text() == "y\n"
-    assert (tmp_path / "readme.md").exists()
+    assert result == "Success. Updated the following files:\nM b.txt"
+    assert (tmp_path / "b.txt").read_text() == "y\n"
+    assert not (tmp_path / "a.txt").exists()
 
 
 def test_moving_a_link_onto_its_target_removes_the_link(tmp_path: Path) -> None:
@@ -280,6 +280,21 @@ def test_git_metadata_path_rejected(tmp_path: Path) -> None:
         "which file tools may not modify."
     )
     assert not (tmp_path / ".git" / "hooks").exists()
+
+
+def test_deleting_a_git_metadata_link_is_refused(tmp_path: Path) -> None:
+    """A .git entry that is a link is Git metadata, so deleting it is refused and its target stays."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "victim.txt").write_text("keep\n")
+    (tmp_path / "sub" / ".git").symlink_to("../victim.txt")
+
+    result = CodingTools(base_dir=str(tmp_path)).apply_patch(
+        "*** Begin Patch\n*** Delete File: sub/.git\n*** End Patch",
+    )
+
+    assert result.startswith("apply_patch verification failed: path 'sub/.git' is inside Git metadata")
+    assert (tmp_path / "victim.txt").read_text() == "keep\n"
+    assert (tmp_path / "sub" / ".git").is_symlink()
 
 
 def test_move_to_renames(tmp_path: Path) -> None:

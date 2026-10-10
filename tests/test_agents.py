@@ -4170,23 +4170,34 @@ def test_create_agent_hides_apply_patch_with_hidden_file_edits(tmp_path: Path, h
 
 
 @pytest.mark.parametrize(
-    ("gated", "expected"),
+    ("default", "rules", "expected"),
     [
-        (("write_file",), {"edit_file", "write_file"}),
-        (("write_file", "apply_patch"), {"apply_patch", "edit_file", "write_file"}),
+        ("auto_approve", {"write_file": "require_approval"}, {"edit_file", "write_file"}),
+        (
+            "auto_approve",
+            {"edit_file": "require_approval", "write_file": "require_approval", "apply_patch": "require_approval"},
+            {"apply_patch", "edit_file", "write_file"},
+        ),
+        (
+            "auto_approve",
+            {"write_file": "require_approval", "apply_patch": "require_approval"},
+            {"edit_file", "write_file"},
+        ),
+        ("require_approval", {"edit_file": "auto_approve", "write_file": "auto_approve"}, {"edit_file", "write_file"}),
     ],
-    ids=["edit-rules-only", "apply-patch-rule-too"],
+    ids=["edit-rules-only", "all-gated", "edit-file-ungated", "allowlist-of-edits"],
 )
-def test_gated_file_edits_hide_an_ungated_apply_patch(
+def test_apply_patch_shows_only_when_gated_like_the_file_edits(
     tmp_path: Path,
-    gated: tuple[str, ...],
+    default: str,
+    rules: dict[str, str],
     expected: set[str],
 ) -> None:
-    """A rule that gates file edits keeps apply_patch away unless a rule gates apply_patch too."""
+    """apply_patch shows only when approval treats it like edit_file and write_file, which models then fall back to."""
     config = _test_config()
     config.agents["general"].tools = ["coding"]
-    config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match=name, action="require_approval") for name in gated],
+    config.tool_approval = ToolApprovalConfig.model_validate(
+        {"default": default, "rules": [{"match": name, "action": action} for name, action in rules.items()]},
     )
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(config, runtime_paths)
@@ -4200,7 +4211,10 @@ def test_gated_file_edits_hide_an_ungated_apply_patch(
         for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
     }
     assert set(functions) & {"apply_patch", "edit_file", "write_file"} == expected
-    assert all(functions[name].requires_confirmation is True for name in gated)
+    assert all(
+        (functions[name].requires_confirmation is True) == (rules.get(name, default) == "require_approval")
+        for name in expected
+    )
 
 
 def _config_with_workspace_skill(tmp_path: Path) -> Config:
