@@ -27,6 +27,7 @@ from mindroom.constants import (
 )
 from mindroom.execution_preparation import (
     _build_unseen_context_messages,
+    _build_unseen_messages_header,
     _classify_partial_reply,
     _clean_partial_reply_body,
     _get_unseen_event_ids_for_metadata,
@@ -50,6 +51,7 @@ from mindroom.streaming import (
     TEAM_PROGRESS_PLACEHOLDER,
     StreamingResponse,
 )
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
@@ -467,31 +469,47 @@ class TestUnseenMessagesPartialReplies:
         assert [message.role for message in context_messages] == ["user", "user", "user", "user"]
         header = str(context_messages[0].content)
         assert "waiting for the requester to approve" in header
-        assert "Do NOT repeat" in header
+        assert "Do NOT re-issue that pending call" in header
         assert context_messages[2].content == render_msg_tag(
             sender=agent_id,
             body="You (reply waiting for approval): Waiting for approval: `post_message`",
             event_id="e2",
         )
 
-    def test_reply_paused_for_approval_without_text_is_still_shown(self) -> None:
-        """A waiting reply whose visible text cleans to nothing must not vanish from the next turn."""
+    @pytest.mark.parametrize(
+        ("body", "expected_body"),
+        [
+            ("🔧 `post_message` [1] ⏳", "Waiting for approval."),
+            ("Posting it now.\n\n🔧 `post_message` [1] ⏳", "Posting it now."),
+            (_PROGRESS_PLACEHOLDER, "Waiting for approval."),
+        ],
+        ids=["marker-only", "text-and-marker", "placeholder"],
+    )
+    def test_reply_paused_for_approval_keeps_its_place_without_tool_chrome(
+        self,
+        body: str,
+        expected_body: str,
+    ) -> None:
+        """The paused text is often only the gated call's marker; the waiting reply must not vanish."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
         agent_id = entity_ids(config, runtime_paths)["helper"].full_id
+        tool_trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_started", tool_name="post_message")])
+        assert tool_trace is not None
 
         thread_history = [
             _make_visible_message(event_id="e1", sender="@user:localhost", body="Post it"),
             _make_visible_message(
                 event_id="e2",
                 sender=agent_id,
-                body="...",
+                body=body,
                 stream_status=STREAM_STATUS_APPROVAL_PENDING,
+                content=tool_trace,
             ),
             _make_visible_message(event_id="e3", sender="@user:localhost", body="thanks"),
         ]
 
-        context_messages, _ = _build_unseen_context_messages(
+        context_messages, unseen_event_ids = _build_unseen_context_messages(
             "thanks",
             thread_history,
             seen_event_ids=set(),
@@ -501,12 +519,25 @@ class TestUnseenMessagesPartialReplies:
             config=config,
         )
 
+        assert unseen_event_ids == ["e1"]
         assert "waiting for the requester to approve" in str(context_messages[0].content)
         assert context_messages[2].content == render_msg_tag(
             sender=agent_id,
-            body="You (reply waiting for approval): Waiting for approval.",
+            body=f"You (reply waiting for approval): {expected_body}",
             event_id="e2",
         )
+
+    def test_approval_notice_follows_the_streaming_header_when_both_apply(self) -> None:
+        """A still-streaming reply and a reply waiting for approval each keep their own guidance."""
+        config = _make_config()
+
+        header = _build_unseen_messages_header(
+            {_PartialReplyKind.IN_PROGRESS, _PartialReplyKind.AWAITING_APPROVAL},
+            config=config,
+        )
+
+        assert header.startswith(config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER"))
+        assert header.endswith(config.get_prompt("APPROVAL_PENDING_PARTIAL_REPLY_NOTICE"))
 
     def test_replay_fallback_sanitizer_matches_unseen_context_rules(self) -> None:
         """Full-thread fallback replay should not reintroduce synthetic notices or stale partial replies."""

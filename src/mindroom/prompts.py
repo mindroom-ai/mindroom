@@ -218,9 +218,9 @@ MIXED_PARTIAL_REPLY_HEADER = (
     "Continue from where you left off if appropriate."
 )
 APPROVAL_PENDING_PARTIAL_REPLY_NOTICE = (
-    "Your previous response is paused, waiting for the requester to approve a tool call in this thread; "
-    "it resumes on its own once they decide. Do NOT repeat that request or its tool calls. "
-    "Answer only what the newer messages ask."
+    "An earlier response of yours is paused, waiting for the requester to approve a tool call in this thread; "
+    "it resumes on its own once they decide. Do NOT re-issue that pending call. "
+    "Still handle anything new the newer messages ask, using tools if needed."
 )
 QUEUED_MESSAGE_NOTICE_TEXT = (
     "[SYSTEM NOTICE — PAUSE FOR A NEWER USER MESSAGE] A newer user message arrived in this thread "

@@ -216,9 +216,33 @@ def _clean_partial_reply_body(body: str) -> str:
 def _partial_reply_body(body: str, partial_kind: _PartialReplyKind) -> str:
     """Return the cleaned partial reply; a reply waiting for approval is never dropped."""
     cleaned_body = _clean_partial_reply_body(body)
-    if not cleaned_body and partial_kind is _PartialReplyKind.AWAITING_APPROVAL:
-        return _AWAITING_APPROVAL_FALLBACK_BODY
-    return cleaned_body
+    if partial_kind is not _PartialReplyKind.AWAITING_APPROVAL:
+        return cleaned_body
+    # The paused text is often only the gated call's tool marker. Strip that display chrome here,
+    # because the speaker label replaces the sender before the usual self-reply stripping.
+    return strip_visible_tool_markers(cleaned_body) or _AWAITING_APPROVAL_FALLBACK_BODY
+
+
+def _own_reply_awaiting_approval(msg: ResolvedVisibleMessage, response_sender_id: str | None) -> bool:
+    """Return whether one message is this responder's reply paused on an approval card."""
+    return (
+        response_sender_id is not None
+        and msg.sender == response_sender_id
+        and msg.stream_status == STREAM_STATUS_APPROVAL_PENDING
+    )
+
+
+def _approval_notice_messages(
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    *,
+    response_sender_id: str | None,
+    config: Config,
+) -> tuple[Message, ...]:
+    """Return the waiting-for-approval notice when full-thread replay contains a paused own reply."""
+    if not any(_own_reply_awaiting_approval(msg, response_sender_id) for msg in thread_history or ()):
+        return ()
+    notice = config.get_prompt("APPROVAL_PENDING_PARTIAL_REPLY_NOTICE")
+    return (Message(role="user", content=notice, add_to_agent_memory=False),)
 
 
 def _without_untrusted_original_senders(
@@ -724,7 +748,7 @@ def _get_unseen_event_ids_for_metadata(
     return event_ids
 
 
-def _has_nothing_to_read(msg: ResolvedVisibleMessage) -> bool:
+def _has_nothing_to_read(msg: ResolvedVisibleMessage, *, response_sender_id: str | None = None) -> bool:
     """Return whether one message is a notice rather than a turn, or a streamed reply showing only its placeholder.
 
     MindRoom redacts a placeholder that ends empty, so recording one as consumed would let that tidy-up remove
@@ -733,6 +757,9 @@ def _has_nothing_to_read(msg: ResolvedVisibleMessage) -> bool:
     content = msg.content
     if isinstance(content, dict) and any(key in content for key in _NON_TURN_NOTICE_CONTENT_KEYS):
         return True
+    if _own_reply_awaiting_approval(msg, response_sender_id):
+        # Shown with a fallback body and never recorded as read, so the redaction concern does not apply.
+        return False
     return msg.stream_status is not None and msg.body.strip() in {PROGRESS_PLACEHOLDER, TEAM_PROGRESS_PLACEHOLDER}
 
 
@@ -755,7 +782,7 @@ def _get_unseen_messages_for_sender(
             continue
         if current_event_id and event_id == current_event_id:
             continue
-        if _has_nothing_to_read(msg):
+        if _has_nothing_to_read(msg, response_sender_id=sender_id):
             continue
         if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(
@@ -951,6 +978,12 @@ async def _prepare_execution_context_common(
         pipeline_timing.mark("prompt_assembly_start")
     if not prepared_history.replays_persisted_history and thread_history:
         fallback_thread_history = _thread_history_before_current_event(thread_history, history_boundary_event_id)
+        # Before sanitizing, which relabels the paused reply's sender.
+        approval_notice_messages = _approval_notice_messages(
+            fallback_thread_history,
+            response_sender_id=response_sender_id,
+            config=config,
+        )
         if fallback_thread_history is not None:
             fallback_thread_history = _sanitize_thread_history_for_replay(
                 fallback_thread_history,
@@ -960,7 +993,7 @@ async def _prepare_execution_context_common(
         replay_fallback_messages = _build_thread_history_messages(
             prompt,
             fallback_thread_history,
-            transient_context_messages=transient_context_messages,
+            transient_context_messages=(*approval_notice_messages, *transient_context_messages),
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,

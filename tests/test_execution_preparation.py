@@ -23,6 +23,8 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_KEY,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -276,6 +278,47 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         body="older context",
         event_id="$older",
     )
+
+
+@pytest.mark.asyncio
+async def test_fallback_replay_keeps_the_waiting_for_approval_notice() -> None:
+    """When the paused run is the agent's only one, full-thread replay must still say it is waiting."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return replace(_prepared_scope_with_persisted_replay(), session=None)
+
+    tool_trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_started", tool_name="post_message")])
+    assert tool_trace is not None
+    waiting_content = {**tool_trace, STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING}
+    config = _config()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(reply_to_event_id="$current", active_event_ids=frozenset()),
+        scope_context=None,
+        prompt="thanks",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="Post it", event_id="$ask"),
+            make_visible_message(
+                sender="@mindroom_code:localhost",
+                body="🔧 `post_message` [1] ⏳",
+                event_id="$waiting",
+                content=waiting_content,
+            ),
+            make_visible_message(sender="@alice:localhost", body="thanks", event_id="$current"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=config,
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=1_000,
+    )
+
+    assert prepared.prepared_history.replays_persisted_history is False
+    rendered = render_prepared_messages_text(prepared.messages)
+    assert config.get_prompt("APPROVAL_PENDING_PARTIAL_REPLY_NOTICE") in rendered
+    assert "You (reply waiting for approval): Waiting for approval." in rendered
 
 
 @pytest.mark.asyncio
