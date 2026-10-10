@@ -395,7 +395,7 @@ class ToolJobRuntimeCoordinator:
             work = None if runtime is None else await conversation_work(runtime, HoldKey.decode(reply.hold_key))
             if work is None or work.ready or not work.jobs:
                 ready = () if work is None else work.ready
-                await bot.admit_job_wake(reply, wake_event_id(reply.reply_id, ready))
+                await bot.admit_job_wake(reply, wake_event_id(reply, ready))
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""

@@ -196,14 +196,17 @@ async def test_the_job_runtime_wakes_a_reply_once_its_work_is_ready(tmp_path: Pa
         bot.admit_job_wake.assert_awaited_once()
         woken, wake_id = bot.admit_job_wake.await_args.args
         assert woken.reply_id == reply.reply_id
-        assert wake_id == wake_event_id(reply.reply_id, (job,))
+        assert wake_id == wake_event_id(reply, (job,))
 
         # The wake retrieves the outcome, so no work is left for the reply.
         retrieved = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", retrieved.claim, source_event_id=wake_id)
         bot.admit_job_wake.reset_mock()
         await coordinator._admit_wakes(runtime)
-        assert bot.admit_job_wake.await_args.args[1] == f"job-wake:{reply.reply_id}:release"
+        released = bot.admit_job_wake.await_args.args[1]
+        assert released == f"job-wake:{reply.reply_id}:release:{reply.revision}"
+        # A later wait of the reply has its own release, so it is admitted rather than ignored as a duplicate.
+        assert wake_event_id(replace(reply, revision=reply.revision + 1), ()) != released
     finally:
         finish.set()
         await runtime.shutdown()
@@ -358,13 +361,14 @@ async def test_a_wake_no_span_took_settles_and_ends_a_wait_no_work_is_left_for(t
     runner = unwrap_extracted_collaborator(bot._response_runner)
     principal = bot.journal_principal()
     reply = await _waiting_reply(principal, _runner_key(bot))
-    event = await _wake(principal, reply, "job-wake:release")
+    release = wake_event_id(reply, ())
+    event = await _wake(principal, reply, release)
     runner.generate_response = AsyncMock(return_value=None)
 
     await runner._run_job_wake(event)
 
     runner.generate_response.assert_awaited_once()
-    assert not await principal.is_pending("job-wake:release")
+    assert not await principal.is_pending(release)
     ended = await principal.replies.load(reply.reply_id)
     assert ended is not None
     assert ended.state is rl.ReplyState.COMPLETED
@@ -400,7 +404,7 @@ async def test_a_wake_admitted_to_end_a_wait_ends_it_despite_work_started_since(
             owner=_runner_owner(key),
             operation=forever,
         )
-        wake_id = wake_event_id(reply.reply_id, ()) if released else "job-wake:other"
+        wake_id = wake_event_id(reply, ()) if released else "job-wake:other"
         event = await _wake(principal, reply, wake_id)
         runner.generate_response = AsyncMock(return_value=None)
 
