@@ -161,7 +161,13 @@ The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`, and the sessio
 Sessions live in MindRoom's memory, so a restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
 
-A session authenticates only `/connections`, `/api/connections/*`, and the OAuth success page and the OAuth callback for flows that the session started.
+A session authenticates only these paths:
+
+- `/connections` and its sub-paths.
+- `/api/connections` and its sub-paths.
+- The OAuth callback, `/api/oauth/{provider}/callback`, for flows started under the session.
+- The OAuth success page, `/api/oauth/{provider}/success`.
+
 It never grants dashboard or administrator access, even to an administrator.
 Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth, which the dashboard keeps using, and alongside trusted upstream sign-in.
 `GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.

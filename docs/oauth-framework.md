@@ -114,7 +114,7 @@ Standalone installs identify the dashboard user through `MINDROOM_OWNER_USER_ID`
 Room-independent access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply, because a browser request has no current room or team.
 Managing a personal connection grants no general dashboard access and no authority over shared credentials.
 With the Connections portal enabled, eligible users manage their connections there, and under trusted upstream auth ordinary dashboard routes require administrator authority.
-A portal session from Matrix sign-in covers only the portal and the OAuth flows it starts, so it never reaches dashboard routes.
+A portal session from Matrix sign-in covers only the portal, the OAuth callback for flows it starts, and the OAuth success page, so it never reaches dashboard routes.
 Unauthorized connect, authorize, status, disconnect, and callback requests return HTTP 403 before any credential is exposed or changed.
 See [Authorization](authorization.md#platform-and-credential-authority) for administrators and credential managers.
 

@@ -13397,7 +13397,7 @@ Standalone installs identify the dashboard user through `MINDROOM_OWNER_USER_ID`
 Room-independent access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply, because a browser request has no current room or team.
 Managing a personal connection grants no general dashboard access and no authority over shared credentials.
 With the Connections portal enabled, eligible users manage their connections there, and under trusted upstream auth ordinary dashboard routes require administrator authority.
-A portal session from Matrix sign-in covers only the portal and the OAuth flows it starts, so it never reaches dashboard routes.
+A portal session from Matrix sign-in covers only the portal, the OAuth callback for flows it starts, and the OAuth success page, so it never reaches dashboard routes.
 Unauthorized connect, authorize, status, disconnect, and callback requests return HTTP 403 before any credential is exposed or changed.
 See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-credential-authority) for administrators and credential managers.
 
@@ -13896,7 +13896,7 @@ Do not report or "fix" these; they are deliberate.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 - The Connections portal signs users in either through trusted upstream strict JWT auth or, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists MindRoom Chat origins, through a Matrix OpenID token that Chat hands to the portal window.
-  The session cookie is bound to the verified Matrix user and a one-hour in-memory lifetime, and it authenticates only the portal, its APIs, and the OAuth callbacks and success pages of flows it started; it never grants dashboard or administrator access, even to an administrator.
+  The session cookie is bound to the verified Matrix user and a one-hour in-memory lifetime, and it authenticates only the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page; it never grants dashboard or administrator access, even to an administrator.
   An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust.
   The `/connections` page shell is served without authentication, while every API stays protected.
 
@@ -17643,7 +17643,13 @@ The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`, and the sessio
 Sessions live in MindRoom's memory, so a restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
 
-A session authenticates only `/connections`, `/api/connections/*`, and the OAuth success page and the OAuth callback for flows that the session started.
+A session authenticates only these paths:
+
+- `/connections` and its sub-paths.
+- `/api/connections` and its sub-paths.
+- The OAuth callback, `/api/oauth/{provider}/callback`, for flows started under the session.
+- The OAuth success page, `/api/oauth/{provider}/success`.
+
 It never grants dashboard or administrator access, even to an administrator.
 Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth, which the dashboard keeps using, and alongside trusted upstream sign-in.
 `GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
