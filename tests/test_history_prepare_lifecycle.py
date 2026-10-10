@@ -57,27 +57,10 @@ from tests.history_helpers import (  # noqa: F401
     _completed_team_run,
     _make_config,
     _session,
-    _shell_call_run,
     _team_session,
     archived_run_ids,
     latest_summary_model,
 )
-
-
-def test_history_estimate_ignores_tool_call_wire_records() -> None:
-    """A call's provider wire record is replay bookkeeping and adds nothing to the replay estimate."""
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    plain, recorded = (
-        estimate_prompt_visible_history_tokens(
-            session=_session("session-wire", runs=[_shell_call_run("run-wire", wire_record=wire_record)]),
-            scope=scope,
-            history_settings=_ALL_HISTORY_SETTINGS,
-        )
-        for wire_record in (False, True)
-    )
-
-    assert plain > 0
-    assert recorded == plain
 
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:

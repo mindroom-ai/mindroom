@@ -48,7 +48,6 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
-    "approval_script_rule_match",
     "arm_scheduled_call_approval",
     "claim_scheduled_call",
     "evaluate_tool_approval",
@@ -174,12 +173,6 @@ def _clear_script_cache() -> None:
 
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
-
-
-def approval_script_rule_match(config: Config, tool_name: str) -> str | None:
-    """Return the ``match`` of the script rule that decides *tool_name*'s approval, or None for a fixed decision."""
-    rule = _matching_tool_approval_rule(config, tool_name)
-    return rule.match if rule is not None and rule.script is not None else None
 
 
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:

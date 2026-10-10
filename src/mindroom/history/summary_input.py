@@ -20,7 +20,6 @@ from mindroom.history.message_content import media_payload_snapshot, message_med
 from mindroom.history.replay import history_skip_roles
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
-from mindroom.tool_dialects.types import without_wire_record
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -302,8 +301,7 @@ def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings:
 def _serialize_message(message: Message) -> list[str]:
     lines = [_message_open_tag(message), _escape_xml_content(render_message_content(message)), "</message>"]
     if message.tool_calls:
-        tool_calls = [without_wire_record(call) for call in message.tool_calls]
-        lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(tool_calls)), "</tool_calls>"])
+        lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
     for tag, media_value in message_media_entries(message):
         serialized = _serialize_media_payload(media_value)
         if not serialized:

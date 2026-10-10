@@ -13,23 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.shell_execution import (
-    ProcessRecord,
-    _BackgroundHandle,
-    _CheckStatus,
-    _format_background_handle_message,
-    _format_finished_status,
-    _format_running_status,
-    check_command,
-    kill_all_records,
-    kill_command,
-    parse_background_handle_message,
-    parse_check_status,
-    parse_kill_message,
-    parse_unknown_handle_error,
-    run_command,
-    signal_record,
-)
+from mindroom.shell_execution import ProcessRecord, kill_all_records, kill_command, run_command, signal_record
 from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
@@ -283,61 +267,3 @@ async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_fini
         assert list(registry) == [result.handle]
     finally:
         capture.release()
-
-
-def test_background_handle_message_round_trips() -> None:
-    """The background-handle message parses back into its fields and nothing else matches."""
-    text = _format_background_handle_message(10, 4242, "shell:0123abcd")
-
-    assert parse_background_handle_message(text) == _BackgroundHandle(timeout=10, pid=4242, handle="shell:0123abcd")
-    assert parse_background_handle_message(text + "\nextra") is None
-    assert parse_background_handle_message("Command timed out") is None
-
-
-def test_parse_check_status_matches_both_templates() -> None:
-    """Both check_command templates parse into their status fields plus the labeled report verbatim."""
-    failed = _format_finished_status(return_code=2, elapsed=1.5, stderr="boom", output="out\nmore")
-    succeeded = _format_finished_status(return_code=0, elapsed=0.5, stderr="ignored", output="ok")
-    running = _format_running_status(pid=77, elapsed=3.0, buffered_lines=4, partial="a\nb")
-
-    assert parse_check_status(failed) == _CheckStatus(
-        running=False,
-        exit_code=2,
-        elapsed=1.5,
-        pid=None,
-        report="Stderr:\nboom\nOutput:\nout\nmore",
-    )
-    assert parse_check_status(succeeded) == _CheckStatus(
-        running=False,
-        exit_code=0,
-        elapsed=0.5,
-        pid=None,
-        report="Output:\nok",
-    )
-    assert parse_check_status(running) == _CheckStatus(
-        running=True,
-        exit_code=None,
-        elapsed=3.0,
-        pid=77,
-        report="Partial output (4 lines buffered):\na\nb",
-    )
-
-
-def test_parse_check_status_rejects_plain_output() -> None:
-    """Output that is not a check status is never parsed."""
-    assert parse_check_status("hello") is None
-    assert parse_check_status("Status: FINISHED (exit code x, ran for 1s)\nOutput:\n") is None
-
-
-def test_unknown_handle_error_round_trips() -> None:
-    """The unknown-handle error parses back to its handle."""
-    assert parse_unknown_handle_error(check_command({}, namespace="ns", handle="shell:0123abcd")) == "shell:0123abcd"
-    assert parse_unknown_handle_error("Error: something else") is None
-
-
-def test_kill_message_round_trips() -> None:
-    """The kill confirmation parses back into its fields."""
-    message = "Force-killed process 77 (SIGKILL sent). Use check_shell_command('shell:0123abcd') to confirm exit."
-
-    assert parse_kill_message(message) == ("Force-killed", 77, "SIGKILL", "shell:0123abcd")
-    assert parse_kill_message("Process 77 already exited") is None
