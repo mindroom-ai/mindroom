@@ -66,6 +66,36 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
 
+## Research check plugin
+
+MindRoom ships the `research_check` plugin, which catches replies that recommend or state specific real-world things, such as places, businesses, products, prices, or opening hours, without having looked them up.
+After each reply, a judgment backend reads the person's message, the tool calls made for that reply, and the reply itself.
+When it finds claims that no lookup supported, the agent gets a visible follow-up in the same conversation asking it to verify each claim with its search or browsing tools, correct anything that does not hold up, and name its sources.
+
+Enable it with its `python:` spec; nothing needs installing:
+
+```yaml
+plugins:
+  - path: python:mindroom.research_check
+    settings:
+      judgment:
+        provider: openai_decisions
+      agents: [assistant]
+```
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `judgment` | object | *required* | Backend that makes the decision, with the fields described under [Judgment Backends](configuration/threads.md#judgment-backends) |
+| `instructions` | string | `""` | Extra guidance for the decision, such as which kinds of claims matter to you |
+| `agents` | list of strings | all agents and teams | Agents or teams whose replies are checked |
+
+- Only replies to messages people send are checked, and each gets at most one follow-up; the verification reply is not checked again.
+- The check sees only the current reply's tool calls, so a reply that relies on research from an earlier message can still get a follow-up.
+- Each checked reply costs one judgment request; use `agents` to limit which agents are checked.
+- An agent without search or browsing tools answers the follow-up by saying which claims remain unverified.
+- A reply gets no follow-up when the backend fails, times out, or has no credential, when the message and reply together exceed roughly 14,000 characters, or when either contains a credential, which is never sent to the backend.
+- Invalid settings, or an `llm` judgment `model` that is not a configured alias, make every check fail with `Hook execution failed` in the logs for plugin `research_check`.
+
 ## Configure plugins
 
 List plugins under `plugins:` in `config.yaml`.
