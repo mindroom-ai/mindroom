@@ -168,8 +168,9 @@ Do not report or "fix" these; they are deliberate.
 - The Connections portal signs users in either through trusted upstream strict JWT auth or, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists MindRoom Chat origins, through a Matrix OpenID token that Chat hands to the portal window.
   The session cookie is bound to the verified Matrix user and a one-hour in-memory lifetime, and it authenticates only the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page; it never grants dashboard or administrator access, even to an administrator.
   An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust.
-  When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), the token is bound to the portal's public origin, so a backend that Chat opens cannot replay it to another deployment on the same homeserver.
-  Other homeservers cannot bind tokens, so keep their OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
+  When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), MindRoom requires `MINDROOM_PUBLIC_URL` and binds tokens to its normalized origin, so a backend that Chat opens cannot replay a token to another deployment on the same homeserver.
+  MindRoom never takes that audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL` it answers 503.
+  Without binding support tokens are not bound, so keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
   The `/connections` page shell is served without authentication, while every API stays protected.
 
 ## Reviewing security findings

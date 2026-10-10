@@ -60,7 +60,7 @@ def gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway
         yield client, peer, app
 
 
-def create(client: TestClient) -> httpx.Response:
+def create(client: TestClient, headers: dict[str, str] | None = None) -> httpx.Response:
     """Create."""
     return client.post(
         "/api/computers/sessions",
@@ -74,6 +74,7 @@ def create(client: TestClient) -> httpx.Response:
             "room_id": "!room:example.org",
             "agent_user_id": "@agent:example.org",
         },
+        headers=headers,
     )
 
 
@@ -387,37 +388,64 @@ def test_openid_subject_server_and_verifier_failures(
     assert "openid-secret" not in caplog.text
 
 
-def test_session_creation_binds_openid_to_the_request_origin(gateway: Gateway) -> None:
-    """A homeserver that binds tokens only accepts them for the origin this gateway is served from."""
-    client, peer, _ = gateway
+def _set_public_url(app: FastAPI, public_url: str) -> None:
+    state = config_lifecycle.require_api_state(app)
+    paths = state.snapshot.runtime_paths
+    state.snapshot = replace(
+        state.snapshot,
+        runtime_paths=replace(paths, process_env={**paths.process_env, "MINDROOM_PUBLIC_URL": public_url}),
+    )
+
+
+def test_session_creation_binds_openid_to_the_configured_public_url(gateway: Gateway) -> None:
+    """A binding homeserver gets the normalized MINDROOM_PUBLIC_URL origin, and a token for another origin is refused."""
+    client, peer, app = gateway
+    _set_public_url(app, "https://Mindroom.Example.org:443/some/path")
     peer.advertise_audience = True
     peer.expected_audience = "https://elsewhere.example.org"
     response = create(client)
     assert response.status_code == 401
     assert "openid-secret" not in response.text
-    peer.expected_audience = "http://testserver"
+    peer.expected_audience = "https://mindroom.example.org"
     assert create(client).status_code == 200
-    assert peer.userinfo_audiences == ["http://testserver", "http://testserver"]
+    assert peer.userinfo_audiences == ["https://mindroom.example.org"] * 2
 
 
-def test_session_creation_binds_openid_to_the_configured_public_url(
+def test_session_creation_never_takes_the_audience_from_the_host_header(gateway: Gateway) -> None:
+    """A replaying backend controls `Host`, so a binding homeserver still sees the configured origin."""
+    client, peer, app = gateway
+    _set_public_url(app, "https://mindroom.example.org")
+    peer.advertise_audience = True
+    peer.expected_audience = "https://mindroom.example.org"
+    assert create(client, headers={"Host": "evil.example.org"}).status_code == 200
+    assert peer.userinfo_audiences == ["https://mindroom.example.org"]
+
+
+@pytest.mark.parametrize("public_url", [None, "mindroom.example.org"])
+def test_session_creation_with_binding_requires_a_valid_public_url(
     gateway: Gateway,
-    monkeypatch: pytest.MonkeyPatch,
+    public_url: str | None,
 ) -> None:
-    """MINDROOM_PUBLIC_URL wins over the request URL, and an unusable one refuses the session."""
-    client, _, app = gateway
-    verifier = AsyncMock(return_value="@alice:example.org")
-    monkeypatch.setattr(computers, "verify_matrix_openid", verifier)
-    state = config_lifecycle.require_api_state(app)
-    snapshot = state.snapshot
-    for public_url, expected in (("https://mindroom.example.org/some/path", 200), ("mindroom.example.org", 503)):
-        paths = replace(
-            snapshot.runtime_paths,
-            process_env={**snapshot.runtime_paths.process_env, "MINDROOM_PUBLIC_URL": public_url},
-        )
-        state.snapshot = replace(snapshot, runtime_paths=paths)
-        assert create(client).status_code == expected
-    assert [call.kwargs for call in verifier.await_args_list] == [{"audience": "https://mindroom.example.org"}]
+    """Binding active and no usable MINDROOM_PUBLIC_URL is a 503 that never reaches userinfo."""
+    client, peer, app = gateway
+    if public_url is not None:
+        _set_public_url(app, public_url)
+    peer.advertise_audience = True
+    response = create(client)
+    assert response.status_code == 503
+    assert "MINDROOM_PUBLIC_URL" in response.json()["detail"]
+    assert "openid-secret" not in response.text
+    assert peer.userinfo_audiences == []
+
+
+@pytest.mark.parametrize("public_url", [None, "mindroom.example.org"])
+def test_session_creation_without_binding_ignores_the_public_url(gateway: Gateway, public_url: str | None) -> None:
+    """A homeserver that cannot bind tokens keeps the unbound verification, whatever MINDROOM_PUBLIC_URL holds."""
+    client, peer, app = gateway
+    if public_url is not None:
+        _set_public_url(app, public_url)
+    assert create(client).status_code == 200
+    assert peer.userinfo_audiences == [None]
 
 
 def test_changed_config_conflicts_with_existing_session(gateway: Gateway) -> None:

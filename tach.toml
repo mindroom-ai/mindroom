@@ -7226,6 +7226,7 @@ path = "mindroom.matrix_openid"
 depends_on = [
     "mindroom.bounded_bytes",
     "mindroom.constants",
+    "mindroom.logging_config",
     "mindroom.requester_identity",
 ]
 
@@ -7240,7 +7241,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.computers"
 depends_on = [
-    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.matrix_openid",

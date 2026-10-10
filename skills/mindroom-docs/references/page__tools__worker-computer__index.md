@@ -104,10 +104,12 @@ One invalid entry disables the whole list.
 The Connections portal's [Matrix sign-in](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules, and Chat uses the same runtime origin for both.
 
 Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
-When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), the token must be bound to the runtime's public origin, which is the origin of `MINDROOM_PUBLIC_URL` or, when that is unset, of the request URL.
-Set `MINDROOM_PUBLIC_URL` when a proxy terminates TLS, so this origin matches the one Chat requests.
-Other homeservers cannot bind tokens, so a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
-On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
+When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), MindRoom requires `MINDROOM_PUBLIC_URL` and binds tokens to its normalized origin.
+The normalized origin has a lowercase scheme and host, no path, and no default port, so it matches the origin Chat requests.
+MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL` it answers 503.
+Without binding support tokens are not bound, and `MINDROOM_PUBLIC_URL` is not required for this.
+A backend that a user points Chat at could then replay the token to another deployment on the same homeserver until the token expires, so keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
+Upgrade MindRoom backends before the homeserver starts binding, because older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](https://docs.mindroom.chat/authorization/#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.

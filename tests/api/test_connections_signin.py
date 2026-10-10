@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -10,12 +12,13 @@ from urllib.parse import parse_qs, urlparse
 
 import jwt
 import pytest
+from aiohttp import web
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom.api import auth, config_lifecycle, connections_session, frontend, main
 from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE, ConnectionsSessionStore
-from mindroom.matrix_openid import MatrixOpenIDError
+from mindroom.matrix_openid import MatrixOpenIDError, verify_matrix_openid
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
     _trusted_upstream_jwks,
@@ -30,8 +33,10 @@ from tests.api.test_oauth_api import (
     _stored_oauth_credentials,
     _use_runtime_auth_settings,
 )
+from tests.computer_helpers import ComputerPeer
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine, Iterator
     from pathlib import Path
 
     from httpx import Response
@@ -44,8 +49,8 @@ CHAT_ORIGIN = "https://chat.example.org"
 def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API in API-key mode with a fake Matrix OpenID verifier for users alice and bob."""
 
-    async def verify(token: Any, _paths: Any, *, audience: str) -> str:  # noqa: ANN401
-        if token.access_token in {"alice", "bob"} and audience == PORTAL_ORIGIN:
+    async def verify(token: Any, _paths: Any) -> str:  # noqa: ANN401
+        if token.access_token in {"alice", "bob"}:
             return f"@{token.access_token}:example.org"
         raise MatrixOpenIDError(401, "Matrix OpenID verification failed.")
 
@@ -91,11 +96,16 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     }
 
 
-def sign_in(client: TestClient, name: str, origin: str = CHAT_ORIGIN) -> Response:
+def sign_in(
+    client: TestClient,
+    name: str,
+    origin: str = CHAT_ORIGIN,
+    headers: dict[str, str] | None = None,
+) -> Response:
     """Post a Matrix OpenID token for `name` the way the portal page does."""
     return client.post(
         "/api/connections/session",
-        headers={"Origin": PORTAL_ORIGIN},
+        headers={"Origin": PORTAL_ORIGIN, **(headers or {})},
         json={
             "openid_token": {
                 "access_token": name,
@@ -143,7 +153,6 @@ def test_sign_in_sets_portal_session_cookie(signin: dict[str, Any]) -> None:
     assert config_lifecycle.app_state(main.app).connections_sessions.resolve(token) == "@alice:example.org"
     assert signin["verifier"].await_args.args[0].access_token == "alice"  # noqa: S105
     assert signin["verifier"].await_args.args[1] == signin["paths"]
-    assert signin["verifier"].await_args.kwargs == {"audience": PORTAL_ORIGIN}
 
 
 def test_sign_in_rejects_client_origin_not_allowlisted(signin: dict[str, Any]) -> None:
@@ -536,3 +545,54 @@ def test_portal_flow_callback_rejects_dashboard_login_only(signin: dict[str, Any
     stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
     assert stored(requester_id="@alice:example.org") is not None
     assert stored(requester_id="@owner:example.org") is None
+
+
+@pytest.fixture
+def binding_homeserver(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> Iterator[ComputerPeer]:
+    """Verify tokens for real against a fake homeserver that binds OpenID tokens, served from a thread."""
+    peer = ComputerPeer(advertise_audience=True)
+    upstream = web.Application()
+    upstream.router.add_get("/_matrix/client/versions", peer.versions)
+    upstream.router.add_get("/_matrix/federation/v1/openid/userinfo", peer.openid)
+    runner = web.AppRunner(upstream, access_log=None)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    def run(coroutine: Coroutine[Any, Any, Any]) -> None:
+        asyncio.run_coroutine_threadsafe(coroutine, loop).result(timeout=10)
+
+    run(runner.setup())
+    run(web.TCPSite(runner, "127.0.0.1", 0).start())
+    monkeypatch.setattr(connections_session, "verify_matrix_openid", verify_matrix_openid)
+    env = {"MATRIX_HOMESERVER": f"http://127.0.0.1:{runner.addresses[0][1]}", "MATRIX_SERVER_NAME": "example.org"}
+    signin["paths"] = replace(signin["paths"], process_env={**signin["paths"].process_env, **env})
+    _serve(signin)
+    try:
+        yield peer
+    finally:
+        run(runner.cleanup())
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=10)
+        loop.close()
+
+
+def test_sign_in_binds_the_token_to_the_configured_origin_not_the_host_header(
+    signin: dict[str, Any],
+    binding_homeserver: ComputerPeer,
+) -> None:
+    """A replaying backend controls `Host`, so a binding homeserver still sees MINDROOM_PUBLIC_URL's origin."""
+    binding_homeserver.expected_audience = PORTAL_ORIGIN
+    response = sign_in(signin["client"], "openid-secret", headers={"Host": "evil.example.org"})
+    assert response.status_code == 200, response.text
+    assert binding_homeserver.userinfo_audiences == [PORTAL_ORIGIN]
+
+
+def test_sign_in_with_binding_requires_the_public_url(signin: dict[str, Any], binding_homeserver: ComputerPeer) -> None:
+    """Without MINDROOM_PUBLIC_URL the origin of the request is never trusted as the audience."""
+    _serve(signin, MINDROOM_PUBLIC_URL="")
+    response = sign_in(signin["client"], "openid-secret")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Set MINDROOM_PUBLIC_URL to verify bound Matrix OpenID tokens."}
+    assert "set-cookie" not in response.headers
+    assert binding_homeserver.userinfo_audiences == []

@@ -161,12 +161,14 @@ Sign-in works as follows:
 3. The portal posts the token and the origin of Chat's message to `POST /api/connections/session`.
 4. MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, then verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo`.
    Only users of that homeserver are accepted.
-   When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), MindRoom also sends its HTTPS public origin, and the homeserver accepts only a token that Chat requested for that origin.
+   When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, and the homeserver accepts only a token that Chat requested for that origin.
 5. MindRoom sets the `__Host-mindroom_connections_session` cookie, and the portal shows `Signed in as <Matrix ID>`.
 
-Tokens are bound to the portal's public origin only when the homeserver advertises `io.mindroom.openid_audience`.
-Other homeservers cannot bind tokens, so a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
+With a binding homeserver, MindRoom requires `MINDROOM_PUBLIC_URL` and binds tokens to its normalized origin (lowercase scheme and host, no path, no default port).
+MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL`, sign-in answers 503.
+Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
 On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
+Upgrade MindRoom backends before the homeserver starts binding, because older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
 
 The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`, and the session lasts one hour.
 Sessions live in MindRoom's memory, so a restart signs everyone out; opening Connections from Chat again signs the user in again.

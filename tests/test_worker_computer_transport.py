@@ -40,13 +40,10 @@ async def test_openid_response_size_boundary(tmp_path: Path, size: int) -> None:
             expires_in=30,
         )
         if size == 16384:
-            assert (
-                await verify_matrix_openid(token, paths, audience="https://mindroom.example.org")
-                == "@alice:example.org"
-            )
+            assert await verify_matrix_openid(token, paths) == "@alice:example.org"
         else:
             with pytest.raises(MatrixOpenIDError, match=r"^Invalid Matrix OpenID response\.$") as error:
-                await verify_matrix_openid(token, paths, audience="https://mindroom.example.org")
+                await verify_matrix_openid(token, paths)
             assert error.value.status_code == 401
 
 
