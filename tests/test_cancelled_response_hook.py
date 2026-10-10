@@ -40,7 +40,7 @@ from mindroom.hooks import (
     MessageEnvelope,
     hook,
 )
-from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
+from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport, ResponseResult
 from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
@@ -930,6 +930,19 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     gateway.edit_text.assert_awaited_once()
     assert gateway.edit_text.await_args.args[0].event_id == "$thinking"
     assert gateway.edit_text.await_args.args[0].new_text == "hooked final body"
+
+
+def test_response_result_defaults_to_no_tool_calls() -> None:
+    """Plugins that build a ResponseResult themselves keep working without naming tool calls."""
+    result = ResponseResult(
+        response_text="done",
+        response_event_id="$reply",
+        delivery_kind="sent",
+        response_kind="ai",
+        envelope=_envelope(),
+    )
+
+    assert result.tool_trace == ()
 
 
 @pytest.mark.asyncio

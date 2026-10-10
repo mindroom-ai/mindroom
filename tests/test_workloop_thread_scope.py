@@ -386,7 +386,6 @@ async def test_enrichment_uses_resolved_thread_scope_and_clears_busy_state(
             delivery_kind="sent",
             response_kind="ai",
             envelope=_message_envelope(body="hello", agent_name="code"),
-            tool_trace=(),
         ),
     )
 

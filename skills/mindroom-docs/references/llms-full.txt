@@ -15288,7 +15288,7 @@ ResponseResult(
     delivery_kind: str,  # "sent" or "edited"
     response_kind: str,
     envelope: MessageEnvelope,
-    tool_trace: tuple[ToolTraceEntry, ...],  # tool calls that produced this reply
+    tool_trace: tuple[ToolTraceEntry, ...] = (),  # tool calls that produced this reply
 )
 ```
 
