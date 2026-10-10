@@ -199,7 +199,7 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_child_snapshot_without_persona_reads_as_configured_child(tmp_path: Path) -> None:
-    """A handle written before personas existed continues as a configured-agent child."""
+    """A session record or parent run state written before personas existed reads as a configured-agent child."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
     owner = _identity()
@@ -211,6 +211,8 @@ async def test_child_snapshot_without_persona_reads_as_configured_child(tmp_path
     record.write_text(json.dumps(payload))
 
     restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+    parent_state = DelegationState.from_metadata({DELEGATION_STATE_KEY: {"children": [payload["child"]]}})
 
     assert restored.persona is None
     assert restored.child_agent_name == "leader"
+    assert parent_state.children == [child]
