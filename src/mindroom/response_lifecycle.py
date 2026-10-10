@@ -264,10 +264,6 @@ class ResponseLifecycleCoordinator:
         lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
         return tuple(approval_id for approval_id, key in self._approval_holds.items() if key == lifecycle_key)
 
-    def is_held_for_approval(self, target: MessageTarget) -> bool:
-        """Return whether a pending approval keeps this conversation busy."""
-        return target.lifecycle_key in self._approval_holds.values()
-
     def _has_active_response_for_thread_key(self, lifecycle_key: ResponseLifecycleKey) -> bool:
         queued_signal = self._thread_queued_signals.get(lifecycle_key)
         if queued_signal is not None and queued_signal.has_active_response_turn():

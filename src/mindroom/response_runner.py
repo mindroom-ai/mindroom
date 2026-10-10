@@ -2952,7 +2952,7 @@ class ResponseRunner:
 
     def is_held_for_approval(self, target: MessageTarget) -> bool:
         """Return whether a pending approval keeps this conversation busy."""
-        return self._lifecycle_coordinator.is_held_for_approval(target)
+        return bool(self._lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id))
 
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until one canonical room/thread has no active response turn.
@@ -3111,46 +3111,12 @@ class ResponseRunner:
         signal_queued_message: bool,
         acknowledge_deferred: Callable[[str, str], Awaitable[None]],
     ) -> str | None:
-        """Run the locked response and end any span it claimed that has not ended itself."""
-        try:
-            result = await self._run_locked_response_operation(
-                request,
-                resolved_target=resolved_target,
-                early_placeholder=early_placeholder,
-                locked_operation=locked_operation,
-                signal_queued_message=signal_queued_message,
-                acknowledge_deferred=acknowledge_deferred,
-            )
-        except BaseException as error:
-            handle = current_span()
-            # The locked operation ends its span before the lock is released;
-            # this covers what raises outside it.
-            await self._exit_unended_span(handle, error, target=resolved_target)
-            if handle is not None and isinstance(error, PostLockRequestPreparationError) and not error.reply_owned:
-                # The span's exit ended the reply with this error, which its records now own.
-                raise PostLockRequestPreparationError(reply_owned=True) from error.__cause__ or error
-            raise
-        handle = current_span()
-        if handle is not None and not handle.exited:
-            # Every exit path is meant to end its span; one that did not is a bug,
-            # and releasing keeps the reply's sources for a retry.
-            self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
-            await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
-        return result
+        """Run the locked response and end any span it claimed that has not ended itself.
 
-    async def _run_locked_response_operation(
-        self,
-        request: ResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-        early_placeholder: _EarlyPlaceholderState,
-        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
-        signal_queued_message: bool,
-        acknowledge_deferred: Callable[[str, str], Awaitable[None]],
-    ) -> str | None:
-        """Run one response under its conversation lock, mapping early failures to their outcomes."""
+        Early failures are mapped to their outcomes first.
+        """
         try:
-            return await self._lifecycle_coordinator.run_locked_response(
+            result = await self._lifecycle_coordinator.run_locked_response(
                 target=resolved_target,
                 response_envelope=request.response_envelope,
                 pipeline_timing=request.pipeline_timing,
@@ -3168,11 +3134,29 @@ class ResponseRunner:
                 ),
                 signal_queued_message=signal_queued_message and not _is_silent_schedule_response(request),
             )
-        except Exception as error:
-            mapped = _post_lock_error(error, early_placeholder, reply_owned=current_span() is not None)
+        except BaseException as error:
+            handle = current_span()
+            mapped = (
+                _post_lock_error(error, early_placeholder, reply_owned=handle is not None)
+                if isinstance(error, Exception)
+                else error
+            )
+            # The locked operation ends its span before the lock is released;
+            # this covers what raises outside it.
+            await self._exit_unended_span(handle, mapped, target=resolved_target)
+            if handle is not None and isinstance(mapped, PostLockRequestPreparationError) and not mapped.reply_owned:
+                # The span's exit ended the reply with this error, which its records now own.
+                raise PostLockRequestPreparationError(reply_owned=True) from mapped.__cause__ or mapped
             if mapped is error:
                 raise
             raise mapped from mapped.__cause__
+        handle = current_span()
+        if handle is not None and not handle.exited:
+            # Every exit path is meant to end its span; one that did not is a bug,
+            # and releasing keeps the reply's sources for a retry.
+            self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
+            await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
+        return result
 
     async def _run_locked_ending_span(
         self,

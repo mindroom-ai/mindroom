@@ -203,7 +203,7 @@ class _SpanToolCalls:
             span_id=handle.span_id,
             call_id=call_id,
             entry_json=_entry_json(replace(entry, type="tool_call_started")),
-            now_ns=self.runtime.clock(),
+            now_ns=time.time_ns(),
         ):
             # A Stop committed before this start, or the span ended: the tool must not run. A synchronous tool's
             # hooks run on a thread the Stop's cancellation never reaches, so this refusal is what stops it.
@@ -222,7 +222,7 @@ class _SpanToolCalls:
                 span_id=handle.span_id,
                 call_id=call_id,
                 entry_json=_entry_json(entry),
-                now_ns=self.runtime.clock(),
+                now_ns=time.time_ns(),
             )
         except Exception:
             # The tool already ran, so its outcome stands: the call stays recorded as started, which a replay is
@@ -262,7 +262,6 @@ class ReplyRuntime:
     hold_conversation: Callable[[ApprovalContinuation], None]
     # Releases the conversation the ended approval held, and settles what its reply owes.
     approval_ended: Callable[[ApprovalEnded], None]
-    clock: Callable[[], int] = field(default=time.time_ns)
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -396,7 +395,7 @@ class ReplyRuntime:
 
     async def forget_finished(self) -> None:
         """Drop the records of replies finished as long ago as the handled-turn ledger forgets their turns."""
-        before_ns = self.clock() - _FINISHED_REPLY_RETENTION_NS
+        before_ns = time.time_ns() - _FINISHED_REPLY_RETENTION_NS
         while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
             pass
 
@@ -414,7 +413,7 @@ class ReplyRuntime:
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
-        for applied in await self.store.replies.owner_lost(self.generation, now_ns=self.clock()):
+        for applied in await self.store.replies.owner_lost(self.generation, now_ns=time.time_ns()):
             await self.run_effects(applied.post_commit)
         # A message to a conversation an approval still holds waits for that approval, after a restart too.
         for continuation in await self.store.pending_approvals():
@@ -520,7 +519,7 @@ class ReplyRuntime:
             delivery_id=delivery_id,
             sources=sources,
             bot_generation=self.generation,
-            now_ns=self.clock(),
+            now_ns=time.time_ns(),
             new_reply_id=_new_id(),
             entity_name=self.entity_name,
             room_id=room_id,
@@ -615,7 +614,7 @@ class ReplyRuntime:
             shown=encode_presentation(presentation),
             previous=handle.unconfirmed_progress,
             active_generation=self.generation,
-            now_ns=self.clock(),
+            now_ns=time.time_ns(),
         )
         if applied.transition.outcome is rl.Outcome.DEFERRED:
             return ProgressPermission.DEFER

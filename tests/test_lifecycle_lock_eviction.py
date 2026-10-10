@@ -94,9 +94,9 @@ async def test_an_approval_hold_keeps_its_conversation_busy_without_taking_its_l
     coordinator.hold_for_approval("approval-1", held)
     # Holding again changes nothing: one release frees the conversation.
     coordinator.hold_for_approval("approval-1", held)
-    assert coordinator.is_held_for_approval(held)
+    assert coordinator.approval_holds(held.room_id, held.resolved_thread_id)
     assert coordinator.has_active_response_for_target(held)
-    assert not coordinator.is_held_for_approval(targets[1])
+    assert not coordinator.approval_holds(targets[1].room_id, targets[1].resolved_thread_id)
 
     coordinator._response_lifecycle_lock(_target(_LOCK_TABLE_CAP))
     assert held.lifecycle_key in coordinator._thread_queued_signals
@@ -121,5 +121,5 @@ def test_leaving_a_room_releases_its_approval_holds() -> None:
     coordinator.hold_for_approval("approval-1", left)
     coordinator.hold_for_approval("approval-2", kept)
     coordinator.release_approval_holds_in_room(left.room_id)
-    assert not coordinator.is_held_for_approval(left)
-    assert coordinator.is_held_for_approval(kept)
+    assert not coordinator.approval_holds(left.room_id, left.resolved_thread_id)
+    assert coordinator.approval_holds(kept.room_id, kept.resolved_thread_id)
