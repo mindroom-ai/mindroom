@@ -297,6 +297,64 @@ async def test_realtime_session_records_its_latest_token_usage(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_realtime_usage_reported_while_the_call_closes_is_saved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response cut off by the hang-up reports its usage while LiveKit drains the session."""
+    from livekit.agents.metrics.usage import AgentSessionUsage, LLMModelUsage  # noqa: PLC0415
+
+    def usage_event(inputs: int) -> SimpleNamespace:
+        usage = LLMModelUsage(provider="openai", model="gpt-realtime-2.1", input_tokens=inputs, output_tokens=10)
+        return SimpleNamespace(usage=AgentSessionUsage(model_usage=[usage]))
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+            self.handlers: dict[str, Callable[[object], None]] = {}
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            return
+
+        def on(self, event: str, callback: Callable[[object], None]) -> None:
+            self.handlers[event] = callback
+
+        async def aclose(self) -> None:
+            self.handlers["session_usage_updated"](usage_event(2000))
+
+    fake_session = FakeSession()
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    recorded: list[RealtimeCallUsage] = []
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        recorded.append(usage)
+
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            record_usage=record_usage,
+        ),
+    )
+    fake_session.handlers["session_usage_updated"](usage_event(900))
+    await bridge.aclose()
+
+    assert recorded[-1].input_tokens == 2000
+
+
+@pytest.mark.asyncio
 async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, PLR0915
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

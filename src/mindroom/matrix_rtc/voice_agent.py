@@ -604,8 +604,7 @@ class RealtimeVoiceBridge:
         created_at = time.time()
 
         def _on_usage(event: SessionUsageUpdatedEvent) -> None:
-            if self._session is not session:
-                return
+            # Accept updates while the session drains at hang-up; teardown awaits their saves.
             llm_usage = [entry for entry in event.usage.model_usage if isinstance(entry, LLMModelUsage)]
             if not llm_usage:
                 return
