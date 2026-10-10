@@ -1,4 +1,4 @@
-"""Groq request policy for decisions that cannot execute provider-managed tools."""
+"""Groq request policy for decisions that cannot execute provider-managed tools, and Groq usage counters."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from agno.models.groq import Groq
 from mindroom.provider_tool_policy import disable_tool_selection, provider_tools_disabled
 
 if TYPE_CHECKING:
+    from agno.metrics import MessageMetrics
+    from groq.types import CompletionUsage
     from pydantic import BaseModel
 
 _COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compound-beta", "compound-beta-mini"})
@@ -43,3 +45,18 @@ class MindRoomGroq(Groq):
             msg = "Participation decisions cannot disable native Groq Compound tools"
             raise ValueError(msg)
         return disable_tool_selection(request_params)
+
+    # AGNO_COMPAT: Groq usage drops cached input and reasoning tokens.
+    # Reason: Agno copies only prompt and completion totals, although Groq reports
+    # prompt_tokens_details.cached_tokens and completion_tokens_details.reasoning_tokens inside them.
+    # Upstream issue: Tracking gap; no issue identified.
+    # Upstream PR: None identified.
+    # Remove when: Agno's Groq metrics report cached input as cache reads and reasoning tokens.
+    # Coverage: tests/test_provider_usage_metrics.py::test_groq_reports_cached_input_and_reasoning.
+    def _get_metrics(self, response_usage: CompletionUsage) -> MessageMetrics:
+        metrics = super()._get_metrics(response_usage)
+        if response_usage.prompt_tokens_details is not None:
+            metrics.cache_read_tokens = response_usage.prompt_tokens_details.cached_tokens
+        if response_usage.completion_tokens_details is not None:
+            metrics.reasoning_tokens = response_usage.completion_tokens_details.reasoning_tokens
+        return metrics

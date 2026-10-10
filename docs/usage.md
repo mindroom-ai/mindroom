@@ -20,6 +20,7 @@ The **Usage** tab shows organization-wide token usage from the [usage report](#u
 - Model detail across agents, requesters, and daily activity, keeping providers separate
 
 The token selector also offers reasoning and audio counters when the provider reports them.
+Output counts include reasoning tokens.
 Select a row in any breakdown to open its detail panel.
 Date ranges apply only to daily activity; agent and model totals stay cumulative.
 Daily and requester detail can be lower than cumulative totals when older attribution is missing, and undated runs appear only in totals.

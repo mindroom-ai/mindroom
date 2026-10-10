@@ -23,8 +23,9 @@ from mindroom.provider_tool_policy import provider_tools_disabled
 if TYPE_CHECKING:
     from typing import Any
 
+    from agno.metrics import MessageMetrics
     from agno.models.message import Message
-    from google.genai.types import ToolListUnion
+    from google.genai.types import GenerateContentResponseUsageMetadata, ToolListUnion
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
@@ -77,7 +78,7 @@ def _without_tool_selection(config: object, *, vertexai: bool) -> GenerateConten
 
 @dataclass
 class MindRoomGoogleGemini(Gemini):
-    """Gemini model that preserves provider call IDs across tool loops."""
+    """Gemini model that preserves provider call IDs across tool loops and reports usage like other providers."""
 
     def get_request_params(
         self,
@@ -152,3 +153,19 @@ class MindRoomGoogleGemini(Gemini):
                         part.function_response.id = tool_response_id
 
         return formatted_messages, system_message
+
+    # AGNO_COMPAT: Gemini usage leaves thinking out of output and drops tool-use prompt tokens.
+    # Reason: Agno maps candidates_token_count to output, keeps thoughts_token_count only as reasoning,
+    # ignores tool_use_prompt_token_count, and totals input and output. Google bills thinking as output
+    # and tool-use prompts as input, and every other provider reports reasoning inside output.
+    # Upstream issue: Tracking gap; no issue identified.
+    # Upstream PR: None identified.
+    # Remove when: Agno's Gemini metrics count thinking in output, tool-use prompts in input, and keep the
+    # provider's total.
+    # Coverage: tests/test_provider_usage_metrics.py::test_gemini_output_includes_thinking_and_input_includes_tool_prompts.
+    def _get_metrics(self, response_usage: GenerateContentResponseUsageMetadata) -> MessageMetrics:
+        metrics = super()._get_metrics(response_usage)
+        metrics.input_tokens += response_usage.tool_use_prompt_token_count or 0
+        metrics.output_tokens += metrics.reasoning_tokens
+        metrics.total_tokens = response_usage.total_token_count or metrics.input_tokens + metrics.output_tokens
+        return metrics
