@@ -214,6 +214,37 @@ describe('Budgets', () => {
     );
   });
 
+  it('flags a model priced without both required prices', async () => {
+    setStore(
+      budgetConfig({
+        models: {
+          luna: {
+            provider: 'openai',
+            id: 'gpt-6-luna',
+            pricing: { input: 0.2 },
+          },
+        } as Config['models'],
+      })
+    );
+    vi.mocked(fetch).mockResolvedValue(respond(status));
+    renderBudgets();
+
+    const luna = await screen.findByRole('row', { name: /openai \/ gpt-6-luna/ });
+    expect(within(luna).getByText('Set both input and output prices.')).toBeInTheDocument();
+  });
+
+  it('warns that spend may be incomplete when usage could not be read', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      respond({
+        ...status,
+        coverage: { scanned_sources: 3, unavailable_sources: 1 },
+      })
+    );
+    renderBudgets();
+
+    expect(await screen.findByText(/Some usage could not be read/)).toBeInTheDocument();
+  });
+
   it("writes a user's cap override and clears it back to the default", async () => {
     vi.mocked(fetch).mockResolvedValue(respond(status));
     renderBudgets();

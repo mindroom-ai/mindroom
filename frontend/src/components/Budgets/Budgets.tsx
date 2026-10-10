@@ -264,6 +264,11 @@ function UsersCard({
             {statusError}
           </p>
         )}
+        {status != null && status.coverage.unavailable_sources > 0 && (
+          <p role="status" className="text-sm text-destructive">
+            Some usage could not be read, so spend may be higher than shown.
+          </p>
+        )}
         <div>
           <table className="w-full text-sm">
             <thead className="hidden text-left text-xs text-muted-foreground sm:table-header-group">
@@ -418,6 +423,12 @@ function ModelPricesCard({
                       <div className="font-mono text-xs text-muted-foreground">
                         {model.provider} / {model.id}
                       </div>
+                      {model.pricing != null &&
+                        (model.pricing.input == null || model.pricing.output == null) && (
+                          <div className="text-xs text-destructive">
+                            Set both input and output prices.
+                          </div>
+                        )}
                     </td>
                     {PRICE_FIELDS.map(([field, label]) => (
                       <td key={field} className="sm:py-2 sm:pr-3">
