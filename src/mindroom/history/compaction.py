@@ -557,6 +557,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     budget = summary_model.input_budget_tokens
     token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
+    summary_length_divisor = retry_policy.summary_length_divisor
     minimum_progress_input_tokens = await asyncio.to_thread(
         minimum_summary_input_tokens,
         previous_summary=previous_summary,
@@ -590,6 +591,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 summary_prompt=summary_prompt,
                 timeout_seconds=timeout_seconds,
                 on_response=partial(on_response, summary_model.model) if on_response is not None else None,
+                summary_length_divisor=summary_length_divisor,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -607,6 +609,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
+            summary_length_divisor = retry_policy.retry_summary_length_divisor(summary_length_divisor, exc)
             # The attempt bound covers the fallback call too: a refusal after an
             # earlier shrink or transient retry propagates instead of issuing a
             # third provider call.

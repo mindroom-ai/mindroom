@@ -680,7 +680,15 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
     assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "timeout": httpx.Timeout(600.0)}
     assert [(message.role, message.content) for message in model.seen_messages] == [
-        ("system", "Summarize the conversation."),
+        (
+            "system",
+            "Summarize the conversation.\n\n"
+            "Length limit: keep the summary under 32,000 tokens. "
+            "The response, including any reasoning, is cut off at 64,000 tokens, "
+            "and a cut-off summary is discarded. "
+            "When <previous_summary> is already near that size, condense it and drop its least important detail "
+            "instead of restating it in full.",
+        ),
         ("user", "conversation payload"),
     ]
 
@@ -798,6 +806,25 @@ def test_build_summary_request_messages_is_the_single_request_seam() -> None:
         ("system", "prompt"),
         ("user", "input"),
     ]
+
+
+def test_summary_request_targets_a_share_of_the_known_output_cap() -> None:
+    """A known output cap bounds the merged summary so restating it can never fill the cap."""
+    first, retry = (
+        build_summary_request_messages(
+            summary_prompt="prompt\n",
+            summary_input="input",
+            output_token_limit=32_768,
+            summary_length_divisor=divisor,
+        )
+        for divisor in (DEFAULT_SUMMARY_RETRY_POLICY.summary_length_divisor, 4)
+    )
+
+    assert first[0].content.startswith("prompt\n\nLength limit: keep the summary under 16,384 tokens.")
+    assert "cut off at 32,768 tokens" in first[0].content
+    assert "condense it" in first[0].content
+    assert "keep the summary under 8,192 tokens." in retry[0].content
+    assert [(message.role, message.content) for message in first[1:]] == [("user", "input")]
 
 
 # --- Invariant 4: deterministic retry on provider failure ----------------------
@@ -1303,6 +1330,7 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
         "original request",
         "original request",
     ]
+    assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == [2, 2]
     retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
 
 
@@ -1354,6 +1382,8 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
 
     assert generated.summary is recovered_summary
     assert generate_summary.await_count == 2
+    # A shorter target is what shrinks the output; the smaller input still restates the whole prior summary.
+    assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == [2, 4]
     retry_input = generate_summary.await_args_list[1].kwargs["summary_input"]
     assert _chars_per_token_estimator(retry_input) < initial_tokens
     assert previous_summary in retry_input

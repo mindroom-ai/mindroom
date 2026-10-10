@@ -86,12 +86,26 @@ class SummaryRetryPolicy:
     and to the caller's smallest progress-preserving rebuild, while selected typed
     transient failures wait ``same_input_retry_delay_seconds`` and retry the
     same configured budget.
+    When the output cap is known, the first request asks for a summary under
+    the cap divided by ``summary_length_divisor``, and each output-limit
+    failure multiplies that divisor by ``shrink_divisor``.
     Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
     same_input_retry_delay_seconds: float = 1.0
+    summary_length_divisor: int = 2
+
+    def retry_summary_length_divisor(self, divisor: int, error: Exception) -> int:
+        """Return the summary length divisor for the request after ``error``.
+
+        A smaller input does not shorten a summary that must restate a long
+        previous summary, so an output-limit failure also asks for a shorter one.
+        """
+        if isinstance(error, CompactionSummaryOutputLimitError):
+            return divisor * self.shrink_divisor
+        return divisor
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
@@ -138,8 +152,29 @@ class SummaryRetryPolicy:
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 
-def build_summary_request_messages(*, summary_prompt: str, summary_input: str) -> list[Message]:
-    """Keep summary instructions separate from the serialized conversation."""
+def build_summary_request_messages(
+    *,
+    summary_prompt: str,
+    summary_input: str,
+    output_token_limit: int | None = None,
+    summary_length_divisor: int = DEFAULT_SUMMARY_RETRY_POLICY.summary_length_divisor,
+) -> list[Message]:
+    """Keep summary instructions separate from the serialized conversation.
+
+    A known output cap adds a length target to the instructions. Without it the
+    durable summary grows with every merge until restating it alone reaches the
+    cap, and every later compaction of that scope fails.
+    """
+    if output_token_limit is not None:
+        target_tokens = output_token_limit // summary_length_divisor
+        summary_prompt = (
+            f"{summary_prompt.rstrip()}\n\n"
+            f"Length limit: keep the summary under {target_tokens:,} tokens. "
+            f"The response, including any reasoning, is cut off at {output_token_limit:,} tokens, "
+            "and a cut-off summary is discarded. "
+            "When <previous_summary> is already near that size, condense it and drop its least important detail "
+            "instead of restating it in full."
+        )
     return [
         Message(role="system", content=summary_prompt),
         Message(role="user", content=summary_input),
@@ -205,6 +240,7 @@ async def generate_compaction_summary(
     summary_prompt: str,
     timeout_seconds: float,
     on_response: Callable[[ModelResponse], Awaitable[None]] | None = None,
+    summary_length_divisor: int = DEFAULT_SUMMARY_RETRY_POLICY.summary_length_divisor,
 ) -> SessionSummary:
     """Bound the provider request, then persist returned usage before validating the summary."""
     timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
@@ -215,7 +251,12 @@ async def generate_compaction_summary(
     async def _request_summary() -> ModelResponse:
         try:
             response = await model.aresponse(
-                messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
+                messages=build_summary_request_messages(
+                    summary_prompt=summary_prompt,
+                    summary_input=summary_input,
+                    output_token_limit=summary_output_limit,
+                    summary_length_divisor=summary_length_divisor,
+                ),
             )
         finally:
             provider_done.set_result(None)

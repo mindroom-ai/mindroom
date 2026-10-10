@@ -116,6 +116,34 @@ async def test_summary_rejects_output_capped_at_effective_request_limit(
 
 @pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
 @pytest.mark.parametrize("raw_body", [False, True])
+async def test_summary_request_states_length_target_from_effective_output_cap(provider: str, *, raw_body: bool) -> None:
+    """The length target follows the cap actually sent, so the model can keep the summary under it."""
+    params = {"extra_body": {"max_tokens": 1024}} if raw_body else {"max_tokens": 1024}
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return _response(output_tokens=100)
+
+    model = _model(provider, httpx.MockTransport(respond), params)
+    try:
+        await generate_compaction_summary(
+            model=model,
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+        )
+    finally:
+        await model.async_client.close()
+    assert requests[0]["max_tokens"] == 1024
+    system = json.dumps(requests[0]["system"])
+    assert "Summarize" in system
+    assert "keep the summary under 512 tokens." in system
+    assert "cut off at 1,024 tokens" in system
+
+
+@pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
+@pytest.mark.parametrize("raw_body", [False, True])
 async def test_summary_disables_thinking_from_request_overrides(provider: str, *, raw_body: bool) -> None:
     """The effective body must obey summary tuning without mutating the caller's mappings."""
     thinking = {"type": "adaptive"}
