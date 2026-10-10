@@ -10,8 +10,8 @@ When a worker makes an HTTP(S) request through the broker, the broker matches th
 If the request matches a service rule, the broker terminates TLS with its own certificate, injects the configured secret into the request as a header or query parameter, forwards the request to the upstream server, and returns the response to the worker.
 Unmatched hosts are either tunneled through (passthrough mode) or blocked (deny mode), controlled by `egress_broker.unmatched_hosts` in `config.yaml`.
 
-Workers receive a short-lived signed token in their environment (`HTTP_PROXY`, `HTTPS_PROXY`) that authenticates them to the broker.
-The broker validates the token, resolves the worker's scope (user, user-agent, shared, or global), and loads the service secret from that scope's primary-only credential store.
+Workers receive a signed token in their environment (`HTTP_PROXY`, `HTTPS_PROXY`) that authenticates them to the broker; it is valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days).
+The broker validates the token, resolves the worker's scope (user, user-agent, shared, or global for agents without a worker scope), and loads the service secret from that scope's primary-only credential store.
 The secret never reaches the worker process, its environment, or the filesystem it can read.
 
 Each worker call gets a fresh token valid for the configured TTL (default 7 days), so long-running commands keep working while a leaked token expires on its own.
@@ -72,8 +72,8 @@ egress_broker:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `host` | Yes | Host to match; exact, IP address, or one-level wildcard such as `*.example.com` |
-| `port` | No | Port to match; omit to match any port |
-| `path_prefix` | No | Path prefix to match; defaults to `/` |
+| `port` | No | Port to match, 1 to 65535; omit to match any port |
+| `path_prefix` | No | Path prefix to match; defaults to `/`; selects a rule but is not an access boundary (see below) |
 | `auth` | Yes | Authentication configuration for this rule |
 
 **Auth types:**
@@ -82,10 +82,19 @@ egress_broker:
 |------|---------|
 | `bearer` | `Authorization: Bearer <secret>` |
 | `basic` | `Authorization: Basic <base64(username:secret)>`; requires `username` field |
-| `header` | Custom header; requires `name` and `template` fields; template must contain `{secret}` exactly once |
-| `query` | Query parameter `<name>=<secret>`; requires `name` field; replaces any client value |
+| `header` | Custom header; requires `name` and `template` fields; `name` must be a valid HTTP header name other than `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Proxy-Authorization`, `Proxy-Connection`, or `Keep-Alive`; template must contain `{secret}` exactly once |
+| `query` | Query parameter `<name>=<secret>`; requires a non-empty `name`; replaces any client value |
 
 Matching follows this order: exact host over wildcard, specific port over none, longest path prefix, then declaration order.
+
+Service names use up to 63 lowercase letters, digits, `_`, and `-`, start with a letter or digit, and must not end in `_oauth` or `_oauth_client`, because the stored `egress_<name>` credential would then read as an OAuth service.
+
+**Choosing auth safely:**
+
+- Prefer `bearer`, `basic`, or `header` auth. The broker returns upstream responses to the worker, so any response that echoes the request can reveal the secret to worker code.
+- `query` auth puts the secret in the URL. A redirect `Location` header, an error page, or a log line that echoes the URL can hand it back to the worker; use it only for APIs that accept nothing else.
+- `header` and `bearer` secrets are exposed the same way by upstream debug endpoints that echo request headers (such as `httpbin.org/headers`), so do not add rules for hosts that offer them.
+- `path_prefix` is compared with the raw request path, so `/allowed/../other` matches `/allowed`. It chooses which rule and secret apply but is not an access boundary: the secret still reaches only the rule's host, and any path on that host can carry it.
 
 **Placeholder environment:**
 
@@ -104,9 +113,13 @@ Secrets are stored per worker scope in the primary-only credential store (the sa
 | `user_agent` | Requester and agent scoped store |
 | `user` | Requester scoped store |
 | `shared` | Agent scoped store |
-| Global (no agent) | Global store |
+| None (no worker scope) | Global store, shared by every agent without a worker scope |
+
+Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
+The dashboard edits it as **Global (unscoped agents)**.
 
 Set secrets through the dashboard Credentials tab or the personal egress page at `/connections/egress`.
+The dashboard offers agents that can run commands and have no worker scope or `shared` scope; keys for `user` and `user_agent` agents belong to each requester and are set on the personal egress page.
 The status API returns whether a secret is configured and when it was last updated; it never returns the secret value.
 
 The personal egress page and its API, `/api/connections/egress`, authenticate with `require_connections_user`: they need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
@@ -181,7 +194,7 @@ networking.firewall.interfaces.docker0.allowedTCPPorts = [ 8768 ];
 Without this firewall rule, workers cannot reach the broker and brokered calls time out.
 
 The broker port must not be published beyond the worker network.
-Do not add it to a published ports list in `docker run -p` or Docker Compose `ports:`, because that would let any code on the host network use the broker with a leaked or expired token.
+Do not add it to a published ports list in `docker run -p` or Docker Compose `ports:`, because that would let any code on the host network use a leaked token until it expires.
 
 ### Static runner
 
@@ -193,6 +206,7 @@ The runner is shared across users, so it is not an isolation boundary between th
 ### Kubernetes
 
 The broker needs no worker pod changes: the token and CA certificate travel in each call's environment, and worker pods already have a writable `/tmp` for the trust bundle.
+Worker images must still come from a release that includes the broker (see [Worker images](#worker-images)).
 The primary's storage volume holds broker state under `egress_broker/`, which workers never mount.
 The runtime chart runs one primary replica, so there is one broker.
 
@@ -201,13 +215,25 @@ The charts support these topologies:
 | Deployment | Worker to broker | Broker to internet |
 |------------|------------------|--------------------|
 | Runtime chart, no egress proxy | Worker pod to the `<fullname>-egress-broker` Service to the primary pod | Direct from the primary pod |
-| Runtime chart with `egressProxy` (operator proxy) | Same, plus an additive worker egress NetworkPolicy for the broker port | Through the operator proxy when the primary's env sets `HTTPS_PROXY` and `NO_PROXY` |
+| Runtime chart with `egressProxy` (operator proxy) | Same, plus an additive worker egress NetworkPolicy for the broker port | Through the operator proxy only when the primary's env sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`; otherwise direct (see the warning below) |
 | Runtime chart with `approvedEgress` (Squid) | Worker to Squid, which checks the grant by pod IP, then to the broker as Squid's parent | Direct from the primary pod |
 | Instance chart (`static_runner` sidecar sharing the primary pod's network) | Sidecar to `127.0.0.1:8768` | Direct |
 
 The first three rows are the runtime chart's two modes.
 **Direct mode** (`egressBroker.enabled`, optionally with `egressProxy`) points workers straight at the broker Service.
 **Chain mode** (`egressBroker.enabled` together with `approvedEgress.enabled`) keeps Squid as the workers' first hop and renders Squid's parent as the broker.
+
+> [!WARNING]
+> **Direct mode with `egressProxy` bypasses the operator proxy unless the primary uses it.**
+> Each `shell` and `python` call's broker environment replaces the `HTTP_PROXY` and `HTTPS_PROXY` that `egressProxy.injectWorkerProxyEnv` gives worker pods, so that traffic goes to the broker instead of the operator proxy.
+> The broker then dials from the primary pod: matched hosts always, and unmatched hosts too under the default `unmatched_hosts: passthrough`.
+> Unless the primary's own environment sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`, that traffic leaves the cluster directly instead of through the operator proxy.
+> Set the operator proxy on the primary through `env.extra`, or set `egress_broker.unmatched_hosts: deny` so only the configured services' hosts are reached directly.
+> The broker connects through the operator proxy to the IP address it validated, so the proxy must allow CONNECT to IP addresses on ports 80 and 443.
+> The chart does not enforce either setting yet.
+
+The broker's environment also replaces `NO_PROXY` for `shell` and `python` calls with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's callback URLs (the broker, script gateway, and agent CLI URLs).
+Entries from `egressProxy.noProxy` or a worker `NO_PROXY` no longer apply to those calls, so requests to other internal hosts go to the broker (through Squid in chain mode), which refuses private addresses with 403 `destination_blocked`.
 
 ```yaml
 workers:
@@ -252,6 +278,12 @@ The chart default is off, and the platform provisioner does not forward `egressB
 It runs `helm upgrade --install` with a fixed set of values and no `--reuse-values`, and every release deploy re-provisions all tenants, so a value set by hand (for example `--set egressBroker.enabled=true`) is overwritten by the next provision and brokered secrets then silently stop being injected.
 Until the provisioner forwards the value, which is a follow-up, treat a hand-set value as for testing only.
 The primary image must also include the broker, so it takes effect with a SaaS release.
+
+### Worker images
+
+Worker and runner images must come from the same release as the primary, or at least one that includes the broker.
+Older runners ignore `MINDROOM_EGRESS_BROKER_CA_PEM`, so they never install the broker's CA: requests to matched hosts then fail TLS verification and no secret is sent, while unmatched passthrough hosts keep working.
+Upgrade the worker image together with the primary; on the LXC host that means rebuilding `mindroom:dev` after pulling the checkout.
 
 ### Background-script workers
 
@@ -302,12 +334,13 @@ If you are currently using Agent Vault (the Go-based proxy fork) on the LXC host
 
 1. Add the egress broker environment variables to the MindRoom service configuration (such as `optional/mindroom-runtime-services.nix`), set `MINDROOM_EGRESS_BROKER_PORT=8768`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, `MINDROOM_EGRESS_BROKER_URL=http://host.docker.internal:8768`.
 2. Open port 8768 on `docker0` in the host firewall configuration (such as `hosts/mindroom/networking.nix`).
-3. Add the `github` service (or other services you use) to `~/.mindroom-chat/config.yaml` under `egress_broker.services`.
-4. Set the secrets in the dashboard Credentials tab or the Connections portal.
-5. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the audit log records it, and the worker environment and workspace contain no trace of the token.
-6. Remove the `agent-vault-bridge` plugin from config.
-7. Remove the Agent Vault CA pin from the NixOS configuration.
-8. Stop the `agent-vault` compose stack on the `nas` host after a grace period.
+3. Rebuild the worker image from the updated checkout so workers install the broker's CA: `cd /srv/mindroom && docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .`
+4. Add the `github` service (or other services you use) to `~/.mindroom-chat/config.yaml` under `egress_broker.services`.
+5. Set the secrets in the dashboard Credentials tab. The personal egress page needs trusted upstream auth with JWT, which a lab host without an upstream proxy does not have.
+6. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the audit log records it, and the worker environment and workspace contain no trace of the token.
+7. Remove the `agent-vault-bridge` plugin from config.
+8. Remove the Agent Vault CA pin from the NixOS configuration.
+9. Stop the `agent-vault` compose stack on the `nas` host after a grace period.
 
 ### Kubernetes
 
@@ -348,12 +381,13 @@ The broker has these known limits in the initial release:
 **Workers time out when calling brokered services:**
 
 Check that the broker port is open on the interface workers reach it through (`docker0` for Docker workers, the broker Service for Kubernetes workers).
-Verify with `curl -v -x $MINDROOM_EGRESS_BROKER_URL http://example.com` from inside a worker (for example `docker exec <worker> curl ...`).
+Verify with `curl -v -x "$HTTPS_PROXY" https://example.com` from an agent's `shell` tool call, whose environment carries the broker URL and token.
+A shell opened with `docker exec` does not have that per-call environment.
 
 **403 `credential_not_configured` errors:**
 
 The service is matched but no secret is set for that worker's scope.
-Set the secret through the dashboard or Connections portal; the error response includes a `manage_url` field pointing to the right UI.
+Set the secret through the dashboard or, where trusted upstream auth is enabled, the personal egress page; the error response includes a `manage_url` field pointing to the right UI.
 Agents with the [`egress_credentials` tool](#agent-tool) can look up which services are set and relay the link to the user.
 
 **407 authentication errors:**

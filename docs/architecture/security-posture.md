@@ -40,13 +40,14 @@ These are the invited-room and pending-invite ledgers, personal-room records, co
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
-When the broker is enabled, workers receive a short-lived signed proxy token in their environment that authenticates them to the broker, and the broker injects the configured secret when the worker's request matches a service rule.
+When the broker is enabled, workers receive a signed proxy token in their environment that authenticates them to the broker, valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), and the broker injects the configured secret when the worker's request matches a service rule.
 Workers can read their own proxy token (it is in their environment), but the token only authorizes that worker's scope and expires after the configured TTL (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
+Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
 On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated workers when requesters must not be able to use each other's brokered credentials.
 
 The egress broker listener (when `MINDROOM_EGRESS_BROKER_PORT` is set) is a worker-reachable primary runtime surface: workers must reach it to make brokered requests, so it must be accessible from the worker network (Docker `docker0` interface or the Kubernetes broker Service).
 The hosted `static_runner` sidecar shares the primary pod's network instead, so there the broker binds only loopback (`127.0.0.1`) and is reachable from no other pod.
-The broker port must not be published beyond the worker network, because a leaked or expired token could otherwise be used from arbitrary network locations.
+The broker port must not be published beyond the worker network, because a leaked token could otherwise be used from arbitrary network locations until it expires; expired tokens get 407.
 Firewall rules and network policies confine the broker port to worker-originated connections only.
 
 ### Workspace mounts by worker scope

@@ -830,8 +830,20 @@ The chart supports direct and chain modes:
 | Mode | Values | Worker to broker | Broker to internet |
 |---|---|---|---|
 | Direct | `egressBroker.enabled` | Worker pod to the `<fullname>-egress-broker` Service to the primary pod | Direct from the primary pod |
-| Direct with an operator proxy | `egressBroker.enabled` and `egressProxy.enabled` | Same, plus an additive worker egress NetworkPolicy for the broker port | Through the operator proxy when the primary's env sets `HTTPS_PROXY` and `NO_PROXY` |
+| Direct with an operator proxy | `egressBroker.enabled` and `egressProxy.enabled` | Same, plus an additive worker egress NetworkPolicy for the broker port | Through the operator proxy only when the primary's env sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`; otherwise direct (see the warning below) |
 | Chain | `egressBroker.enabled` and `approvedEgress.enabled` | Worker to Squid (grant check by pod IP) to the broker as Squid's parent | Direct from the primary pod |
+
+> [!WARNING]
+> **Direct mode with `egressProxy` bypasses the operator proxy unless the primary uses it.**
+> Each `shell` and `python` call's broker environment replaces the `HTTP_PROXY` and `HTTPS_PROXY` that `egressProxy.injectWorkerProxyEnv` gives worker pods, so that traffic goes to the broker instead of the operator proxy.
+> The broker then dials from the primary pod: matched hosts always, and unmatched hosts too under the default `unmatched_hosts: passthrough`.
+> Unless the primary's own environment sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`, that traffic leaves the cluster directly instead of through the operator proxy.
+> Set the operator proxy on the primary through `env.extra`, or set `egress_broker.unmatched_hosts: deny` in the MindRoom config so only the configured services' hosts are reached directly.
+> The broker connects through the operator proxy to the IP address it validated, so the proxy must allow CONNECT to IP addresses on ports 80 and 443.
+> The chart does not enforce either setting yet.
+
+The broker's environment also replaces `NO_PROXY` for `shell` and `python` calls with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's callback URLs.
+`egressProxy.noProxy` entries no longer apply to those calls, so requests to other internal hosts go to the broker (through Squid in chain mode), which refuses private addresses with 403 `destination_blocked`.
 
 The SaaS instance chart (`cluster/k8s/instance`) has its own `egressBroker.enabled`, which sets the loopback env on the primary for its sandbox-runner sidecar and renders no Service or NetworkPolicy.
 
@@ -852,6 +864,7 @@ The primary container then exposes an `egress-broker` port and gets `MINDROOM_EG
 The URL points workers at a `<fullname>-egress-broker` ClusterIP Service for that port.
 The Service is separate from the main runtime Service so `service.type` never exposes the broker port outside the cluster.
 Workers need no changes: each call carries its own token and CA certificate.
+Worker images must still come from a release that includes the broker, because older runners ignore the CA in the call's environment and requests to matched hosts then fail TLS verification.
 When `networkPolicy.create` is true, a `<fullname>-egress-broker` NetworkPolicy admits workers to that port on the control-plane pod.
 When the chart's worker egress NetworkPolicy exists (`egressProxy.enabled` with `egressProxy.networkPolicy.create=true`), a `<fullname>-egress-broker-workers` NetworkPolicy in the worker namespace adds egress from workers to the broker port on the control-plane pod.
 Without that policy workers already have unrestricted egress, so the chart adds no worker rule.
