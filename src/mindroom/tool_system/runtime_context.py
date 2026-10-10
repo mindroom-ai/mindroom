@@ -73,6 +73,7 @@ class DetachedRequesterContext:
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
     config_provider: Callable[[], Config | None]
+    budget_monitor: BudgetMonitor | None
 
 
 _DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = ContextVar(
@@ -84,6 +85,14 @@ _DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = Conte
 def get_detached_requester_context() -> DetachedRequesterContext | None:
     """Return authority established by the current detached request boundary."""
     return _DETACHED_REQUESTER_CONTEXT.get()
+
+
+def current_budget_monitor() -> BudgetMonitor | None:
+    """Return the spend monitor of the current conversation or detached API request."""
+    if (context := get_tool_runtime_context()) is not None:
+        return context.budget_monitor
+    detached = get_detached_requester_context()
+    return detached.budget_monitor if detached is not None else None
 
 
 @contextmanager

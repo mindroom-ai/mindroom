@@ -34,6 +34,7 @@ from mindroom.logging_config import get_logger
 from mindroom.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.tool_system.runtime_context import (
+    current_budget_monitor,
     get_tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import (
@@ -292,7 +293,7 @@ class DelegateTools(Toolkit):
             config=config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
-            budget_monitor=context.budget_monitor if (context := get_tool_runtime_context()) is not None else None,
+            budget_monitor=current_budget_monitor(),
             model=model,
             agent_mode="minimal" if minimal else "standard",
             previous=continuation,

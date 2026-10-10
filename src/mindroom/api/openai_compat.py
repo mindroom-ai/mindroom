@@ -487,6 +487,7 @@ def _requester_authority(
             trigger_runtime.agent_reply_memberships if trigger_runtime is not None else AgentReplyMembershipIndex()
         ),
         config_provider=current_config,
+        budget_monitor=config_lifecycle.app_state(request.app).budget_monitor,
     )
 
 

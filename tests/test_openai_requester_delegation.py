@@ -17,8 +17,9 @@ from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.routing import ResponderSelection
@@ -145,6 +146,54 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     assert len(child_calls) == 1
     assert get_detached_requester_context() is None
     assert not config_lifecycle.app_state(api.client.app).openai_responses
+
+
+class _Spent:
+    """Budget monitor stand-in reporting one month-to-date spend for every requester."""
+
+    def __init__(self, spend_usd: float) -> None:
+        self._amount = spend_usd
+
+    def _spend_usd(self, _user_id: str) -> float:
+        return self._amount
+
+    def response_finished(self) -> None:
+        """Accept the completion's rescan request."""
+
+
+def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarness) -> None:
+    """A delegated child must not keep an over-budget API requester on a priced model."""
+    api.config.models["default"].pricing = ModelPricing(input=5, output=30)
+    api.config.models["luna"] = ModelConfig(provider="ollama", id="cheap", pricing=ModelPricing(input=0.2, output=1.25))
+    api.config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
+    config_lifecycle.app_state(api.client.app).budget_monitor = _Spent(12.0)  # type: ignore[assignment]
+    child_models: list[str | None] = []
+
+    async def child(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        child_models.append(ctx.active_model_name)
+        return "specialist result"
+
+    async def delegate(
+        _ctx: ResponseTurnContext,
+        *,
+        execution_identity: ToolExecutionIdentity,
+        **_kwargs: object,
+    ) -> str:
+        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        return await tool.run_subagent(agent_name="specialist", task="help")
+
+    with (
+        patch.object(openai_compat, "ai_response", side_effect=delegate),
+        patch("mindroom.ai.ai_response", side_effect=child),
+    ):
+        response = api.client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer alice-key"},
+            json={"model": "leader", "messages": [{"role": "user", "content": "help"}]},
+        )
+
+    assert response.status_code == 200
+    assert child_models == ["luna"]
 
 
 @pytest.mark.parametrize(("key", "target"), [("legacy-key", "specialist"), ("alice-key", "forbidden")])
