@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import re
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.credential_policy import is_oauth_client_config_service, is_oauth_token_service
+from mindroom.egress_broker.presets import EGRESS_PRESETS
 
 _AuthType = Literal["bearer", "basic", "header", "query"]
 
@@ -174,6 +176,13 @@ class EgressService(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    preset: str | None = Field(
+        default=None,
+        description=(
+            "Built-in service preset that supplies display_name, description, rules, placeholder_env, "
+            "and oauth_provider; fields set explicitly here replace the preset's values"
+        ),
+    )
     display_name: str | None = Field(
         default=None,
         description="Human-readable service name",
@@ -191,6 +200,32 @@ class EgressService(BaseModel):
         default_factory=dict,
         description="Placeholder environment variables",
     )
+    oauth_provider: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+        description=(
+            "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored; "
+            "checked against the provider registry at runtime"
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def expand_preset(cls, data: object) -> object:
+        """Merge the selected preset under the authored fields before field validation."""
+        if not isinstance(data, dict):
+            return data
+        authored = cast("dict[str, object]", data)
+        name = authored.get("preset")
+        if not isinstance(name, str):
+            return data
+        preset = EGRESS_PRESETS.get(name)
+        if preset is None:
+            known = ", ".join(sorted(EGRESS_PRESETS))
+            msg = f"unknown egress preset '{name}' (known presets: {known})"
+            raise ValueError(msg)
+        # Deep copy so validated models never alias the shared built-in table.
+        return {**copy.deepcopy(preset), **authored}
 
     @field_validator("placeholder_env")
     @classmethod

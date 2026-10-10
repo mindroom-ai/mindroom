@@ -1676,6 +1676,19 @@
       "additionalProperties": false,
       "description": "One egress service configuration.",
       "properties": {
+        "preset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Built-in service preset that supplies display_name, description, rules, placeholder_env, and oauth_provider; fields set explicitly here replace the preset's values",
+          "title": "Preset"
+        },
         "display_name": {
           "anyOf": [
             {
@@ -1712,6 +1725,20 @@
           "description": "Placeholder environment variables",
           "title": "Placeholder Env",
           "type": "object"
+        },
+        "oauth_provider": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored; checked against the provider registry at runtime",
+          "title": "Oauth Provider"
         }
       },
       "required": [
