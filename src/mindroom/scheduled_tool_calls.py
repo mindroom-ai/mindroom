@@ -159,6 +159,9 @@ def _canonical_call(agent: Agent, tool_name: str, arguments_json: str) -> tuple[
     call = {"id": "scheduled", "type": "function", "function": {"name": tool_name, "arguments": arguments_json}}
     [translated], errors = canonical_tool_calls(dialect, [call], functions)
     if errors:
+        # A canonical caller, such as the agent CLI, may name a function whose wire tool shares its name.
+        if tool_name in functions:
+            return tool_name, arguments_json
         return errors[0].message.removeprefix("Error: ")
     return translated["function"]["name"], translated["function"]["arguments"]
 

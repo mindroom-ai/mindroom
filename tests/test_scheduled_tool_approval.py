@@ -2306,7 +2306,7 @@ class _ShellTools(Toolkit):
     """A shell toolkit with the canonical run_shell_command signature."""
 
     def __init__(self) -> None:
-        super().__init__(name="shell", tools=[self.run_shell_command])
+        super().__init__(name="shell", tools=[self.run_shell_command, self.kill_shell_command])
 
     def run_shell_command(self, args: str, tail: int = 100, timeout: int = 120) -> str:
         """Run a shell command.
@@ -2318,6 +2318,16 @@ class _ShellTools(Toolkit):
 
         """
         return f"ran {args} {tail} {timeout}"
+
+    def kill_shell_command(self, handle: str, force: bool = False) -> str:
+        """Stop a background command.
+
+        Args:
+            handle: The handle of the command.
+            force: Send SIGKILL instead of SIGTERM.
+
+        """
+        return f"killed {handle} {force}"
 
 
 @pytest.mark.parametrize(
@@ -2344,6 +2354,24 @@ def test_harness_named_calls_schedule_as_canonical_calls(
     live, stored = result
     assert live.function.name == "run_shell_command"
     assert stored["args"] == "./backup.sh"
+
+
+@pytest.mark.parametrize("arguments", [{"session_id": "shell:1"}, {"handle": "shell:1"}], ids=["wire", "canonical"])
+def test_kill_shared_by_name_schedules_in_either_shape(arguments: dict[str, object]) -> None:
+    """Codex's kill_shell_command shares its canonical name, so a canonical caller such as the agent CLI can schedule it."""
+    toolkit = _ShellTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = "shell"
+    model = OpenAIChat()
+    install_tool_dialect(model, CODEX_DIALECT)
+    agent = Agent(id="general", model=model, tools=[toolkit])
+
+    result = prepare_scheduled_call(agent, "kill_shell_command", json.dumps(arguments))
+
+    assert not isinstance(result, str), result
+    live, stored = result
+    assert live.function.name == "kill_shell_command"
+    assert stored["handle"] == "shell:1"
 
 
 def test_harness_named_call_with_a_repeated_argument_is_refused() -> None:
