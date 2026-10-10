@@ -50,6 +50,7 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
     ToolFileAccess,
+    with_implied_exclusions,
 )
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
@@ -169,8 +170,9 @@ class _AgentToolAssembly:
 
     def deferred_wire_tool_names(self, dialect: ToolDialect) -> frozenset[str]:
         """Return deferred names as *dialect* presents them on the wire, from the final projected toolkit surface."""
+        taken = {name for toolkit in self.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())}
         return frozenset(
-            wire_function_name(dialect, deferred.domain_name, function_name)
+            wire_function_name(dialect, deferred.domain_name, function_name, taken)
             for deferred in self.deferred_toolkits
             for function_name in deferred.wire_function_names
         )
@@ -1279,15 +1281,17 @@ def apply_tool_approval_capability(
                 function.requires_confirmation = True
                 function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         return toolkit
-    toolkit.functions = {
-        name: function
-        for name, function in toolkit.functions.items()
-        if function.requires_confirmation is not True and not function_may_require_approval(function)
-    }
+    gated = [
+        name
+        for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
+        if function.requires_confirmation is True or function_may_require_approval(function)
+    ]
+    # A function that does what a hidden gated one does, such as apply_patch beside edit_file, goes with it.
+    metadata = TOOL_METADATA.get(registered_tool_name or "")
+    hidden = set(with_implied_exclusions(gated, metadata.implied_exclusions if metadata is not None else None))
+    toolkit.functions = {name: function for name, function in toolkit.functions.items() if name not in hidden}
     toolkit.async_functions = {
-        name: function
-        for name, function in toolkit.async_functions.items()
-        if function.requires_confirmation is not True and not function_may_require_approval(function)
+        name: function for name, function in toolkit.async_functions.items() if name not in hidden
     }
     return toolkit if toolkit.functions or toolkit.async_functions else None
 

@@ -33,7 +33,7 @@ from mindroom.tool_dialects.types import (
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from agno.models.message import Message
 
@@ -190,10 +190,18 @@ def wire_tools(
     return presented
 
 
-def wire_function_name(dialect: ToolDialect, toolkit_name: str, function_name: str) -> str:
-    """Return the wire name of a canonical function, or its canonical name when *dialect* does not map it."""
+def wire_function_name(
+    dialect: ToolDialect,
+    toolkit_name: str,
+    function_name: str,
+    taken: Collection[str] = (),
+) -> str:
+    """Return the wire name of a canonical function, or its canonical name when *dialect* does not map it.
+
+    Like the presented definitions, a function whose wire name another of the *taken* names holds keeps its own.
+    """
     registered = Config.expand_tool_names([toolkit_name])
-    return next(
+    wire_name = next(
         (
             wire_function.wire_name
             for wire_function in dialect.functions
@@ -201,6 +209,7 @@ def wire_function_name(dialect: ToolDialect, toolkit_name: str, function_name: s
         ),
         function_name,
     )
+    return function_name if wire_name != function_name and wire_name in taken else wire_name
 
 
 def _with_output_path(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:

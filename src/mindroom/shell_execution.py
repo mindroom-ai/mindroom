@@ -31,7 +31,7 @@ DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 MAX_BACKGROUNDED = 16
-_MAX_OUTPUT_LINES = 10_000
+MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
@@ -138,7 +138,7 @@ def _format_running_status(*, pid: int, elapsed: float, buffered_lines: int, par
 class _OutputBuffer:
     """Bound shell output by both line count and encoded byte size."""
 
-    max_lines: int = _MAX_OUTPUT_LINES
+    max_lines: int = MAX_OUTPUT_LINES
     max_bytes: int = _MAX_OUTPUT_BYTES
     chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0

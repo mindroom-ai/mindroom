@@ -15,7 +15,7 @@ from mindroom.agents import _set_toolkit_approval_origin
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, _format_read_output
-from mindroom.shell_execution import _format_background_handle_message
+from mindroom.shell_execution import MAX_OUTPUT_LINES, _format_background_handle_message
 from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
 from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_dialects.translation import resolve_tool_dialect
@@ -37,10 +37,15 @@ def test_bash_maps_command_timeout_background() -> None:
     """Bash takes milliseconds and a background flag; canonical shell takes seconds, where 0 backgrounds at once."""
     to_canonical = _wire("Bash").to_canonical
 
-    assert to_canonical({"command": "ls", "description": "List files"}) == {"args": "ls"}
-    assert to_canonical({"command": "make", "timeout": 1500}) == {"args": "make", "timeout": 2}
+    assert to_canonical({"command": "ls", "description": "List files"}) == {"args": "ls", "tail": MAX_OUTPUT_LINES}
+    assert to_canonical({"command": "make", "timeout": 1500}) == {
+        "args": "make",
+        "tail": MAX_OUTPUT_LINES,
+        "timeout": 2,
+    }
     assert to_canonical({"command": "serve", "run_in_background": True, "timeout": 9000}) == {
         "args": "serve",
+        "tail": MAX_OUTPUT_LINES,
         "timeout": 0,
     }
     with pytest.raises(DialectArgumentError, match="Bash requires command"):
@@ -100,8 +105,8 @@ def test_text_editor_aliases_are_accepted() -> None:
 @pytest.mark.parametrize(
     ("wire_name", "canonical"),
     [
-        ("Bash", {"args": "ls -la", "timeout": 3}),
-        ("Bash", {"args": "serve", "timeout": 0}),
+        ("Bash", {"args": "ls -la", "tail": MAX_OUTPUT_LINES, "timeout": 3}),
+        ("Bash", {"args": "serve", "tail": MAX_OUTPUT_LINES, "timeout": 0}),
         ("BashOutput", {"handle": "shell:0123abcd"}),
         ("KillShell", {"handle": "shell:0123abcd", "force": False}),
         ("Read", {"path": "a.py", "offset": 4, "limit": 9}),
@@ -234,7 +239,7 @@ async def test_thinking_replay_keeps_wire_call_verbatim() -> None:
             return httpx.Response(200, json=_claude_response([thinking, tool_use], "tool_use"))
         return httpx.Response(200, json=_claude_response([{"type": "text", "text": "Done"}], "end_turn"))
 
-    def run_shell_command(args: str) -> str:
+    def run_shell_command(args: str, tail: int = 100) -> str:  # noqa: ARG001
         """Run a shell command."""
         executions.append(args)
         return "a.txt"
@@ -262,4 +267,8 @@ def test_workdir_history_renders_as_cd_prefix() -> None:
 
 def test_bash_timeout_stays_inside_the_worker_budget() -> None:
     """A Bash timeout above 120 seconds waits 120 and then moves the command to the background."""
-    assert _wire("Bash").to_canonical({"command": "make", "timeout": 600000}) == {"args": "make", "timeout": 120}
+    assert _wire("Bash").to_canonical({"command": "make", "timeout": 600000}) == {
+        "args": "make",
+        "tail": MAX_OUTPUT_LINES,
+        "timeout": 120,
+    }

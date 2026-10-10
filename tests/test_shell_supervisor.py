@@ -1305,7 +1305,7 @@ def test_subprocess_mode_shell_background_handle_across_requests(tmp_path: Path)
 
 
 def test_shell_run_timeout_seconds_parses_kwargs() -> None:
-    """The dispatch budget helper should read the requested foreground timeout."""
+    """The dispatch budget helper should read the requested foreground timeout or poll wait."""
 
     def prepared(function_name: str, kwargs: dict[str, object]) -> object:
         return sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
@@ -1319,6 +1319,7 @@ def test_shell_run_timeout_seconds_parses_kwargs() -> None:
     assert helper(prepared("run_shell_command", {})) == 120.0
     assert helper(prepared("run_shell_command", {"timeout": "nope"})) == 120.0
     assert helper(prepared("check_shell_command", {"timeout": 300})) == 0.0
+    assert helper(prepared("check_shell_command", {"wait": 60})) == 60.0
 
 
 def test_shell_subprocess_dispatch_context_injects_socket_and_budget(

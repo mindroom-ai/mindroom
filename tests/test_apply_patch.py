@@ -261,7 +261,10 @@ def test_git_metadata_path_rejected(tmp_path: Path) -> None:
         "*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+x\n*** End Patch",
     )
 
-    assert "inside Git metadata" in result
+    assert result == (
+        "apply_patch verification failed: path '.git/hooks/pre-commit' is inside Git metadata ('.git'), "
+        "which file tools may not modify."
+    )
     assert not (tmp_path / ".git" / "hooks").exists()
 
 

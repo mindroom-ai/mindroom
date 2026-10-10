@@ -8382,6 +8382,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `run_shell_command()` accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
+Claude and OpenAI models, which call it as `Bash` or `exec_command`, get the whole output up to that 50 KiB cap instead of the last 100 lines.
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
 `workdir` runs the command in a directory relative to the workspace instead of the workspace itself.

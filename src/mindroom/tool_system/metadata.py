@@ -26,6 +26,7 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolMetadata,
     ToolValidationInfo,
+    with_implied_exclusions,
 )
 from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
 from mindroom.tool_system.legacy_tool_overrides import retired_tool_override
@@ -636,8 +637,7 @@ def _apply_implicit_toolkit_filters(
         raise ValueError(msg)
 
     if exclude_tools is not None:
-        implied = (name for excluded in exclude_tools for name in (implied_exclusions or {}).get(excluded, ()))
-        exclude_tools = list(dict.fromkeys([*exclude_tools, *implied]))
+        exclude_tools = with_implied_exclusions(exclude_tools, implied_exclusions)
     toolkit.include_tools = include_tools
     toolkit.exclude_tools = exclude_tools
     included_names = set(include_tools) if include_tools is not None else None

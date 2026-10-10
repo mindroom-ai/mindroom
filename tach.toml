@@ -6045,6 +6045,7 @@ expose = [
     "ToolValidationInfo",
     "declare_tool_schema_source",
     "tool_schema_source",
+    "with_implied_exclusions",
 ]
 from = ["mindroom.tool_system.declarations"]
 

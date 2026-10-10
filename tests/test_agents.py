@@ -34,8 +34,10 @@ from mindroom import path_confinement, prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _AdditionalContextChunk,
+    _AgentToolAssembly,
     _apply_preload_cap,
     _load_context_files,
+    _NativeDeferredToolkit,
     _prune_toolkit_functions,
     _render_tool_execution_environment,
     _trim_chunk_tails,
@@ -4036,6 +4038,29 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
     assert toolkit.async_functions == {}
 
 
+def test_non_resumable_tool_surface_hides_apply_patch_with_gated_file_edits() -> None:
+    """Hiding gated edit_file and write_file also hides apply_patch, the other way to change files."""
+    rules = [{"match": name, "action": "require_approval"} for name in ("edit_file", "write_file")]
+    config = Config.model_validate({"tool_approval": {"default": "auto_approve", "rules": rules}})
+    toolkit = Toolkit(
+        name="coding",
+        tools=[
+            Function(name=name, entrypoint=lambda: None)
+            for name in ("apply_patch", "edit_file", "write_file", "read_file")
+        ],
+    )
+
+    filtered = agents_module.apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=False,
+        registered_tool_name="coding",
+    )
+
+    assert filtered is toolkit
+    assert set(toolkit.functions) == {"read_file"}
+
+
 def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
     """An authored Agno confirmation must not escape onto a surface with no resume owner."""
     config = Config.model_validate({"tool_approval": {"default": "auto_approve"}})
@@ -5558,3 +5583,31 @@ def test_create_agent_installs_tool_dialect_for_runtime_model(mock_storage: Magi
     assert installed_tool_dialect(default_agent.model) == resolve_tool_dialect(config.models["default"])
     assert installed_tool_dialect(override_agent.model) == resolve_tool_dialect(config.models["sonnet"])
     assert installed_tool_dialect(override_agent.model) == CLAUDE_DIALECT
+
+
+def test_deferred_wire_names_follow_the_collision_fallback() -> None:
+    """A deferred function whose wire name another tool takes is deferred under the canonical name it keeps."""
+
+    def run_shell_command() -> str:
+        return ""
+
+    def exec_command() -> str:
+        return ""
+
+    shell = Toolkit(name="shell", tools=[run_shell_command])
+    mcp = Toolkit(name="mcp_exec", tools=[exec_command])
+    assembly = _AgentToolAssembly(
+        tools=[shell, mcp],
+        loaded_tools=("shell", "mcp_exec"),
+        hidden_toolkits=frozenset(),
+        selected_dynamic_tools=(),
+        deferred_toolkits=(_NativeDeferredToolkit(domain_name="shell", toolkit=shell),),
+        local_tool_names=(),
+        worker_routed_tool_names=(),
+        cli_deferred=(),
+        tool_hook_bridge=None,
+    )
+
+    codex = resolve_tool_dialect(ModelConfig(provider="openai", id="gpt-6-astra"))
+    assert assembly.deferred_wire_tool_names(codex) == {"run_shell_command"}
+    assert assembly.deferred_wire_tool_names(resolve_tool_dialect(None)) == {"run_shell_command"}

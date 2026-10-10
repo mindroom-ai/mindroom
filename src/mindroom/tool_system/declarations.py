@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from weakref import ref
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
 
 MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
@@ -145,6 +145,16 @@ class ToolValidationInfo:
     requires_primary_runtime: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
+
+
+def with_implied_exclusions(
+    names: Iterable[str],
+    implied_exclusions: Mapping[str, tuple[str, ...]] | None,
+) -> list[str]:
+    """Return *names* plus every function that *implied_exclusions* removes along with one of them."""
+    listed = list(names)
+    implied = (function for name in listed for function in (implied_exclusions or {}).get(name, ()))
+    return list(dict.fromkeys([*listed, *implied]))
 
 
 @dataclass

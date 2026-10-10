@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.models.message import Message
 from agno.tools.function import Function
 
 from mindroom.config.models import ModelConfig
-from mindroom.shell_execution import _format_background_handle_message, _format_finished_status, _format_running_status
+from mindroom.constants import resolve_runtime_paths
+from mindroom.shell_execution import (
+    MAX_OUTPUT_LINES,
+    _format_background_handle_message,
+    _format_finished_status,
+    _format_running_status,
+)
 from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from mindroom.tool_dialects.codex import CODEX_DIALECT
 from mindroom.tool_dialects.translation import canonical_tool_calls, resolve_tool_dialect, wire_messages, wire_tools
-from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, WireFunction
+from mindroom.tool_dialects.types import MINDROOM_WIRE_KEY, DialectArgumentError, ToolDialect, WireFunction
+from mindroom.tool_system.metadata import get_tool_by_name
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _wire(name: str) -> WireFunction:
@@ -38,10 +49,11 @@ def test_exec_command_maps_cmd_workdir_yield() -> None:
 
     assert to_canonical({"cmd": "pytest", "workdir": "pkg", "yield_time_ms": 1500, "max_output_tokens": 999}) == {
         "args": "pytest",
+        "tail": MAX_OUTPUT_LINES,
         "workdir": "pkg",
         "timeout": 2,
     }
-    assert to_canonical({"cmd": "ls", "yield_time_ms": 10}) == {"args": "ls", "timeout": 1}
+    assert to_canonical({"cmd": "ls", "yield_time_ms": 10}) == {"args": "ls", "tail": MAX_OUTPUT_LINES, "timeout": 1}
     with pytest.raises(DialectArgumentError, match="exec_command requires cmd"):
         to_canonical({"command": "ls"})
 
@@ -130,7 +142,7 @@ def test_finished_report_keeps_stderr_that_repeats_a_label() -> None:
 @pytest.mark.parametrize(
     ("wire_name", "canonical"),
     [
-        ("exec_command", {"args": "ls -la", "workdir": "src", "timeout": 3}),
+        ("exec_command", {"args": "ls -la", "tail": MAX_OUTPUT_LINES, "workdir": "src", "timeout": 3}),
         ("write_stdin", {"handle": "shell:0123abcd", "wait": 7}),
         ("apply_patch", {"input": "*** Begin Patch\n*** Delete File: a\n*** End Patch"}),
     ],
@@ -226,8 +238,12 @@ def test_exec_command_yields_like_codex() -> None:
     """exec_command waits 10 seconds by default and at most 30, as Codex does."""
     to_canonical = _wire("exec_command").to_canonical
 
-    assert to_canonical({"cmd": "ls"}) == {"args": "ls", "timeout": 10}
-    assert to_canonical({"cmd": "ls", "yield_time_ms": 600000}) == {"args": "ls", "timeout": 30}
+    assert to_canonical({"cmd": "ls"}) == {"args": "ls", "tail": MAX_OUTPUT_LINES, "timeout": 10}
+    assert to_canonical({"cmd": "ls", "yield_time_ms": 600000}) == {
+        "args": "ls",
+        "tail": MAX_OUTPUT_LINES,
+        "timeout": 30,
+    }
 
 
 def test_kill_shell_command_call_dispatches_with_the_handle() -> None:
@@ -297,3 +313,29 @@ def test_failed_same_named_call_replays_as_sent() -> None:
 
     assert [error.message for error in errors] == ["Error: kill_shell_command requires session_id"]
     assert rendered.tool_calls == [call]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dialect", "wire_name", "arguments"),
+    [(CLAUDE_DIALECT, "Bash", {"command": "seq 1 250"}), (CODEX_DIALECT, "exec_command", {"cmd": "seq 1 250"})],
+    ids=["claude", "codex"],
+)
+async def test_harness_shell_calls_return_more_than_the_default_tail(
+    tmp_path: Path,
+    dialect: ToolDialect,
+    wire_name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Harness shell calls return output whole up to the byte cap, not just the canonical last 100 lines."""
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    shell = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    run = shell.async_functions["run_shell_command"].entrypoint
+    assert run is not None
+    wire = next(function for function in dialect.functions if function.wire_name == wire_name)
+
+    output = await run(**wire.to_canonical(arguments))
+
+    lines = output.splitlines()
+    assert lines[lines.index("1") :] == [str(number) for number in range(1, 251)]

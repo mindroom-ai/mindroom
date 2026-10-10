@@ -10,7 +10,12 @@ import shlex
 from typing import Any
 
 from mindroom.custom_tools.coding import EDIT_NOT_FOUND_ERROR, parse_edit_multiple_matches_error, split_read_output
-from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS, parse_background_handle_message, parse_kill_message
+from mindroom.shell_execution import (
+    DEFAULT_RUN_TIMEOUT_SECONDS,
+    MAX_OUTPUT_LINES,
+    parse_background_handle_message,
+    parse_kill_message,
+)
 from mindroom.tool_dialects.types import (
     APPLY_PATCH,
     FILE_EDITS,
@@ -51,7 +56,8 @@ def _render_bash(text: str) -> str:
 
 
 def _bash_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
-    canonical: dict[str, Any] = {"args": wire_argument(arguments, "Bash", "command")}
+    # Like Claude Code, output arrives whole up to the byte cap, which notes any cut, not as the last 100 lines.
+    canonical: dict[str, Any] = {"args": wire_argument(arguments, "Bash", "command"), "tail": MAX_OUTPUT_LINES}
     if wire_argument(arguments, "Bash", "run_in_background", kind=bool, required=False):
         canonical["timeout"] = 0
     elif (timeout := wire_argument(arguments, "Bash", "timeout", kind=float, required=False)) is not None:

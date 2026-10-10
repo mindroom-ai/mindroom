@@ -1365,14 +1365,17 @@ def _execute_request_forkserver(
 
 
 def _shell_run_timeout_seconds(prepared: PreparedSandboxRunnerExecuteRequest) -> float:
-    """Return the foreground wait requested by one run_shell_command call."""
-    if prepared.function_name != "run_shell_command":
+    """Return the foreground wait requested by one run_shell_command call or check_shell_command poll."""
+    if prepared.function_name == "run_shell_command":
+        raw_timeout, default = prepared.kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS), DEFAULT_RUN_TIMEOUT_SECONDS
+    elif prepared.function_name == "check_shell_command":
+        raw_timeout, default = prepared.kwargs.get("wait", 0), 0
+    else:
         return 0.0
-    raw_timeout = prepared.kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS)
     try:
         return max(0.0, float(raw_timeout))
     except (TypeError, ValueError):
-        return float(DEFAULT_RUN_TIMEOUT_SECONDS)
+        return float(default)
 
 
 def _shell_subprocess_dispatch_context(

@@ -15,6 +15,7 @@ from typing import Any
 
 from mindroom.shell_execution import (
     MAX_CHECK_WAIT_SECONDS,
+    MAX_OUTPUT_LINES,
     parse_background_handle_message,
     parse_check_status,
     parse_kill_message,
@@ -114,14 +115,14 @@ def _render_kill(text: str) -> str:
 
 
 def _exec_to_canonical(arguments: dict[str, Any]) -> dict[str, Any]:
-    canonical: dict[str, Any] = {"args": wire_argument(arguments, "exec_command", "cmd")}
+    # Like Codex, output arrives whole up to the byte cap, which notes any cut, so max_output_tokens is not forwarded.
+    canonical: dict[str, Any] = {"args": wire_argument(arguments, "exec_command", "cmd"), "tail": MAX_OUTPUT_LINES}
     if (workdir := wire_argument(arguments, "exec_command", "workdir", required=False)) is not None:
         canonical["workdir"] = workdir
     minimum, default, maximum = _YIELD_MS
     yield_ms = wire_argument(arguments, "exec_command", "yield_time_ms", kind=float, required=False)
     clamped = default if yield_ms is None else min(max(yield_ms, minimum), maximum)
     canonical["timeout"] = milliseconds_to_seconds(clamped, "exec_command", "yield_time_ms")
-    # Output length follows the canonical tool's tail and byte limits, so max_output_tokens is not forwarded.
     return canonical
 
 

@@ -34,6 +34,7 @@ from mindroom.text_templates import INT_FIELD, template_pattern
 from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
+    git_metadata_reason,
     is_within_base_dir,
     read_resolved_file,
     remove_resolved_path,
@@ -833,7 +834,7 @@ class CodingTools(Toolkit):
         except ValueError as e:
             raise PatchError(str(e)) from e
         if is_git_metadata_path(resolved):
-            raise PatchError(blocked_git_metadata_message("applying patch", path))
+            raise PatchError(git_metadata_reason(path))
         return resolved
 
     def _patch_entry(self, path: str) -> Path:
