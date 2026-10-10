@@ -40,6 +40,7 @@ import structlog
 import yaml
 from agno.models.base import Model
 from agno.models.response import ModelResponse
+from agno.utils import log as agno_log
 from aioresponses import aioresponses
 from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
@@ -2938,8 +2939,21 @@ def _isolate_structlog_configuration(
     _configure_quiet_structlog()
     if request.node.path.name != "test_logging_config.py":
         monkeypatch.setattr(structlog, "configure", _configure_uncached_structlog)
+    # `setup_logging` reroutes Agno's loggers; give later tests on this worker Agno's own setup back.
+    agno_loggers = [
+        (agno_logger, agno_logger.handlers[:], agno_logger.filters[:], agno_logger.level, agno_logger.propagate)
+        for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger)
+    ]
+    # Team and workflow runs repoint Agno's default logger, and `log_info` and friends follow it.
+    agno_default_logger = agno_log.logger
     yield
     _configure_quiet_structlog()
+    for agno_logger, handlers, filters, level, propagate in agno_loggers:
+        agno_logger.handlers[:] = handlers
+        agno_logger.filters[:] = filters
+        agno_logger.setLevel(level)
+        agno_logger.propagate = propagate
+    agno_log.logger = agno_default_logger
 
 
 @pytest.fixture(autouse=True)
