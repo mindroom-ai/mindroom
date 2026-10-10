@@ -153,7 +153,7 @@ Sign-in works as follows:
 1. Chat opens `/connections/` in a new window.
 2. The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to 30 seconds.
    It shows nothing until that succeeds and ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
-   A portal without an opener, such as a direct visit or a trusted upstream deployment, shows the session the server reports, or asks the user to open Connections from Chat.
+   When the portal is opened directly rather than from MindRoom Chat, as with trusted upstream sign-in, it uses the existing session or signed upstream identity, or asks the user to open Connections from Chat.
 3. The portal posts the token and the origin of Chat's message to `POST /api/connections/session`.
 4. MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, then verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo`.
    Only users of that homeserver are accepted.

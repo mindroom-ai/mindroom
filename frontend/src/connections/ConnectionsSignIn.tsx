@@ -96,8 +96,8 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
 /**
  * Render the portal for the Matrix user signed in to MindRoom Chat.
  *
- * When MindRoom Chat opened the portal, its OpenID handshake is the only way in and the portal ignores any existing
- * session, so another account's session can never show. Without an opener, the portal shows the session the server reports.
+ * When MindRoom Chat opened the portal, it ignores any existing session and only renders after Chat's OpenID handshake
+ * succeeds. Without an opener, the portal shows the session the server reports.
  *
  * @param children - Portal content shown only after sign-in succeeds.
  */
