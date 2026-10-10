@@ -495,6 +495,31 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_native_authoring_after_the_caller_is_removed_is_refused(tmp_path: Path) -> None:
+    """A reload that removes the caller mid-response refuses its authored subagent instead of failing the response."""
+    config = _config(tools=("file",))
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    without_caller = config.model_copy(update={"agents": {"child": config.agents["child"]}})
+
+    with tool_runtime_context(_delegate_runtime_context(without_caller, paths, execution_identity=identity)):
+        result = await _resolve_delegation_target(
+            ToolExecution(
+                tool_name="run_subagent",
+                tool_args={"task": "Read.", "system_prompt": "Q", "tools": ["file"]},
+            ),
+            None,
+            caller_identity=identity,
+            config=config,
+            runtime_paths=paths,
+            depth=0,
+        )
+
+    assert result == "Cannot delegate: unknown tool 'file'. Your tools: none."
+
+
+@pytest.mark.asyncio
 async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> None:
     """A native follow-up refuses once the caller's current config lost a persona tool."""
     paths = _runtime_paths(tmp_path)

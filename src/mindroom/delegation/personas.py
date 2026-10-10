@@ -239,6 +239,9 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
     Matrix room tools are listed too; a child naming one outside a Matrix room refuses to start.
     The deferred-tool manager is not, since an explicit tool list loads every toolkit it names.
     """
+    if agent_name not in config.agents:
+        # A reload can remove the caller mid-response; its copies then have no tools to inherit.
+        return []
     deferred = [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
     surface = visible_tool_surface(
         agent_name=agent_name,
@@ -299,7 +302,7 @@ def validate_persona_tools(
     entry = missing_persona_tool(tools, available_toolkits, cap)
     if entry is not None:
         yours = cap if cap is not None else sorted(set(available_toolkits))
-        msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours)}."
+        msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours) or 'none'}."
         raise PersonaError(msg)
 
 
