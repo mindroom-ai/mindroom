@@ -71,6 +71,8 @@ _OPENAI = {
 _GITHUB_OAUTH = {**_GITHUB, "oauth_provider": "github"}
 _PUBLIC_URL = "https://chat.example.org"
 _OAUTH_REFRESH_TOKEN = "github-refresh"  # noqa: S105 - test credential
+# Provider ids a user service may name, as the API reads them from the registry.
+_PROVIDERS = frozenset({"github"})
 
 
 @pytest.fixture
@@ -1095,7 +1097,14 @@ async def test_user_service_injects_its_owners_key_and_leaves_other_requesters_a
     config = _config()
     alice, bob = _target(), _target("@bob:example.org")
     mine = EgressService.model_validate(_GITHUB)
-    save_user_service(manager, alice, "mine", mine, config_services=config.egress_broker.services)
+    save_user_service(
+        manager,
+        alice,
+        "mine",
+        mine,
+        config_services=config.egress_broker.services,
+        oauth_providers=_PROVIDERS,
+    )
     save_secret(manager, alice, "mine", "alice-key")
     save_secret(manager, bob, "mine", "bob-key")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
@@ -1133,7 +1142,14 @@ async def test_user_service_edits_apply_to_the_running_broker(
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
         before = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
         mine = EgressService.model_validate(_GITHUB)
-        save_user_service(manager, target, "mine", mine, config_services=config.egress_broker.services)
+        save_user_service(
+            manager,
+            target,
+            "mine",
+            mine,
+            config_services=config.egress_broker.services,
+            oauth_providers=_PROVIDERS,
+        )
         # A new service starts without a key, so the key is set after it.
         save_secret(manager, target, "mine", "alice-key")
         saved = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
@@ -1158,7 +1174,14 @@ async def test_user_service_uses_only_its_scopes_oauth_connection(
     alice, bob = _target(), _target("@bob:example.org")
     mine = EgressService.model_validate(_GITHUB_OAUTH)
     for target in (alice, bob):
-        save_user_service(manager, target, "mine", mine, config_services=config.egress_broker.services)
+        save_user_service(
+            manager,
+            target,
+            "mine",
+            mine,
+            config_services=config.egress_broker.services,
+            oauth_providers=_PROVIDERS,
+        )
     _connect_github(manager, "@alice:example.org", "alice-oauth")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=alice)
@@ -1187,7 +1210,14 @@ async def test_user_service_cannot_open_a_host_under_deny(
     config = Config(egress_broker={"unmatched_hosts": "deny", "services": {"openai": _OPENAI}})
     target = _target()
     mine = EgressService.model_validate(_GITHUB)
-    save_user_service(manager, target, "mine", mine, config_services=config.egress_broker.services)
+    save_user_service(
+        manager,
+        target,
+        "mine",
+        mine,
+        config_services=config.egress_broker.services,
+        oauth_providers=_PROVIDERS,
+    )
     save_secret(manager, target, "mine", "alice-key")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
@@ -1195,3 +1225,34 @@ async def test_user_service_cannot_open_a_host_under_deny(
         response = await raw_proxy(port, connect)
     assert (response.status, response.json()) == (403, {"error": "host_not_allowed", "services": ["openai"]})
     assert tls_upstream.hits == []
+
+
+@pytest.mark.asyncio
+async def test_config_placeholders_win_over_user_placeholders(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """A user service cannot replace a config service's placeholder; its own variables still reach the worker."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
+    config = _config(github=_GITHUB)
+    target = _target()
+    mine = EgressService.model_validate(
+        {
+            "rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}],
+            "placeholder_env": {"GH_TOKEN": "user-value", "MINE_TOKEN": "mine-placeholder"},
+        },
+    )
+    save_user_service(
+        manager,
+        target,
+        "mine",
+        mine,
+        config_services=config.egress_broker.services,
+        oauth_providers=_PROVIDERS,
+    )
+    save_secret(manager, target, "github", "s3cret")
+    save_secret(manager, target, "mine", "mine-key")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+    assert env["GH_TOKEN"] == _PLACEHOLDER
+    assert env["MINE_TOKEN"] == "mine-placeholder"  # noqa: S105 - a placeholder value, not a secret

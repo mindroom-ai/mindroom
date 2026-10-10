@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 _ALICE = "@alice:example.org"
 _BOB = "@bob:example.org"
+# Provider ids a user service may name, as the API reads them from the registry.
+_PROVIDERS = frozenset({"github"})
 _CONFIG = EgressBrokerConfig.model_validate(
     {"unmatched_hosts": "deny", "services": {"github": {"preset": "github"}}},
 )
@@ -68,7 +70,7 @@ def _service(host: str = "api.example.com", **fields: object) -> EgressService:
 
 
 def _save(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name: str, service: EgressService) -> None:
-    save_user_service(manager, target, name, service, config_services=_CONFIG.services)
+    save_user_service(manager, target, name, service, config_services=_CONFIG.services, oauth_providers=_PROVIDERS)
 
 
 def _delete(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name: str) -> bool:
@@ -224,7 +226,14 @@ def test_effective_config_puts_config_services_first_and_ignores_shadowed_user_s
 ) -> None:
     """A user service named like a config service never changes it; top-level settings come from config only."""
     # Saved while the config had no `github`, then the operator added one.
-    save_user_service(manager, _target(), "github", _service("evil.example.com"), config_services={})
+    save_user_service(
+        manager,
+        _target(),
+        "github",
+        _service("evil.example.com"),
+        config_services={},
+        oauth_providers=_PROVIDERS,
+    )
     _save(manager, _target(), "mine", _service())
 
     effective = effective_config(_CONFIG, manager, _target())
@@ -261,7 +270,7 @@ def test_effective_config_is_cached_and_invalidated_by_save_and_delete(manager: 
 
 def test_effective_config_follows_a_config_change(manager: CredentialsManager) -> None:
     """A new config object is merged afresh: its services appear and a now-shadowed user service drops out."""
-    save_user_service(manager, _target(), "openai", _service(), config_services={})
+    save_user_service(manager, _target(), "openai", _service(), config_services={}, oauth_providers=_PROVIDERS)
     before = effective_config(_CONFIG, manager, _target())
     changed = EgressBrokerConfig.model_validate({"services": {"openai": {"preset": "openai"}}})
 
@@ -415,3 +424,115 @@ def test_stored_oauth_provider_is_ignored_outside_personal_scopes(manager: Crede
     assert [(entry["event"], entry["service"]) for entry in logs] == [
         ("egress_broker_user_service_oauth_ignored", "team"),
     ]
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["LD_PRELOAD", "NODE_OPTIONS", "BASH_ENV", "PYTHONPATH", "TOKENIZER_MODE", "_GH_TOKEN", "GIT_ASKPASS"],
+)
+def test_placeholder_names_must_be_credential_words(manager: CredentialsManager, variable: str) -> None:
+    """A user placeholder needs a credential word between underscores, so loader and shell variables are refused."""
+    with pytest.raises(ValueError, match="placeholder_env name"):
+        _save(manager, _target(), "mine", _service(placeholder_env={variable: "mindroom-brokered"}))
+
+    assert load_user_services(manager, _target()) == {}
+
+
+def test_credential_placeholder_names_are_accepted(manager: CredentialsManager) -> None:
+    """Common credential variables qualify."""
+    names = ["GH_TOKEN", "OPENAI_API_KEY", "GITLAB_PAT", "AWS_ACCESS_KEY_ID", "DB_PASSWORD", "X_AUTH", "APP_SECRET"]
+    _save(manager, _target(), "mine", _service(placeholder_env=dict.fromkeys(names, "mindroom-brokered")))
+
+    assert list(load_user_services(manager, _target())["mine"].placeholder_env) == names
+
+
+@pytest.mark.parametrize("value", ["", "two words", "a/b", "x" * 257, "$(id)", "semi;colon", "pa\tss"])
+def test_placeholder_values_must_be_plain(manager: CredentialsManager, value: str) -> None:
+    """A user placeholder value is 1 to 256 plain characters; the error never quotes it."""
+    with pytest.raises(ValueError, match="placeholder_env value of 'GH_TOKEN'") as raised:
+        _save(manager, _target(), "mine", _service(placeholder_env={"GH_TOKEN": value}))
+
+    if value:
+        assert value not in str(raised.value)
+    assert load_user_services(manager, _target()) == {}
+
+
+def test_stored_placeholders_users_may_not_set_are_dropped(manager: CredentialsManager) -> None:
+    """A stored placeholder that fails the user rules is dropped by name; the service and its other placeholders stay."""
+    store = manager.for_primary_runtime_scope(_ALICE, "code")
+    authored = {
+        **_service().authored_model_dump(),
+        "placeholder_env": {"GH_TOKEN": "mindroom-brokered", "LD_PRELOAD": "evil.so", "NPM_TOKEN": "has space"},
+    }
+    store.save_credentials(USER_SERVICES_CREDENTIAL_SERVICE, {"services": {"mine": authored}})
+
+    with capture_logs() as logs:
+        loaded = load_user_services(manager, _target())
+
+    assert loaded["mine"].placeholder_env == {"GH_TOKEN": "mindroom-brokered"}
+    dropped = [
+        (entry["service"], entry["variable"])
+        for entry in logs
+        if entry["event"] == "egress_broker_user_service_placeholder_ignored"
+    ]
+    assert dropped == [("mine", "LD_PRELOAD"), ("mine", "NPM_TOKEN")]
+    assert "evil.so" not in str(logs)
+    assert "has space" not in str(logs)
+
+
+def test_a_service_is_limited_to_16_kib(manager: CredentialsManager) -> None:
+    """One service's authored JSON may take at most 16 KiB."""
+    _save(manager, _target(), "fits", _service(description="x" * 16_000))
+    with pytest.raises(ValueError, match="at most 16 KiB"):
+        _save(manager, _target(), "too-big", _service(description="x" * 16_500))
+
+    assert list(load_user_services(manager, _target())) == ["fits"]
+
+
+def test_a_scope_document_is_limited_to_256_kib(manager: CredentialsManager) -> None:
+    """All of a scope's services together may take at most 256 KiB, well before the 50-service limit."""
+    for index in range(16):
+        _save(manager, _target(), f"svc-{index}", _service(description="x" * 15_500))
+
+    with pytest.raises(ValueError, match="at most 256 KiB"):
+        _save(manager, _target(), "svc-16", _service(description="x" * 15_500))
+
+    assert len(load_user_services(manager, _target())) == 16
+    # Replacing a service with a smaller one still fits.
+    _save(manager, _target(), "svc-0", _service())
+
+
+def test_oauth_provider_must_be_registered(manager: CredentialsManager) -> None:
+    """A user service can name only a provider the registry knows, a preset's provider included."""
+    with pytest.raises(ValueError, match="unknown oauth_provider 'nope'"):
+        _save(manager, _target(), "mine", _service(oauth_provider="nope"))
+    with pytest.raises(ValueError, match="unknown oauth_provider 'atlassian'"):
+        _save(manager, _target(), "mine", EgressService.model_validate({"preset": "atlassian"}))
+
+    assert load_user_services(manager, _target()) == {}
+    _save(manager, _target(), "mine", _service(oauth_provider="github"))
+    assert load_user_services(manager, _target())["mine"].oauth_provider == "github"
+
+
+def test_equal_config_copies_share_a_cache_entry(manager: CredentialsManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The broker's and the tools' config objects can be separate equal copies; they share one entry, not evict."""
+    _save(manager, _target(), "mine", _service())
+    authored = {"unmatched_hosts": "deny", "services": {"github": {"preset": "github"}}}
+    api_copy = EgressBrokerConfig.model_validate(authored)
+    orchestrator_copy = EgressBrokerConfig.model_validate(authored)
+    reads: list[object] = []
+    original = user_services.load_user_services
+
+    def counting(read_manager: CredentialsManager, target: ResolvedWorkerTarget | None) -> dict[str, EgressService]:
+        reads.append(target)
+        return original(read_manager, target)
+
+    monkeypatch.setattr(user_services, "load_user_services", counting)
+    first = effective_config(api_copy, manager, _target())
+    for _ in range(3):
+        assert effective_config(orchestrator_copy, manager, _target()) is first
+        assert effective_config(api_copy, manager, _target()) is first
+    changed = EgressBrokerConfig.model_validate({**authored, "unmatched_hosts": "passthrough"})
+    assert effective_config(changed, manager, _target()).unmatched_hosts == "passthrough"
+
+    assert len(reads) == 2

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 __all__ = [
+    "PERSONAL_WORKER_SCOPES",
     "EgressServiceStatus",
     "OAuthStatus",
     "OAuthStatusReader",
@@ -37,6 +38,8 @@ __all__ = [
 ]
 
 _MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
+# Worker scopes whose sandbox and egress store belong to one requester.
+PERSONAL_WORKER_SCOPES: frozenset[str] = frozenset({"user", "user_agent"})
 
 
 def egress_credential_service(name: str) -> str:
@@ -59,7 +62,7 @@ def load_egress_document(
         return manager.load_credentials(credential_service)
 
     # For requester-scoped targets, disable shared fallback
-    allowed_shared = frozenset() if target.worker_scope in ("user", "user_agent") else None
+    allowed_shared = frozenset() if target.worker_scope in PERSONAL_WORKER_SCOPES else None
 
     return load_scoped_credentials(
         credential_service,

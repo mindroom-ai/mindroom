@@ -397,7 +397,14 @@ def _save_own_service(name: str, agent_name: str | None = None) -> None:
         )
         target = resolve_worker_target("shared", agent_name, identity, private_agent_names=frozenset())
     service = EgressService.model_validate({"rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]})
-    save_user_service(manager, target, name, service, config_services=config.egress_broker.services)
+    save_user_service(
+        manager,
+        target,
+        name,
+        service,
+        config_services=config.egress_broker.services,
+        oauth_providers=(),
+    )
 
 
 def _listed(client: TestClient, agent_name: str | None = None) -> list[tuple[str, str, bool]]:

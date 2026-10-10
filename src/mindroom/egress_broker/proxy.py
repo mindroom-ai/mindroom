@@ -35,10 +35,10 @@ if TYPE_CHECKING:
     from mindroom.egress_broker.secrets import SecretResult
     from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
-__all__ = ["ConfigProvider", "EgressBroker", "ManageUrl", "SecretResolver"]
+__all__ = ["EgressBroker", "ManageUrl", "RulesProvider", "SecretResolver"]
 
 # Called in a thread with the verified requester's claims; returns the rules that requester's traffic matches.
-type ConfigProvider = Callable[[WorkerClaims], EgressRules]
+type RulesProvider = Callable[[WorkerClaims], EgressRules]
 # Awaited on the broker's loop: the resolver chooses which executor each blocking lookup runs on.
 type SecretResolver = Callable[[WorkerClaims, str], Awaitable[SecretResult]]
 type ManageUrl = Callable[[WorkerClaims], str | None]
@@ -108,7 +108,7 @@ class EgressBroker:
     CONNECT to a host with rules is intercepted and each request inside gets the worker scope's secret.
     Other hosts are tunnelled blind or denied by policy. Absolute-form ``http://`` requests are forwarded,
     except that a request a rule matches is refused: secrets only travel over TLS. Rules come from
-    `config_provider` for each requester's verified claims, read again for every CONNECT and request.
+    `rules_provider` for each requester's verified claims, read again for every CONNECT and request.
     """
 
     def __init__(
@@ -116,7 +116,7 @@ class EgressBroker:
         *,
         ca: BrokerCA,
         signer: TokenSigner,
-        config_provider: ConfigProvider,
+        rules_provider: RulesProvider,
         resolve_secret: SecretResolver,
         audit: AuditLog,
         dial_policy: DialPolicy = DialPolicy(),  # noqa: B008 - frozen dataclass
@@ -130,7 +130,7 @@ class EgressBroker:
         self._head_timeout = head_timeout
         self._relay = Relay(
             audit=audit,
-            config_provider=config_provider,
+            rules_provider=rules_provider,
             dial_policy=dial_policy,
             max_body_bytes=max_body_bytes,
             idle_timeout=idle_timeout,

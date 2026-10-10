@@ -133,7 +133,7 @@ async def test_deny_ignores_user_rules_on_hosts_the_operator_does_not_name(
     operator = EgressBrokerConfig(unmatched_hosts="deny", services=_config("api.github.com").services)
     mine = EgressService(rules=[EgressRule(host="localhost", auth=EgressAuth(type="bearer"))])
     started = await broker(
-        config_provider=lambda _claims: _with_user_services(operator, mine=mine),
+        rules_provider=lambda _claims: _with_user_services(operator, mine=mine),
         secrets={"mine": "k"},
     )
     token = broker.token()
@@ -165,7 +165,7 @@ async def test_deny_lets_user_rules_work_on_operator_hosts(
     )
     mine = EgressService(rules=[EgressRule(host="localhost", path_prefix="/echo", auth=EgressAuth(type="bearer"))])
     await broker(
-        config_provider=lambda _claims: _with_user_services(operator, mine=mine),
+        rules_provider=lambda _claims: _with_user_services(operator, mine=mine),
         secrets={"op": "operator-key", "mine": "user-key"},
     )
 
@@ -192,7 +192,7 @@ async def test_operator_restriction_refuses_paths_only_a_user_rule_lists(
     )
     mine = EgressService(rules=[EgressRule(host="localhost", auth=EgressAuth(type="bearer"))])
     await broker(
-        config_provider=lambda _claims: _with_user_services(operator, mine=mine),
+        rules_provider=lambda _claims: _with_user_services(operator, mine=mine),
         secrets={"op": "operator-key", "mine": "user-key"},
     )
     client = proxy_client(broker.token())
@@ -589,7 +589,7 @@ async def test_plain_http_streamed_body_over_limit_gets_413(
     "transport",
     ["connect", "plain"],
 )
-async def test_config_provider_failure_gets_502_and_listener_survives(
+async def test_rules_provider_failure_gets_502_and_listener_survives(
     broker: BrokerFactory,
     raw_proxy: RawProxy,
     audit: AuditLog,
@@ -601,7 +601,7 @@ async def test_config_provider_failure_gets_502_and_listener_survives(
         msg = "config unavailable"
         raise RuntimeError(msg)
 
-    started = await broker(config_provider=failing_provider)
+    started = await broker(rules_provider=failing_provider)
     authorization = proxy_authorization(broker.token())
     request = (
         connect_request("localhost:443", authorization=authorization)

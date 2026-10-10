@@ -237,7 +237,14 @@ def test_lists_the_scopes_own_services_next_to_config_services(tmp_path: Path) -
     mine = EgressService.model_validate(
         {"display_name": "Mine", "rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]},
     )
-    save_user_service(manager, _target(), "mine", mine, config_services=context.config.egress_broker.services)
+    save_user_service(
+        manager,
+        _target(),
+        "mine",
+        mine,
+        config_services=context.config.egress_broker.services,
+        oauth_providers=(),
+    )
     save_secret(manager, _target(), "mine", _SECRET)
 
     alice = _list(EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target()), context)
@@ -252,7 +259,8 @@ def test_user_services_are_listed_without_config_services(tmp_path: Path) -> Non
     """With no operator services, the scope's own services are still listed instead of the no-services note."""
     runtime_paths = _runtime_paths(tmp_path)
     mine = EgressService.model_validate({"rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]})
-    save_user_service(get_runtime_credentials_manager(runtime_paths), _target(), "mine", mine, config_services={})
+    manager = get_runtime_credentials_manager(runtime_paths)
+    save_user_service(manager, _target(), "mine", mine, config_services={}, oauth_providers=())
 
     payload = _list(
         EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target()),

@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.egress_broker.secrets import OAuthStatus
+from mindroom.egress_broker.secrets import PERSONAL_WORKER_SCOPES, OAuthStatus
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialUnreadableError,
@@ -68,8 +68,6 @@ _connect_urls_lock = threading.Lock()
 # After a refresh fails for a reason that may pass (a provider outage, a timeout, a network error), lookups for
 # that credential scope answer at once for this long instead of running the grant again.
 _TRANSIENT_FAILURE_BACKOFF_SECONDS = 30.0
-# Worker scopes whose sandbox belongs to one requester.
-_REQUESTER_WORKER_SCOPES = frozenset({"user", "user_agent"})
 
 
 @dataclass(frozen=True)
@@ -230,7 +228,7 @@ def shared_worker_oauth(
         return None
     if (
         worker_target is not None
-        and worker_target.worker_scope in _REQUESTER_WORKER_SCOPES
+        and worker_target.worker_scope in PERSONAL_WORKER_SCOPES
         and primary_worker_backend_is_dedicated(runtime_paths)
     ):
         return None

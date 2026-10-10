@@ -346,16 +346,16 @@ class BrokerFactory:
         manage_url: ManageUrl | None = None,
         max_body_bytes: int = 1 << 30,
         head_timeout: float = 30.0,
-        config_provider: Callable[[WorkerClaims], EgressBrokerConfig | EgressRules] | None = None,
+        rules_provider: Callable[[WorkerClaims], EgressBrokerConfig | EgressRules] | None = None,
     ) -> EgressBroker:
         """Start a broker on an ephemeral loopback port; `secrets` maps service names to secrets.
 
-        `resolve_secret` replaces the `secrets` lookup, and `config_provider` replaces the fixed `config`,
+        `resolve_secret` replaces the `secrets` lookup, and `rules_provider` replaces the fixed `config`,
         when a test needs a callback that changes, fails, or depends on the requester's claims. It returns a config,
         or `EgressRules` to add user services. Both are plain functions; the broker awaits the lookup.
         """
         current = config or EgressBrokerConfig()
-        provider = config_provider or (lambda _claims: current)
+        provider = rules_provider or (lambda _claims: current)
 
         def rules_for(claims: WorkerClaims) -> EgressRules:
             value = provider(claims)
@@ -373,7 +373,7 @@ class BrokerFactory:
         broker = EgressBroker(
             ca=self.ca,
             signer=self.signer,
-            config_provider=rules_for,
+            rules_provider=rules_for,
             resolve_secret=recording_lookup,
             audit=self.audit,
             dial_policy=dial_policy or DialPolicy(allow_loopback=True),

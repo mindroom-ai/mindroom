@@ -1271,6 +1271,44 @@ def test_user_service_limits_are_422(egress_portal: dict[str, Any]) -> None:
     assert _put_service(portal, "bob", "personal", "svc50").status_code == 204
 
 
+@pytest.mark.parametrize(
+    ("body", "fragment"),
+    [
+        ({**_NOTES, "placeholder_env": {"LD_PRELOAD": "evil"}}, "placeholder_env name 'LD_PRELOAD'"),
+        ({**_NOTES, "placeholder_env": {"NOTES_TOKEN": "two words"}}, "placeholder_env value of 'NOTES_TOKEN'"),
+        ({**_NOTES, "oauth_provider": "no_such_provider"}, "unknown oauth_provider 'no_such_provider'"),
+    ],
+)
+def test_user_service_placeholders_and_provider_are_422(
+    egress_portal: dict[str, Any],
+    body: dict[str, Any],
+    fragment: str,
+) -> None:
+    """User-only rules on placeholders and OAuth providers reach the user as a 422 and nothing is stored."""
+    response = _put_service(egress_portal, "alice", "personal", "notes", body)
+    assert response.status_code == 422, response.text
+    assert fragment in response.json()["detail"]
+    assert "two words" not in response.json()["detail"]
+    assert _get_service(egress_portal, "alice", "personal", "notes").status_code == 404
+
+
+def test_user_service_body_over_16_kib_is_413_before_validation(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized body, such as a huge rules list, is refused before the service model validates any of it."""
+    parsed: list[object] = []
+    monkeypatch.setattr(egress_credentials, "_parse_user_service", parsed.append)
+    huge_rules = {"rules": [{"host": f"h{i}.example.com", "auth": {"type": "bearer"}} for i in range(2000)]}
+    for body in (huge_rules, {**_NOTES, "description": "x" * 17_000}):
+        response = _put_service(egress_portal, "alice", "personal", "notes", body)
+        assert response.status_code == 413, response.text
+        assert response.json()["detail"] == "A service can take at most 16 KiB"
+
+    assert parsed == []
+    assert _get_service(egress_portal, "alice", "personal", "notes").status_code == 404
+
+
 def test_oauth_provider_is_refused_in_user_services_of_shared_agents(egress_portal: dict[str, Any]) -> None:
     """A manager cannot route a shared agent's OAuth connection to hosts of their choosing; personal agents can."""
     portal = egress_portal

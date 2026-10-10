@@ -809,7 +809,7 @@ async def test_open_tunnel_follows_config_changes(
 ) -> None:
     """Rules are read per request, so a config change applies to tunnels that are already open."""
     configs = [_config()]
-    await broker(config_provider=lambda _claims: configs[-1], secrets={"svc": SECRET})
+    await broker(rules_provider=lambda _claims: configs[-1], secrets={"svc": SECRET})
     client = proxy_client(broker.token())
 
     first = await client.get(tls_upstream.url("/echo"))
@@ -838,7 +838,7 @@ async def test_rules_come_from_the_requesters_own_config(
         seen.append(claims.requester_id)
         return _config() if claims == alice else EgressBrokerConfig()
 
-    await broker(config_provider=per_requester, secrets={"svc": SECRET})
+    await broker(rules_provider=per_requester, secrets={"svc": SECRET})
     alice_response = await proxy_client(broker.token(alice)).get(tls_upstream.url("/echo"))
     # Bob's CONNECT is a blind tunnel, so his client sees the upstream's own certificate.
     bob_client = proxy_client(broker.token(bob), verify=upstream_ca.client_context())

@@ -37,12 +37,14 @@ from mindroom.egress_broker.oauth_source import oauth_status, shared_worker_oaut
 from mindroom.egress_broker.secrets import OAuthStatus, delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log
 from mindroom.egress_broker.user_services import (
+    MAX_SERVICE_BYTES,
     UserServiceConflictError,
     delete_user_service,
     save_user_service,
     user_service_hosts_not_allowed,
 )
 from mindroom.logging_config import get_logger
+from mindroom.oauth.registry import load_oauth_providers
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
@@ -499,6 +501,16 @@ def _unprocessable(detail: str) -> HTTPException:
     return HTTPException(422, detail, headers=CONNECTIONS_HEADERS)
 
 
+async def _limit_service_body(request: Request) -> None:
+    """Refuse a service body over 16 KiB with 413 before its fields are validated, so a huge rules list never is.
+
+    FastAPI has already read the body, so this reads Starlette's cached bytes.
+    """
+    if len(await request.body()) > MAX_SERVICE_BYTES:
+        msg = f"A service can take at most {MAX_SERVICE_BYTES // 1024} KiB"
+        raise HTTPException(413, msg, headers=CONNECTIONS_HEADERS)
+
+
 def _parse_user_service(body: dict[str, Any]) -> EgressService:
     """Validate a service body like a config service; the operator-only `oauth_on_shared_workers` is not accepted."""
     if "oauth_on_shared_workers" in body:
@@ -558,12 +570,14 @@ def put_user_service(
     name: str,
     body: Annotated[dict[str, Any], Body()],
     requester_id: _EgressUser,
+    _size: Annotated[None, Depends(_limit_service_body)],
 ) -> None:
     """Create or replace one of the scope's own services.
 
-    The body has the fields of a config service except `oauth_on_shared_workers`. Returns 409 for the name of a
-    config service and 422 for an invalid service, a limit, an OAuth provider on a shared or unscoped agent, or
-    rules on hosts that `unmatched_hosts: deny` keeps closed.
+    The body has the fields of a config service except `oauth_on_shared_workers`. Returns 413 for a body over 16 KiB,
+    409 for the name of a config service, and 422 for an invalid service, a limit (count or size), a placeholder user
+    services may not set, an unknown OAuth provider or one on a shared or unscoped agent, or rules on hosts that
+    `unmatched_hosts: deny` keeps closed.
     """
     _require_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -574,7 +588,14 @@ def put_user_service(
     _require_hosts_within_operator_policy(operator, service)
     manager = get_runtime_credentials_manager(agent.runtime_paths)
     try:
-        save_user_service(manager, agent.target, name, service, config_services=operator.services)
+        save_user_service(
+            manager,
+            agent.target,
+            name,
+            service,
+            config_services=operator.services,
+            oauth_providers=load_oauth_providers(agent.config, agent.runtime_paths).keys(),
+        )
     except ValueError as exc:
         raise _unprocessable(str(exc)) from exc
 

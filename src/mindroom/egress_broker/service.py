@@ -325,7 +325,7 @@ class _BrokerService:
         broker = EgressBroker(
             ca=ca,
             signer=signer,
-            config_provider=config.rules,
+            rules_provider=config.rules,
             resolve_secret=functools.partial(
                 _resolve_secret,
                 config=config,
@@ -454,7 +454,8 @@ def execution_env_for_worker(
         # The broker answers this scope's requests with 502 meanwhile; the call still gets the proxy env.
         logger.warning("egress_broker_user_services_failed", error_type=type(exc).__name__)
         services = config.egress_broker.services
-    placeholder_env: dict[str, str] = {}
+    config_placeholders: dict[str, str] = {}
+    user_placeholders: dict[str, str] = {}
     for name, egress_service in services.items():
         if not egress_service.placeholder_env:
             continue
@@ -478,12 +479,14 @@ def execution_env_for_worker(
             logger.warning("egress_broker_secret_status_failed", service=name, error_type=type(exc).__name__)
             continue
         if configured:
-            placeholder_env.update(egress_service.placeholder_env)
+            from_config = name in config.egress_broker.services
+            (config_placeholders if from_config else user_placeholders).update(egress_service.placeholder_env)
     return broker_execution_env(
         broker_url=runtime.url,
         token=runtime.signer.mint(claims),
         ca_pem=runtime.ca_pem,
-        placeholder_env=placeholder_env,
+        # A config service's placeholder wins over a user service's for the same variable.
+        placeholder_env={**user_placeholders, **config_placeholders},
         extra_no_proxy_hosts=primary_callback_hosts(runtime_paths),
         call_env=call_env,
     )
