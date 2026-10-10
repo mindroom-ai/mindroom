@@ -56,7 +56,8 @@ _SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
 # Conversations, keyed by agent Matrix user, requester, room, and thread (None for the room timeline),
 # that got the show_computer notice in this process, so the agent's first browser use announces it only
 # once. Each requester has their own computer and Chat shows only notices addressed to its own user.
-_SHOWN_COMPUTERS: set[tuple[str, str, str, str | None]] = set()
+# Values are the reply (correlation ID) that sent the notice, so one reply never sends it twice.
+_SHOWN_COMPUTERS: dict[tuple[str, str, str, str | None], str | None] = {}
 # Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
 _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
@@ -385,9 +386,25 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
+        conversation = _computer_conversation(context, requester_id)
+        turn = context.correlation_id
+        was_shown = conversation in _SHOWN_COMPUTERS
+        shown_in = _SHOWN_COMPUTERS.get(conversation)
+        if turn is not None and was_shown and shown_in == turn:
+            # This reply's first browser call, or an earlier show_computer, already sent the notice.
+            return self._payload(
+                "ok",
+                action="show_computer",
+                message="The Computer panel was already shown in this reply.",
+            )
+        # Claim the conversation before awaiting the send, so a browser call racing this one sends nothing.
+        _SHOWN_COMPUTERS[conversation] = turn
         result = await self._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
-        if json.loads(result)["status"] == "ok":
-            _SHOWN_COMPUTERS.add(_computer_conversation(context, requester_id))
+        if json.loads(result)["status"] != "ok" and _SHOWN_COMPUTERS.get(conversation) == turn:
+            if was_shown:
+                _SHOWN_COMPUTERS[conversation] = shown_in
+            else:
+                del _SHOWN_COMPUTERS[conversation]
         return result
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
@@ -884,7 +901,7 @@ async def show_computer_once() -> None:
     if conversation in _SHOWN_COMPUTERS:
         return
     # Claim the conversation before awaiting the send, so concurrent first calls send one notice.
-    _SHOWN_COMPUTERS.add(conversation)
+    _SHOWN_COMPUTERS[conversation] = context.correlation_id
     sent = False
     try:
         result = await ChatUITools._send_validated_action(
@@ -906,7 +923,7 @@ async def show_computer_once() -> None:
     finally:
         # An undelivered notice does not count, so the next browser call tries again.
         if not sent:
-            _SHOWN_COMPUTERS.discard(conversation)
+            _SHOWN_COMPUTERS.pop(conversation, None)
 
 
 def _parsed_json(value: object) -> object:

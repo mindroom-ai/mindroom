@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 @pytest.fixture(autouse=True)
 def _no_computer_shown_yet(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every test before any conversation has seen the agent's computer."""
-    monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", set())
+    monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", {})
 
 
 @pytest.fixture(params=["show_computer", "open_panel"])
@@ -569,6 +569,51 @@ async def test_explicit_computer_request_still_sends_after_the_first_browser_not
         result = json.loads(await ChatUITools().open_panel(panel="computer"))
 
     assert result["status"] == "ok"
+    assert context.client.room_send.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["browser", "explicit"])
+async def test_one_turn_sends_one_computer_notice(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+    first: str,
+) -> None:
+    """An agent that browses and shows its computer in the same reply posts one notice, in either order."""
+    context = replace(_context(tmp_path), correlation_id="$turn")
+    delivered = context.client.room_send.return_value
+
+    async def slow_send(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0)
+        return delivered
+
+    context.client.room_send.side_effect = slow_send
+
+    with tool_runtime_context(context):
+        calls = [show_computer_once(), computer_request()]
+        if first == "explicit":
+            calls.reverse()
+        results = await asyncio.gather(*calls)
+        repeated = json.loads(await computer_request())
+
+    context.client.room_send.assert_awaited_once()
+    assert repeated["status"] == "ok"
+    assert all(json.loads(result)["status"] == "ok" for result in results if result is not None)
+
+
+@pytest.mark.asyncio
+async def test_a_later_turn_can_show_the_computer_again(
+    tmp_path: Path,
+    computer_request: Callable[[], Awaitable[str]],
+) -> None:
+    """A reply after the one that announced the computer can show it again, for example for a login."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(replace(context, correlation_id="$first-turn")):
+        await show_computer_once()
+    with tool_runtime_context(replace(context, correlation_id="$second-turn")):
+        assert json.loads(await computer_request())["status"] == "ok"
+
     assert context.client.room_send.await_count == 2
 
 
