@@ -24,9 +24,9 @@ agents:
 
 Workspace exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, which agent tools see as `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
 `mindroom threads export` writes the same layout under its output directory.
-Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
+Each thread file holds `version`, `room` metadata, `thread` metadata including the current thread summary as `thread.summary`, and a `messages` list.
 Exported messages match the history agents see in their prompts, including edits, redactions, and long messages.
-Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+Each room directory also holds an `index.json` mapping every thread file to its message count, participants, current summary, and last activity, sorted by most recent activity.
 A thread file is rewritten only when its content changed, so `exported_at` reflects the last content-changing export.
 
 Size limits:

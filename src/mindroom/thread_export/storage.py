@@ -23,7 +23,7 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import MAX_READ_BYTES, open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.models import ThreadExportRoom
@@ -33,6 +33,8 @@ _ROOM_INDEX_FILENAME = "index.json"
 _ROOT_MARKER_FILENAME = ".mindroom-thread-exports"
 _ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
+# The summary metadata keys `mindroom.thread_summary` reads to pick a thread's current summary.
+_THREAD_SUMMARY_METADATA_KEYS = ("version", "summary", "generated_at", "model", "pinned")
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # `thread.exported_at` is the only two-space-indented exported_at key a dump writes; scalar continuations indent further.
 _EXPORTED_AT_LINE = re.compile(rb"^  exported_at: .*$", re.MULTILINE)
@@ -488,25 +490,10 @@ def exported_content(message: ResolvedVisibleMessage) -> dict[str, Any]:
     if (reply_to_event_id := message.reply_to_event_id) is not None:
         content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
     if isinstance(meta := message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
-        summary = meta.get("summary")
-        content[_THREAD_SUMMARY_CONTENT_KEY] = {"summary": summary} if isinstance(summary, str) else {}
+        content[_THREAD_SUMMARY_CONTENT_KEY] = {
+            key: value for key in _THREAD_SUMMARY_METADATA_KEYS if isinstance(value := meta.get(key), str | int)
+        }
     return content
-
-
-def _latest_thread_summary(
-    messages: list[ResolvedVisibleMessage],
-    *,
-    trusted_sender_ids: Collection[str],
-) -> str | None:
-    """Return the latest trusted thread-summary notice text, when one exists."""
-    for message in reversed(messages):
-        if message.sender not in trusted_sender_ids:
-            continue
-        meta = message.content.get(_THREAD_SUMMARY_CONTENT_KEY)
-        if isinstance(meta, dict):
-            summary = meta.get("summary")
-            return summary if isinstance(summary, str) and summary else message.body
-    return None
 
 
 def thread_payload(
@@ -515,14 +502,14 @@ def thread_payload(
     thread_id: str,
     messages: list[ResolvedVisibleMessage],
     exported_at: datetime,
-    trusted_sender_ids: Collection[str],
+    summary: str | None,
 ) -> dict[str, object]:
     """Build one YAML document for a Matrix thread."""
     thread_block: dict[str, object] = {
         "id": thread_id,
         "source": "matrix",
     }
-    if summary := _latest_thread_summary(messages, trusted_sender_ids=trusted_sender_ids):
+    if summary:
         thread_block["summary"] = summary
     thread_block["exported_at"] = exported_at.isoformat()
     thread_block["message_count"] = len(messages)

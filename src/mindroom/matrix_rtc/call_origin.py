@@ -14,6 +14,7 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, projected_thread_history
+from mindroom.thread_summary import current_thread_summary_from_history
 from mindroom.token_budget import approximate_o200k_tokens
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -162,12 +164,9 @@ async def resolve_call_origin_context(  # noqa: PLR0911
         return None
 
     trusted_sender_ids = current_internal_sender_ids(context.config, context.runtime_paths)
-    thread_title: str | None = None
     messages: list[_CallBriefMessage] = []
     for message in history:
         if message.sender in trusted_sender_ids and isinstance(message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
-            summary = message.content[_THREAD_SUMMARY_CONTENT_KEY].get("summary")
-            thread_title = summary if isinstance(summary, str) and summary else None
             continue
         body = message.body.strip()
         if not body:
@@ -178,9 +177,33 @@ async def resolve_call_origin_context(  # noqa: PLR0911
         origin=origin,
         caller_id=context.requester_id,
         room_name=" ".join(room.display_name.split()),
-        thread_title=thread_title,
+        thread_title=_thread_title(origin, history, context=context, trusted_sender_ids=trusted_sender_ids),
         messages=tuple(messages),
     )
+
+
+def _thread_title(
+    origin: CallOrigin,
+    history: Sequence[ResolvedVisibleMessage],
+    *,
+    context: ToolRuntimeContext,
+    trusted_sender_ids: frozenset[str],
+) -> str | None:
+    """Return the title a thread origin shows now, which thread listings also report."""
+    if origin.thread_id is None:
+        return None
+    current_summary = current_thread_summary_from_history(
+        context.client,
+        origin.room_id,
+        origin.thread_id,
+        history,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        entity_name=context.agent_name,
+        membership_index=context.require_agent_reply_memberships(),
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    return None if current_summary is None else current_summary.summary
 
 
 def member_label(room: nio.MatrixRoom | None, user_id: str) -> str:

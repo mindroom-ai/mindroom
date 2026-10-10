@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.agent import AgentThreadExportConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -78,6 +79,7 @@ class WorkspaceThreadExportDeps:
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], _ThreadExportBot | None]
     response_admission_gate: ResponseAdmissionGate
+    agent_reply_memberships: AgentReplyMembershipIndex
     debounce_seconds: float = _DEBOUNCE_SECONDS
 
 
@@ -152,7 +154,14 @@ class WorkspaceThreadExportRunner:
                 if bot is None or not bot.running or bot.client is None:
                     msg = f"No running Matrix owner for {group.entity_name}; retry after startup or reload"
                     raise RuntimeError(msg)
-                return _source_for_bot(bot, group.rooms, None, config)
+                return _source_for_bot(
+                    bot,
+                    group.rooms,
+                    None,
+                    config,
+                    entity_name=group.entity_name,
+                    membership_index=self._deps.agent_reply_memberships,
+                )
 
             return await export_threads_once(
                 config=config,
@@ -283,7 +292,16 @@ class WorkspaceThreadExportRunner:
                 state_rooms,
             )
             rooms = [room for room in rooms if full_pass or room.room_id in room_ids]
-            sources.append(_source_for_bot(bot, tuple(rooms), agent_targets, config))
+            sources.append(
+                _source_for_bot(
+                    bot,
+                    tuple(rooms),
+                    agent_targets,
+                    config,
+                    entity_name=agent_name,
+                    membership_index=self._deps.agent_reply_memberships,
+                ),
+            )
         stats = await export_threads_to_sources(
             config=config,
             runtime_paths=runtime_paths,
@@ -324,6 +342,9 @@ def _source_for_bot(
     rooms: tuple[ThreadExportRoom, ...],
     targets: tuple[ThreadExportTarget, ...] | None,
     config: Config,
+    *,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
 ) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
     client = bot.client
@@ -337,6 +358,8 @@ def _source_for_bot(
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
+        entity_name=entity_name,
+        membership_index=membership_index,
         target_output_dirs=None if targets is None else tuple(target.output_dir for target in targets),
     )
 
