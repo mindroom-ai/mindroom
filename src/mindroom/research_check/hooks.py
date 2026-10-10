@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
+from mindroom.agents import show_tool_calls_for_agent
 from mindroom.config.judgment import JudgmentConfig, LLMJudgmentConfig
-from mindroom.hooks import EVENT_MESSAGE_AFTER_RESPONSE, AfterResponseContext, SenderKind, hook
+from mindroom.hooks import EVENT_MESSAGE_AFTER_RESPONSE, AfterResponseContext, hook
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.redaction import redact_sensitive_text
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
 _MAX_PREVIEW_CHARS = 500
 # Leaves room in the judgment request for the person's message and a long reply.
 _MAX_TOOL_CHARS = 6_000
-_CHECKED_RESPONSE_KINDS = ("ai", "team")
 
 _RESEARCH_CHECK_QUESTION = JudgmentQuestion(
     id="research_check",
@@ -100,11 +100,12 @@ async def check_research(ctx: AfterResponseContext) -> None:
     """Send one verification follow-up when the judge finds unresearched claims in a reply to a person."""
     result = ctx.result
     envelope = result.envelope
-    # Hook-sourced turns include this plugin's own follow-ups, so each person's turn is checked at most once.
+    # Only an agent's reply to a person's own request: never this plugin's follow-ups, other agents, automations,
+    # schedules, or webhooks. Team replies and hidden tool calls carry no tool trace, so the judge would see no lookups.
     if (
-        result.response_kind not in _CHECKED_RESPONSE_KINDS
-        or envelope.hook_source is not None
-        or envelope.origin.requester_kind != SenderKind.USER
+        result.response_kind != "ai"
+        or not envelope.origin.may_answer_interactive_prompt
+        or not show_tool_calls_for_agent(ctx.config, envelope.agent_name)
     ):
         return
     settings = ResearchCheckSettings.model_validate(ctx.settings)

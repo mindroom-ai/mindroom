@@ -59,6 +59,20 @@ def _envelope(*, body: str = "Where can I get good coffee in Utrecht?", **overri
     return MessageEnvelope(**(values | overrides))
 
 
+def _dispatched_envelope(source_kind: str, *, hook_source: str | None = None) -> MessageEnvelope:
+    """A turn MindRoom started on the person's behalf, such as a plugin follow-up, schedule, or webhook."""
+    return _envelope(
+        hook_source=hook_source,
+        origin=message_origin(
+            sender_id="@mindroom_code:localhost",
+            requester_id="@user:localhost",
+            sender_entity_name="code",
+            source_kind=source_kind,
+            original_sender="@user:localhost",
+        ),
+    )
+
+
 @dataclass
 class _Sent:
     room_id: str
@@ -214,14 +228,25 @@ async def test_false_abstain_and_failure_send_nothing(
 @pytest.mark.parametrize(
     "context_kwargs",
     [
-        {"envelope": _envelope(hook_source="research_check:message:after_response")},
-        {"envelope": _envelope(hook_source="automation/dreaming")},
+        {"envelope": _dispatched_envelope("hook_dispatch", hook_source="research_check:message:after_response")},
+        {"envelope": _dispatched_envelope("hook_dispatch", hook_source="automation/dreaming")},
+        {"envelope": _dispatched_envelope("scheduled")},
+        {"envelope": _dispatched_envelope("external_trigger")},
         {"response_kind": "router"},
+        {"response_kind": "team"},
         {"settings": _SETTINGS | {"agents": ["other"]}},
     ],
-    ids=["own-follow-up", "automation", "router-reply", "filtered-agent"],
+    ids=[
+        "own-follow-up",
+        "automation",
+        "scheduled",
+        "external-trigger",
+        "router-reply",
+        "team-reply",
+        "filtered-agent",
+    ],
 )
-async def test_skips_hook_sourced_turns_other_kinds_and_filtered_agents(
+async def test_skips_turns_no_person_asked_for_other_kinds_and_filtered_agents(
     harness: _Harness,
     context_kwargs: dict[str, Any],
 ) -> None:
@@ -233,15 +258,15 @@ async def test_skips_hook_sourced_turns_other_kinds_and_filtered_agents(
 
 
 @pytest.mark.asyncio
-async def test_listed_team_reply_is_checked(harness: _Harness) -> None:
-    """A team named in agents gets the follow-up addressed to the team."""
-    envelope = _envelope(agent_name="crew")
+async def test_agents_that_hide_tool_calls_are_not_checked(harness: _Harness) -> None:
+    """Hidden tool calls never reach the reply's trace, so the judge would wrongly see no lookups."""
+    config = _config(harness.tmp_path)
+    config.agents["code"].show_tool_calls = False
 
-    await research_check.check_research(
-        harness.context(envelope=envelope, response_kind="team", settings=_SETTINGS | {"agents": ["crew"]}),
-    )
+    await research_check.check_research(harness.context(config=config))
 
-    assert [sent.body.split()[0] for sent in harness.sent] == ["@crew"]
+    assert harness.bound == []
+    assert harness.sent == []
 
 
 @pytest.mark.asyncio

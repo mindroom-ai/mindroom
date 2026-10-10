@@ -14027,9 +14027,10 @@ plugins:
 | --- | --- | --- | --- |
 | `judgment` | object | *required* | Backend that makes the decision, with the fields described under [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends) |
 | `instructions` | string | `""` | Extra guidance for the decision, such as which kinds of claims matter to you |
-| `agents` | list of strings | all agents and teams | Agents or teams whose replies are checked |
+| `agents` | list of strings | all agents | Agents whose replies are checked |
 
-- Only replies to people are checked, including their scheduled tasks, and each gets at most one follow-up; replies to other agents, plugins, and automations, and the verification reply itself, are not checked.
+- Only an agent's replies to messages people send are checked, and each gets at most one follow-up; team replies, scheduled tasks, external triggers, turns started by other agents, plugins, or automations, and the verification reply itself are not checked.
+- Agents with `show_tool_calls: false` are not checked, because their tool calls are not recorded with the reply.
 - The check sees only the current reply's tool calls, so a reply that relies on research from an earlier message can still get a follow-up.
 - Each checked reply costs one judgment request; use `agents` to limit which agents are checked.
 - The follow-up asks an agent without search or browsing tools to say which claims remain unverified.
