@@ -63,6 +63,14 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
     return recipient in config.agents and actor in config.agents
 
 
+def _accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:
+    """Return the entities the requester must still reach: a configured team's access grants its exact members."""
+    team = config.teams.get(recipient)
+    if team is not None and actor in team.agents:
+        return {recipient}
+    return {recipient, actor}
+
+
 @dataclass
 class ToolJobRuntimeCoordinator:
     """Own the background job runtime; replies deliver outcomes."""
@@ -154,7 +162,7 @@ class ToolJobRuntimeCoordinator:
         caller = config.agents.get(owner.agent_name)
         if caller is None:
             return "denied"
-        entities = {owner.agent_name, owner.recipient}
+        entities = _accessed_entities(config, owner.recipient, owner.agent_name)
         if job.kind == "delegation":
             child = delegation_child(job)
             child_name = child.child_agent_name
@@ -231,7 +239,12 @@ class ToolJobRuntimeCoordinator:
         root = edges[0][0] if edges else owner.agent_name
         recipient = owner.transport_agent_name or root
         valid_transport = _transport_allows_actor(config, recipient, root)
-        callers = {owner.agent_name, recipient, *(caller for caller, _ in edges)}
+        # Delegated children and their callers need their own grants; the root actor may hold its team's.
+        callers = ({owner.agent_name, *(caller for caller, _ in edges)} - {root}) | _accessed_entities(
+            config,
+            recipient,
+            root,
+        )
         allowed_edges = all(
             caller in config.agents and child in config.agents[caller].delegate_to for caller, child in edges
         )

@@ -74,10 +74,15 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
     tmp_path: Path,
     configured: bool,
 ) -> None:
-    """A member's tool becomes a job, while the leader's SDK delegation runs inline, until the grant is withdrawn."""
+    """A member's tool becomes a job, while the leader's SDK delegation runs inline, until the grant is withdrawn.
+
+    A configured team's access is the grant for its exact members; an ad hoc team's member needs its own.
+    """
     config = managed_team_config(tmp_path)
     config.agents["worker"].tools = ["calculator"]
     config.teams["team"].agents = ["lead", "worker"]
+    if configured:
+        config.agents["worker"].access = ResponderAccessConfig(current_room_members=False)
     coordinator = team_coordinator(tmp_path, config)
     paths = coordinator.runtime_paths
     owner = replace(completed_delegation_job().owner, transport_agent_name="team" if configured else "lead")
@@ -110,7 +115,10 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
                 assert waited.job.status == "completed", waited.job.result
                 assert json.loads(waited.job.result)["result"] == 5
                 assert await coordinator.runtime.list_jobs(owner=owner, depth=0) == []
-                config.agents["worker"].access = ResponderAccessConfig(current_room_members=False)
+                if configured:
+                    config.teams["team"].access = ResponderAccessConfig(current_room_members=False)
+                else:
+                    config.agents["worker"].access = ResponderAccessConfig(current_room_members=False)
                 assert await coordinator.runtime.list_jobs(owner=member_owner, depth=0) == []
     finally:
         await coordinator.stop()
