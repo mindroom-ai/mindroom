@@ -179,7 +179,9 @@ class ThreadMoveTools(Toolkit):
                 content,
                 operation="thread_move",
             )
-            if delivered is None or _lost_text(content, delivered.content_sent):
+            if delivered is not None:
+                new_root_id = new_root_id or delivered.event_id
+            if delivered is None or _lost_content(content, delivered.content_sent):
                 # The source thread stays untouched, so the user can retry or delete the partial copy.
                 partial = {} if new_root_id is None else {"link": _permalink(prepared.target_room_id, new_root_id, via)}
                 return self._payload(
@@ -187,7 +189,6 @@ class ThreadMoveTools(Toolkit):
                     message=f"Copied {copied} of {len(prepared.plan)} messages before a send failed.",
                     **partial,
                 )
-            new_root_id = new_root_id or delivered.event_id
             previous_event_id = delivered.event_id
         assert new_root_id is not None
 
@@ -369,9 +370,10 @@ async def _mark_source_moved(
         warnings.append(f"Could not mark the original thread resolved: {exc}")
 
 
-def _lost_text(content: dict[str, Any], content_sent: dict[str, Any]) -> bool:
-    """Return whether a long message went out cut short because its full text could not be attached."""
-    return content_sent.get("body") != content.get("body") and not holds_unresolved_sidecar(content_sent)
+def _lost_content(content: dict[str, Any], content_sent: dict[str, Any]) -> bool:
+    """Return whether a large message went out cut short because its full content could not be attached."""
+    # A message that fits goes out unchanged; one that does not carries its full content as an attachment.
+    return content_sent != content and not holds_unresolved_sidecar(content_sent)
 
 
 def _permalink(room_id: str, event_id: str, via: str) -> str:

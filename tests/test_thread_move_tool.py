@@ -749,3 +749,44 @@ async def test_move_thread_accepts_a_long_message_sent_with_its_full_text_attach
 
     assert payload["status"] == "ok"
     assert payload["copied"] == 3
+
+
+@pytest.mark.asyncio
+async def test_move_thread_stops_when_collapsible_sections_were_dropped(tmp_path: Path) -> None:
+    """A short message whose large sections could not be attached would lose them, so the move stops there."""
+    move = _move(tmp_path)
+    history = _thread(move)
+    history[1] = _message(
+        move.ids["code"],
+        {"msgtype": "m.text", "body": "Report", "com.mindroom.message_extras": {"version": 2, "sections": []}},
+        "$code:localhost",
+    )
+    sends = _delivered_sends()
+
+    async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
+        delivered = await sends(client, room_id, content, **kwargs)
+        plain = {key: value for key, value in content.items() if key != "com.mindroom.message_extras"}
+        return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent=plain)
+
+    with _matrix(move, history, send=AsyncMock(side_effect=send)):
+        payload = await _run()
+
+    assert payload["message"] == "Copied 1 of 3 messages before a send failed."
+
+
+@pytest.mark.asyncio
+async def test_move_thread_links_a_root_that_arrived_cut_short(tmp_path: Path) -> None:
+    """When the first copy arrives cut short, the error still links it so the user can find and remove it."""
+    move = _move(tmp_path)
+    sends = _delivered_sends()
+
+    async def send(client: object, room_id: str, content: dict[str, Any], **kwargs: object) -> DeliveredMatrixEvent:
+        delivered = await sends(client, room_id, content, **kwargs)
+        return DeliveredMatrixEvent(event_id=delivered.event_id, content_sent={**content, "body": "cut…"})
+
+    with _matrix(move, _thread(move), send=AsyncMock(side_effect=send)) as mocks:
+        payload = await _run()
+
+    assert payload["message"] == "Copied 0 of 3 messages before a send failed."
+    assert payload["link"] == "https://matrix.to/#/%21target%3Alocalhost/%24copy0%3Alocalhost?via=localhost"
+    assert mocks.send.await_count == 1
