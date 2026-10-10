@@ -488,11 +488,21 @@ def iter_usage_storage_rows(
             table = quote_identifier(source.expected_session_table)
             usage_table = f"{source.expected_session_table}_usage"
             has_usage = _table_exists(connection, usage_table)
+            # Session counters cover all history, so a run-only read skips their payload.
+            session_data = "session_data" if mode == "both" else "NULL AS session_data"
             query = (
-                "SELECT session_id, session_type, agent_id, team_id, user_id, session_data "  # noqa: S608
+                f"SELECT session_id, session_type, agent_id, team_id, user_id, {session_data} "  # noqa: S608
                 f"FROM {table}"
             )
-            for row in connection.execute(query):
+            parameters: tuple[object, ...] = ()
+            if since is not None and has_usage:
+                # A dated read visits only sessions with a usage snapshot in range.
+                query += (
+                    f" WHERE session_id IN (SELECT session_id FROM {quote_identifier(usage_table)} "  # noqa: S608
+                    "WHERE json_extract(usage_data, '$.created_at') >= ?)"
+                )
+                parameters = (since,)
+            for row in connection.execute(query, parameters):
                 try:
                     yield _extract_row(source, row, connection, mode=mode, has_usage=has_usage, since=since)
                 except (RecursionError, TypeError, ValueError):

@@ -303,6 +303,27 @@ def test_reader_since_skips_older_and_undated_usage_rows(tmp_path: Path) -> None
     assert sorted(run.run_id or "" for row in unfiltered for run in row.runs) == ["oct", "sept", "undated"]
 
 
+def test_reader_since_skips_sessions_without_recent_usage(tmp_path: Path) -> None:
+    """A month scan reads only sessions with usage in range, so its cost follows recent activity."""
+    database = tmp_path / "code.db"
+    _create_database(
+        database,
+        runs=[{**_run(), "run_id": "recent", "created_at": datetime(2026, 10, 2, tzinfo=UTC).timestamp()}],
+    )
+    _insert_runs_row(
+        database,
+        session_id="old-session",
+        runs=[{**_run(), "run_id": "old", "created_at": datetime(2026, 8, 2, tzinfo=UTC).timestamp()}],
+    )
+    source = _source(database)
+
+    since = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    rows = [row for row in iter_usage_storage_rows(source, since=since) if isinstance(row, UsageSessionRow)]
+
+    assert [row.row_key for row in rows] == ["session-1"]
+    assert len([row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]) == 2
+
+
 def test_reader_uses_run_table_timestamp_when_dict_payload_omits_it(tmp_path: Path) -> None:
     """Agno's fallback timestamp remains available even when run_data omits it."""
     storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
