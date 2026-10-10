@@ -61,12 +61,14 @@ Use it for self-contained tasks where the child does not need its role, instruct
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
+A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt as its whole minimal prompt, its Bash tool description points it to `mindroom-agent`, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
+It can still read the caller's configured instructions on demand with `mindroom-agent context`.
 
 ## Standard mode
 
 A standard-mode agent with the `shell` tool can use `mindroom-agent` inside its shell commands, so one script can combine many tool calls, loop over results, or filter them before anything returns to the model.
 It is available automatically when the agent answers a Matrix conversation itself and its shell meets the [deployment requirements](#deployment-requirements); the agent's instructions then mention it.
-Team members, call agents, workflow participants, and OpenAI-compatible requests do not get it.
+Team members, call agents, `room_agent` workflow participants, and OpenAI-compatible requests do not get it.
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
 The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.

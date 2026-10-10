@@ -41,6 +41,8 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
     output_file_policy: ToolOutputFilePolicy | None = None
     delegation_depth: int = 0
     refresh_scheduler: KnowledgeRefreshScheduler | None = None
+    # An authored persona's prompt does not mention mindroom-agent, so the Bash description must.
+    persona_hint: bool = False
 
     def configure_minimal(
         self,
@@ -108,7 +110,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
         user_id: str | None = None,  # noqa: ARG002 - pure SDK inspection
     ) -> list[Any]:
         """Pure presentation for synchronous prompt inspection; never issue a grant."""
-        return [MinimalBashTools()]
+        return [MinimalBashTools(persona_hint=self.persona_hint)]
 
     @staticmethod
     def _validate_handlers(processed_tools: list[Any]) -> None:
@@ -263,7 +265,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
             def prepared(function: Function) -> None:
                 lifetime.bind_provider(owner.checkpoint, function)
 
-            facade = MinimalBashTools(execute=owner.execute_bash, on_prepare=prepared)
+            facade = MinimalBashTools(execute=owner.execute_bash, on_prepare=prepared, persona_hint=self.persona_hint)
         except BaseException as exc:
             await catalog.close()
             self._raise_failure(exc)
