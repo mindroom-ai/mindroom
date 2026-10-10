@@ -24,7 +24,7 @@ from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
@@ -2427,6 +2427,44 @@ def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_
     )
 
     assert plan.entities_to_restart == {"general"}
+
+
+@pytest.mark.parametrize("backend", ["cascaded", "live"])
+def test_config_update_plan_keeps_call_agents_running_when_only_model_prices_change(backend: str) -> None:
+    """Budgets read prices at each refresh, so a price edit must not rebuild an idle call manager."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "call": ModelConfig(provider="openai", id="call-model", pricing=ModelPricing(input=5, output=30)),
+            },
+            calls=_delegated_calls_for("general", model="call", backend=backend),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "call": ModelConfig(provider="openai", id="call-model", pricing=ModelPricing(input=4, output=20)),
+            },
+            calls=_delegated_calls_for("general", model="call", backend=backend),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots=_call_bots(running_entities),
+    )
+
+    assert plan.entities_to_restart == set()
 
 
 def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_changes() -> None:

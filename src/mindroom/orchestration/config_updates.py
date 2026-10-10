@@ -272,7 +272,8 @@ def _call_manager_signature(config: Config, agent_name: str) -> object | None:
         config.calls.livekit_service_url,
         config.calls.agents[agent_name],
         profile.model_dump(exclude_none=True),
-        model.model_dump(exclude_none=True) if model is not None else None,
+        # Budgets read prices at each spend refresh, so a price edit leaves the call manager as it is.
+        model.model_dump(exclude_none=True, exclude={"pricing"}) if model is not None else None,
     )
 
 

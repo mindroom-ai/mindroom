@@ -36,6 +36,7 @@ budgets:
 ```
 
 Prices are USD per million tokens, set with the `pricing` field described in [Model Config Fields](configuration/models.md#model-config-fields).
+Give every model entry that points at a paid model its prices, including entries that differ only in API transport or ID prefix.
 The dashboard **Budgets** page edits the same settings and prices.
 
 ## Fields
@@ -69,6 +70,7 @@ This covers agent and team replies including every team member, delegated agents
 Models without prices keep running, because they add no spend.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
 Requests without a human requester, such as unauthenticated OpenAI-compatible calls, are never budgeted.
+Users get no chat message when the fallback applies; the Budgets page shows who is over budget.
 
 ## Dashboard Budgets Page
 
