@@ -2137,7 +2137,6 @@ async def schedule_approved_tool_call(
     scheduled_by: str,
     agent_name: str,
     call: LiveFunction,
-    tool_name: str,
     arguments: dict[str, object],
     execute_at: str,
     description: str,
@@ -2149,6 +2148,7 @@ async def schedule_approved_tool_call(
 
     """
     config = runtime.config
+    tool_name = call.function.name
     checked = await _scheduled_call_refusal(
         runtime,
         thread_id=thread_id,

@@ -43,6 +43,7 @@ The [macOS app's local model setup](../installation/macos-app.md#local-ai-models
 | `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; equivalent to `extra_kwargs.api_key` |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters (see [Extra Kwargs](#extra-kwargs)) |
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](history.md#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
+| `tool_dialect` | No | `auto` | `auto`, `mindroom`, `claude`, or `codex`; the shape of the shell and file-editing tools this model sees (see [Tool Dialect](#tool-dialect)) |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
@@ -61,6 +62,15 @@ A local `icon` must be a PNG, JPEG, WebP, or GIF image of at most 1 MiB inside t
 A missing, unreadable, unsupported, or out-of-directory image falls back to the client's provider icon and does not prevent startup.
 External image URLs are not fetched.
 Blank `display_name` or `icon` values count as unset.
+
+## Tool Dialect
+
+Claude and OpenAI models are trained inside their vendors' coding agents, so a model can see the shell and file-editing tools in the shape of the coding agent it knows: `claude` follows Claude Code, `codex` follows the Codex CLI, and `mindroom` keeps MindRoom's own tools.
+With `auto`, Claude models (on `anthropic`, `vertexai_claude`, `bedrock_claude`, or OpenRouter `anthropic/` IDs) use `claude`, and every other model uses `mindroom`.
+GPT models keep `mindroom` under `auto` because on graded coding tasks `codex` solved no more tasks and used more tokens; set `tool_dialect: codex` to give a GPT model the Codex CLI's tools anyway.
+Set `tool_dialect: claude` for a Claude model whose provider does not reveal the family, such as one behind an OpenAI-compatible endpoint.
+The dialect follows the model that answers, so switching a thread's model also switches its tools from the next reply on.
+[Execution and Coding](../tools/execution-and-coding.md) lists the tool names each dialect uses.
 
 ## Configuration Examples
 

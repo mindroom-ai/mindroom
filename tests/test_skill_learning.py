@@ -41,10 +41,12 @@ from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
 from mindroom.model_loading import get_model_instance
+from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning import library
+from mindroom.skill_learning import reviewer as reviewer_module
 from mindroom.skill_learning import runner as runner_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, observe_final_request
 from mindroom.skill_learning.reviewer import review_conversation
@@ -52,6 +54,9 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
 from mindroom.synthetic_model import SyntheticModel
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect, installed_tool_dialect
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
+from mindroom.tool_dialects.codex import CODEX_DIALECT
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -65,6 +70,7 @@ if TYPE_CHECKING:
     from agno.models.base import Model
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_dialects.types import ToolDialect
 
 LEARNED = (
     "---\nname: deploy-checks\ndescription: Use when deploying the web service\n"
@@ -1910,3 +1916,55 @@ async def test_the_review_closes_the_claude_client_it_opens(tmp_path: Path, endi
     assert clients
     assert all(client.is_closed() for client in clients)
     assert model.async_client is None
+
+
+def test_review_tool_copies_keep_their_dialect_presentation(tmp_path: Path) -> None:
+    """A dialect-bound model presents the review fork's tools exactly as it presented the agent's request."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
+    shell = Function(name="run_shell_command", description="Run.", parameters={"type": "object", "properties": {}})
+    shell.owning_toolkit = "shell"
+    gated = Function(name="edit_file", description="Edit.", parameters={"type": "object", "properties": {}})
+    gated.owning_toolkit = "coding"
+    gated.requires_confirmation = True
+    skill = Function(name="skill_manage", description="Manage.", parameters={"type": "object", "properties": {}})
+
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test")
+    install_tool_dialect(model, CLAUDE_DIALECT)
+    review_tools, runnable = reviewer_module._review_tools(
+        [shell, gated, skill],
+        tools,
+        model._format_tools,
+        installed_tool_dialect(model),
+    )
+
+    assert model._format_tools(review_tools) == model._format_tools([shell, gated, skill])
+    assert [tool["function"]["name"] for tool in model._format_tools(review_tools)] == ["Bash", "Edit", "skill_manage"]
+    assert runnable == ["skill_manage"]
+
+
+@pytest.mark.parametrize(
+    ("dialect", "gated_names"),
+    [(CODEX_DIALECT, {"apply_patch"}), (CLAUDE_DIALECT, {"edit_file", "write_file"}), (CLAUDE_DIALECT, set())],
+    ids=["codex-gated-patch", "claude-gated-edits", "claude-ungated"],
+)
+def test_review_fork_hides_what_the_request_hid(tmp_path: Path, dialect: ToolDialect, gated_names: set[str]) -> None:
+    """A tool the dialect hid beside its replacement stays hidden in the review, even when approval gates either one."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
+    coding = []
+    for name in ("apply_patch", "edit_file", "write_file", "read_file"):
+        function = Function(name=name, description=name, parameters={"type": "object", "properties": {}})
+        function.owning_toolkit = "coding"
+        function.requires_confirmation = name in gated_names
+        coding.append(function)
+
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test")
+    install_tool_dialect(model, dialect)
+    review_tools, _runnable = reviewer_module._review_tools(coding, tools, model._format_tools, dialect)
+
+    assert model._format_tools(review_tools) == model._format_tools(coding)

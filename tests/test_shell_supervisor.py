@@ -27,9 +27,9 @@ from mindroom.shell_supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
     _ShellSupervisorManager,
-    check_command_via_supervisor,
     kill_command_via_supervisor,
     parse_shell_supervisor_status,
+    poll_command_via_supervisor,
     run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -138,8 +138,8 @@ def _extract_handle(message: str) -> str:
     return message.split("Handle: ")[1].split("\n", maxsplit=1)[0]
 
 
-async def _check(socket_path: str, handle: str, *, namespace: str = "ns") -> str:
-    return await asyncio.to_thread(check_command_via_supervisor, socket_path, namespace=namespace, handle=handle)
+async def _check(socket_path: str, handle: str, *, namespace: str = "ns", wait: int = 0) -> str:
+    return await poll_command_via_supervisor(socket_path, namespace=namespace, handle=handle, wait=wait)
 
 
 async def _kill(socket_path: str, handle: str, *, namespace: str = "ns", force: bool = False) -> str:
@@ -244,7 +244,7 @@ async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
     registry: dict[str, ProcessRecord] = {}
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["bash", "-c", "echo bg-line; sleep 300"], timeout=0)
-        assert "timed out" in result.lower()
+        assert "started in the background" in result.lower()
         handle = _extract_handle(result)
 
         await asyncio.sleep(0.3)
@@ -1225,9 +1225,9 @@ async def test_toolkit_routes_through_supervisor_across_instances(
 
     await asyncio.sleep(0.3)
     tool_check = _get_toolkit(tmp_path)
-    check_fn = tool_check.functions["check_shell_command"].entrypoint
+    check_fn = tool_check.async_functions["check_shell_command"].entrypoint
     assert check_fn is not None
-    status = await asyncio.to_thread(check_fn, handle)
+    status = await check_fn(handle)
     assert "RUNNING" in status
     assert "client-mode" in status
 
@@ -1305,7 +1305,7 @@ def test_subprocess_mode_shell_background_handle_across_requests(tmp_path: Path)
 
 
 def test_shell_run_timeout_seconds_parses_kwargs() -> None:
-    """The dispatch budget helper should read the requested foreground timeout."""
+    """The dispatch budget helper should read the requested foreground timeout or poll wait."""
 
     def prepared(function_name: str, kwargs: dict[str, object]) -> object:
         return sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
@@ -1319,6 +1319,9 @@ def test_shell_run_timeout_seconds_parses_kwargs() -> None:
     assert helper(prepared("run_shell_command", {})) == 120.0
     assert helper(prepared("run_shell_command", {"timeout": "nope"})) == 120.0
     assert helper(prepared("check_shell_command", {"timeout": 300})) == 0.0
+    assert helper(prepared("check_shell_command", {"wait": 60})) == 60.0
+    assert helper(prepared("check_shell_command", {"wait": 600})) == 60.0
+    assert helper(prepared("check_shell_command", {"wait": 10**400})) == 0.0
 
 
 def test_shell_subprocess_dispatch_context_injects_socket_and_budget(
@@ -1350,3 +1353,47 @@ def test_shell_subprocess_dispatch_context_injects_socket_and_budget(
     assert updated_context.subprocess_env[SHELL_SUPERVISOR_SOCKET_ENV] == socket_path
     assert updated_context.template_env == {"PATH": "/usr/bin"}
     assert timeout_seconds == 630.0
+
+
+@pytest.mark.asyncio
+async def test_check_wait_through_supervisor() -> None:
+    """A supervisor check with wait returns once the background command finishes."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        handle = _extract_handle(await _run(socket_path, ["bash", "-c", "sleep 1; echo waited"], timeout=0))
+
+        status = await _check(socket_path, handle, wait=5)
+
+        assert status.startswith("Status: FINISHED (exit code 0")
+        assert "waited" in status
+
+
+@pytest.mark.asyncio
+async def test_negative_wait_polls_at_once() -> None:
+    """A negative wait reports the status immediately instead of timing out the supervisor request."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        handle = _extract_handle(await _run(socket_path, ["bash", "-c", "sleep 30"], timeout=0))
+
+        status = await _check(socket_path, handle, wait=-100)
+        await _kill(socket_path, handle, force=True)
+
+    assert status.startswith("Status: RUNNING")
+
+
+@pytest.mark.asyncio
+async def test_wait_too_large_for_a_float_is_a_request_error() -> None:
+    """A wait no float can hold is answered as an invalid request instead of dropping the connection."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        handle = _extract_handle(await _run(socket_path, ["bash", "-c", "sleep 30"], timeout=0))
+
+        status = await _check(socket_path, handle, wait=10**400)
+        await _kill(socket_path, handle, force=True)
+
+    assert status.startswith("Error: Invalid shell supervisor request")
+
+
+def test_check_wait_stays_inside_the_worker_proxy_budget() -> None:
+    """The longest wait plus the supervisor grace fits the default worker proxy timeout."""
+    assert shell_execution_module.MAX_CHECK_WAIT_SECONDS + 30 < 120

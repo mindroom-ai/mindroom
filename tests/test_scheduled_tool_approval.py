@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -56,6 +57,9 @@ from mindroom.scheduling import (
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from mindroom.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
+from mindroom.tool_dialects.codex import CODEX_DIALECT
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -73,6 +77,7 @@ if TYPE_CHECKING:
 
     from mindroom.approval_manager import ApprovalActionResult
     from mindroom.event_journal import ScheduledCallRefusal
+    from mindroom.tool_dialects.types import ToolDialect
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
@@ -2295,3 +2300,130 @@ def test_scheduler_functions_are_never_scheduled_calls() -> None:
         result = prepare_scheduled_call(agent, tool_name, '{"task_id": "abc"}')
         assert isinstance(result, str)
         assert "not one of this agent's tools" in result
+
+
+class _ShellTools(Toolkit):
+    """A shell toolkit with the canonical run_shell_command signature."""
+
+    def __init__(self) -> None:
+        super().__init__(name="shell", tools=[self.run_shell_command, self.kill_shell_command])
+
+    def run_shell_command(self, args: str, tail: int = 100, timeout: int = 120) -> str:
+        """Run a shell command.
+
+        Args:
+            args: The command to run.
+            tail: The number of lines to return.
+            timeout: Seconds to wait before backgrounding.
+
+        """
+        return f"ran {args} {tail} {timeout}"
+
+    def kill_shell_command(self, handle: str, force: bool = False) -> str:
+        """Stop a background command.
+
+        Args:
+            handle: The handle of the command.
+            force: Send SIGKILL instead of SIGTERM.
+
+        """
+        return f"killed {handle} {force}"
+
+
+@pytest.mark.parametrize(
+    ("dialect", "tool_name", "arguments"),
+    [(CLAUDE_DIALECT, "Bash", {"command": "./backup.sh"}), (CODEX_DIALECT, "exec_command", {"cmd": "./backup.sh"})],
+    ids=["claude", "codex"],
+)
+def test_harness_named_calls_schedule_as_canonical_calls(
+    dialect: ToolDialect,
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    """A model schedules a call under the tool name and shape it was shown, and the canonical call is stored."""
+    toolkit = _ShellTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = "shell"
+    model = OpenAIChat()
+    install_tool_dialect(model, dialect)
+    agent = Agent(id="general", model=model, tools=[toolkit])
+
+    result = prepare_scheduled_call(agent, tool_name, json.dumps(arguments))
+
+    assert not isinstance(result, str), result
+    live, stored = result
+    assert live.function.name == "run_shell_command"
+    assert stored["args"] == "./backup.sh"
+
+
+@pytest.mark.parametrize("arguments", [{"session_id": "shell:1"}, {"handle": "shell:1"}], ids=["wire", "canonical"])
+def test_kill_shared_by_name_schedules_in_either_shape(arguments: dict[str, object]) -> None:
+    """Codex's kill_shell_command shares its canonical name, so a canonical caller such as the agent CLI can schedule it."""
+    toolkit = _ShellTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = "shell"
+    model = OpenAIChat()
+    install_tool_dialect(model, CODEX_DIALECT)
+    agent = Agent(id="general", model=model, tools=[toolkit])
+
+    result = prepare_scheduled_call(agent, "kill_shell_command", json.dumps(arguments))
+
+    assert not isinstance(result, str), result
+    live, stored = result
+    assert live.function.name == "kill_shell_command"
+    assert stored["handle"] == "shell:1"
+
+
+def test_harness_named_call_with_a_repeated_argument_is_refused() -> None:
+    """A repeated key in a harness-named call is refused as JSON, not resolved to its last value."""
+    toolkit = _ShellTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = "shell"
+    model = OpenAIChat()
+    install_tool_dialect(model, CODEX_DIALECT)
+    agent = Agent(id="general", model=model, tools=[toolkit])
+
+    result = prepare_scheduled_call(agent, "exec_command", '{"cmd": "./backup.sh", "cmd": "./wipe.sh"}')
+
+    assert isinstance(result, str)
+    assert "duplicate key" in result
+
+
+@pytest.mark.asyncio
+async def test_scheduling_a_harness_named_call_binds_the_canonical_call() -> None:
+    """A Claude model schedules Bash, and approval, the stored binding, and its trigger all use run_shell_command."""
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            tool_approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+            ),
+        ),
+    )
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+    toolkit = _ShellTools()
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = "shell"
+    model = OpenAIChat()
+    install_tool_dialect(model, CLAUDE_DIALECT)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling._start_new_scheduled_task"),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        result = await SchedulerTools().schedule_tool_call(
+            tool_name="Bash",
+            arguments_json='{"command": "./backup.sh"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Nightly backup",
+            agent=Agent(id="general", model=model, tools=[toolkit]),
+        )
+
+    [(_status, record)] = _persisted_workflows(context)
+    [binding] = request.await_args.args
+    assert "approve" in result.lower()
+    assert binding.tool_name == "run_shell_command"
+    assert "`run_shell_command`" in record.workflow.message

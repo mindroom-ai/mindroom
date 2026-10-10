@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -30,6 +31,8 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.translation import resolve_tool_dialect
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
@@ -694,7 +697,9 @@ async def _aexecute_ephemeral_agent_participant(
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
     agent_id = f"dynamic_workflow_{participant_id}"
     install_model_call_cap(model, entity_name=agent_id)
+    install_tool_dialect(model, resolve_tool_dialect(context.config.models.get(model_name)))
     run_config = _participant_run_config(context, toolkits_by_name)
+    toolkits_by_name = _approval_consistent_toolkits(toolkits_by_name, run_config)
     _reject_nonresumable_toolkits(toolkits_by_name, run_config)
     bridge = build_tool_hook_bridge(
         context.hook_registry,
@@ -726,6 +731,28 @@ async def _aexecute_ephemeral_agent_participant(
     return await _arun_agent(participant_context, agent, prompt)
 
 
+def _approval_consistent_toolkits(toolkits: dict[str, Toolkit], config: Config) -> dict[str, Toolkit]:
+    """Hide functions such as apply_patch that the participant's run config may gate, as agent assembly does.
+
+    The shared builder applies this rule under the agent's config; a participant runs under its own run config,
+    which can gate apply_patch alone, and would otherwise refuse the whole workflow.
+    """
+    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
+    from mindroom.agents import without_implied_exclusions  # noqa: PLC0415
+
+    consistent: dict[str, Toolkit] = {}
+    for name, toolkit in toolkits.items():
+        kept = without_implied_exclusions(
+            toolkit,
+            removed=set(),
+            may_require_approval=partial(tool_may_require_approval, config),
+            registered_tool_name=name,
+        )
+        if kept is not None:
+            consistent[name] = kept
+    return consistent
+
+
 def _reject_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) -> None:
     """Reject gated functions for embedded agents that cannot resume paused runs."""
     unavailable = sorted(
@@ -750,7 +777,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
     ensure_tool_registry_loaded(context.runtime_paths, context.config)
     _reject_unavailable_workflow_tools(tool_names)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools, set_toolkit_owner  # noqa: PLC0415
 
     execution_identity = build_execution_identity_from_runtime_context(context)
     worker_tools = resolve_runtime_worker_tools(
@@ -778,6 +805,8 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."
             raise DynamicWorkflowError(msg)
+        # The participant's tool dialect presents a function only when it knows the function's toolkit.
+        set_toolkit_owner(toolkit, tool_name)
         toolkits[tool_name] = toolkit
     return toolkits
 

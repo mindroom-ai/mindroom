@@ -283,7 +283,7 @@ class TestEditFile:
         """Rejects empty old_text instead of attempting a replacement."""
         result = tools.edit_file("hello.py", "", "replacement")
         assert "Error" in result
-        assert "non-empty" in result
+        assert "must not be empty" in result
 
 
 class TestWriteFile:
@@ -1631,9 +1631,37 @@ class TestRegistration:
         cls = coding_tools()
         assert cls is CodingTools
 
-    def test_toolkit_has_six_methods(self) -> None:
-        """Toolkit exposes exactly the 6 expected methods."""
+    def test_toolkit_has_seven_methods(self) -> None:
+        """Toolkit exposes exactly the 7 expected methods."""
         tools = CodingTools()
         func_names = {f.name for f in tools.functions.values()}
-        expected = {"read_file", "edit_file", "write_file", "grep", "find_files", "ls"}
+        expected = {"read_file", "edit_file", "write_file", "apply_patch", "grep", "find_files", "ls"}
         assert expected == func_names
+
+
+def test_edit_file_replace_all_replaces_every_match(tools: CodingTools, tmp_base: Path) -> None:
+    """replace_all rewrites every occurrence instead of demanding a unique match."""
+    (tmp_base / "dup.txt").write_text("a = 1\nb = 1\na = 1\n")
+
+    result = tools.edit_file("dup.txt", "a = 1", "a = 2", replace_all=True)
+
+    assert result.startswith("Applied 2 edits")
+    assert (tmp_base / "dup.txt").read_text() == "a = 2\nb = 1\na = 2\n"
+
+
+def test_multiple_match_error_points_to_replace_all(tools: CodingTools, tmp_base: Path) -> None:
+    """An ambiguous edit names replace_all as the way to change every match."""
+    (tmp_base / "dup.txt").write_text("x\nx\n")
+
+    assert tools.edit_file("dup.txt", "x", "y") == (
+        "Error: the text to replace matches 2 locations. "
+        "Provide more context to make the match unique, or set replace_all to replace every match."
+    )
+
+
+def test_edit_errors_do_not_name_a_dialect_specific_argument(tools: CodingTools, tmp_base: Path) -> None:
+    """Claude's Edit calls the text old_string, so edit errors describe it instead of naming old_text."""
+    (tmp_base / "a.txt").write_text("x\n")
+
+    assert tools.edit_file("a.txt", "missing", "y") == "Error: the text to replace was not found in the file."
+    assert tools.edit_file("a.txt", "", "y") == "Error: the text to replace must not be empty."

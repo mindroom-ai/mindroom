@@ -34,8 +34,10 @@ from mindroom import path_confinement, prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _AdditionalContextChunk,
+    _AgentToolAssembly,
     _apply_preload_cap,
     _load_context_files,
+    _NativeDeferredToolkit,
     _prune_toolkit_functions,
     _render_tool_execution_environment,
     _trim_chunk_tails,
@@ -82,6 +84,9 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_dialects.agno_compat_model import installed_tool_dialect
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
+from mindroom.tool_dialects.translation import resolve_tool_dialect
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1214,6 +1219,63 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
+
+
+@pytest.mark.parametrize("gate_edits", [True, False], ids=["edit-rules", "no-rules"])
+def test_patch_only_allowlist_follows_the_edit_approval_rule(tmp_path: Path, *, gate_edits: bool) -> None:
+    """An allowlist naming apply_patch without the edit tools still keeps rules written for those edit tools."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    if gate_edits:
+        config.tool_approval = ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match=name, action="require_approval") for name in ("edit_file", "write_file")],
+        )
+    config = _bind_runtime_paths(config, runtime_paths)
+    agent_runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    toolkit = build_agent_toolkit(
+        "coding",
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        agent_runtime=agent_runtime,
+        tool_config_overrides={"include_tools": ["read_file", "apply_patch"]},
+        execution_identity=None,
+    )
+
+    assert toolkit is not None
+    assert ("apply_patch" in {*toolkit.functions, *toolkit.async_functions}) is not gate_edits
+
+
+def test_shared_toolkit_builder_hides_apply_patch_when_a_file_edit_may_need_approval(tmp_path: Path) -> None:
+    """Every consumer of the shared builder, such as the MCP gateway, loses apply_patch when an edit tool is gated."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match=name, action="require_approval") for name in ("edit_file", "write_file")],
+    )
+    config = _bind_runtime_paths(config, runtime_paths)
+    agent_runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    toolkit = build_agent_toolkit(
+        "coding",
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        agent_runtime=agent_runtime,
+        execution_identity=None,
+    )
+
+    assert toolkit is not None
+    names = {*toolkit.functions, *toolkit.async_functions}
+    assert "apply_patch" not in names
+    assert {"edit_file", "write_file"} <= names
 
 
 def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_path: Path) -> None:
@@ -4131,6 +4193,84 @@ async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_func
     assert all(not isinstance(tool, Function) or tool.name != "search_knowledge_base" for tool in tools)
 
 
+@pytest.mark.parametrize("hidden_by", ["channel filter", "approval"])
+def test_create_agent_hides_apply_patch_with_hidden_file_edits(tmp_path: Path, hidden_by: str) -> None:
+    """Whatever hides edit_file and write_file from a channel also hides apply_patch, the other way to change files."""
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    if hidden_by == "approval":
+        config.tool_approval = ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match=name, action="require_approval") for name in ("edit_file", "write_file")],
+        )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+
+    agent = create_agent(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        supports_native_tool_approval=False,
+        tool_function_filter=(lambda function: function.name not in {"edit_file", "write_file"})
+        if hidden_by == "channel filter"
+        else None,
+    )
+
+    names = {
+        name
+        for toolkit in agent.tools or []
+        if isinstance(toolkit, Toolkit)
+        for name in (*toolkit.functions, *toolkit.async_functions)
+    }
+    assert "read_file" in names
+    assert not names & {"apply_patch", "edit_file", "write_file"}
+
+
+@pytest.mark.parametrize(
+    ("default", "rules", "expected"),
+    [
+        ("auto_approve", {}, {"apply_patch", "edit_file", "write_file"}),
+        ("auto_approve", {"write_file": "require_approval"}, {"edit_file", "write_file"}),
+        ("auto_approve", {"apply_patch": "require_approval"}, {"edit_file", "write_file"}),
+        (
+            "auto_approve",
+            {"edit_file": "require_approval", "write_file": "require_approval", "apply_patch": "require_approval"},
+            {"edit_file", "write_file"},
+        ),
+        ("require_approval", {"edit_file": "auto_approve", "write_file": "auto_approve"}, {"edit_file", "write_file"}),
+    ],
+    ids=["ungated", "write-gated", "patch-gated", "all-gated", "allowlist-of-edits"],
+)
+def test_apply_patch_shows_only_when_no_file_edit_needs_approval(
+    tmp_path: Path,
+    default: str,
+    rules: dict[str, str],
+    expected: set[str],
+) -> None:
+    """Any approval on file edits keeps apply_patch away, so models edit with the gated edit_file and write_file."""
+    config = _test_config()
+    config.agents["general"].tools = ["coding"]
+    config.tool_approval = ToolApprovalConfig.model_validate(
+        {"default": default, "rules": [{"match": name, "action": action} for name, action in rules.items()]},
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+
+    agent = create_agent("general", config, runtime_paths, execution_identity=None, supports_native_tool_approval=True)
+
+    functions = {
+        name: function
+        for toolkit in agent.tools or []
+        if isinstance(toolkit, Toolkit)
+        for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
+    }
+    assert set(functions) & {"apply_patch", "edit_file", "write_file"} == expected
+    assert all(
+        (functions[name].requires_confirmation is True) == (rules.get(name, default) == "require_approval")
+        for name in expected
+    )
+
+
 def _config_with_workspace_skill(tmp_path: Path) -> Config:
     config = _test_config()
     config.agents["general"].knowledge_bases = ["docs"]
@@ -5542,3 +5682,46 @@ def test_create_agent_passes_resolved_tool_call_budget_to_agno() -> None:
         ((capped.model,), {"entity_name": "calculator"}),
         ((inheriting.model,), {"entity_name": "general"}),
     ]
+
+
+@patch("mindroom.agent_storage._ConversationSqliteDb")
+def test_create_agent_installs_tool_dialect_for_runtime_model(mock_storage: MagicMock) -> None:  # noqa: ARG001
+    """Each built agent presents its tools in the dialect of the model it runs, including a thread override."""
+    config = _test_config()
+
+    default_agent = _create_agent_for_test("shell", config)
+    override_agent = _create_agent_for_test("shell", config, active_model_name="sonnet")
+
+    assert installed_tool_dialect(default_agent.model) == resolve_tool_dialect(config.models["default"])
+    assert installed_tool_dialect(override_agent.model) == resolve_tool_dialect(config.models["sonnet"])
+    assert installed_tool_dialect(override_agent.model) == CLAUDE_DIALECT
+
+
+def test_deferred_wire_names_follow_the_collision_fallback() -> None:
+    """A deferred function whose wire name another tool takes is deferred under the canonical name it keeps."""
+
+    def run_shell_command() -> str:
+        return ""
+
+    def exec_command() -> str:
+        return ""
+
+    shell = Toolkit(name="shell", tools=[run_shell_command])
+    mcp = Toolkit(name="mcp_exec", tools=[exec_command])
+    assembly = _AgentToolAssembly(
+        tools=[shell, mcp],
+        loaded_tools=("shell", "mcp_exec"),
+        hidden_toolkits=frozenset(),
+        selected_dynamic_tools=(),
+        deferred_toolkits=(_NativeDeferredToolkit(domain_name="shell", toolkit=shell),),
+        local_tool_names=(),
+        worker_routed_tool_names=(),
+        cli_deferred=(),
+        tool_hook_bridge=None,
+    )
+
+    codex = resolve_tool_dialect(ModelConfig(provider="openai", id="gpt-6-astra", tool_dialect="codex"))
+    assert assembly.deferred_wire_tool_names(codex) == {"run_shell_command"}
+    assert assembly.deferred_wire_tool_names(resolve_tool_dialect(None)) == {"run_shell_command"}
+    without_collision = replace(assembly, tools=[shell], loaded_tools=("shell",))
+    assert without_collision.deferred_wire_tool_names(codex) == {"exec_command"}

@@ -21,6 +21,7 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent,
 )
 
+from mindroom.agno_compat_openai_custom_tools import record_streamed_custom_tool_call
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.usage_storage import has_token_usage
 
@@ -435,6 +436,7 @@ class OpenAIResponsesProviderCompat:
             self._record_completed_responses_output(model_response, items)
             response_items = {}
         if isinstance(stream_event, ResponseOutputItemDoneEvent):
+            record_streamed_custom_tool_call(model_response, assistant_message, stream_event.item)
             self._record_provider_only_responses_items(model_response, [stream_event.item])
             if self._should_buffer_responses_output():
                 response_items[stream_event.output_index] = stream_event.item.model_dump(mode="json", exclude_none=True)

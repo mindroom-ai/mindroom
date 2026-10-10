@@ -74,6 +74,15 @@ agents:
 
 Here `file_generation` saves into `exports` and `visualization` into `charts`, both inside the agent workspace.
 
+### Tool names per model family
+
+A model can see `shell` and `coding` under the names and arguments of the coding agent it was trained in, chosen by the model's [`tool_dialect`](../configuration/models.md#tool-dialect).
+Claude models, which use the `claude` dialect by default, see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
+Models set to `tool_dialect: codex` see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
+When tool filters leave `apply_patch` out of `coding`, or approval can apply to any file edit, these models see `edit_file` and `write_file` instead.
+`exec_command` moves a command to the background after 10 seconds unless the model asks to wait longer (at most 30), and the model then polls it with `write_stdin`.
+Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees, so a hook that guards `edit_file` and `write_file` should also handle `apply_patch`.
+
 ## [`file`]
 
 `file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
@@ -129,10 +138,12 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `run_shell_command()` accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
+Models in the `claude` or `codex` dialect, which call it as `Bash` or `exec_command`, get the whole output up to that 50 KiB cap instead of the last 100 lines.
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
+`workdir` runs the command in a directory relative to the workspace instead of the workspace itself.
 A command that exceeds `timeout` keeps running in the background, and the tool returns a `shell:...` handle.
-Poll it with `check_shell_command(handle)` and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
+Poll it with `check_shell_command(handle)`, passing `wait` to wait up to that many seconds (at most 60) for it to finish, and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
 A backgrounded command with `mindroom_output_path` saves its output when it finishes, and `check_shell_command()` then returns the file receipt.
 Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
 Records of finished commands are cleared about 10 minutes after they finish.
@@ -218,11 +229,13 @@ pip_install_package("rich")
 
 ## [`coding`]
 
-`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`.
+`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, plus `apply_patch()` for models in the `codex` dialect.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
-`edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`.
+`edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`, or pass `replace_all=True` to replace every match.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
-Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) like [`file`](#file), and `write_file()` and `edit_file()` refuse paths inside a `.git` directory.
+`apply_patch()` checks every file a patch touches before writing any of them, so a patch that does not apply changes nothing.
+Excluding `edit_file` or `write_file` with `exclude_tools` also excludes `apply_patch()`, so excluding both leaves `coding` unable to change files, while an `include_tools` list that names `apply_patch` keeps it without the edit tools when no approval can apply to file edits.
+Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) like [`file`](#file), and `write_file()`, `edit_file()`, and `apply_patch()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
 
 ### Example

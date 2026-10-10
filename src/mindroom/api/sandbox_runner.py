@@ -52,7 +52,7 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS
+from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS, MAX_CHECK_WAIT_SECONDS
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -1365,14 +1365,18 @@ def _execute_request_forkserver(
 
 
 def _shell_run_timeout_seconds(prepared: PreparedSandboxRunnerExecuteRequest) -> float:
-    """Return the foreground wait requested by one run_shell_command call."""
-    if prepared.function_name != "run_shell_command":
+    """Return the foreground wait one run_shell_command call or check_shell_command poll may spend."""
+    if prepared.function_name == "run_shell_command":
+        raw_timeout, default = prepared.kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS), DEFAULT_RUN_TIMEOUT_SECONDS
+        cap = float("inf")
+    elif prepared.function_name == "check_shell_command":
+        raw_timeout, default, cap = prepared.kwargs.get("wait", 0), 0, MAX_CHECK_WAIT_SECONDS
+    else:
         return 0.0
-    raw_timeout = prepared.kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS)
     try:
-        return max(0.0, float(raw_timeout))
-    except (TypeError, ValueError):
-        return float(DEFAULT_RUN_TIMEOUT_SECONDS)
+        return min(max(0.0, float(raw_timeout)), cap)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
 
 
 def _shell_subprocess_dispatch_context(

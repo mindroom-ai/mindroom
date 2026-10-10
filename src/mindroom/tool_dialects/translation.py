@@ -1,0 +1,355 @@
+"""Translate MindRoom's canonical tools to and from the tool interface each model family was trained on.
+
+Inside MindRoom every tool call is canonical: approvals, hooks, worker routing, and stored history use
+canonical names and arguments.
+A dialect exists only on the provider wire, so the same history renders correctly for whichever
+model a thread runs next.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from functools import cache
+from typing import TYPE_CHECKING, Any
+
+from agno.tools.function import Function
+
+from mindroom.config.main import Config
+from mindroom.logging_config import get_logger
+from mindroom.model_loading import canonical_provider
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
+from mindroom.tool_dialects.codex import CODEX_DIALECT
+from mindroom.tool_dialects.types import (
+    APPLY_PATCH,
+    FILE_EDITS,
+    DialectArgumentError,
+    DialectName,
+    ToolDialect,
+    WireFunction,
+)
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping, Sequence
+
+    from agno.models.message import Message
+
+    from mindroom.config.models import ModelConfig
+    from mindroom.tool_system.tool_access import ToolKey
+
+logger = get_logger(__name__)
+
+_CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"})
+
+# apply_patch exists for Codex models; every other dialect edits with edit_file and write_file.
+_MINDROOM_DIALECT = ToolDialect(name="mindroom", replaced={APPLY_PATCH: FILE_EDITS})
+_DIALECTS: dict[DialectName, ToolDialect] = {
+    "mindroom": _MINDROOM_DIALECT,
+    "claude": CLAUDE_DIALECT,
+    "codex": CODEX_DIALECT,
+}
+
+
+@dataclass(frozen=True)
+class _ToolCallError:
+    """A wire tool *call* that could not become a canonical call, answered with *message* instead of running."""
+
+    call: dict[str, Any]
+    name: str
+    message: str
+
+    @property
+    def call_id(self) -> str | None:
+        """Return the provider ID the error answers."""
+        return self.call.get("id")
+
+
+def _resolve_tool_dialect_name(model_config: ModelConfig) -> DialectName:
+    """Return the dialect for *model_config*; ``auto`` gives Claude models Claude Code's tools.
+
+    GPT models keep MindRoom's tools under ``auto``: measured on graded terminal tasks, the Codex dialect passed
+    no more tasks and cost more tokens, so it is selected only by ``tool_dialect: codex``.
+    """
+    if model_config.tool_dialect != "auto":
+        return model_config.tool_dialect
+    provider = canonical_provider(model_config.provider)
+    if provider == "openrouter" and model_config.id.strip().lower().startswith("anthropic/"):
+        return "claude"
+    return "claude" if provider in _CLAUDE_PROVIDERS else "mindroom"
+
+
+def resolve_tool_dialect(model_config: ModelConfig | None) -> ToolDialect:
+    """Return the dialect object for *model_config*; an unknown model keeps MindRoom's own tools."""
+    return _DIALECTS[_resolve_tool_dialect_name(model_config) if model_config is not None else "mindroom"]
+
+
+def _tool_dict_name(tool: dict[str, Any]) -> str:
+    """Return the name of one Agno-formatted or provider-built tool definition."""
+    function = tool.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name", ""))
+    return str(tool.get("name", ""))
+
+
+def _is_canonical(function: Function, key: ToolKey) -> bool:
+    """Return whether *function* is canonical *key*, including when an authored preset brought its toolkit in."""
+    return function.name == key.function and key.toolkit in Config.expand_tool_names([function.owning_toolkit or ""])
+
+
+def _wire_function_for(dialect: ToolDialect, function: Function) -> WireFunction | None:
+    return next(
+        (wire_function for wire_function in dialect.functions if _is_canonical(function, wire_function.key)),
+        None,
+    )
+
+
+def _wire_description(function: Function, wire_function: WireFunction) -> str:
+    canonical_description = function.description or ""
+    notes = [note for note in wire_function.carried_notes if note in canonical_description]
+    return "\n\n".join((wire_function.description, *notes))
+
+
+def _wire_parameters(function: Function, wire_function: WireFunction) -> dict[str, Any]:
+    """Return the wire schema plus the MindRoom-managed output-path argument the canonical schema offers."""
+    output_path = (function.parameters or {}).get("properties", {}).get(OUTPUT_PATH_ARGUMENT)
+    if output_path is None:
+        return wire_function.parameters
+    properties = {**wire_function.parameters.get("properties", {}), OUTPUT_PATH_ARGUMENT: output_path}
+    return {**wire_function.parameters, "properties": properties}
+
+
+def _wire_tool_dict(function: Function, wire_function: WireFunction, *, custom_tools: bool) -> dict[str, Any]:
+    if custom_tools and wire_function.custom_format is not None:
+        return {
+            "type": "custom",
+            "name": wire_function.wire_name,
+            "description": _wire_description(function, wire_function),
+            "format": wire_function.custom_format,
+        }
+    definition = function.to_dict()
+    # Canonical strictness describes the canonical schema, not the wire one.
+    definition.pop("strict", None)
+    definition.update(
+        name=wire_function.wire_name,
+        description=_wire_description(function, wire_function),
+        parameters=_wire_parameters(function, wire_function),
+    )
+    return {"type": "function", "function": definition}
+
+
+def presents(dialect: ToolDialect, function: Function, tools: Sequence[Function | dict[str, Any]]) -> bool:
+    """Return whether *dialect* shows *function* among *tools*: not beside a function that replaces it."""
+    replacements = next((keys for key, keys in dialect.replaced.items() if _is_canonical(function, key)), ())
+    return not any(
+        isinstance(tool, Function) and _is_canonical(tool, replacement)
+        for tool in tools
+        for replacement in replacements
+    )
+
+
+def wire_tools(
+    dialect: ToolDialect,
+    tools: Sequence[Function | dict[str, Any]],
+    *,
+    custom_tools: bool,
+) -> list[Function | dict[str, Any]]:
+    """Return *tools* with hidden functions dropped and canonical functions replaced by wire definitions.
+
+    Other functions stay ``Function`` objects so the model's own tool formatting still applies to them.
+    """
+    return [presented for _tool, presented in wire_tool_pairs(dialect, tools, custom_tools=custom_tools)]
+
+
+def wire_tool_pairs(
+    dialect: ToolDialect,
+    tools: Sequence[Function | dict[str, Any]],
+    *,
+    custom_tools: bool,
+) -> list[tuple[Function | dict[str, Any], Function | dict[str, Any]]]:
+    """Return each tool *dialect* presents paired with how it presents it, in order, leaving hidden ones out."""
+    taken = {tool.name if isinstance(tool, Function) else _tool_dict_name(tool) for tool in tools}
+    presented: list[tuple[Function | dict[str, Any], Function | dict[str, Any]]] = []
+    for tool in tools:
+        if not isinstance(tool, Function):
+            presented.append((tool, tool))
+            continue
+        if not presents(dialect, tool, tools):
+            continue
+        wire_function = _wire_function_for(dialect, tool)
+        if wire_function is not None and wire_function.wire_name != tool.name and wire_function.wire_name in taken:
+            _warn_name_collision(dialect.name, tool.name, wire_function.wire_name)
+            wire_function = None
+        presented.append(
+            (tool, tool if wire_function is None else _wire_tool_dict(tool, wire_function, custom_tools=custom_tools)),
+        )
+    return presented
+
+
+@cache
+def _warn_name_collision(dialect: DialectName, function: str, wire_name: str) -> None:
+    """Warn once per collision, however many requests present the same tools."""
+    logger.warning(
+        "Tool dialect name collides with another tool; keeping the canonical name",
+        dialect=dialect,
+        function=function,
+        wire_name=wire_name,
+    )
+
+
+def wire_function_name(
+    dialect: ToolDialect,
+    toolkit_name: str,
+    function_name: str,
+    taken: Collection[str],
+) -> str:
+    """Return the wire name of a canonical function, or its canonical name when *dialect* does not map it.
+
+    Like the presented definitions, a function whose wire name another of the *taken* names holds keeps its own.
+    """
+    registered = Config.expand_tool_names([toolkit_name])
+    wire_name = next(
+        (
+            wire_function.wire_name
+            for wire_function in dialect.functions
+            if wire_function.key.function == function_name and wire_function.key.toolkit in registered
+        ),
+        function_name,
+    )
+    return function_name if wire_name != function_name and wire_name in taken else wire_name
+
+
+def _with_output_path(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    if OUTPUT_PATH_ARGUMENT not in source:
+        return target
+    return {**target, OUTPUT_PATH_ARGUMENT: source[OUTPUT_PATH_ARGUMENT]}
+
+
+def _translate_call(call: dict[str, Any], wire_function: WireFunction) -> dict[str, Any] | _ToolCallError:
+    name = wire_function.wire_name
+    raw_arguments = call["function"].get("arguments") or "{}"
+    try:
+        arguments = json.loads(raw_arguments)
+        if not isinstance(arguments, dict):
+            msg = f"{name} arguments must be a JSON object"
+            raise DialectArgumentError(msg)
+        canonical_arguments = _with_output_path(arguments, wire_function.to_canonical(arguments))
+    except (ValueError, OverflowError) as exc:
+        # DialectArgumentError is a ValueError, like a JSON integer longer than Python converts.
+        reason = f"Invalid JSON arguments for {name}: {exc}" if isinstance(exc, json.JSONDecodeError) else str(exc)
+        return _ToolCallError(call=call, name=name, message=f"Error: {reason}")
+    return {
+        **call,
+        "function": {
+            **call["function"],
+            "name": wire_function.key.function,
+            "arguments": json.dumps(canonical_arguments, ensure_ascii=False),
+        },
+    }
+
+
+def canonical_tool_calls(
+    dialect: ToolDialect,
+    tool_calls: list[dict[str, Any]],
+    functions: Mapping[str, Function],
+) -> tuple[list[dict[str, Any]], list[_ToolCallError]]:
+    """Return *tool_calls* with wire calls made canonical, plus errors for calls that cannot translate.
+
+    A call naming a function that exists keeps its name, so a wire name demoted by a collision still
+    reaches the colliding function.
+    Untranslatable calls stay in the returned list unchanged, so history keeps every call.
+    """
+    by_wire_name = {wire_function.wire_name: wire_function for wire_function in dialect.functions}
+    translated: list[dict[str, Any]] = []
+    errors: list[_ToolCallError] = []
+    for call in tool_calls:
+        name = call.get("function", {}).get("name")
+        wire_function = by_wire_name.get(name)
+        # A name that is a real function belongs to it, unless that function is the dialect's own same-named one.
+        if wire_function is not None and name in functions and name != wire_function.key.function:
+            wire_function = None
+        function = functions.get(wire_function.key.function) if wire_function is not None else None
+        if wire_function is None or function is None or not _is_canonical(function, wire_function.key):
+            translated.append(call)
+            continue
+        result = _translate_call(call, wire_function)
+        if isinstance(result, _ToolCallError):
+            errors.append(result)
+            translated.append(call)
+        else:
+            translated.append(result)
+    return translated, errors
+
+
+def _wire_call(mapped: Mapping[str, WireFunction], call: dict[str, Any]) -> dict[str, Any]:
+    """Return a stored canonical *call* as this request presents it."""
+    function = call.get("function")
+    if not isinstance(function, dict):
+        return call
+    wire_function = mapped.get(function.get("name", ""))
+    if wire_function is None:
+        return call
+    try:
+        arguments = json.loads(function.get("arguments") or "{}")
+        if not isinstance(arguments, dict):
+            return call
+        wire_arguments = json.dumps(_with_output_path(arguments, wire_function.to_wire(arguments)), ensure_ascii=False)
+    except (ValueError, OverflowError):
+        # Stored arguments a model sent, such as an infinite timeout, may not render; the call stays as stored.
+        return call
+    return {**call, "function": {**function, "name": wire_function.wire_name, "arguments": wire_arguments}}
+
+
+def _wire_result(message: Message, wire_function: WireFunction) -> Message:
+    """Return a tool result under the wire name its call is presented with, which some providers pair by name."""
+    if message.tool_name == wire_function.wire_name:
+        return message
+    return message.model_copy(update={"tool_name": wire_function.wire_name})
+
+
+def _is_wire_definition(tool: dict[str, Any], wire_function: WireFunction) -> bool:
+    """Return whether *tool* is this dialect's own definition, which a same-named foreign tool is not."""
+    if tool.get("type") == "custom":
+        return tool.get("format") == wire_function.custom_format
+    function = tool.get("function")
+    parameters = function.get("parameters") if isinstance(function, dict) else None
+    properties = set(parameters.get("properties", {})) if isinstance(parameters, dict) else set()
+    return properties - {OUTPUT_PATH_ARGUMENT} == set(wire_function.parameters.get("properties", {}))
+
+
+def _presented_wire_functions(dialect: ToolDialect, tools: Sequence[dict[str, Any]]) -> dict[str, WireFunction]:
+    """Return the dialect functions this request presents in wire form, by canonical name.
+
+    A function counts only with the dialect's own schema, so a foreign tool sharing a wire name does not, and a
+    renamed one also not while its canonical name is presented, which means a collision kept the canonical one.
+    """
+    by_name = {_tool_dict_name(tool): tool for tool in tools}
+    mapped: dict[str, WireFunction] = {}
+    for wire_function in dialect.functions:
+        tool = by_name.get(wire_function.wire_name)
+        if tool is None or not _is_wire_definition(tool, wire_function):
+            continue
+        if wire_function.wire_name == wire_function.key.function or wire_function.key.function not in by_name:
+            mapped[wire_function.key.function] = wire_function
+    return mapped
+
+
+def wire_messages(dialect: ToolDialect, messages: list[Message], tools: Sequence[dict[str, Any]]) -> list[Message]:
+    """Return *messages* rendered for one provider request that presents the formatted *tools*.
+
+    Only functions the request presents in wire form render, translated by canonical name.
+    Messages that change are copied, so stored history stays canonical.
+    """
+    mapped = _presented_wire_functions(dialect, tools)
+    rendered: list[Message] = []
+    for message in messages:
+        if message.role == "assistant" and message.tool_calls:
+            calls = [_wire_call(mapped, call) for call in message.tool_calls]
+            rendered.append(
+                message if calls == message.tool_calls else message.model_copy(update={"tool_calls": calls}),
+            )
+        elif message.role == "tool" and (wire_function := mapped.get(message.tool_name or "")) is not None:
+            rendered.append(_wire_result(message, wire_function))
+        else:
+            rendered.append(message)
+    return rendered

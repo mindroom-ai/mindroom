@@ -22,6 +22,7 @@ from threading import RLock
 from typing import TYPE_CHECKING, TypeGuard, cast
 from weakref import ref
 
+from agno.models.base import Model
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
@@ -33,6 +34,7 @@ from agno.tools.function import Function
 from mindroom.agno_compat_prepared_tools import prepare_team_prompt_tools, temporary_tool_instructions
 from mindroom.timing import timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_dialects.agno_compat_model import installed_tool_dialect, presented_tool_pairs
 from mindroom.tool_schema_cache import cached_processed_schema
 
 if TYPE_CHECKING:
@@ -183,7 +185,10 @@ def _agent_prompt_tool_surface(agent: Agent) -> _PromptToolSurface:
             user_id=run_context.user_id,
         )
     with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.tool_schema_prepare"):
-        surface = _prompt_tool_surface_for_tools(processed_tools)
+        surface = _prompt_tool_surface_for_tools(
+            processed_tools,
+            agent.model if isinstance(agent.model, Model) else None,
+        )
     _store_tool_surface(agent, surface)
     return surface
 
@@ -232,16 +237,25 @@ def _build_prompt_tool_surface(
     )
 
 
-def _prompt_tool_surface_for_tools(tools: object) -> _PromptToolSurface:
-    """Build the prompt-only tool surface for one agent's Agno tool list."""
+def _prompt_tool_surface_for_tools(tools: object, model: Model | None = None) -> _PromptToolSurface:
+    """Build the prompt-only tool surface for one agent's Agno tool list, as *model*'s tool dialect shows it."""
     if not isinstance(tools, Sequence):
         return _build_prompt_tool_surface([], [])
 
+    candidates = [_prompt_payload_candidates(tool) for tool in tools]
+    shown = _dialect_presentation(model, [function for group in candidates for function, _ in group if function])
     payloads: list[_ToolDefinition] = []
     tool_instructions: list[str] = []
     seen_names: set[str] = set()
-    for tool in tools:
-        for function, payload in _prompt_payload_candidates(tool):
+    for tool, group in zip(tools, candidates, strict=True):
+        for function, canonical_payload in group:
+            payload = canonical_payload
+            if function is not None and shown is not None:
+                presented = shown.get(id(function))
+                if presented is None:
+                    continue
+                if not isinstance(presented, Function):
+                    payload = _presented_definition_payload(presented)
             tool_name = payload["name"]
             if not isinstance(tool_name, str) or not tool_name or tool_name in seen_names:
                 continue
@@ -253,6 +267,25 @@ def _prompt_tool_surface_for_tools(tools: object) -> _PromptToolSurface:
         if isinstance(tool, Toolkit) and tool.add_instructions and tool.instructions is not None:
             tool_instructions.append(tool.instructions)
     return _build_prompt_tool_surface(payloads, tool_instructions)
+
+
+def _dialect_presentation(model: Model | None, functions: list[Function]) -> dict[int, Function | dict] | None:
+    """Map each function a tool dialect shows to its presented definition; None without a dialect."""
+    if model is None or installed_tool_dialect(model) is None:
+        return None
+    return {id(function): presented for function, presented in presented_tool_pairs(model, functions)}
+
+
+def _presented_definition_payload(definition: dict[str, object]) -> _ToolDefinition:
+    """Return a dialect's wire definition, a function or a freeform custom tool, as a prompt-only payload."""
+    function = definition.get("function")
+    if isinstance(function, dict):
+        return _dict_tool_payload(cast("_ToolDefinition", function))
+    return {
+        "name": str(definition["name"]),
+        "description": str(definition.get("description", "")),
+        "format": deepcopy(definition.get("format")),
+    }
 
 
 def _prompt_payload_candidates(tool: object) -> list[tuple[Function | None, _ToolDefinition]]:

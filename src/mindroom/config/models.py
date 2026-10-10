@@ -686,6 +686,14 @@ class ModelConfig(BaseModel):
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )
+    tool_dialect: Literal["auto", "mindroom", "claude", "codex"] = Field(
+        default="auto",
+        description=(
+            "Names and argument shapes of the shell and file-editing tools this model sees: claude follows Claude "
+            "Code, codex follows the Codex CLI, mindroom keeps MindRoom's own; auto picks claude for Claude models "
+            "and mindroom for every other model"
+        ),
+    )
     stream_idle_timeout_seconds: float | None = Field(
         default=None,
         ge=0,

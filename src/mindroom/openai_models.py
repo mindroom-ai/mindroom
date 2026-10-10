@@ -19,6 +19,7 @@ from agno.utils.media import get_image_type
 from agno.utils.tokens import _parse_image_dimensions_from_bytes
 
 from mindroom.agno_compat_openai_chat import OpenAIChatProviderCompat as AgnoOpenAIChatProviderCompat
+from mindroom.agno_compat_openai_custom_tools import replay_custom_tool_items, tool_calls_with_custom
 from mindroom.agno_compat_openai_responses import OpenAIResponsesProviderCompat
 from mindroom.agno_compat_openai_responses_items import record_response_output, record_tool_search_items
 from mindroom.history.message_content import image_content_for_token_estimation
@@ -51,6 +52,10 @@ if TYPE_CHECKING:
     from openai import OpenAI as OpenAIClient
     from openai.types.responses import Response
     from pydantic import BaseModel
+
+
+# OpenAI's public API and the Codex backend share Responses features that compatible servers may lack.
+_OPENAI_NATIVE_ENDPOINTS = frozenset({"https://api.openai.com/v1", "https://chatgpt.com/backend-api/codex"})
 
 
 class OpenAIChatProviderCompat(AgnoOpenAIChatProviderCompat):
@@ -327,11 +332,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
             self.store is not True
             and not self.background
             and self.id.startswith(("gpt-5.3-codex", "gpt-5.4", "gpt-6"))
-            and self.native_compaction_endpoint()
-            in {
-                "https://api.openai.com/v1",
-                "https://chatgpt.com/backend-api/codex",
-            }
+            and self.reaches_openai_native_api()
             and not any(
                 any(key in params for key in ("context_management", "previous_response_id", "background", "store"))
                 for params in (
@@ -341,6 +342,10 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
                 )
             )
         )
+
+    def reaches_openai_native_api(self) -> bool:
+        """Return whether requests go to OpenAI's own Responses API or the Codex backend, not a compatible server."""
+        return self.native_compaction_endpoint() in _OPENAI_NATIVE_ENDPOINTS
 
     def native_compaction_endpoint(self) -> str:
         """Bind replay to the effective client endpoint."""
@@ -445,7 +450,11 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
         replay_model = copy(self) if explicit_replay else self
         if explicit_replay:
             replay_model.store = False
-        formatted_input = OpenAIResponses._format_messages(replay_model, messages, compress_tool_results, tools=tools)
+        formatted_input = replay_custom_tool_items(
+            OpenAIResponses._format_messages(replay_model, messages, compress_tool_results, tools=tools),
+            tools,
+            messages,
+        )
         if replay_model.store is not False:
             # Match Agno's continuation boundary before locating assistant spans.
             for index in range(len(messages) - 1, -1, -1):
@@ -469,6 +478,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderComp
     def _parse_provider_response(self, response: Response, **kwargs: object) -> ModelResponse:
         """Capture completed provider output and response storage provenance."""
         model_response = super()._parse_provider_response(response, **kwargs)
+        model_response.tool_calls = tool_calls_with_custom(model_response.tool_calls, response.output)
         model_response.provider_data = {
             **(model_response.provider_data or {}),
             "mindroom_response_stored": self.store is not False,

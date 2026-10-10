@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from inspect import isawaitable
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import nio
@@ -2475,6 +2475,172 @@ def test_ephemeral_participant_runs_within_the_default_tool_call_budget(tmp_path
     assert run_payload["status"] == "completed"
     assert agent_mock.call_args.kwargs["tool_call_limit"] == 12
     install_cap.assert_called_once_with(model, entity_name="dynamic_workflow_writer")
+
+
+def test_participant_model_presents_tools_in_its_dialect(tmp_path: Path) -> None:
+    """A participant on a Claude model sees coding as Claude Code's Read, Edit, and Write, like a configured agent."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": ["coding"]}}, "coding"],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    tool = DynamicWorkflowTools()
+    model = FakeModel(id="participant-model", provider="fake")
+    agent_mock = Mock(return_value=_fake_stream_agent(content="done"))
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "ephemeral_agent",
+                "name": "Writer",
+                "model": "claude-sonnet-5-5",
+                "tools": ["coding"],
+            },
+        ],
+    )
+    spec["permissions"] = {
+        **cast("dict[str, object]", spec["permissions"]),
+        "models": ["claude-sonnet-5-5"],
+        "tools": ["coding"],
+    }
+
+    with (
+        tool_runtime_context(context),
+        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model),
+        patch.object(dynamic_workflow_module, "Agent", agent_mock),
+    ):
+        _tool_payload(tool.create_workflow(spec))
+        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert run_payload["status"] == "completed"
+    [toolkit] = agent_mock.call_args.kwargs["tools"]
+    presented = model._format_tools(list(toolkit.get_async_functions().values()))
+    assert sorted(definition["function"]["name"] for definition in presented) == [
+        "Edit",
+        "Read",
+        "Write",
+        "find_files",
+        "grep",
+        "ls",
+    ]
+
+
+def test_participant_hides_apply_patch_when_it_may_need_approval(tmp_path: Path) -> None:
+    """A rule gating only apply_patch hides it, as for configured agents, instead of refusing the workflow."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": ["coding"]}}, "coding"],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+            tool_approval={"rules": [{"match": "apply_patch", "action": "require_approval"}]},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    tool = DynamicWorkflowTools()
+    agent_mock = Mock(return_value=_fake_stream_agent(content="done"))
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "ephemeral_agent",
+                "name": "Writer",
+                "model": "claude-sonnet-5-5",
+                "tools": ["coding"],
+            },
+        ],
+    )
+    spec["permissions"] = {
+        **cast("dict[str, object]", spec["permissions"]),
+        "models": ["claude-sonnet-5-5"],
+        "tools": ["coding"],
+    }
+
+    with (
+        tool_runtime_context(context),
+        patch.object(
+            dynamic_workflow_module.model_loading,
+            "get_model_instance",
+            return_value=FakeModel(id="participant-model", provider="fake"),
+        ),
+        patch.object(dynamic_workflow_module, "Agent", agent_mock),
+    ):
+        _tool_payload(tool.create_workflow(spec))
+        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert run_payload["status"] == "completed"
+    [toolkit] = agent_mock.call_args.kwargs["tools"]
+    assert "apply_patch" not in toolkit.get_async_functions()
+    assert "edit_file" in toolkit.get_async_functions()
+
+
+def test_participant_hides_apply_patch_its_run_config_gates(tmp_path: Path) -> None:
+    """Rules that approve each older coding function keep a workflow running when only apply_patch needs approval."""
+    context = _make_context(tmp_path)
+    approved = ("read_file", "edit_file", "write_file", "grep", "find_files", "ls")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": []}}, "coding"],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+            tool_approval={"rules": [{"match": name, "action": "auto_approve"} for name in approved]},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    tool = DynamicWorkflowTools()
+    agent_mock = Mock(return_value=_fake_stream_agent(content="done"))
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "ephemeral_agent",
+                "name": "Writer",
+                "model": "claude-sonnet-5-5",
+                "tools": ["coding"],
+            },
+        ],
+    )
+    spec["permissions"] = {
+        **cast("dict[str, object]", spec["permissions"]),
+        "models": ["claude-sonnet-5-5"],
+        "tools": ["coding"],
+    }
+
+    with (
+        tool_runtime_context(context),
+        patch.object(
+            dynamic_workflow_module.model_loading,
+            "get_model_instance",
+            return_value=FakeModel(id="participant-model", provider="fake"),
+        ),
+        patch.object(dynamic_workflow_module, "Agent", agent_mock),
+    ):
+        _tool_payload(tool.create_workflow(spec))
+        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert run_payload["status"] == "completed", run_payload
+    [toolkit] = agent_mock.call_args.kwargs["tools"]
+    assert "apply_patch" not in toolkit.get_async_functions()
+    assert set(approved) <= set(toolkit.get_async_functions())
 
 
 def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:

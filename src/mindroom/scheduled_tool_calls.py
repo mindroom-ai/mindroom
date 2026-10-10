@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agno.models.base import Model
 from agno.tools.function import Function, entrypoint_accepts_media
 from agno.tools.toolkit import Toolkit
 
@@ -31,6 +32,8 @@ from mindroom.tool_approval import (
     scheduled_call,
 )
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
+from mindroom.tool_dialects.agno_compat_model import installed_tool_dialect
+from mindroom.tool_dialects.translation import canonical_tool_calls
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
@@ -138,12 +141,41 @@ def _resolve_live_function(agent: Agent, tool_name: str, toolkit_name: str | Non
     )
 
 
+def _canonical_call(agent: Agent, tool_name: str, arguments_json: str) -> tuple[str, str] | str:
+    """Return a call named and shaped as the model's tool dialect shows it, such as Bash, in canonical form."""
+    dialect = installed_tool_dialect(agent.model) if isinstance(agent.model, Model) else None
+    if dialect is None:
+        return tool_name, arguments_json
+    # Translation re-serializes the arguments, so check the model's own JSON strictly first.
+    arguments = _parse_arguments(arguments_json)
+    if isinstance(arguments, str):
+        return arguments
+    functions = {
+        name: function
+        for tool in (agent.tools if isinstance(agent.tools, list) else ())
+        if isinstance(tool, Toolkit)
+        for name, function in tool.get_async_functions().items()
+    }
+    call = {"id": "scheduled", "type": "function", "function": {"name": tool_name, "arguments": arguments_json}}
+    [translated], errors = canonical_tool_calls(dialect, [call], functions)
+    if errors:
+        # A canonical caller, such as the agent CLI, may name a function whose wire tool shares its name.
+        if tool_name in functions:
+            return tool_name, arguments_json
+        return errors[0].message.removeprefix("Error: ")
+    return translated["function"]["name"], translated["function"]["arguments"]
+
+
 def prepare_scheduled_call(
     agent: Agent,
     tool_name: str,
     arguments_json: str,
 ) -> tuple[LiveFunction, dict[str, object]] | str:
     """Resolve the function and arguments a new scheduled call stores, or return why it cannot."""
+    canonical = _canonical_call(agent, tool_name, arguments_json)
+    if isinstance(canonical, str):
+        return _sentence(canonical)
+    tool_name, arguments_json = canonical
     live = _resolve_live_function(agent, tool_name)
     if isinstance(live, str):
         return _sentence(live)

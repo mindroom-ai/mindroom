@@ -279,7 +279,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     function.requires_confirmation = True
     catalog = await _catalog(tmp_path, [function])
     shell_toolkit = shell_tools()(runtime_paths=catalog.runtime_context.runtime_paths)
-    agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+    agents.set_toolkit_owner(shell_toolkit, "shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[function, shell_toolkit])
     catalog.run_response.agent_id = "helper"
     catalog.run_response.metadata = {"source": "original"}
@@ -417,7 +417,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     """A shell approval rule on the outer Bash recovers as an honest notice, never a replay."""
     catalog = await _catalog(tmp_path, [])
     shell_toolkit = shell_tools()(runtime_paths=catalog.runtime_context.runtime_paths)
-    agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+    agents.set_toolkit_owner(shell_toolkit, "shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[shell_toolkit])
     catalog.run_response.agent_id = "helper"
     catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
@@ -589,7 +589,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 
     toolkit = Toolkit(name="media", tools=[media])
     toolkit.functions["media"].requires_confirmation = nested in {"approval", "suspend"}
-    agents._set_toolkit_approval_origin(toolkit, "media")
+    agents.set_toolkit_owner(toolkit, "media")
     agent.add_tool(toolkit)
     name = "run_shell_command" if shell else "media"
     namespace = "shell" if shell else "media"

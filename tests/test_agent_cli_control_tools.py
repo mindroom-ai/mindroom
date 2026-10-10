@@ -556,7 +556,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
     arguments = {"agent_name": "code", "task": "work"}
     if mode in {"recover", "recover_again"}:
         shell_toolkit = shell_tools()(runtime_paths=runtime.runtime_paths)
-        agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+        agents.set_toolkit_owner(shell_toolkit, "shell")
         catalog.agent = MinimalAgent(
             id="helper",
             model=catalog.agent.model,

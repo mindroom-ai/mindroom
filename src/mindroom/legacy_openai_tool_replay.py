@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.agno_compat_openai_custom_tools import CUSTOM_TOOL_CALL
+
 if TYPE_CHECKING:
     from agno.models.message import Message
 
@@ -71,5 +73,5 @@ def repair_legacy_responses_span(message: Message, formatted_span: list[Any]) ->
     return [
         {key: value for key, value in item.items() if key != "id"}
         for item in formatted_span
-        if isinstance(item, dict) and item.get("type") == "function_call"
+        if isinstance(item, dict) and item.get("type") in {"function_call", CUSTOM_TOOL_CALL}
     ]

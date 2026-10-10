@@ -45,6 +45,7 @@ from typing import Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.shell_execution import (
+    MAX_CHECK_WAIT_SECONDS,
     ProcessRecord,
     ShellRunResult,
     check_command,
@@ -52,6 +53,7 @@ from mindroom.shell_execution import (
     kill_all_records,
     kill_command,
     run_command,
+    wait_for_command,
 )
 from mindroom.shell_output_capture import ShellOutputDestination
 
@@ -237,9 +239,14 @@ async def _handle_connection(
             if result is None:
                 return
         elif op == "check":
-            result = ShellRunResult(
-                message=check_command(registry, namespace=str(payload["namespace"]), handle=str(payload["handle"])),
+            namespace, handle = str(payload["namespace"]), str(payload["handle"])
+            await wait_for_command(
+                registry,
+                namespace=namespace,
+                handle=handle,
+                wait_seconds=float(payload.get("wait", 0)),
             )
+            result = ShellRunResult(message=check_command(registry, namespace=namespace, handle=handle))
         elif op == "kill":
             result = ShellRunResult(
                 message=kill_command(
@@ -253,7 +260,7 @@ async def _handle_connection(
             result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.")
         writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
         await writer.drain()
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OverflowError) as exc:
         with suppress(OSError):
             result = ShellRunResult(message=f"Error: Invalid shell supervisor request: {exc}")
             writer.write(json.dumps(asdict(result)).encode() + b"\n")
@@ -324,7 +331,7 @@ async def run_command_via_supervisor(
     output_destination: ShellOutputDestination | None = None,
 ) -> ShellRunResult:
     """Run one shell command and preserve its execution and output-file ownership."""
-    request = {
+    request: dict[str, object] = {
         "op": "run",
         "namespace": namespace,
         "argv": argv,
@@ -339,6 +346,26 @@ async def run_command_via_supervisor(
         request["max_runtime_seconds"] = max_runtime_seconds
     if output_destination is not None:
         request["output_destination"] = asdict(output_destination)
+    return await _async_supervisor_request(socket_path, request, response_timeout=timeout)
+
+
+async def poll_command_via_supervisor(socket_path: str, *, namespace: str, handle: str, wait: float) -> str:
+    """Poll a background handle through the supervisor, waiting up to *wait* seconds for it to finish."""
+    request: dict[str, object] = {"op": "check", "namespace": namespace, "handle": handle, "wait": wait}
+    result = await _async_supervisor_request(
+        socket_path,
+        request,
+        response_timeout=min(max(wait, 0), MAX_CHECK_WAIT_SECONDS),
+    )
+    return result.message
+
+
+async def _async_supervisor_request(
+    socket_path: str,
+    request: dict[str, object],
+    *,
+    response_timeout: float,
+) -> ShellRunResult:
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:
@@ -346,7 +373,7 @@ async def run_command_via_supervisor(
     try:
         writer.write(json.dumps(request).encode("utf-8") + b"\n")
         await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=timeout + _RUN_RESPONSE_GRACE_SECONDS)
+        line = await asyncio.wait_for(reader.readline(), timeout=response_timeout + _RUN_RESPONSE_GRACE_SECONDS)
     except TimeoutError:
         return ShellRunResult(message="Error: Shell supervisor did not respond in time.")
     except OSError as exc:

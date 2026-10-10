@@ -2288,6 +2288,7 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
+        "apply_patch",
         "edit_file",
         "find_files",
         "grep",
