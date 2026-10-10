@@ -237,6 +237,13 @@ def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None
     return instance.runtime if (instance := tool_job_instance(runtime_paths)) is not None else None
 
 
+def notify_job_stops(runtime_paths: RuntimePaths) -> None:
+    """Let the storage root's job runtime apply a recorded Stop now, instead of on its next pass."""
+    runtime = get_background_runtime(runtime_paths)
+    if runtime is not None:
+        runtime.changed.set()
+
+
 def register_background_runtime(runtime_paths: RuntimePaths, runtime: ToolJobRuntime) -> None:
     """Publish the recovered runtime of the instance pinned for its storage root; releasing the instance withdraws it."""
     instance = tool_job_instance(runtime_paths)

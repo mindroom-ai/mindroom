@@ -272,6 +272,7 @@ def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnSto
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: None,
     )
     return bot
 

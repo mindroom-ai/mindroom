@@ -703,6 +703,7 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: None,
     )
     await principal.replies.record_tool_call(
         span_id=first.span_id,
@@ -747,6 +748,7 @@ async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: None,
     )
     lost_regeneration = replace(
         first,
@@ -997,6 +999,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
     principal = journal_store.principal("agent@alice")
     cancelled: list[tuple[str, str | None]] = []
     ended: list[ApprovalEnded] = []
+    jobs_stopped: list[bool] = []
 
     class _Spans(SpanRegistry):
         def cancel(self, span_id: str, *, cancel_source: TaskCancelSource | None) -> bool:
@@ -1012,6 +1015,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         hold_conversation=lambda _continuation: None,
         approval_ended=ended.append,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: jobs_stopped.append(True),
         spans=_Spans(),
     )
     with (
@@ -1023,10 +1027,16 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         pytest.raises(RuntimeError, match="journal unavailable"),
     ):
         await runtime.run_effects(
-            (WakeApproval("approval-1"), ApprovalEnded("approval-2", "reply-2"), rl.CancelSpan("span-1", by_stop=True)),
+            (
+                WakeApproval("approval-1"),
+                ApprovalEnded("approval-2", "reply-2"),
+                replies.JobsStopped(),
+                rl.CancelSpan("span-1", by_stop=True),
+            ),
         )
     assert cancelled == [("span-1", "user_stop")]
     assert [end.approval_id for end in ended] == ["approval-2"]
+    assert jobs_stopped == [True]
 
 
 @pytest.mark.parametrize("ended_by", ["departure", "deletion"])
@@ -1065,6 +1075,7 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: None,
     )
     runtime.spans.expect(span.span_id)
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -1093,6 +1104,7 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: None,
         spans=spans,
     )
     await _delete(principal, "$source")
@@ -1316,6 +1328,7 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: None,
     )
     await runtime.take_ownership()
     stored = await alice.approval_continuation("approval-1")
@@ -1400,6 +1413,7 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         hold_conversation=lambda _continuation: None,
         approval_ended=ended.append,
         settle_debt=lambda _reply_id: None,
+        jobs_stopped=lambda: None,
     )
     committing = asyncio.Event()
     finish = PrincipalStore.finish_approval_continuation
@@ -1959,6 +1973,8 @@ async def test_a_stop_records_the_work_it_cancels_as_the_reply_was(journal_store
     )
     assert stopped.transition.reply is not None
     assert stopped.transition.reply.state is ReplyState.CANCELLED
+    # The job runtime learns of the Stop after the commit, so it cancels the work at once.
+    assert replies.JobsStopped() in stopped.post_commit
     [stop] = await journal_store.reply_job_stops()
     assert stop.principal_id == PRINCIPAL
     assert stop.sources == ("$source",)
@@ -1980,5 +1996,9 @@ async def test_a_stop_records_nothing_while_no_background_job_exists(journal_sto
     """A stopped reply starts nothing afterwards, so with no job saved there is no work to cancel."""
     principal = journal_store.principal(PRINCIPAL)
     reply = await _waiting(principal)
-    await _apply(journal_store, rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=60))
+    stopped = await _apply(
+        journal_store,
+        rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=60),
+    )
+    assert replies.JobsStopped() not in stopped.post_commit
     assert await journal_store.reply_job_stops() == ()

@@ -18,7 +18,7 @@ from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.completion import HoldKey, join_conversation_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, notify_job_stops, register_background_runtime
 from mindroom.tool_jobs.wakes import wake_event, wake_event_id
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
@@ -267,8 +267,15 @@ async def test_a_recorded_stop_reaches_its_work_before_the_job_runtime_applies_i
         await start_job(runtime, "other", tool_name="tool", depth=0, adapter={}, owner=elsewhere, operation=forever)
         assert not await runtime.stop_recorded("held")
 
+        context = _job_context(tmp_path, owner)
+        pin_background_tool_jobs(context.config, context.runtime_paths)
+        register_background_runtime(context.runtime_paths, runtime)
+        runtime.changed.clear()
         stop = rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=30)
         await principal.replies.update(reply.reply_id, lambda _current: stop)
+        # The bot tells the job runtime after the commit, so its next pass starts at once.
+        notify_job_stops(context.runtime_paths)
+        assert runtime.changed.is_set()
 
         assert await runtime.stop_recorded("held")
         assert not await runtime.stop_recorded("other")

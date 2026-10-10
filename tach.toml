@@ -4297,6 +4297,7 @@ depends_on = [
     "mindroom.tool_approval",
     "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.disabled",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -7798,6 +7799,8 @@ depends_on = [
 ]
 visibility = [
     "mindroom.approval_response",
+    # The bot lets the job runtime apply a Stop its replies recorded at once.
+    "mindroom.bot",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",

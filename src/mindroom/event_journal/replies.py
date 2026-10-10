@@ -74,8 +74,13 @@ class ReplyDebtDue:
     reply_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class JobsStopped:
+    """After commit: a Stop recorded background work to cancel, which the job runtime can apply at once."""
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted | ReplyDebtDue
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted | ReplyDebtDue | JobsStopped
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -191,19 +196,20 @@ def _run(
         case StopJobs():
             reply = transition.reply
             assert reply is not None, "a Stop of background work belongs to a reply's transition"
-            _record_job_stop(transaction, principal_id, reply)
+            if _record_job_stop(transaction, principal_id, reply):
+                post_commit.append(JobsStopped())
         case _:
             msg = f"Reply effect {effect!r} has no transactional owner yet"
             raise NotImplementedError(msg)
 
 
-def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) -> None:
+def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) -> bool:
     """Record which background work a Stop cancels, as the reply is now, so a later regeneration cannot change it.
 
     Nothing is recorded while no background job exists: a stopped reply starts none afterwards.
     """
     if transaction.fetchone("SELECT 1 AS present FROM tool_jobs LIMIT 1") is None:
-        return
+        return False
     sources = tuple(
         dict.fromkeys(
             source
@@ -228,6 +234,7 @@ def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) 
         ),
         now_ns=reply.updated_at_ns,
     )
+    return True
 
 
 def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None = None) -> bool:

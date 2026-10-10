@@ -155,6 +155,7 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .tool_jobs.disabled import event_is_parked
+from .tool_jobs.runtime import notify_job_stops
 from .tool_jobs.wakes import wake_event
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
@@ -648,6 +649,7 @@ class AgentBot:
             hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
             approval_ended=lambda ended: self._approval_ended(ended),
             settle_debt=self._settle_reply_debt_later,
+            jobs_stopped=lambda: notify_job_stops(self.runtime_paths),
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(

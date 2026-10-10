@@ -30,7 +30,7 @@ Every fact about an AI reply has one owner and one writer; other stores hold onl
 | Journal | Whether each event is pending or settled: the work queue of one Matrix identity. |
 | Agent history (Agno session runs) | The conversation the model sees, with each run's sources and the event that shows its answer; a regeneration prunes the run it replaces once it claims the reply. |
 | Outbox (`matrix_delivery_outbox`) | Transport for every Matrix write: key, room, thread, membership epoch, transaction id, frozen payload, continuation segments, edit target, attempt, device, acknowledgement, permanent failure, fence, and for a reply row its owner (`reply_id`, `span_id`, `reply_sequence`), with no reply meaning. |
-| Reply job stops (`reply_job_stops`) | A Stop's cancellation of the background work a reply started or waits for: the reply's sources, hold key, and newest message receipt order at the Stop, kept until the job runtime applied it. |
+| Reply job stops (`reply_job_stops`) | A Stop's cancellation of the background work a reply started or waits for: the reply's sources, hold key, and newest message receipt order at the Stop, kept until the job runtime applied it, which the commit prompts at once. |
 | Approval run (`approval_continuations`, calls, cards, grants) | Consent and the Agno payload: the approval id, the span whose pause created it (`span_id`), the span that claims it (`claim_span_id`), generation, calls and decisions, publication lease, `waiting`, `ready`, or `failing`, failure text, and the run snapshot. Its room, thread, event, entity, held sources, and visibility are read from that paused span and its reply, and the hold on that reply is read from it. |
 
 ## Records

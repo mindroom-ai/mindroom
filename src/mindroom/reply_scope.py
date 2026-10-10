@@ -26,6 +26,7 @@ from mindroom.event_journal.replies import (
     AppliedTransition,
     ApprovalEnded,
     Decide,
+    JobsStopped,
     ReplyCreation,
     ReplyDebtDue,
     TurnCompleted,
@@ -277,6 +278,8 @@ class ReplyRuntime:
     approval_ended: Callable[[ApprovalEnded], None]
     # Delivers what a reply another reply's transition ended owes Matrix.
     settle_debt: Callable[[str], None]
+    # Lets the job runtime apply the background work a Stop recorded now, instead of on its next pass.
+    jobs_stopped: Callable[[], None]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -307,6 +310,8 @@ class ReplyRuntime:
                     self.approval_ended(effect)
                 elif isinstance(effect, ReplyDebtDue):
                     self.settle_debt(effect.reply_id)
+                elif isinstance(effect, JobsStopped):
+                    self.jobs_stopped()
             for effect in effects:
                 if isinstance(effect, rl.CancelSpan):
                     self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
