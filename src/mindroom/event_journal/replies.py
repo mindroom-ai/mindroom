@@ -591,9 +591,6 @@ class ReplyRowRequest:
     reply_id: str
     span_id: str
     decide: Decide | None
-    # Where the row is sent: the reply's room and the thread it answers in.
-    room_id: str
-    thread_id: str | None
     # Whether the row shows only the reply's placeholder.
     placeholder_only: bool = False
     create: ReplyCreation | None = None

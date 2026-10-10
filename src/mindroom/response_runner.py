@@ -1870,7 +1870,6 @@ class ResponseRunner:
                 handle,
                 pause_decision(handle, shown, in_place=in_place, stage=None),
                 enqueue=partial(self.deps.approval_store.pause_for_approval, continuation),
-                target=target,
             )
         shown_now = await self._edit_pause_row(
             handle,

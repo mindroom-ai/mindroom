@@ -210,7 +210,7 @@ def _refused_reply_outcome(
     extra_content: dict[str, Any] | None,
 ) -> FinalDeliveryOutcome:
     """Report an answer the reply's rules refused, or whose span already ended: a Stop to apply first, or a span that no longer owns it."""
-    stopped = refused is not None and refused.transition.outcome in {ReplyOutcome.RECOMPUTE, ReplyOutcome.STOPPED}
+    stopped = refused is not None and refused.transition.outcome is ReplyOutcome.RECOMPUTE
     return FinalDeliveryOutcome(
         terminal_status="cancelled" if stopped else "error",
         event_id=request.existing_event_id,
@@ -306,14 +306,6 @@ def _shown_before(reply: rl.Reply, handle: SpanHandle | None) -> Presentation:
     if handle is not None:
         shown = replace(shown, placeholder=handle.base.placeholder, show_tool_calls=handle.base.show_tool_calls)
     return shown
-
-
-def _terminal_status_for_reply_state(state: ReplyState) -> Literal["completed", "cancelled", "error"]:
-    if state is ReplyState.COMPLETED:
-        return "completed"
-    if state is ReplyState.CANCELLED:
-        return "cancelled"
-    return "error"
 
 
 def _reply_state_for_stream_status(status: object) -> ReplyState:
@@ -1253,8 +1245,6 @@ class DeliveryGateway:
                     reply_id=write.reply_id,
                     span_id=write.span.span_id,
                     decide=write.decide,
-                    room_id=target.room_id,
-                    thread_id=target.resolved_thread_id,
                     placeholder_only=write.placeholder_only,
                     create=write.create,
                     stage=write.stage,
@@ -1362,7 +1352,7 @@ class DeliveryGateway:
         # A transition that wrote no row, such as a restore, may still leave a button or a note owed.
         await self.settle_reply_debt(handle.reply_id)
         return FinalDeliveryOutcome(
-            terminal_status=_terminal_status_for_reply_state(state),
+            terminal_status=rendered.stream_status,
             event_id=reply.event_id or delivered,
             is_visible_response=(reply.event_id or delivered) is not None,
             final_visible_body=rendered.body if delivered is not None else None,
@@ -1476,7 +1466,6 @@ class DeliveryGateway:
         decide: Decide,
         *,
         enqueue: ReplyRowEnqueuer,
-        target: MessageTarget,
     ) -> bool:
         """Pause a reply whose create already showed the pause, with the continuation; return whether it paused."""
         enqueued = await enqueue(
@@ -1484,8 +1473,6 @@ class DeliveryGateway:
                 reply_id=handle.reply_id,
                 span_id=handle.span_id,
                 decide=decide,
-                room_id=target.room_id,
-                thread_id=target.resolved_thread_id,
                 author_generation=handle.runtime.generation,
             ),
             PreparedReplyRow(payload={}),

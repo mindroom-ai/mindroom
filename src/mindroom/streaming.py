@@ -1425,17 +1425,9 @@ class StreamingResponse:
         never does.
         """
         durable_progress = {} if progress is None else {"progress": progress}
-        if is_final and self.terminal_send is not None:
-            delivered = await self.terminal_send(
-                client,
-                self.room_id,
-                content,
-                display_text,
-                retry_sync_recovery=retry_sync_recovery,
-                **durable_progress,
-            )
-        elif not is_final and self.initial_send is not None:
-            delivered = await self.initial_send(
+        send = self.terminal_send if is_final else self.initial_send
+        if send is not None:
+            delivered = await send(
                 client,
                 self.room_id,
                 content,

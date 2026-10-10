@@ -9361,10 +9361,8 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
 class TestClosingAnswersEveryWriteItWillNotRun:
     """A write is run or refused, never abandoned -- however many are in flight.
 
-    SQLite-only because the enqueue is: the PostgreSQL backend serializes on a
-    lock, whose waiters are all woken by the releases that follow it, and has
-    no queue for a producer to be stranded outside of. The rule holds on both
-    backends; only one of them can be asked this question.
+    Both backends run their writes through the same queue, so this SQLite run
+    covers the rule for both.
     """
 
     async def test_no_write_is_left_waiting_when_the_store_closes_under_load(

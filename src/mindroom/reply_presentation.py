@@ -19,11 +19,6 @@ import json
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, cast
 
-from mindroom.constants import (
-    STREAM_STATUS_CANCELLED,
-    STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
-)
 from mindroom.reply_lifecycle import NoteKind
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
@@ -116,7 +111,7 @@ class RenderedReply:
 
     body: str
     tool_trace: tuple[ToolTraceEntry, ...]
-    stream_status: str
+    stream_status: Literal["completed", "cancelled", "error"]
 
 
 def _combined(segments: Sequence[Segment], placeholder: str) -> tuple[str, tuple[ToolTraceEntry, ...]]:
@@ -152,13 +147,13 @@ def render_body(presentation: Presentation) -> tuple[str, tuple[ToolTraceEntry, 
     return (body or presentation.placeholder), trace
 
 
-def _terminal_status(state: str) -> str:
+def _terminal_status(state: str) -> Literal["completed", "cancelled", "error"]:
     if state == "completed":
-        return STREAM_STATUS_COMPLETED
+        return "completed"
     if state == "cancelled":
-        return STREAM_STATUS_CANCELLED
+        return "cancelled"
     if state == "failed":
-        return STREAM_STATUS_ERROR
+        return "error"
     msg = f"No terminal wire status for reply state {state!r}"
     raise ValueError(msg)
 

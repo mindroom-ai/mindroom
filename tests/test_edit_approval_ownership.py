@@ -198,8 +198,6 @@ class _ApprovalCase:
                     ),
                     now_ns=time.time_ns(),
                 ),
-                room_id=self.room.room_id,
-                thread_id=None,
             ),
             PreparedReplyRow(payload={"body": "Edited answer", "formatted_body": "Edited answer"}),
         )

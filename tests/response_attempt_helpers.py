@@ -24,14 +24,15 @@ class _DirectResponseOutbox:
 
     async def _admit_sources(self, request: "ReplyRowRequest") -> None:
         span = await self.principal.replies.span(request.span_id)
-        if span is not None:
+        reply = None if span is None else await self.principal.replies.load(span.reply_id)
+        if span is not None and reply is not None:
             for event_id in span.sources.pending:
                 if await self.principal.load_event(event_id) is None:
                     await self.principal.admit(
                         InboundEvent(
                             event_id=event_id,
-                            room_id=request.room_id,
-                            thread_id=request.thread_id,
+                            room_id=reply.room_id,
+                            thread_id=reply.thread_id,
                             kind=EventKind.MESSAGE,
                             event_class=EventClass.ACTIONABLE,
                             sender="@user:localhost",

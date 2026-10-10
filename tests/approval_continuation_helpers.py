@@ -153,8 +153,6 @@ async def advance_continuation(
                 in_place=False,
                 now_ns=time.time_ns(),
             ),
-            room_id=current.room_id,
-            thread_id=current.thread_id,
         ),
         PreparedReplyRow(payload={}),
     )
@@ -186,8 +184,6 @@ async def freeze_resume_final(
             reply_id=span.reply_id,
             span_id=span.span_id,
             decide=decide,
-            room_id=claimed.room_id,
-            thread_id=claimed.thread_id,
             stage=rl.WriteStage.FINAL,
         ),
         PreparedReplyRow(

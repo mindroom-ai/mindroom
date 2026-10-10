@@ -1548,34 +1548,28 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
         return _unchanged(Outcome.DUPLICATE, reply)
     live = span is not None and span.span_id == reply.current_span_id and not span.ended
     current = span if live else None
-    if reply.approval_id is not None:
-        # The span ends here, so a resume or an in-place wait starts no tool and writes no note before its cancel lands.
-        updated, spans = _end_running(reply, current, SpanOutcome.CANCELLED)
-        cancel = () if current is None else (CancelSpan(current.span_id),)
-        return Transition(
-            outcome=Outcome.APPLIED,
-            reply=_gone(updated, now_ns),
-            spans=spans,
-            effects=(FenceApproval(reply.approval_id, "cancelled_by_user"), *cancel),
-        )
-    # A regeneration a restart or retry left waiting for its replay still holds the answer it would replace.
-    waiting = span if not live and span is not None and span.outcome in _SOURCES_PENDING_OUTCOMES else None
-    regeneration = current or waiting
-    kept = None if regeneration is None else _kept_answer(reply, regeneration)
-    if regeneration is not None and kept is not None:
-        # The answer an edit was regenerating stands, as when the regeneration
-        # fails before showing anything: a finished answer is kept.
-        # The restored answer stands, but nothing answers sources the user deleted.
-        settle = SettleSources(regeneration.span_id, answered=False)
-        effects = (settle,) if regeneration is waiting else (CancelSpan(regeneration.span_id), settle)
-        return _restored(reply, regeneration, kept, now_ns, *effects)
+    if reply.approval_id is None:
+        # A regeneration a restart or retry left waiting for its replay still holds the answer it would replace.
+        waiting = span if not live and span is not None and span.outcome in _SOURCES_PENDING_OUTCOMES else None
+        regeneration = current or waiting
+        kept = None if regeneration is None else _kept_answer(reply, regeneration)
+        if regeneration is not None and kept is not None:
+            # The answer an edit was regenerating stands, as when the regeneration
+            # fails before showing anything: a finished answer is kept.
+            # The restored answer stands, but nothing answers sources the user deleted.
+            settle = SettleSources(regeneration.span_id, answered=False)
+            effects = (settle,) if regeneration is waiting else (CancelSpan(regeneration.span_id), settle)
+            return _restored(reply, regeneration, kept, now_ns, *effects)
+    # The span ends here, so a resume or an in-place wait starts no tool and writes no note before its cancel lands.
     updated, spans = _end_running(reply, current, SpanOutcome.CANCELLED)
-    effects: tuple[Effect, ...] = (
-        (SettleSources(reply.last_span_id, answered=False),)
-        if current is None
-        else (CancelSpan(current.span_id), SettleSources(current.span_id, answered=False))
+    cancel = () if current is None else (CancelSpan(current.span_id),)
+    # A running span is the reply's last; an approval's settlement settles the sources it holds.
+    ending = (
+        SettleSources(reply.last_span_id, answered=False)
+        if reply.approval_id is None
+        else FenceApproval(reply.approval_id, "cancelled_by_user")
     )
-    return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=effects)
+    return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=(*cancel, ending))
 
 
 def departed(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
