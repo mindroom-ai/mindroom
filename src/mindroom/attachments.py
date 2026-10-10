@@ -29,6 +29,7 @@ from .constants import ATTACHMENT_IDS_KEY
 from .legacy_attachments import legacy_attachment_source, open_legacy_attachment_source
 from .logging_config import get_logger
 from .matrix.media import (
+    MATRIX_MEDIA_MSGTYPES,
     AudioMessageEvent,
     FileOrVideoMessageEvent,
     ImageMessageEvent,
@@ -151,9 +152,6 @@ def _thread_history_message_in_scope(message: ResolvedVisibleMessage, thread_id:
     return thread_id in (message.thread_id, message.event_id)
 
 
-_MEDIA_MSGTYPES = frozenset({"m.audio", "m.file", "m.image", "m.video"})
-
-
 def _attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list[str]:
     """Return attachment IDs carried by one visible message.
 
@@ -165,7 +163,7 @@ def _attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list
     if attachment_ids:
         return attachment_ids
     msgtype = message.content.get("msgtype")
-    if msgtype not in _MEDIA_MSGTYPES:
+    if msgtype not in MATRIX_MEDIA_MSGTYPES:
         return []
     # Voice handling registers audio under its original event; thread history registers other media per revision.
     event_id = message.event_id if msgtype == "m.audio" else message.visible_event_id

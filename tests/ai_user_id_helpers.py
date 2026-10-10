@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -31,7 +31,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import PrincipalStore
+from mindroom.event_journal import EventJournalStore, PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, PreparedHistoryState
@@ -44,6 +44,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeReso
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
+from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_runner import (
     ResponseRequest,
@@ -61,14 +62,13 @@ from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
     make_membership_stub,
-    make_outbox_mock,
     make_relation_lookup,
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable
     from pathlib import Path
 
     from agno.knowledge.knowledge import Knowledge
@@ -77,6 +77,7 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.identity import MatrixID
     from mindroom.media_inputs import MediaInputs
+    from mindroom.reply_scope import SpanSlot
 
 
 T = TypeVar("T")
@@ -306,9 +307,6 @@ def _make_bot(
 ) -> MagicMock:
     bot = MagicMock(spec=AgentBot)
     bot.logger = MagicMock()
-    bot.stop_manager = MagicMock()
-    bot.stop_manager.add_stop_button = AsyncMock()
-    bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.agent_name = agent_name
@@ -355,6 +353,20 @@ def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNam
         hook_room_state_putter=lambda: None,
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
     )
+
+
+class _StartedReplyRuntime(ReplyRuntime):
+    """A bot instance's reply records, owned from the first span on, as a started bot owns them."""
+
+    _started: bool = False
+
+    @asynccontextmanager
+    async def span_scope(self) -> AsyncIterator[SpanSlot]:
+        if not self._started:
+            self._started = True
+            await self.start()
+        async with super().span_scope() as slot:
+            yield slot
 
 
 def _build_response_runner(
@@ -459,6 +471,10 @@ def _build_response_runner(
     response_hook_service = ResponseHookService(hook_context=hook_context)
     response_hook_service.emit_cancelled_response = AsyncMock(wraps=response_hook_service.emit_cancelled_response)
     response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
+    # One principal's records, as a bot's gateway and reply runtime share them.
+    principal = EventJournalStore.open_sqlite(storage_path / "reply_records.db").principal(
+        f"{bot.agent_name}@{bot.matrix_id.full_id}",
+    )
     delivery_gateway = DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=runtime,
@@ -468,7 +484,7 @@ def _build_response_runner(
             redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
-            outbox=make_outbox_mock(),
+            outbox=principal,
             turn_handoff=ignore_final_delivery_handoff,
         ),
     )
@@ -485,7 +501,19 @@ def _build_response_runner(
         ),
     )
     _set_gateway_method(delivery_gateway, "edit_text", AsyncMock(return_value=True))
-    _set_gateway_method(delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
+    # A reply's placeholder is its record's first row; the homeserver names it ``$thinking``.
+    bot.client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$thinking", room_id="!test:localhost"))
+    if not isinstance(bot.client.rooms, dict):
+        bot.client.rooms = {}
+    bot.client.rooms.setdefault("!test:localhost", nio.MatrixRoom("!test:localhost", "@mindroom_general:localhost"))
+    record_send_text = delivery_gateway.send_text
+
+    async def send_text(request: object) -> str | None:
+        if getattr(request, "reply_write", None) is not None:
+            return await record_send_text(request)  # type: ignore[arg-type]
+        return "$thinking"
+
+    _set_gateway_method(delivery_gateway, "send_text", AsyncMock(side_effect=send_text))
     membership = make_membership_stub()
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
@@ -515,7 +543,6 @@ def _build_response_runner(
         ResponseRunnerDeps(
             runtime=runtime,
             logger=bot.logger,
-            stop_manager=bot.stop_manager,
             runtime_paths=runtime_paths,
             storage_path=storage_path,
             agent_name=bot.agent_name,
@@ -536,8 +563,26 @@ def _build_response_runner(
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
             approval_runtime_generation="test-runtime",
             redacted_history_events=AsyncMock(return_value={}),
+            replies=_StartedReplyRuntime(
+                store=principal,
+                entity_name=bot.agent_name,
+                generation="test-runtime",
+                retry_sources=lambda _room_id, _event_ids: None,
+                complete_turn=AsyncMock(),
+                hold_conversation=lambda _continuation: None,
+                approval_ended=lambda _ended: None,
+            ),
         ),
     )
+
+
+@asynccontextmanager
+async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) -> AsyncIterator[ResponseRequest]:
+    """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
+    async with runner.deps.replies.span_scope():
+        claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
+        assert claimed is not None
+        yield claimed
 
 
 def _response_request(

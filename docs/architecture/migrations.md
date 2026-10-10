@@ -46,10 +46,9 @@ rg -n -F 'LEGACY_COMPAT:' --glob '*.py'
 | `src/mindroom/api/credentials_target.py` | A dashboard delete of a scoped tool's settings, which the primary now owns. | The worker copy an older dashboard saved is deleted along with the primary copy, through the same credential store delete. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
-| [`src/mindroom/event_journal/legacy_response_attempts.py`][legacy-response-attempts] | Backend startup finds released approval/outbox tables without `response_attempts`. | One schema transaction adopts stable source identity, preserves pending approvals and frozen wire payloads, and aborts corrupt required live ownership; a second open does not repeat adoption. |
+| [`src/mindroom/event_journal/legacy_response_attempts.py`][legacy-response-attempts] | Backend startup finds `approval_continuations` without `span_id`, before the schema statements run. | An upgrade cannot rule out a pending approval, so one schema transaction cancels every continuation: it deletes the continuation with its calls and cards and settles its sources unanswered, leaving its reply's Matrix message as it was, then drops `response_attempts`, `response_attempt_sources`, `approval_continuation_sources`, the continuation's `entity_name` column, and the emptied `approval_continuation_calls`, which the schema recreates with its `toolkit_name` and `arguments_digest` columns; a second open does not repeat the upgrade. |
 | [`src/mindroom/legacy_delivery_payloads.py`][legacy-delivery] | Outbox reads or Matrix writes encounter inline FINAL results and the bounded marker. | Old inline outcomes keep rolling-writer precedence, current local results remain authoritative otherwise, and full recovery data stays off the wire. |
-| [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | Approval claim or resume encounters missing historical context or the older card ID. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
-| [`src/mindroom/event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | Approval settlement encounters an INITIAL retired by historical deleted-response cleanup. | The helper proves exact source and response tombstones with no FINAL; current owners retain card expiration, failure fencing, retries, locking, and transactional settlement. |
+| [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | An approval card names its call only through the older `tool_call_id` field. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
 | [`src/mindroom/matrix/legacy_sync_continuity.py`][legacy-sync] | `SyncContinuityStore` loads a valid v2 or v3 record. | The helper validates the old shape, discards its checkpoint, increments revision once, and lets the store rewrite v4 under lock. |
 | [`src/mindroom/external_triggers/legacy_replay_store.py`][legacy-replay-store] | An external trigger replay call finds the shared `external_triggers/replay.json`, including one written before thread keys existed. | The helper splits the file by replay scope and supplies an empty `threads` section; `ExternalTriggerReplayStore` validates every record before writing one current file per scope, deletes the old file under its lock, and fails closed on a malformed one. |
 | [`src/mindroom/script_runs/legacy_schema.py`][script-legacy-schema] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
@@ -60,7 +59,7 @@ rg -n -F 'LEGACY_COMPAT:' --glob '*.py'
 | [`src/mindroom/legacy_streaming.py`][legacy-streaming] | Streaming replay encounters body-only `[cancelled]` or `[error]` suffixes (each preceded by one space). | Current markers stay in `streaming.py`; `execution_preparation.py` gives recognized structured status precedence and delegates body fallback to the streaming reader. |
 | [`src/mindroom/history/legacy_compaction_state.py`][legacy-compaction-state] | Opening a conversation database whose archive tables do not exist yet finds v2 state carrying `compacted_run_ids` or last-compaction audit fields, or a replayed summary. | `migrate_compaction_database` creates the archive and, in the same transaction, records one content-free legacy generation per such scope with its tombstones, plus the summary and its seen ids for the scope that owns the summary, then strips the retired keys; the legacy summary keeps replaying, `history/storage.py` prunes tombstoned runs by archive membership, and it owns legacy redaction invalidation. |
 | [`src/mindroom/legacy_revision_replay.py`][legacy-revision-replay] | Turn-record merges and redaction lookups encounter reconstructed revision provenance from pre-v2026.9.43 summaries. | Current revision facts win, storage mutation stays in `history/storage.py`, and `TurnStore.redacted_history_events` reports a redacted revision with its source only for labeled historical replay. |
-| [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, a current approval generation has executable calls without toolkit origins, or approval calls lack an argument digest column. | Journals from before Nio ownership keep their history and completed turns, while their unfinished requests, deliveries, and approvals are dropped and do not resume; the later approval upgrades keep frozen deliveries, unresumable approvals enter normal failure recovery before another card decision, and calls without a recorded argument digest never execute, except that CLI recovery of a generated `agent` function runs the arguments saved in the journal's own CLI payload. |
+| [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, or the outbox lacks reply identity and the `edit` stage. | Journals from before Nio ownership keep their history and completed turns, while their unfinished requests, deliveries, and approvals are dropped and do not resume. |
 | [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
 | [`src/mindroom/legacy_private_storage.py`][private-legacy], [`legacy_private_storage_aliases.py`][private-legacy-aliases], and [`private_storage_paths.py`][private-paths] | Startup without the `tracking/private_storage_migrated.json` receipt finds a verified private scope with the historical requester spelling. | Intent records, owner and inode checks, worker quiescence, ordered renames, and verified aliases protect recovery and current callers. Sandbox runners can write `private_instances`, so an entry there whose evidence is invalid stays untouched with a warning instead of stopping startup, including an interrupted move whose session mirror is missing or whose configured roots changed; only unexpected entries in a separate session root and checks across all pending moves, such as a missing volume, still stop startup. The receipt, written once a start finishes every verified move, keeps later starts from scanning `private_instances` again, so an entry left untouched is retried only after the operator restores what it needs and deletes `tracking/private_storage_migrated.json`. |
 | `src/mindroom/legacy_state_root_records.py` | Primary or standalone API startup without the `tracking/state_root_records_moved.json` receipt finds invited-room, pending-invite, personal-room, or conversation-mode records inside `agents/` or `private_instances/`. | Each old file is read without following links or blocking; a valid one is copied below `tracking/` at the same relative path unless a record already exists there and is then removed, anything else stays in place with a warning, and the receipt stops later starts from reading the worker-mounted locations again. An invalid old invited-room ledger is not adopted, so that entity leaves the rooms it kept on its first room pass after the upgrade. |
@@ -83,22 +82,27 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | ID | Status | Owner and reason |
 | --- | --- | --- |
 | J1 | Isolated | [`legacy_handled_turns.py`][legacy-handled] adopts pre-journal JSON once and renames it. |
-| J2 | Isolated | [`handled_turns.py`][handled] keeps current sparse fields, [`turn_store.py`][turn-store] owns Agno run recovery and redaction tombstones, [`legacy_handled_turns.py`][legacy-handled] reconstructs absent historical revision facts, and [`legacy_revision_replay.py`][legacy-revision-replay] owns their preservation and source-only summary decisions. |
+| J2 | Isolated | [`handled_turns.py`][handled] keeps current sparse fields, [`turn_store.py`][turn-store] owns redaction tombstones, [`legacy_handled_turns.py`][legacy-handled] reconstructs absent historical revision facts, and [`legacy_revision_replay.py`][legacy-revision-replay] owns their preservation and source-only summary decisions. |
 | J3 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] replaces the old additive conversion framework with the Nio ownership cutoff. |
 | J4 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old interactive tables instead of archiving or translating them. |
 | J5 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] retires the old response outbox rather than converting delivery debt. |
 | J6 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] retires all pre-cutoff delivery tables, replacing the earlier unfenced-outbox guard. |
 | J7 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old approval transport and continuations rather than converting or tombstoning them. |
 | J8 | Isolated | [`legacy_delivery_payloads.py`][legacy-delivery] owns inline FINAL results, precedence, markers, and wire sanitation. |
-| J9 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] rebuilds historical optional context; [`approval_execution.py`][approval-execution] keeps current exact execution gates. |
+| J9 | Removed/superseded | A continuation's origin and the rest of its context are always the native snapshot: the [continuation upgrade][legacy-response-attempts] cancels every approval an earlier release left, so nothing rebuilds historical optional context. |
 | J10 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] owns the old card ID alias; [`approval_manager.py`][approval-manager] keeps current authentication, retries, tombstones, and fail-closed behavior. |
 | J11 | Isolated | [`matrix/legacy_sync_continuity.py`][legacy-sync] converts valid v2/v3 join fences to current v4. |
 | J12 | Removed/superseded | [The upgrade fixture][pre-journal-test] confirms old event-cache and dispatch-obligation files have no runtime reader and remain untouched. |
 | J13 | Current behavior | [`event_journal_open.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
-| J14 | Current behavior | [`sync_restart_retry.py`][restart-retry] and [`visible_response_reconciliation.py`][visible-recovery] keep current replay and visible-response safety. |
-| J15 | Isolated | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] recognizes approvals stranded by historical INITIAL retirement; current owners retain consent, failure handling, and settlement. |
+| J14 | Current behavior | Reply claims in [`reply_lifecycle.py`][reply-lifecycle] decide replays and retried regenerations; [`visible_response_reconciliation.py`][visible-recovery] keeps visible-response safety. |
+| J15 | Removed/superseded | No approval stranded by historical INITIAL retirement survives: the [continuation upgrade][legacy-response-attempts] cancels every approval an earlier release left, and current retirement never retires an acknowledged INITIAL. |
 | J16 | Current behavior | [`turn_store.py`][turn-store] does not migrate ledger tombstones that carry no room, so one that v2026.10.30 or earlier wrote for a redaction delivered in another room still marks its event handled and blocks replies in threads that contain it until ledger retention drops it. |
 | J17 | Current behavior | [`handled_turns.py`][handled] ignores the redaction cleanup obligations that v2026.10.145 or earlier stored in turn records; responses derive history cleanup from the ledger tombstones those records still carry. |
+| J18 | Isolated | [`event_journal/legacy_schema.py`][journal-legacy-schema] gives the outbox reply identity and the `edit` stage in one table rebuild on SQLite and one constraint change on Postgres; existing rows keep no reply identity and stay ordinary deliveries. |
+| J19 | Isolated | [`event_journal/legacy_response_attempts.py`][legacy-response-attempts] cancels every approval continuation an earlier release left, with its calls and cards, settling its sources unanswered, and drops the response attempt and continuation source tables, the continuation's `entity_name` column, and the emptied call table, which the schema recreates with the call columns older releases lacked. |
+| J20 | Removed/superseded | No reply an earlier release left paused for approval is adopted: the [continuation upgrade][legacy-response-attempts] cancels its approval, and the reply gets no records. |
+| J21 | Current behavior | [`handled_turns.py`][handled] ignores the Stop, edit order, and correlation id keys earlier releases wrote on turn records, and an edit of an AI answer older than the reply records regenerates nothing. |
+| J22 | Removed/superseded | A continuation reads its tool-call visibility from the reply it paused; the [continuation upgrade][legacy-response-attempts] cancels every continuation an earlier release left, so none reads the visibility v2026.8.85 began freezing in its context. |
 
 ## Agent state, history, memory, and knowledge
 
@@ -205,12 +209,15 @@ An incompatible format is different from a locked database, permission failure, 
 Migration owners reject those failures rather than converting them into deletion.
 The OAuth credential and sync-continuity stores reject unsupported versions; other owners retain their existing version policies.
 Several sparse readers deliberately ignore unknown fields or drop malformed reconstructible records.
-Agno session databases are not reconstructible caches, because their run metadata can hold current handled-turn recovery records beside historical run blobs.
+Agno session databases are not reconstructible caches, because they hold the conversation history the models see.
 Usage discovery skips verified historical private-storage aliases because it scans their canonical directories separately, and reports any unverified symlink as incomplete coverage.
 
 Private-storage migration support can be removed only after an explicit supported upgrade floor requires an intermediate release that contains the migration.
 A fixed number of releases is not enough, because installations skip releases and restore older backups.
 Later releases must keep rejecting unsupported historical layouts and direct operators to that intermediate upgrade.
+
+Reply records adopt nothing an earlier release left.
+An upgrade runs while no reply is in flight, so streams, queued deliveries, and resumes are not adopted; it cannot rule out pending approvals, so it cancels them.
 
 Additional small compatibility branches stay with current readers.
 [`execution_preparation.py`][execution-preparation] classifies structured stream status first and uses the old `[cancelled]` and `[error]` body suffixes (each preceded by one space) owned by [`legacy_streaming.py`][legacy-streaming] only through the streaming reader fallback.
@@ -223,7 +230,6 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
 [ai-runtime]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/ai_runtime.py
 [api-oauth]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/oauth.py
-[approval-execution]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_execution.py
 [approval-manager]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_manager.py
 [attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/attachments.py
 [auto-flush]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/auto_flush.py
@@ -265,7 +271,6 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
-[legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
 [legacy-docker-worker-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_docker_worker_metadata.py
 [legacy-state-root-mounts]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_state_root_mounts.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
@@ -296,7 +301,7 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
 [legacy-replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/legacy_replay_store.py
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
-[restart-retry]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/sync_restart_retry.py
+[reply-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/reply_lifecycle.py
 [saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py

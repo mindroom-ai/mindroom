@@ -80,6 +80,7 @@ __all__ = [
     "EmptyRunDiscard",
     "ExcludedAttempt",
     "HandledAttempt",
+    "PausedAnswer",
     "PausedAttempt",
     "ResponsePausedForApproval",
     "ResponseTurnContext",
@@ -401,6 +402,16 @@ class ExcludedAttempt:
     session_id: str | None = None
     run_id: str | None = None
     metadata_content: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class PausedAnswer:
+    """The answer a paused run showed, as its reply's records keep it, which its resume continues."""
+
+    text: str = ""
+    tool_trace: tuple[ToolTraceEntry, ...] = ()
+    # A team's structured document, restored instead of re-parsing its rendered text.
+    team_state: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

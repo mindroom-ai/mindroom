@@ -88,6 +88,8 @@ class JournalCallbacks:
     on_approval_continuation: _ApprovalContinuationCallback
     source_has_live_owner: Callable[[str], bool]
     turn_has_live_claim: Callable[[str], bool]
+    # Delivers what replies left waiting to replay a settled source owe Matrix.
+    replies_ended: Callable[[tuple[str, ...]], None]
     on_rtc: _RtcCallback | None = None
 
 
@@ -116,6 +118,7 @@ class JournalDispatcher:
             handle=self._run_event,
             runtime_generation=self.runtime_generation,
             deferral_is_live=self._deferral_is_live,
+            replies_ended=self.callbacks.replies_ended,
         )
 
     def start(self) -> None:
@@ -355,7 +358,7 @@ class JournalDispatcher:
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
         self._release_sources(event_ids)
-        await self.store.settle_many(event_ids)
+        self.callbacks.replies_ended(await self.store.settle_many(event_ids))
 
     async def settle_running_event_intentionally_ignored(self) -> None:
         """Settle the current callback's event before releasing an authorization fence."""

@@ -34,6 +34,7 @@ from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     make_pending_event,
     prepared_dispatch_result,
+    record_turn_answered,
     replace_interactive_selection_handlers,
     replace_turn_controller_deps,
     unwrap_extracted_collaborator,
@@ -601,6 +602,7 @@ def _turn_controller_dispatcher(
             on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=bot._turn_store.has_live_turn_claim,
+            replies_ended=lambda _reply_ids: None,
         ),
         room_for_id=lambda _room_id: room,
     )
@@ -753,6 +755,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         on_approval_continuation=AsyncMock(return_value=None),
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
+        replies_ended=lambda _reply_ids: None,
     )
     dispatcher = JournalDispatcher(
         store=journal_store.principal("agent@lane"),
@@ -1116,6 +1119,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
         if source_event_id == "$a0":
             first_locked.set()
             await release_first_response.wait()
+        await record_turn_answered(bot, request)
         return f"{source_event_id}-response"
 
     async def fake_prepare_dispatch(
@@ -1165,19 +1169,21 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             await bot._turn_controller.handle_text_event(room, first)
             await asyncio.wait_for(first_locked.wait(), timeout=1.0)
 
-            # Matrix sync callbacks run as independent tasks; the answer's
-            # callback parks on the active turn while later ingress arrives.
+            # The answer's callback hands the selection to a runner-owned task and returns while the active turn
+            # still holds this conversation.
             answer_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, answer))
-            await asyncio.wait_for(ack_sent.wait(), timeout=1.0)
+            await asyncio.wait_for(answer_task, timeout=1.0)
             await bot._turn_controller.handle_text_event(room, other_thread)
 
             await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
             assert not release_first_response.is_set()
+            assert "$f1" not in generated
 
             release_first_response.set()
-            await asyncio.wait_for(answer_task, timeout=1.0)
             await bot._coalescing_gate.drain_all()
             await bot._response_runner.drain_inbox_responses()
+            assert ack_sent.is_set()
+            assert "$f1" in generated
     finally:
         release_first_response.set()
         if answer_task is not None and not answer_task.done():

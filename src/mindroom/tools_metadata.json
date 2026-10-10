@@ -910,6 +910,32 @@
       "dependencies": [
         "agno"
       ],
+      "description": "Move a conversation thread into another room",
+      "display_name": "Thread Move",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "move_thread"
+      ],
+      "helper_text": null,
+      "icon": "Share2",
+      "icon_color": "text-sky-500",
+      "name": "thread_move",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
       "description": "Mark conversation threads as resolved or reopen them",
       "display_name": "Thread Resolution",
       "docs_url": "https://github.com/mindroom-ai/mindroom",

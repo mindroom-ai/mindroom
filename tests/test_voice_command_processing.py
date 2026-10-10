@@ -838,12 +838,10 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     expected_record = replace(
         TurnRecord.create(
             ["$voice_event"],
-            response_event_id="$response",
             source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
         ),
         response_owner="home",
         requester_id="@alice:example.com",
-        correlation_id="$voice_event",
         history_scope=HistoryScope(kind="agent", scope_id="home"),
         conversation_target=MessageTarget(
             room_id=room.room_id,
@@ -854,11 +852,9 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         ),
     )
     turn_store.record_pending_turn.assert_called_once()
-    pending_input = turn_store.record_pending_turn.call_args.args[0]
-    assert replace(pending_input, response_event_id="$response") == expected_record
-    turn_store.record_turn.assert_called_once()
-    terminal_input = turn_store.record_turn.call_args.args[0]
-    assert replace(terminal_input, completed=True, timestamp=0.0) == expected_record
+    assert turn_store.record_pending_turn.call_args.args[0] == expected_record
+    # The reply's records record the turn answered; nothing else writes it terminal.
+    turn_store.record_turn.assert_not_called()
     persisted_record = turn_store.get_turn_record("$voice_event")
     assert persisted_record is not None
     assert persisted_record.completed is True
@@ -1832,7 +1828,6 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     assert record.response_event_id == "$response"
     assert record.response_owner == ROUTER_AGENT_NAME
     assert record.requester_id == "@alice:example.com"
-    assert record.correlation_id == "$voice_event"
     assert record.history_scope is None
     assert record.conversation_target == MessageTarget.resolve(
         room_id=room.room_id,

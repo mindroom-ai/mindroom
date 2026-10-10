@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
 import pytest_asyncio
@@ -63,9 +63,11 @@ from mindroom.event_journal import (
     reads,
     replacement_target,
     sqlite_backend,
+    turn_records,
 )
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
+from mindroom.event_journal.replies import ApprovalEnded
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
     SQLITE_DIALECT,
@@ -78,9 +80,11 @@ from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
+from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
 from tests.conftest import postgres_journal_schema_url
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, reply_shown_for_approval
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
@@ -94,6 +98,8 @@ if TYPE_CHECKING:
         TurnRecordStore,
     )
     from mindroom.event_journal.backend import Backend, Operation, Transaction
+    from mindroom.event_journal.postgres_backend import PostgresBackend
+    from mindroom.event_journal.write_queue import WriteOutcome
     from mindroom.history_recovery import RoomHistoryRecovery
 
 pytestmark = pytest.mark.asyncio
@@ -230,7 +236,7 @@ async def _release_writes_the_store_abandoned(
     for task in abandoned:
         task.cancel()
     while any(not task.done() for task in abandoned):
-        queue = backend._queue
+        queue = backend._writes._queue
         while queue is not None and not queue.empty():
             queue.get_nowait().future.cancel()
         await asyncio.sleep(0)
@@ -2114,6 +2120,69 @@ class TestLatestVisibleEvent:
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
 
 
+class TestLaterMessage:
+    """Whether someone wrote after a turn's messages, which decides whether an edit of them regenerates."""
+
+    async def _later(
+        self,
+        store: PrincipalStore,
+        *sources: str,
+        thread_id: str | None = "$root",
+        whole_room: bool = False,
+    ) -> bool:
+        return await store.later_message_exists(
+            room_id=ROOM,
+            thread_id=thread_id,
+            source_event_ids=sources,
+            excluded_senders=frozenset({BOB}),
+            whole_room=whole_room,
+        )
+
+    async def test_a_later_message_in_the_thread_counts(self, alice: PrincipalStore) -> None:
+        """A later message in the thread counts."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$asked", ts=2_000, thread_id="$root")
+        assert not await self._later(alice, "$asked")
+
+        await admit(alice, "$next", ts=3_000, thread_id="$root")
+
+        assert await self._later(alice, "$asked")
+
+    async def test_an_edit_of_the_source_does_not_count(self, alice: PrincipalStore) -> None:
+        """An edit revises the source itself, so nothing came after it."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$asked", ts=2_000, thread_id="$root")
+        await admit(alice, "$asked-edit", ts=3_000, thread_id="$root", content=edit("$asked", "revised"))
+
+        assert not await self._later(alice, "$asked")
+
+    async def test_an_excluded_sender_and_another_thread_do_not_count(self, alice: PrincipalStore) -> None:
+        """An agent's answer and messages elsewhere in the room are not a later turn of this conversation."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$asked", ts=2_000, thread_id="$root")
+        await admit(alice, "$answer", ts=3_000, thread_id="$root", sender=BOB)
+        await admit(alice, "$elsewhere", ts=4_000, thread_id="$other-root")
+        await admit(alice, "$room-message", ts=5_000)
+
+        assert not await self._later(alice, "$asked")
+
+    async def test_a_thread_root_counts_the_replies_in_its_thread(self, alice: PrincipalStore) -> None:
+        """A root is stored in the room conversation, but its turn continues in its thread."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+
+        assert await self._later(alice, "$root")
+        assert not await self._later(alice, "$root", thread_id=None)
+
+    async def test_in_room_mode_a_message_in_any_thread_counts(self, alice: PrincipalStore) -> None:
+        """When the room is one conversation, a later message sent in one of its threads is a later turn."""
+        await admit(alice, "$asked", ts=1_000)
+        await admit(alice, "$threaded", ts=2_000, thread_id="$other-root")
+
+        assert not await self._later(alice, "$asked", thread_id=None)
+        assert await self._later(alice, "$asked", thread_id=None, whole_room=True)
+
+
 class TestProjectedInteractivePrompts:
     """The Matrix-visible revision is the sole active-prompt authority."""
 
@@ -2157,6 +2226,32 @@ class TestProjectedInteractivePrompts:
         assert selection is not None
         assert (selection.question_text, selection.selected_value) == ("Choose?", "yes")
 
+    async def test_reenqueueing_an_attempted_delivery_keeps_its_frozen_row(self, alice: PrincipalStore) -> None:
+        """A retry of a delivery already offered to Matrix resolves to the row its first attempt froze."""
+        await admit(alice, "$turn", sender=BOB)
+        first = await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "first"},
+        )
+        assert first is not None
+        assert await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+
+        retried = await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "second"},
+        )
+
+        assert retried == first
+        frozen = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert frozen is not None
+        assert frozen.payload["body"] == "first"
+
     async def test_delivery_acknowledgement_projects_a_prompt_before_its_echo(
         self,
         alice: PrincipalStore,
@@ -2191,7 +2286,7 @@ class TestProjectedInteractivePrompts:
             ts=3_000,
         )
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt")
         assert await alice.claim_interactive_reaction(source_event_id="$reaction") == InteractiveSelection(
             question_event_id="$prompt",
             question_text="Choose?",
@@ -2237,7 +2332,7 @@ class TestProjectedInteractivePrompts:
         )
         await admit_room_membership(alice, ROOM, "join")
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer")
         assert await bodies(alice, thread_id="$thread") == []
         records = await journal_store.turn_records("general").load_all()
         assert records == (), "retired membership cannot publish new terminal proof"
@@ -2266,7 +2361,7 @@ class TestProjectedInteractivePrompts:
             delivered_projections=(projection("$answer", sender="alice", ts=2_000, content=content),),
         )
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer")
         assert await bodies(alice) == []
 
     async def test_delivery_marker_fences_an_old_device_echo_without_a_transaction_id(
@@ -2342,7 +2437,7 @@ class TestProjectedInteractivePrompts:
             delivered_projections=(projection("$late-echo", sender="alice", ts=2_000, content=stored.payload),),
         )
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$late-echo", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$late-echo")
         assert await bodies(alice) == []
 
     async def test_retiring_an_edit_removes_an_echo_that_won_the_race(
@@ -2487,7 +2582,7 @@ class TestProjectedInteractivePrompts:
         if not echo_before_ack:
             await admit_echo()
 
-        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt", bound=True)
+        assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$prompt")
         assert await bodies(alice, thread_id="$thread") == []
 
     async def test_interactive_source_waits_for_an_attempted_delivery_to_be_projected(
@@ -3397,7 +3492,7 @@ class TestProjectedInteractivePrompts:
 
         assert acknowledgement_waited, "acknowledgement bypassed the refetch membership claim"
         assert installed
-        assert acknowledged == DeliveryAcknowledgement(settled_event_id="$old-edit", bound=True)
+        assert acknowledged == DeliveryAcknowledgement(settled_event_id="$old-edit")
         page = await refetch_store.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         assert page.messages == ()
         assert page.refresh_pending == ()
@@ -5342,46 +5437,6 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
-    @pytest.mark.parametrize("redaction_scope", ["same", "other_room", "other_principal", "other_event"])
-    async def test_startup_recovery_skips_only_exact_redacted_response(
-        self,
-        alice: PrincipalStore,
-        journal_store: EventJournalStore,
-        redaction_scope: str,
-    ) -> None:
-        """A deleted response is terminal evidence, while unrelated deletions are not."""
-        await alice.enqueue_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.INITIAL,
-            room_id=ROOM,
-            thread_id=None,
-            payload=text("Thinking..."),
-        )
-        await alice.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
-        await alice.acknowledge_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.INITIAL,
-            event_id="$response",
-            delivered_projections=(),
-        )
-        assert len(await alice.recovery_initial_deliveries()) == 1
-
-        redaction_principal = journal_store.principal("agent@bob") if redaction_scope == "other_principal" else alice
-        await admit(
-            redaction_principal,
-            "$redaction",
-            room_id=OTHER_ROOM if redaction_scope == "other_room" else ROOM,
-            redacts="$unrelated" if redaction_scope == "other_event" else "$response",
-            kind=EventKind.REDACTION,
-        )
-
-        candidates = await alice.recovery_initial_deliveries()
-        assert len(candidates) == (0 if redaction_scope == "same" else 1)
-        # Keep the transport identity and ACK available for other lifecycle owners.
-        initial = await alice.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
-        assert initial is not None
-        assert initial.acknowledged_event_id == "$response"
-
     @pytest.mark.ledger_loads_from_disk
     async def test_changed_source_claim_rolls_back_ack_without_losing_pending_owner(
         self,
@@ -5450,7 +5505,7 @@ class TestOutbox:
             delivered_projections=(),
             terminal_turn=terminal,
         )
-        assert retry.bound
+        assert retry.settled_event_id == "$answer"
         assert retry.terminal_turn is None
         rows = await store.deps.turn_records.load_all()
         assert {index for index, _, _ in rows} == {"$a", "$source"}
@@ -5480,7 +5535,6 @@ class TestOutbox:
             response_event_id="$answer",
             completed=mutation != "projection",
             source_event_prompts={source: "original"},
-            latest_edit_receipt_order=1,
         )
         if mutation == "projection":
             await store.record_pending_turn(initial)
@@ -5632,7 +5686,6 @@ class TestOutbox:
                 [source],
                 response_event_id="$answer",
                 source_event_prompts={source: "original"},
-                latest_edit_receipt_order=1,
             ),
         )
         registered = await store.register_edit_revision(source, (20, driving))
@@ -6017,7 +6070,7 @@ class TestOutbox:
         assert [acknowledged.settled_event_id for acknowledged in reported] == [winner, winner], (
             "a caller reported an event it did not bind the row to"
         )
-        assert [acknowledged.bound for acknowledged in reported].count(True) == 1, (
+        assert [acknowledged.terminal_turn is not None for acknowledged in reported].count(True) == 1, (
             "both callers were told their own write is what bound the row"
         )
         rows = await rival_stores.first.turn_records("general").load_all()
@@ -6356,14 +6409,14 @@ class TestOutbox:
         )
         await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
 
-        acknowledged_event_id = await alice.record_permanent_matrix_delivery_failure(
+        failure = await alice.record_permanent_matrix_delivery_failure(
             delivery_id="turn-1",
             stage=DeliveryStage.FINAL,
             reason="matrix event exceeds the hard size limit",
         )
 
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-        assert acknowledged_event_id is None
+        assert failure.acknowledged_event_id is None
         assert stored is not None
         assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
         assert await alice.unacknowledged_matrix_deliveries() == ()
@@ -6513,15 +6566,16 @@ class TestApprovalContinuations:
             continuation_count=2,
             calls=tuple(replace(call, toolkit_name="shell") for call in original.calls),
         )
-        await first.create_approval_continuation(continuation)
+        await paused_for_approval(first, continuation)
         reopened = journal_database().principal("agent@alice")
         loaded = await reopened.approval_continuation("approval-1")
         assert loaded is not None
         assert loaded.continuation_count == 2
         assert loaded.state == "ready", loaded.failure_reason
-        claimed = await reopened.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        claimed = await claim_continuation(reopened, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
-        advanced = await reopened.advance_approval_continuation(
+        advanced = await advance_continuation(
+            reopened,
             "approval-1",
             claimant_generation=claimed.generation,
             run_id="run-next",
@@ -6538,16 +6592,11 @@ class TestApprovalContinuations:
     @staticmethod
     def continuation(*, state: str = "ready") -> ApprovalContinuation:
         """Return one exact paused-run owner."""
-        return ApprovalContinuation(
+        return approval_continuation(
             approval_id="approval-1",
-            run_id="run-1",
-            session_id="session-1",
-            entity_kind="agent",
             entity_name="agent",
             room_id=ROOM,
-            thread_id="$thread",
             requester_id=ALICE,
-            response_event_id="$waiting",
             sources=ResponseSources(("$source-1", "$source-2"), ("$source-1", "$source-2")),
             calls=(
                 ApprovalCall(
@@ -6563,29 +6612,6 @@ class TestApprovalContinuations:
             request_body="run it",
             state=state,
         )
-
-    async def test_missing_saved_continuation_count_defaults_to_zero(self, alice: PrincipalStore) -> None:
-        """Existing approval snapshots remain readable without a saved budget."""
-        await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-
-        def remove_count(transaction: Transaction) -> None:
-            row = transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            )
-            assert row is not None
-            context = json.loads(str(row["context_json"]))
-            context.pop("continuation_count")
-            transaction.execute(
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(context), "approval-1"),
-            )
-
-        await alice._backend.write(remove_count)
-        loaded = await alice.approval_continuation("approval-1")
-        assert loaded is not None
-        assert loaded.continuation_count == 0
 
     @staticmethod
     async def admit_sources(store: PrincipalStore) -> None:
@@ -6603,11 +6629,12 @@ class TestApprovalContinuations:
             "call_id": "call-1",
             "parent_bash_call_id": "bash-1",
         }
-        created = await alice.create_approval_continuation(replace(self.continuation(), cli_call=payload))
+        created = await paused_for_approval(alice, replace(self.continuation(), cli_call=payload))
         assert created.cli_call == payload
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="live")
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="live")
         assert claimed.cli_call == payload
-        advanced = await alice.advance_approval_continuation(
+        advanced = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=0,
             run_id="run-2",
@@ -6748,7 +6775,7 @@ class TestApprovalContinuations:
         await self.admit_sources(alice)
         continuation = self.continuation()
 
-        created = await alice.create_approval_continuation(continuation)
+        created = await paused_for_approval(alice, continuation)
 
         assert created == continuation
         assert await alice.approval_continuation_for_source("$source-1") == continuation
@@ -6765,31 +6792,16 @@ class TestApprovalContinuations:
             thread_id="$thread",
             payload=text("Waiting for approval"),
         )
-        await alice.create_approval_continuation(self.continuation(state=state))
+        await paused_for_approval(alice, self.continuation(state="ready" if state == "claimed" else state))
+        if state == "claimed":
+            assert await claim_continuation(alice, "approval-1", runtime_generation="runtime-a") is not None
         for index in (1, 2):
             await admit(alice, f"$redact-{index}", redacts=f"$source-{index}", kind=EventKind.REDACTION)
 
-        assert await alice.deleted_initial_deliveries(agent_name="agent") == ()
-        with pytest.raises(RuntimeError, match="approval"):
-            await alice.retire_deleted_initial(delivery_id="$source-1")
         assert await alice.is_pending("$source-1")
         initial = await alice.load_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.INITIAL)
         assert initial is not None
         assert not initial.retired
-
-    async def test_approval_cannot_acquire_retired_initial(self, alice: PrincipalStore) -> None:
-        """A response already retired by deletion cannot acquire a new paused run."""
-        await self.admit_sources(alice)
-        await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
-            stage=DeliveryStage.INITIAL,
-            room_id=ROOM,
-            thread_id="$thread",
-            payload=text("Waiting"),
-        )
-        await alice.retire_deleted_initial(delivery_id="$source-1")
-
-        assert await alice.create_approval_continuation(self.continuation()) is None
 
     @pytest.mark.parametrize("approval_first", [True, False])
     async def test_approval_creation_serializes_with_source_redaction(
@@ -6823,14 +6835,17 @@ class TestApprovalContinuations:
         async def redact(store: PrincipalStore) -> None:
             await admit(store, "$redact", redacts="$source-1", kind=EventKind.REDACTION)
 
+        # The response showed its reply before it pauses; only the pause races the redaction.
+        shown = await reply_shown_for_approval(principal, self.continuation())
+        assert shown is not None
         first = asyncio.create_task(
-            holding.create_approval_continuation(self.continuation()) if approval_first else redact(holding),
+            pause_shown_reply(holding, self.continuation(), shown) if approval_first else redact(holding),
         )
         try:
             await asyncio.to_thread(reached.wait, _WORKER_WAIT_SECONDS)
             assert reached.is_set()
             second = asyncio.create_task(
-                redact(racing) if approval_first else racing.create_approval_continuation(self.continuation()),
+                redact(racing) if approval_first else pause_shown_reply(racing, self.continuation(), shown),
             )
             second.add_done_callback(lambda _: racer_finished.set())
             await asyncio.to_thread(
@@ -6846,143 +6861,37 @@ class TestApprovalContinuations:
         assert (await principal.approval_continuation("approval-1") is not None) is approval_first
         assert await principal.is_pending("$source-1") is approval_first
 
-    @pytest.mark.parametrize(
-        "proof",
-        ["complete", "source_only", "partial_sources", "active_initial", "wrong_response", "owed_final", "ready"],
-    )
-    async def test_deleted_approval_failure_settles_only_proven_terminal_delivery(
-        self,
-        alice: PrincipalStore,
-        journal_store: EventJournalStore,
-        proof: str,
-    ) -> None:
-        """Recover an already-retired approval without discarding live delivery debt."""
-        await self.admit_sources(alice)
-        await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
-            stage=DeliveryStage.INITIAL,
-            room_id=ROOM,
-            thread_id="$thread",
-            payload=text("Waiting"),
-        )
-        await alice.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.INITIAL)
-        await alice.acknowledge_matrix_delivery(
-            delivery_id="$source-1",
-            stage=DeliveryStage.INITIAL,
-            event_id="$waiting",
-            delivered_projections=(),
-        )
-        await alice.create_approval_continuation(self.continuation(state="ready" if proof == "ready" else "failing"))
-        if proof == "wrong_response":
-            await journal_store.backend.write(
-                lambda tx: tx.execute(
-                    "UPDATE matrix_delivery_outbox SET acknowledged_event_id = '$different' WHERE stage = 'initial'",
-                ),
-            )
-        if proof == "owed_final":
-            await alice.enqueue_matrix_delivery(
-                delivery_id="$source-1",
-                stage=DeliveryStage.FINAL,
-                room_id=ROOM,
-                thread_id="$thread",
-                payload=text("Frozen final"),
-            )
-        if proof != "active_initial":
-            # Reproduce persisted state created before approval-aware cleanup.
-            await journal_store.backend.write(
-                lambda tx: tx.execute(
-                    "UPDATE matrix_delivery_outbox SET retired = 1 WHERE delivery_id = ? AND stage = 'initial'",
-                    ("$source-1",),
-                ),
-            )
-        deleted = ["$source-1"]
-        if proof != "partial_sources":
-            deleted.append("$source-2")
-        if proof != "source_only":
-            deleted.append("$waiting")
-        for index, event_id in enumerate(deleted):
-            await admit(alice, f"$redact-{index}", redacts=event_id, kind=EventKind.REDACTION)
-
-        finished = await alice.finish_approval_continuation("approval-1")
-
-        assert finished is (proof == "complete")
-        assert await alice.is_pending("$source-1") is not finished
-        assert (await alice.approval_continuation("approval-1") is None) is finished
-
-    async def test_continuation_round_trips_committed_presentation_and_visibility(
+    async def test_continuation_round_trips_frozen_visibility_without_its_presentation(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A restart restores the exact pause presentation without consulting current config."""
+        """A restart restores frozen visibility without current config; the reply's records keep what it showed."""
         await self.admit_sources(alice)
-        continuation = replace(
-            self.continuation(),
-            response_text="Before.\n\n🔧 `inspect` [1] ⏳",
-            response_tool_trace=(
-                {
-                    "type": "tool_call_started",
-                    "tool_name": "inspect",
-                    "tool_call_id": "call-1",
-                },
-            ),
-            response_presentation_state={"kind": "team", "members": {"GeneralAgent": "Before."}},
-            show_tool_calls=False,
-        )
+        continuation = replace(self.continuation(), show_tool_calls=False)
 
-        await alice.create_approval_continuation(continuation)
+        await paused_for_approval(alice, continuation)
         restored = await alice.approval_continuation("approval-1")
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
 
         assert restored == continuation
         assert restored is not None
-        assert restored.response_presentation_state == {
-            "kind": "team",
-            "members": {"GeneralAgent": "Before."},
-        }
         assert restored.show_tool_calls is False
-
-    @pytest.mark.parametrize("current_policy", [False, True])
-    async def test_claim_freezes_current_visibility_for_a_legacy_continuation(
-        self,
-        alice: PrincipalStore,
-        current_policy: bool,
-    ) -> None:
-        """A pre-visibility row adopts policy once instead of defaulting visible forever."""
-        await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-
-        def remove_visibility(transaction: object) -> None:
-            row = transaction.fetchone(  # type: ignore[attr-defined]
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            )
-            context = json.loads(str(row["context_json"]))
-            context.pop("show_tool_calls")
-            transaction.execute(  # type: ignore[attr-defined]
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(context), "approval-1"),
-            )
-
-        await alice._backend.write(remove_visibility)
-
-        claimed = await alice.claim_approval_continuation(
-            "approval-1",
-            runtime_generation="runtime-a",
-            legacy_show_tool_calls=current_policy,
-        )
-        restored = await alice.approval_continuation("approval-1")
-
-        assert claimed is not None
-        assert claimed.show_tool_calls is current_policy
-        assert restored is not None
-        assert restored.show_tool_calls is current_policy
+        assert row is not None
+        stored = json.loads(str(row["context_json"]))
+        assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
         """Only one response lifecycle may continue the exact persisted Agno run."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
+        await paused_for_approval(alice, self.continuation())
 
-        winner = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
-        loser = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b")
+        winner = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
+        loser = await claim_continuation(alice, "approval-1", runtime_generation="runtime-b")
 
         assert winner is not None
         assert winner.state == "claimed"
@@ -6998,7 +6907,7 @@ class TestApprovalContinuations:
         """Waiting and live claims stay hidden while ready and old claims re-enter once."""
         await self.admit_sources(alice)
         waiting = self.continuation(state="waiting")
-        await alice.create_approval_continuation(waiting)
+        await paused_for_approval(alice, waiting)
 
         assert list(await alice.pending(room_id=room_id, runtime_generation="runtime-a")) == []
 
@@ -7013,7 +6922,8 @@ class TestApprovalContinuations:
     async def test_pending_card_page_exposes_unreadable_durable_debt(self, alice: PrincipalStore) -> None:
         """A corrupt card stays visible to recovery accounting without becoming actionable."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
@@ -7056,7 +6966,8 @@ class TestApprovalContinuations:
     ) -> None:
         """A crash before every card is durable cannot hide the paused source forever."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
 
@@ -7067,8 +6978,8 @@ class TestApprovalContinuations:
     async def test_current_claim_is_hidden_and_old_runtime_claim_is_recoverable(self, alice: PrincipalStore) -> None:
         """A restart recovers delivery debt without replaying the coalesced source twice."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(alice, self.continuation())
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
 
         assert list(await alice.pending(runtime_generation="runtime-a")) == []
         recovered = await alice.pending(runtime_generation="runtime-b")
@@ -7077,8 +6988,8 @@ class TestApprovalContinuations:
     async def test_current_claim_with_final_delivery_debt_is_recoverable(self, alice: PrincipalStore) -> None:
         """A transient FINAL failure re-enters only to reconcile its frozen outbox payload."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(alice, self.continuation())
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         await alice.enqueue_matrix_delivery(
             delivery_id="$source-1",
             stage=DeliveryStage.FINAL,
@@ -7097,8 +7008,8 @@ class TestApprovalContinuations:
     ) -> None:
         """A stale lifecycle cannot replace a newer chained approval pause."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(alice, self.continuation())
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         calls = (
             ApprovalCall(
                 tool_call_id="call-2",
@@ -7108,28 +7019,21 @@ class TestApprovalContinuations:
             ),
         )
 
-        stale = await alice.advance_approval_continuation(
+        stale = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=1,
             run_id="run-2",
             session_id="session-1",
             calls=calls,
         )
-        advanced = await alice.advance_approval_continuation(
+        advanced = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=0,
             run_id="run-2",
             session_id="session-1",
             calls=calls,
-            response_text="Before.\n\n🔧 `write_file` [2] ⏳",
-            response_tool_trace=(
-                {
-                    "type": "tool_call_started",
-                    "tool_name": "write_file",
-                    "tool_call_id": "call-2",
-                },
-            ),
-            response_presentation_state={"kind": "team", "consensus": "Before."},
         )
 
         assert stale is None
@@ -7139,9 +7043,6 @@ class TestApprovalContinuations:
         assert advanced.run_id == "run-2"
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
-        assert advanced.response_text.endswith("🔧 `write_file` [2] ⏳")
-        assert advanced.response_tool_trace[-1]["tool_call_id"] == "call-2"
-        assert advanced.response_presentation_state == {"kind": "team", "consensus": "Before."}
 
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
         self,
@@ -7149,8 +7050,8 @@ class TestApprovalContinuations:
     ) -> None:
         """A restart cannot execute a chained generation before its presentation is acknowledged."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(alice, self.continuation())
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         calls = (
             ApprovalCall(
@@ -7162,7 +7063,8 @@ class TestApprovalContinuations:
             ),
         )
 
-        publishing = await alice.advance_approval_continuation(
+        publishing = await advance_continuation(
+            alice,
             "approval-1",
             claimant_generation=claimed.generation,
             run_id="run-2",
@@ -7173,7 +7075,7 @@ class TestApprovalContinuations:
         assert publishing is not None
         assert publishing.state == "waiting"
         assert publishing.runtime_generation == "runtime-a"
-        assert await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b") is None
+        assert await claim_continuation(alice, "approval-1", runtime_generation="runtime-b") is None
 
         activated = await alice.activate_approval_continuation(
             "approval-1",
@@ -7202,7 +7104,7 @@ class TestApprovalContinuations:
             calls=(*self.continuation(state="waiting").calls, second_call),
             runtime_generation="runtime-a",
         )
-        await responder.create_approval_continuation(publishing)
+        await paused_for_approval(responder, publishing)
 
         reserved = await router.reserve_approval_card_deliveries(
             continuation_principal_id="agent@alice",
@@ -7266,7 +7168,7 @@ class TestApprovalContinuations:
             self.continuation(state="waiting"),
             runtime_generation="runtime-a",
         )
-        await responder.create_approval_continuation(publishing)
+        await paused_for_approval(responder, publishing)
 
         reserved = await router.reserve_approval_card_deliveries(
             continuation_principal_id="agent@alice",
@@ -7316,7 +7218,7 @@ class TestApprovalContinuations:
         router = journal_store.principal("router@shared")
         await self.admit_sources(responder)
         publishing = replace(self.continuation(state="waiting"), runtime_generation="runtime-a")
-        await responder.create_approval_continuation(publishing)
+        await paused_for_approval(responder, publishing)
 
         with pytest.raises(ValueError, match="changed exact-call identity"):
             await router.reserve_approval_card_deliveries(
@@ -7358,7 +7260,8 @@ class TestApprovalContinuations:
         responder = journal_store.principal("agent@alice")
         router = journal_store.principal("router@shared")
         await self.admit_sources(responder)
-        await responder.create_approval_continuation(
+        await paused_for_approval(
+            responder,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await admit_room_membership(router, ROOM, "leave", source=DepartureSource.REPORTED)
@@ -7403,7 +7306,8 @@ class TestApprovalContinuations:
         principal_id = "agent@alice"
         responder = rival_stores.first.principal(principal_id)
         await self.admit_sources(responder)
-        await responder.create_approval_continuation(
+        await paused_for_approval(
+            responder,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         reservation_read = threading.Event()
@@ -7489,7 +7393,8 @@ class TestApprovalContinuations:
         responder = rival_stores.first.principal(principal_id)
         router = rival_stores.first.principal("router@shared")
         await self.admit_sources(responder)
-        await responder.create_approval_continuation(
+        await paused_for_approval(
+            responder,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
@@ -7505,9 +7410,7 @@ class TestApprovalContinuations:
             backend=_PausingBackend(
                 rival_stores.first.backend,
                 pause_after_continuation_read,
-                statement_matches=lambda sql: (
-                    "SELECT principal_id, entity_name, state, generation, failure_reason" in sql
-                ),
+                statement_matches=lambda sql: "SELECT principal_id, state, generation, failure_reason" in sql,
             ),
         ).principal("router@shared")
         decision = asyncio.create_task(
@@ -7561,7 +7464,8 @@ class TestApprovalContinuations:
         router = rival_stores.first.principal("router@shared")
         await admit_room_membership(responder, ROOM, "join")
         await self.admit_sources(responder)
-        await responder.create_approval_continuation(
+        await paused_for_approval(
+            responder,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
@@ -7628,7 +7532,7 @@ class TestApprovalContinuations:
     async def test_failure_request_is_guarded_by_observed_state(self, alice: PrincipalStore) -> None:
         """A stale failure observer cannot fence work that already made progress."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
+        await paused_for_approval(alice, self.continuation())
 
         stale = await alice.request_approval_failure(
             "approval-1",
@@ -7652,8 +7556,8 @@ class TestApprovalContinuations:
     ) -> None:
         """The successful FINAL debt atomically outranks a concurrent failure request."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(alice, self.continuation())
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         await alice.enqueue_matrix_delivery(
             delivery_id="$source-1",
@@ -7679,8 +7583,8 @@ class TestApprovalContinuations:
     async def test_permanently_failed_final_can_settle_approval_ownership(self, alice: PrincipalStore) -> None:
         """A definitive Matrix refusal is terminal for its paused-run owner too."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(alice, self.continuation())
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         await alice.enqueue_matrix_delivery(
             delivery_id="$source-1",
@@ -7706,7 +7610,7 @@ class TestApprovalContinuations:
 
         assert failing is not None
         assert failing.state == "failing"
-        assert await alice.finish_approval_continuation("approval-1")
+        assert await alice.finish_approval_continuation("approval-1") is not None
         assert await alice.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
@@ -7714,7 +7618,8 @@ class TestApprovalContinuations:
     async def test_card_decision_atomically_readies_the_exact_call(self, alice: PrincipalStore) -> None:
         """The card and final call decision become durable in one transaction."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
@@ -7781,7 +7686,8 @@ class TestApprovalContinuations:
     ) -> None:
         """The tombstone replaces completed approval-domain and transport ownership."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
@@ -7841,7 +7747,7 @@ class TestApprovalContinuations:
             calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
             runtime_generation="runtime-a",
         )
-        await alice.create_approval_continuation(expired)
+        await paused_for_approval(alice, expired)
         await self.remember_card(alice)
 
         recorded = await alice.resolve_continuation_approval_card(
@@ -7877,7 +7783,7 @@ class TestApprovalContinuations:
             calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
             runtime_generation="runtime-a",
         )
-        await alice.create_approval_continuation(expired)
+        await paused_for_approval(alice, expired)
         await self.remember_card(alice)
 
         recorded = await alice.resolve_continuation_approval_card(
@@ -7914,7 +7820,7 @@ class TestApprovalContinuations:
             calls=(replace(self.continuation(state="waiting").calls[0], expires_at_ns=1),),
             runtime_generation="runtime-a",
         )
-        await alice.create_approval_continuation(expired)
+        await paused_for_approval(alice, expired)
         assert await router.reserve_approval_card_deliveries(
             continuation_principal_id="agent@alice",
             continuation_id="approval-1",
@@ -7985,7 +7891,7 @@ class TestApprovalContinuations:
         """A late click terminalizes the card but cannot approve work fenced for failure."""
         await self.admit_sources(alice)
         waiting = replace(self.continuation(state="waiting"), runtime_generation="runtime-a")
-        await alice.create_approval_continuation(waiting)
+        await paused_for_approval(alice, waiting)
         await self.remember_card(alice)
         failing = await alice.request_approval_failure(
             waiting.approval_id,
@@ -8024,7 +7930,8 @@ class TestApprovalContinuations:
     async def test_duplicate_card_decision_preserves_the_first_winner(self, alice: PrincipalStore) -> None:
         """A later reaction can redeliver but never reverse the stored decision."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
@@ -8062,10 +7969,12 @@ class TestApprovalContinuations:
     ) -> None:
         """A paused run cannot disappear before its frozen final answer is visible."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        paused = await paused_for_approval(alice, self.continuation())
+        assert paused is not None
+        assert paused.span_id is not None
+        await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
 
-        assert await alice.finish_approval_continuation("approval-1") is False
+        assert await alice.finish_approval_continuation("approval-1") is None
         assert await alice.is_pending("$source-1")
         assert await alice.is_pending("$source-2")
 
@@ -8085,7 +7994,12 @@ class TestApprovalContinuations:
             delivered_projections=(),
         )
 
-        assert await alice.finish_approval_continuation("approval-1") is True
+        effects = await alice.finish_approval_continuation("approval-1")
+        assert effects is not None
+        # A claim that waited for the approval to end, such as an edit's regeneration, retries.
+        span = await alice.replies.span(paused.span_id)
+        assert span is not None
+        assert ApprovalEnded("approval-1", span.reply_id) in effects
         assert await alice.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
@@ -8093,12 +8007,14 @@ class TestApprovalContinuations:
     async def test_release_hands_interrupted_sources_back_to_replay(self, alice: PrincipalStore) -> None:
         """A run a restart cut short gives its still-pending sources back to ordinary replay as a fresh attempt."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        paused = await paused_for_approval(alice, self.continuation())
+        assert paused is not None
+        assert paused.span_id is not None
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
 
         # Only a fenced continuation can be released; a live claim may still be running.
-        assert await alice.release_approval_continuation("approval-1", expected_generation=claimed.generation) is False
+        assert await alice.release_approval_continuation("approval-1", expected_generation=claimed.generation) is None
         failing = await alice.request_approval_failure(
             "approval-1",
             "interrupted",
@@ -8108,7 +8024,11 @@ class TestApprovalContinuations:
         )
         assert failing is not None
 
-        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is True
+        effects = await alice.release_approval_continuation("approval-1", expected_generation=failing.generation)
+        assert effects is not None
+        span = await alice.replies.span(paused.span_id)
+        assert span is not None
+        assert ApprovalEnded("approval-1", span.reply_id) in effects
 
         assert await alice.approval_continuation("approval-1") is None
         assert await alice.approval_continuation_for_source("$source-1") is None
@@ -8116,21 +8036,11 @@ class TestApprovalContinuations:
         replayable = await alice.pending(runtime_generation="runtime-a")
         assert [event.event_id for event in replayable] == ["$source-1", "$source-2"]
 
-        def attempt_count(transaction: Transaction) -> int:
-            row = transaction.fetchone(
-                "SELECT COUNT(*) AS count FROM response_attempts WHERE driving_event_id = ?",
-                ("$source-1",),
-            )
-            assert row is not None
-            return int(row["count"])
-
-        assert await alice._backend.read(attempt_count) == 0
-
     async def test_release_refuses_once_a_final_exists(self, alice: PrincipalStore) -> None:
         """A FINAL already owes the reply its terminal text, so the continuation settles instead."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation())
-        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(alice, self.continuation())
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         failing = await alice.request_approval_failure(
             "approval-1",
@@ -8149,7 +8059,7 @@ class TestApprovalContinuations:
             edits_event_id="$waiting",
         )
 
-        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is False
+        assert await alice.release_approval_continuation("approval-1", expected_generation=failing.generation) is None
         assert await alice.approval_continuation("approval-1") is not None
 
     async def test_finish_serializes_with_responder_departure(
@@ -8160,8 +8070,8 @@ class TestApprovalContinuations:
         responder = rival_stores.first.principal("agent@alice")
         await admit_room_membership(responder, ROOM, "join")
         await self.admit_sources(responder)
-        await responder.create_approval_continuation(self.continuation())
-        await responder.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        await paused_for_approval(responder, self.continuation())
+        await claim_continuation(responder, "approval-1", runtime_generation="runtime-a")
         await responder.enqueue_matrix_delivery(
             delivery_id="$source-1",
             stage=DeliveryStage.FINAL,
@@ -8216,7 +8126,7 @@ class TestApprovalContinuations:
 
         completed, departed = await asyncio.gather(finish, departure)
 
-        assert completed
+        assert completed is not None
         assert departed == 1
         assert await responder.approval_continuation("approval-1") is None
         assert not await responder.is_pending("$source-1")
@@ -8227,13 +8137,25 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """Permanent-unavailability cleanup requires its durable terminal notice."""
+        """Permanent-unavailability cleanup requires its durable terminal notice, and answers nothing."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        pending = TurnRecord.create(["$source-1", "$source-2"], completed=False)
+        await journal_store.backend.write(
+            lambda tx: turn_records.write_record(
+                tx,
+                "agent",
+                index_event_ids=pending.indexed_event_ids,
+                anchor_event_id=pending.anchor_event_id,
+                record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
+            ),
+        )
+        await paused_for_approval(alice, self.continuation(state="waiting"))
 
-        owners = await journal_store.approval_continuations_for_entities({"agent"})
-        assert [(principal, continuation.approval_id) for principal, continuation in owners] == [
-            ("agent@alice", "approval-1"),
+        owners = await journal_store.approval_continuations()
+        assert [
+            (principal, continuation.entity_name, continuation.approval_id) for principal, continuation in owners
+        ] == [
+            ("agent@alice", "agent", "approval-1"),
         ]
 
         failing = await alice.request_approval_failure(
@@ -8281,6 +8203,9 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
+        record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source-1"))
+        assert record is not None
+        assert not record.completed
 
     async def test_unavailable_cleanup_and_router_departure_share_membership_first_lock_order(
         self,
@@ -8291,7 +8216,8 @@ class TestApprovalContinuations:
         router = rival_stores.first.principal("router@alice")
         await admit_room_membership(router, ROOM, "join")
         await self.admit_sources(responder)
-        await responder.create_approval_continuation(
+        await paused_for_approval(
+            responder,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
@@ -8366,7 +8292,7 @@ class TestApprovalContinuations:
     ) -> None:
         """An acknowledged notice must still belong to the router's active membership."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await paused_for_approval(alice, self.continuation(state="waiting"))
         assert (
             await alice.request_approval_failure(
                 "approval-1",
@@ -8422,7 +8348,7 @@ class TestApprovalContinuations:
     ) -> None:
         """A stale physical attempt must not strand its live logical notice obligation."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(self.continuation(state="waiting"))
+        await paused_for_approval(alice, self.continuation(state="waiting"))
         assert (
             await alice.request_approval_failure(
                 "approval-1",
@@ -8510,45 +8436,27 @@ class TestApprovalContinuations:
                 self.continuation(state="waiting"),
                 approval_id=f"approval-page-{index}",
                 entity_name="removed" if index != 2 else "configured",
+                response_event_id=f"$waiting-{index}",
                 sources=ResponseSources((source_event_id,), (source_event_id,)),
             )
-            assert await alice.create_approval_continuation(continuation) == continuation
+            assert await paused_for_approval(alice, continuation) == continuation
 
         first = await journal_store.approval_continuations(limit=2)
-        second = await journal_store.approval_continuations(
-            limit=2,
-            after=(first[-1][1].entity_name, first[-1][1].approval_id),
-        )
-        third = await journal_store.approval_continuations(
-            limit=2,
-            after=(second[-1][1].entity_name, second[-1][1].approval_id),
-        )
-        assert [continuation.approval_id for _principal, continuation in first] == [
-            "approval-page-2",
-            "approval-page-0",
+        second = await journal_store.approval_continuations(limit=2, after=first[-1][1].approval_id)
+        third = await journal_store.approval_continuations(limit=2, after=second[-1][1].approval_id)
+        pages = [[continuation.approval_id for _principal, continuation in page] for page in (first, second, third)]
+        assert pages == [
+            ["approval-page-0", "approval-page-1"],
+            ["approval-page-2", "approval-page-3"],
+            ["approval-page-4"],
         ]
-        assert [continuation.approval_id for _principal, continuation in second] == [
-            "approval-page-1",
-            "approval-page-3",
-        ]
-        assert [continuation.approval_id for _principal, continuation in third] == ["approval-page-4"]
-
-        removed_first = await journal_store.approval_continuations_for_entities(
-            {"removed"},
-            limit=2,
-        )
-        removed_second = await journal_store.approval_continuations_for_entities(
-            {"removed"},
-            limit=2,
-            after=(removed_first[-1][1].entity_name, removed_first[-1][1].approval_id),
-        )
-        assert [continuation.approval_id for _principal, continuation in removed_first] == [
-            "approval-page-0",
-            "approval-page-1",
-        ]
-        assert [continuation.approval_id for _principal, continuation in removed_second] == [
-            "approval-page-3",
-            "approval-page-4",
+        # Each continuation's entity is its paused reply's.
+        assert [continuation.entity_name for page in (first, second, third) for _principal, continuation in page] == [
+            "removed",
+            "removed",
+            "configured",
+            "removed",
+            "removed",
         ]
 
     async def test_room_departure_discards_continuation_and_cards_with_its_sources(
@@ -8557,7 +8465,8 @@ class TestApprovalContinuations:
     ) -> None:
         """A membership fence cannot leave a continuation pointing at settled room work."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
@@ -8577,7 +8486,8 @@ class TestApprovalContinuations:
         """The responder's membership fence must preserve the router's visible card cleanup debt."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
@@ -8599,7 +8509,8 @@ class TestApprovalContinuations:
         """A responder departure preserves a terminal card whose domain retirement crashed."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
@@ -8634,7 +8545,8 @@ class TestApprovalContinuations:
         """A provably invisible card cannot turn into a standalone terminal event after departure."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         assert await router.reserve_approval_card_deliveries(
@@ -8684,7 +8596,8 @@ class TestApprovalContinuations:
         """A reserved INITIAL and FINAL that Matrix never saw cannot outlive their continuation."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         assert await router.reserve_approval_card_deliveries(
@@ -8742,7 +8655,8 @@ class TestApprovalContinuations:
         """A late visible card outranks its refusal and restores its terminal edit."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         assert await router.reserve_approval_card_deliveries(
@@ -8824,7 +8738,8 @@ class TestApprovalContinuations:
         """Deleting router-owned cards must not leave their responder-owned pause hidden forever."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
@@ -8862,7 +8777,8 @@ class TestApprovalContinuations:
     ) -> None:
         """A card-owner departure completes domain retirement after Matrix already acknowledged it."""
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
@@ -8896,7 +8812,8 @@ class TestApprovalContinuations:
         """A committed exact-call decision retains visible cleanup ownership across membership epochs."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
@@ -8980,7 +8897,8 @@ class TestApprovalContinuations:
         """An invisible card is retired while its exact call still records the fail-closed decision."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
-        await alice.create_approval_continuation(
+        await paused_for_approval(
+            alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         assert await router.reserve_approval_card_deliveries(
@@ -9458,10 +9376,8 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
 class TestClosingAnswersEveryWriteItWillNotRun:
     """A write is run or refused, never abandoned -- however many are in flight.
 
-    SQLite-only because the enqueue is: the PostgreSQL backend serializes on a
-    lock, whose waiters are all woken by the releases that follow it, and has
-    no queue for a producer to be stranded outside of. The rule holds on both
-    backends; only one of them can be asked this question.
+    Both backends run their writes through the same queue, so this SQLite run
+    covers the rule for both.
     """
 
     async def test_no_write_is_left_waiting_when_the_store_closes_under_load(
@@ -9547,7 +9463,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         writing = asyncio.create_task(backend.write(operation))
         # The write enqueues, and the writer has not resumed (or started) yet.
         await asyncio.sleep(0)
-        writer = backend._writer_task
+        writer = backend._writes._writer_task
         assert writer is not None
         writer.cancel()
         answered, abandoned = await asyncio.wait({writing}, timeout=_SETTLEMENT_WAIT_SECONDS)
@@ -9560,6 +9476,61 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         assert len(refusals) == 1
         assert isinstance(refusals[0], RuntimeError)
         assert str(refusals[0]) == "The event-journal writer stopped before running this write"
+
+
+class TestQueuedWritesCommitTogether:
+    """Writes queued behind a commit share the next one, each still atomic on its own."""
+
+    async def test_a_failing_write_rolls_back_alone_in_a_shared_commit(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """One commit covers the writes queued behind another; one that fails leaves the rest committed."""
+        backend = cast("SqliteBackend | PostgresBackend", journal_database().backend)
+        await backend.write(lambda transaction: transaction.execute("CREATE TABLE probe (n INTEGER)"))
+        writes = backend._writes
+        apply = writes.apply
+        batches: list[int] = []
+
+        def counted(operations: list[Operation[Any]]) -> list[WriteOutcome]:
+            batches.append(len(operations))
+            return apply(operations)
+
+        writes.apply = counted
+        started = threading.Event()
+        release = threading.Event()
+
+        def hold(_transaction: Transaction) -> None:
+            started.set()
+            release.wait()
+
+        def insert(n: int) -> Operation[int]:
+            def operation(transaction: Transaction) -> int:
+                transaction.execute("INSERT INTO probe (n) VALUES (?)", (n,))
+                if n == 2:
+                    message = "abandon this write"
+                    raise RuntimeError(message)
+                return n
+
+            return operation
+
+        try:
+            holding = asyncio.create_task(backend.write(hold))
+            assert await asyncio.to_thread(started.wait, _SETTLEMENT_WAIT_SECONDS), "the held write never ran"
+            queued = [asyncio.create_task(backend.write(insert(n))) for n in (1, 2, 3)]
+            # Each write is queued once its task first runs.
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        await holding
+        outcomes = await asyncio.gather(*queued, return_exceptions=True)
+        rows = await backend.read(lambda transaction: transaction.fetchall("SELECT n FROM probe ORDER BY n"))
+
+        assert outcomes[0] == 1
+        assert isinstance(outcomes[1], RuntimeError)
+        assert outcomes[2] == 3
+        assert [row["n"] for row in rows] == [1, 3]
+        assert batches == [1, 3], "the writes queued behind the held one did not share one commit"
 
 
 class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:
@@ -9670,14 +9641,7 @@ class TestHotQueriesAreIndexCovered:
             "WHERE initial.principal_id=? AND initial.acknowledged_event_id=? AND initial.stage='initial'"
         ),
         "continuation owner page": (
-            "SELECT * FROM approval_continuations "
-            "WHERE (entity_name, approval_id) > (?, ?) "
-            "ORDER BY entity_name, approval_id LIMIT 50"
-        ),
-        "continuation owners for entities": (
-            "SELECT * FROM approval_continuations WHERE entity_name IN (?, ?) "
-            "AND (entity_name, approval_id) > (?, ?) "
-            "ORDER BY entity_name, approval_id LIMIT 50"
+            "SELECT * FROM approval_continuations WHERE approval_id > ? ORDER BY approval_id LIMIT 50"
         ),
     }
 
@@ -10099,52 +10063,38 @@ class TestCrossProcessWriters:
             await store.close()
 
 
-@pytest.mark.parametrize("ended_by", ["leave", "rejoin"])
-async def test_resume_response_ownership_requires_current_attempted_delivery(
-    alice: PrincipalStore,
-    journal_store: EventJournalStore,
-    ended_by: str,
-) -> None:
-    """History cannot create response ownership, and old memberships cannot retain it."""
-    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
-    await alice.enqueue_matrix_delivery(
-        delivery_id="$turn",
-        stage=DeliveryStage.INITIAL,
-        room_id=ROOM,
-        thread_id="$thread",
-        payload=text("Partial response"),
-    )
-    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
-    await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.INITIAL)
-    # An unknown send result stays with outbox recovery until the send is acknowledged.
-    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
-    await alice.acknowledge_matrix_delivery(
-        delivery_id="$turn",
-        stage=DeliveryStage.INITIAL,
-        event_id="$response",
-        delivered_projections=(),
-    )
-    assert await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
-    assert not await alice.owns_matrix_response(room_id=OTHER_ROOM, event_id="$response")
-    assert not await journal_store.principal("other@alice").owns_matrix_response(room_id=ROOM, event_id="$response")
-    await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
-    if ended_by == "rejoin":
-        await admit_room_membership(alice, ROOM, "join")
-    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+async def test_one_runtime_holds_a_journal_at_a_time(journal_database: Callable[[], EventJournalStore]) -> None:
+    """A second runtime on the same database is refused until the first one's store closes."""
+    first = journal_database()
+    second = journal_database()
+    assert await first.hold_exclusively("journal-identity")
+    assert await first.hold_exclusively("journal-identity")
+    assert await first.still_held()
+    assert not await second.hold_exclusively("journal-identity")
+    assert not await second.still_held()
+
+    await first.close()
+
+    assert await second.hold_exclusively("journal-identity")
+    assert await second.still_held()
 
 
-async def test_resume_response_ownership_accepts_an_attempted_edit_target(alice: PrincipalStore) -> None:
-    """A final edit can prove its original response even before its own ACK arrives."""
-    await alice.enqueue_matrix_delivery(
-        delivery_id="$turn",
-        stage=DeliveryStage.FINAL,
-        room_id=ROOM,
-        thread_id="$thread",
-        payload=text("Interrupted"),
-        edits_event_id="$response",
-    )
-    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
-    await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
-    assert await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
-    await alice.retire_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL, room_id=ROOM, membership_epoch=0)
-    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+async def test_a_postgres_journal_hold_lets_the_server_drop_a_vanished_holder(postgres_journal_url: str) -> None:
+    """The lock's session keeps short TCP keepalives, so a runtime lost without closing it frees the journal soon."""
+    from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
+
+    store = EventJournalStore.open_postgres(postgres_journal_schema_url(postgres_journal_url))
+    try:
+        assert await store.hold_exclusively("keepalive-identity")
+        backend = store.backend
+        assert isinstance(backend, PostgresBackend)
+        session = backend._hold
+        assert session is not None
+        shown = {}
+        for setting in ("tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"):
+            row = session.execute(f"SHOW {setting}").fetchone()
+            assert row is not None
+            shown[setting] = row[0]
+        assert shown == {"tcp_keepalives_idle": "30", "tcp_keepalives_interval": "10", "tcp_keepalives_count": "3"}
+    finally:
+        await store.close()

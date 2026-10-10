@@ -26,7 +26,6 @@ if TYPE_CHECKING:
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )
-    from mindroom.response_sources import ResponseAttempt
     from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation
 
     from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
@@ -50,12 +49,14 @@ if TYPE_CHECKING:
         JournalEvent,
         MatrixDelivery,
         PendingPage,
+        PermanentDeliveryFailure,
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
+    from .replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from .scheduled_approvals import (
         ScheduledApprovalArmState,
         ScheduledCall,
@@ -104,8 +105,8 @@ class ReplayView(Protocol):
         """Return whether one event still owes semantic work."""
         ...
 
-    async def settle(self, event_id: str) -> None:
-        """Mark one event's semantic work terminal."""
+    async def settle(self, event_id: str) -> tuple[str, ...]:
+        """Mark one event's semantic work terminal; return the replies left waiting to replay it that ends."""
         ...
 
 
@@ -120,8 +121,8 @@ class DispatchView(ReplayView, Protocol):
         """Record successful room-member hook delivery."""
         ...
 
-    async def settle_many(self, event_ids: tuple[str, ...]) -> None:
-        """Settle every event that one terminal turn accounted for."""
+    async def settle_many(self, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Settle every event that one terminal turn accounted for; return the replies that ends."""
         ...
 
     async def unsettled_event_ids(self) -> frozenset[str]:
@@ -194,10 +195,6 @@ class ConversationReadView(Protocol):
     Nothing here can change a conversation, which is the point: a reader that
     could write one is a reader that can be made to.
     """
-
-    async def is_event_redacted(self, *, room_id: str, event_id: str) -> bool:
-        """Return exact principal/room/physical-event tombstone proof."""
-        ...
 
     async def read_conversation(
         self,
@@ -332,6 +329,11 @@ class MatrixDeliveryView(Protocol):
         """Return the principal whose delivery rows this view owns."""
         ...
 
+    @property
+    def replies(self) -> ReplyStore:
+        """Return this principal's reply records."""
+        ...
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
         ...
@@ -345,7 +347,6 @@ class MatrixDeliveryView(Protocol):
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -388,8 +389,8 @@ class MatrixDeliveryView(Protocol):
         delivery_id: str,
         stage: DeliveryStage,
         reason: str,
-    ) -> str | None:
-        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+    ) -> PermanentDeliveryFailure:
+        """Stop retrying one definitively refused immutable payload, or report its ACK."""
         ...
 
     async def retire_matrix_delivery(
@@ -423,6 +424,19 @@ class MatrixDeliveryView(Protocol):
         after: tuple[int, str, str] | None = None,
     ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
+        ...
+
+    async def enqueue_reply_row(self, request: ReplyRowRequest, prepared: PreparedReplyRow) -> ReplyRowEnqueue | None:
+        """Decide and record one durable write of an agent or team reply, or refuse both."""
+        ...
+
+    async def unresolved_reply_rows(
+        self,
+        reply_id: str,
+        *,
+        before_sequence: int | None = None,
+    ) -> tuple[tuple[str, DeliveryStage], ...]:
+        """Return a reply's rows whose Matrix outcome is unknown, in write order."""
         ...
 
 

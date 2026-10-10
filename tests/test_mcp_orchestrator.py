@@ -705,7 +705,6 @@ async def test_mcp_catalog_restart_replays_unfinished_startup_maintenance_with_l
         patch.object(orchestrator, "_cancel_bot_start_task", new=AsyncMock()),
         patch.object(orchestrator, "_create_and_start_entities", side_effect=create_and_start),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as recover,
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
         patch.object(orchestrator._computer_runtime, "bind_if_ready"),
@@ -715,20 +714,21 @@ async def test_mcp_catalog_restart_replays_unfinished_startup_maintenance_with_l
             new=AsyncMock(),
         ) as mark_runtime_support_ready,
     ):
-        orchestrator._startup_maintenance.start([old_bot], config, startup_cutoff_ms=123456)
+        orchestrator._startup_maintenance.start([old_bot], config)
         original_task = orchestrator._startup_maintenance.task
         try:
             await asyncio.wait_for(old_setup_started.wait(), timeout=1.0)
             await orchestrator._handle_mcp_catalog_change("demo")
             replayed_task = orchestrator._startup_maintenance.task
-            assert original_task is not None and original_task.cancelled()
-            assert replayed_task is not None and replayed_task is not original_task
+            assert original_task is not None
+            assert original_task.cancelled()
+            assert replayed_task is not None
+            assert replayed_task is not original_task
             await asyncio.wait_for(replayed_task, timeout=1.0)
         finally:
             await orchestrator._startup_maintenance.cancel()
 
     assert setup_calls[-1] == [new_bot]
-    assert recover.await_args.args[0] == [new_bot]
     mark_runtime_support_ready.assert_awaited_once_with()
 
 
@@ -1099,6 +1099,7 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
             "reconcile_unavailable_entities",
             side_effect=reconcile_before_cleanup,
         ),
+        patch.object(orchestrator, "_shared_journal_store", return_value=MagicMock(end_entity_replies=AsyncMock())),
     ):
         await orchestrator._remove_deleted_entities({ROUTER_AGENT_NAME})
 

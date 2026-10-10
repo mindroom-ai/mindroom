@@ -1093,20 +1093,14 @@ VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 VOICE_TRANSCRIPT_KEY = "com.mindroom.voice_transcript"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
-MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY = "matrix_turn_schema_version"
 MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
-MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_turn_redacted_source_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
-MATRIX_RESPONSE_OWNER_METADATA_KEY = "matrix_response_owner"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
-MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"
-MATRIX_CONVERSATION_TARGET_METADATA_KEY = "matrix_conversation_target"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
 MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
-MATRIX_SOURCE_EVENT_METADATA_KEY = "matrix_source_event_metadata"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
@@ -1126,6 +1120,10 @@ STREAM_STATUS_COMPLETED = "completed"
 STREAM_STATUS_CANCELLED = "cancelled"
 STREAM_STATUS_INTERRUPTED = "interrupted"
 STREAM_STATUS_ERROR = "error"
+# A reply with one of these statuses is still being written or waits for a tool approval.
+UNFINISHED_REPLY_STATUSES = frozenset(
+    {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING},
+)
 
 # Placeholder used in starter config templates. `mindroom connect` can
 # automatically replace this token with the owner Matrix user ID returned

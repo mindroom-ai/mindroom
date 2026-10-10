@@ -27,6 +27,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import (
     CompletedApprovalRun,
+    PausedAnswer,
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
@@ -38,7 +39,7 @@ from mindroom.tool_system.agent_tool_calls import (
     execute_agent_tool_call,
 )
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
+from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
@@ -78,6 +79,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     persisted: RunOutput,
     session: AgentSession,
     *,
+    paused_answer: PausedAnswer,
     runtime_context: ToolRuntimeContext,
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
@@ -149,8 +151,8 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     recovery_owner = None
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
-        response_text=continuation.response_text,
-        tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+        response_text=paused_answer.text,
+        tool_trace=list(paused_answer.tool_trace),
         track_hidden_tools=True,
     )
     messages = persisted.messages or []
@@ -330,7 +332,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     snapshot = build_interrupted_replay_snapshot(
         user_message=continuation.request_body,
         user_message_is_structured=False,
-        partial_text=continuation.response_text,
+        partial_text=paused_answer.text,
         completed_tools=completed_trace,
         interrupted_tools=interrupted_trace,
         run_metadata=persisted.metadata,

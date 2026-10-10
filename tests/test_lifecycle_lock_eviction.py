@@ -1,13 +1,15 @@
-"""Lifecycle-lock table eviction must never drop live response state.
+"""Lifecycle-lock table eviction must never drop live response state, including an approval's hold.
 
 ``ResponseLifecycleCoordinator`` bounds its per-target lock table at 100 entries.
 Eviction may only reclaim fully idle targets: an acquired lock serializes an
 in-flight response, and a live queued-message signal carries queued human
 ingress (or an active turn about to acquire the lock) whose silent loss would
-drop user input.
+drop user input. A pending approval holds its conversation as an active turn.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
@@ -81,3 +83,43 @@ async def test_eviction_drops_fully_idle_targets_to_keep_the_table_bounded() -> 
     assert coordinator._response_lifecycle_lock(new_target) is new_lock
     assert targets[0].lifecycle_key not in coordinator._response_lifecycle_locks
     assert coordinator._response_lifecycle_lock(targets[0]) is not idle_lock
+
+
+@pytest.mark.asyncio
+async def test_an_approval_hold_keeps_its_conversation_busy_without_taking_its_lock() -> None:
+    """A held conversation reads as busy and survives eviction, yet the approval's own work can still take its lock."""
+    coordinator = ResponseLifecycleCoordinator()
+    targets = _fill_lock_table(coordinator)
+    held = targets[0]
+    coordinator.hold_for_approval("approval-1", held)
+    # Holding again changes nothing: one release frees the conversation.
+    coordinator.hold_for_approval("approval-1", held)
+    assert coordinator.approval_holds(held.room_id, held.resolved_thread_id)
+    assert coordinator.has_active_response_for_target(held)
+    assert not coordinator.approval_holds(targets[1].room_id, targets[1].resolved_thread_id)
+
+    coordinator._response_lifecycle_lock(_target(_LOCK_TABLE_CAP))
+    assert held.lifecycle_key in coordinator._thread_queued_signals
+    lock = coordinator._response_lifecycle_lock(held)
+    await asyncio.wait_for(lock.acquire(), timeout=1)
+    lock.release()
+
+    idle = asyncio.create_task(coordinator.wait_for_thread_idle(held.room_id, held.resolved_thread_id))
+    await asyncio.sleep(0)
+    assert not idle.done()
+    coordinator.release_approval_hold("approval-1")
+    await asyncio.wait_for(idle, timeout=1)
+    assert not coordinator.has_active_response_for_target(held)
+    # Releasing an approval that holds nothing changes nothing.
+    coordinator.release_approval_hold("approval-1")
+
+
+def test_leaving_a_room_releases_its_approval_holds() -> None:
+    """A departure ends the room's approvals without their settlement, so their holds go with it."""
+    coordinator = ResponseLifecycleCoordinator()
+    left, kept = _target(1), _target(2)
+    coordinator.hold_for_approval("approval-1", left)
+    coordinator.hold_for_approval("approval-2", kept)
+    coordinator.release_approval_holds_in_room(left.room_id)
+    assert not coordinator.approval_holds(left.room_id, left.resolved_thread_id)
+    assert coordinator.approval_holds(kept.room_id, kept.resolved_thread_id)

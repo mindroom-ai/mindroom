@@ -17,16 +17,12 @@ from mindroom.orchestration.runtime import cancel_failure_reason, classify_cance
 from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     import nio
     import structlog
 
-    from mindroom.config.main import Config
     from mindroom.message_target import MessageTarget
-    from mindroom.stop import StopManager
-
-type _MatrixEventId = str
 
 _FORWARDED_CANCEL_WAIT_SECONDS = 10.0
 
@@ -36,10 +32,18 @@ class ResponseAttemptDeps:
     """Collaborators needed to run a visible response attempt."""
 
     client: nio.AsyncClient
-    stop_manager: StopManager
     logger: structlog.stdlib.BoundLogger
     show_stop_button: Callable[[], bool]
-    config: Config
+
+
+@dataclass(frozen=True)
+class SpanAttempt:
+    """A reply span owns the attempt: the span registry cancels it and the reply records its Stop button."""
+
+    # Told the attempt task as soon as it exists, so a Stop on the span cancels exactly it.
+    register: Callable[[asyncio.Task[None]], None]
+    # Shows the Stop button on the reply's event, best effort.
+    add_stop_button: Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -48,15 +52,16 @@ class ResponseAttemptRequest:
 
     target: MessageTarget
     response_function: Callable[[str | None], Coroutine[Any, Any, None]]
+    # The reply span this attempt executes.
+    span: SpanAttempt
     existing_event_id: str | None = None
     user_id: str | None = None
-    run_id: str | None = None
     on_cancelled: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
 class ResponseAttemptRunner:
-    """Own stop tracking and attempt task cleanup for one visible response.
+    """Own the attempt task of one reply span: its registration, Stop button, and cleanup.
 
     Sending the turn's placeholder is deliberately not part of this: the
     durable ``INITIAL`` outbox row is the only thing allowed to put one in the
@@ -148,36 +153,18 @@ class ResponseAttemptRunner:
                 error=str(error),
             )
 
-    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:  # noqa: C901
-        """Run one response coroutine under visible message tracking."""
+    async def run(self, request: ResponseAttemptRequest) -> None:
+        """Run one response coroutine as its reply span's attempt."""
         with bound_log_context(**request.target.log_context):
             message_id = request.existing_event_id
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
-            tracked_message_id = message_id or f"__pending_response__:{id(task)}"
-            show_stop_button = False
-            process_shutdown = False
-
-            self.deps.stop_manager.set_current(
-                tracked_message_id,
-                request.target,
-                task,
-                None,
-                run_id=request.run_id,
-            )
-
+            request.span.register(task)
             try:
                 if message_id is not None:
-                    show_stop_button = await self._should_show_stop_button(request, message_id)
-                    if show_stop_button:
-                        self.deps.logger.info("Adding stop button", message_id=message_id)
-                        await self.deps.stop_manager.add_stop_button(
-                            self.deps.client,
-                            message_id,
-                        )
+                    await self._add_stop_button(request, message_id)
 
                 await asyncio.shield(task)
             except asyncio.CancelledError as caught_cancellation:
-                process_shutdown = current_task_is_process_shutdown()
                 cancellation = caught_cancellation
                 if task.done() and task.cancelled():
                     try:
@@ -188,40 +175,37 @@ class ResponseAttemptRunner:
                 if request.on_cancelled is not None:
                     request.on_cancelled(failure_reason)
                 await self._forward_cancel_to_attempt_task(task, cancellation)
-                process_shutdown = current_task_is_process_shutdown()
                 log_cancelled_response(
                     self.deps.logger,
                     exc=cancellation,
-                    message_id=message_id or tracked_message_id,
+                    message_id=message_id or task.get_name(),
                     restart_message="Response interrupted by sync restart",
                     user_stop_message="Response cancelled by user",
                     interrupted_message="Response interrupted — traceback for diagnosis",
                 )
-                if process_shutdown:
+                if current_task_is_process_shutdown():
                     raise
             except StreamingLifecycleSuspensionError:
                 raise
             except Exception as error:
                 self.deps.logger.exception("Error during response generation", error=str(error))
+                # What failed around the attempt, such as recording its Stop button, must not leave the attempt
+                # running after its span ends, where a Stop no longer reaches it.
+                await self._forward_cancel_to_attempt_task(task, asyncio.CancelledError())
                 raise
-            finally:
-                tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
-                button_already_removed = tracked is None or tracked.reaction_event_id is None
-                if process_shutdown:
-                    self.deps.stop_manager.discard_message(tracked_message_id)
-                else:
-                    self.deps.stop_manager.clear_message(
-                        tracked_message_id,
-                        self.deps.client,
-                        remove_button=show_stop_button and not button_already_removed,
-                    )
 
-            return message_id
+    async def _add_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> None:
+        """Show the Stop button on the reply's event when wanted; the reply records it and redacts it."""
+        if not await self._should_show_stop_button(request, message_id):
+            return
+        self.deps.logger.info("Adding stop button", message_id=message_id)
+        await request.span.add_stop_button(message_id)
 
 
 __all__ = [
     "ResponseAttemptDeps",
     "ResponseAttemptRequest",
     "ResponseAttemptRunner",
+    "SpanAttempt",
     "log_cancelled_response",
 ]

@@ -1,6 +1,6 @@
 # Matrix & Threads
 
-These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, and summarize threads, make low-level Matrix API calls, and reuse conversation attachments.
+These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, make low-level Matrix API calls, and reuse conversation attachments.
 This page also covers automatic thread summaries.
 
 ## Tools On This Page
@@ -10,6 +10,7 @@ This page also covers automatic thread summaries.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and list shared tags on Matrix threads.
 - [`thread_resolution`] - Resolve or reopen threads in the current room.
+- [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
@@ -23,7 +24,7 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 These tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
-`thread_tags`, `thread_resolution`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root; other tools need the thread root ID itself.
+`thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root; other tools need the thread root ID itself.
 Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
@@ -138,6 +139,33 @@ agents:
 ```
 
 To close out finished threads, find candidates with `list_thread_tags(exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
+
+## [`thread_move`]
+
+`thread_move` lets an agent move a thread from the current room into another room, for example to file a conversation under the room of the project it belongs to.
+It is not in starter configs or default tool sets.
+
+Matrix cannot move messages between rooms, so `move_thread(room_id, thread_id=None)` copies the thread into a new thread in the target room and copies its tags.
+The original thread gets a `Moved to <link>` notice and is marked `resolved`.
+`room_id` accepts a room ID, alias, or configured room name.
+Without `thread_id`, it moves the active thread.
+
+Each agent re-posts its own messages, so the agents in the thread continue the conversation in the new thread with its earlier messages as context.
+The router re-posts messages from people, and from agents that are not in the target room, prefixed with the author's name.
+The copies never trigger agent replies.
+
+```yaml
+agents:
+  general:
+    tools:
+      - thread_move
+```
+
+A move is refused when the requester is not joined to the target room, when the router or the agent doing the move is not in it, when the original room is end-to-end encrypted and the target room is not, or when the thread cannot be read in full.
+Copies have new timestamps and keep only the latest edit of each message.
+Reactions, notices such as thread summaries, and replies still being written are not copied.
+Earlier tool-call results, per-thread model choices, agent modes, todos, scheduled tasks, and pending approvals stay with the original thread.
+Agents count only the people who post after the move, so until two people have posted in the moved thread, an agent that took part may answer untagged messages there.
 
 ## [`thread_summary`]
 

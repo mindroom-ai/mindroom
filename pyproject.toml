@@ -403,6 +403,7 @@ telegram = [
   "pytelegrambotapi>=4.32",
 ]
 thread_model = []
+thread_move = []
 thread_resolution = []
 thread_summary = []
 thread_tags = []

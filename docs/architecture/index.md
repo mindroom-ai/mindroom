@@ -43,6 +43,7 @@ MindRoom's architecture consists of several key components working together.
 - [Internal Turn CLI](agent-cli.md) - Minimal-mode discovery, response ownership, and approval recovery
 - [Agent Orchestration](orchestration.md) - How agents are managed
 - [Bot Runtime](bot-runtime.md) - The inbound turn pipeline and its module boundaries
+- [Reply Messages](reply-messages.md) - The durable records that own every AI reply, and the rules that change them
 - [Code Map](code-map.md) - The inbound turn pipeline at module level, key modules and their purpose, and where persistent state lives
 - [Migration and Compatibility Boundaries](migrations.md) - Current owners for historical formats, dependency migrations, and retained compatibility
 - [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it

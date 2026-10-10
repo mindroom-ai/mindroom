@@ -765,7 +765,7 @@ async def test_ledger_refresh_settles_edit_debts_before_the_next_proof(tmp_path:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("variant", ["declined", "edit_unsettled", "old_answered"])
 async def test_settled_edit_of_superseded_source_is_a_declined_no_op(tmp_path: Path, variant: str) -> None:
-    """MindRoom settles an edit of a message it superseded without regenerating anything, so the edit owes nothing."""
+    """MindRoom settles an edit of a message a newer one followed without regenerating anything, so it owes nothing."""
     case = await _supersession_case(tmp_path, visible_old=False, old_record=variant == "old_answered")
     principal = case.journal.principal("general@@agent:example")
     edit = {
@@ -796,9 +796,10 @@ async def test_settled_edit_of_superseded_source_is_a_declined_no_op(tmp_path: P
     case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
     try:
         case.oracle.refresh_ledger_attributions(min_interval=0)
-        assert ("$old" in case.oracle.declined_edit_sources) is (variant == "declined")
+        # An older message's edit is declined whether MindRoom answered that message or superseded it.
+        assert ("$old" in case.oracle.declined_edit_sources) is (variant != "edit_unsettled")
         # A declined edit owes nothing, so it no longer blocks proof that MindRoom superseded the message.
-        assert ("$old" in case.oracle.supersession_proofs) is (variant == "declined")
+        assert ("$old" in case.oracle.supersession_proofs) is (variant != "edit_unsettled")
     finally:
         await case.journal.close()
 
@@ -1486,7 +1487,7 @@ async def test_runtime_redaction_observer_records_before_original(
     path = tmp_path / "entries.jsonl"
     path.touch()
     store = _redaction_observer_store()
-    monkeypatch.setattr(TurnStore, "is_revision_redacted", lambda _self, _target: False)
+    monkeypatch.setattr(TurnStore, "_is_revision_redacted", lambda _self, _target: False)
     calls: list[str] = []
     error = RuntimeError("original mutation failed")
     cancelled = asyncio.CancelledError("original cancelled")
@@ -1554,7 +1555,7 @@ def test_real_runtime_child_installs_observer_across_generations(
 
     monkeypatch.setattr(cli_main, "app", app)
     monkeypatch.setattr(live_fuzz.sys, "argv", ["harness"])
-    monkeypatch.setattr(TurnStore, "is_revision_redacted", lambda _self, _target: generation == 2)
+    monkeypatch.setattr(TurnStore, "_is_revision_redacted", lambda _self, _target: generation == 2)
     live_fuzz._ModelHandler.reset_observations()
     monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 100)
     live_fuzz._ModelHandler._record_observation(90, frozenset({"marker"}))
@@ -1597,7 +1598,7 @@ async def test_runtime_redaction_observer_rejects_recovered_revision_without_phy
             revision_replay={"$edit": RevisionReplay("$source", 100, redacted=True)},
         ),
     )
-    assert not store.is_revision_redacted("$edit")
+    assert not store._is_revision_redacted("$edit")
     path = tmp_path / "entries.jsonl"
     path.touch()
     monkeypatch.setattr(TurnStore, "mark_source_redacted", TurnStore.mark_source_redacted)

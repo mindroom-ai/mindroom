@@ -43,12 +43,16 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.reply_span_helpers import reply_span
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.event_journal import EventJournalStore
+    from mindroom.reply_scope import SpanHandle
 
 
 def test_should_skip_mentions_with_metadata() -> None:
@@ -328,6 +332,23 @@ def _delivery_envelope() -> MessageEnvelope:
     )
 
 
+def _reply_span(
+    journal_store: EventJournalStore,
+    *,
+    placeholder_event_id: str | None = None,
+) -> AbstractAsyncContextManager[SpanHandle]:
+    """Run delivery in the reply span of the test envelope's source."""
+    envelope = _delivery_envelope()
+    return reply_span(
+        journal_store.principal("email_agent@alice"),
+        source_event_id=envelope.source_event_id,
+        room_id=envelope.target.room_id,
+        thread_id=envelope.target.resolved_thread_id,
+        entity_name="email_agent",
+        placeholder_event_id=placeholder_event_id,
+    )
+
+
 @pytest.mark.asyncio
 async def test_delivery_gateway_send_text_logs_target_thread_context(
     tmp_path: Path,
@@ -435,7 +456,10 @@ async def test_delivery_gateway_edit_text_sends_a_relation_free_replacement(tmp_
 
 
 @pytest.mark.asyncio
-async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_path: Path) -> None:
+async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
     """Streaming delivery should attribute its latest-thread lookup."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     target = MessageTarget.resolve("!test:server", "$thread", "$root")
@@ -450,22 +474,23 @@ async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_p
         "mindroom.delivery_gateway.send_streaming_response",
         new=AsyncMock(return_value=SimpleNamespace(event_id="$stream", final_visible_body="hello")),
     ):
-        await gateway.deliver_stream(
-            StreamingDeliveryRequest(
-                target=target,
-                response_stream=stream(),
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=_delivery_envelope(),
-                    correlation_id="corr-stream",
-                    sources=ResponseSources(
-                        (_delivery_envelope().source_event_id,),
-                        (_delivery_envelope().source_event_id,),
+        async with _reply_span(journal_store, placeholder_event_id="$existing"):
+            await gateway.deliver_stream(
+                StreamingDeliveryRequest(
+                    target=target,
+                    response_stream=stream(),
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=_delivery_envelope(),
+                        correlation_id="corr-stream",
+                        sources=ResponseSources(
+                            (_delivery_envelope().source_event_id,),
+                            (_delivery_envelope().source_event_id,),
+                        ),
                     ),
+                    existing_event_id="$existing",
                 ),
-                existing_event_id="$existing",
-            ),
-        )
+            )
 
     gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
         room_id="!test:server",
@@ -521,7 +546,10 @@ async def test_delivery_gateway_edit_text_skips_dead_room_mode_relation(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tmp_path: Path) -> None:
+async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
     """Final delivery should route fresh sends through the gateway helper only."""
     gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)
     before_hooks.return_value = ResponseDraft(
@@ -540,24 +568,25 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")) as mock_send_text,
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
     ):
-        result = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=_delivery_envelope().target,
-                existing_event_id=None,
-                response_text="raw response",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=_delivery_envelope(),
-                    correlation_id="corr-1",
-                    sources=ResponseSources(
-                        (_delivery_envelope().source_event_id,),
-                        (_delivery_envelope().source_event_id,),
+        async with _reply_span(journal_store):
+            result = await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=_delivery_envelope().target,
+                    existing_event_id=None,
+                    response_text="raw response",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=_delivery_envelope(),
+                        correlation_id="corr-1",
+                        sources=ResponseSources(
+                            (_delivery_envelope().source_event_id,),
+                            (_delivery_envelope().source_event_id,),
+                        ),
                     ),
+                    tool_trace=None,
+                    extra_content=None,
                 ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+            )
 
     mock_send_text.assert_awaited_once()
     assert mock_send_text.await_args.args[0].retry_sync_recovery is True
@@ -567,7 +596,10 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
 
 
 @pytest.mark.asyncio
-async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messages(tmp_path: Path) -> None:
+async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messages(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
     """Final delivery should route edits through the gateway helper only."""
     gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)
     before_hooks.return_value = ResponseDraft(
@@ -586,24 +618,25 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)) as mock_edit_text,
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
     ):
-        result = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=_delivery_envelope().target,
-                existing_event_id="$existing",
-                response_text="raw response",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=_delivery_envelope(),
-                    correlation_id="corr-2",
-                    sources=ResponseSources(
-                        (_delivery_envelope().source_event_id,),
-                        (_delivery_envelope().source_event_id,),
+        async with _reply_span(journal_store, placeholder_event_id="$existing"):
+            result = await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=_delivery_envelope().target,
+                    existing_event_id="$existing",
+                    response_text="raw response",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=_delivery_envelope(),
+                        correlation_id="corr-2",
+                        sources=ResponseSources(
+                            (_delivery_envelope().source_event_id,),
+                            (_delivery_envelope().source_event_id,),
+                        ),
                     ),
+                    tool_trace=None,
+                    extra_content=None,
                 ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
+            )
 
     mock_edit_text.assert_awaited_once()
     assert mock_edit_text.await_args.args[0].retry_sync_recovery is True

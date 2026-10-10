@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
 from mindroom.authorization import ensure_room_membership_synced, is_requester_joined_to_room
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescingKey,
@@ -24,14 +24,12 @@ from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SCHEDULED_MODEL_KEY,
-    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
+    UNFINISHED_REPLY_STATUSES,
     RuntimePaths,
 )
-from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
@@ -70,6 +68,7 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.ingress_lanes import IngressRetryError, ReceiptLaneKey
 from mindroom.logging_config import bound_log_context
+from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.conversation_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
@@ -117,7 +116,6 @@ from mindroom.turn_origin import (
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
-from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
 from mindroom.voice_readiness import VoiceReadiness
 
 if TYPE_CHECKING:
@@ -475,14 +473,20 @@ class TurnController:
         """
         if envelope.origin.intent not in {TurnIntent.ROUTER_HANDOFF, TurnIntent.TRUSTED_INTERNAL_RELAY}:
             return True
+        return self._mentions_another_participant(room, event.source) is not True
+
+    def _mentions_another_participant(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
+        """Return whom a message mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people."""
         mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-            event.source,
+            source,
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
         )
-        return am_i_mentioned or not (mentioned_agents or has_non_agent_mentions)
+        if am_i_mentioned:
+            return False
+        return True if mentioned_agents or has_non_agent_mentions else None
 
     def _voice_queued_notice_reservation(
         self,
@@ -564,7 +568,35 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
         else:
+            self._mark_waiting_for_approval(room, prepared_event.source, target, envelope)
             return _IngressAdmissionOutcome.DEFERRED
+
+    def _mark_waiting_for_approval(
+        self,
+        room: nio.MatrixRoom,
+        source: dict[str, Any],
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+    ) -> None:
+        """React ⏳ to a human message that waits because a pending approval holds its conversation."""
+        if not envelope.origin.may_answer_interactive_prompt or not self.deps.response_runner.is_held_for_approval(
+            target,
+        ):
+            return
+        if self._mentions_another_participant(room, source):
+            # A message for another agent or person does not wait for this one.
+            return
+        create_background_task(
+            self.deps.delivery_gateway.send_judgment_reaction(
+                turn_id=envelope.source_event_id,
+                room_id=target.room_id,
+                event_id=envelope.source_event_id,
+                key="⏳",
+                kind="approval_wait",
+            ),
+            name=f"approval_wait_reaction_{envelope.source_event_id}",
+            owner=self.deps.runtime,
+        )
 
     async def _enqueue_media_for_dispatch(
         self,
@@ -610,6 +642,7 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
         else:
+            self._mark_waiting_for_approval(room, event.source, target, envelope)
             return _IngressAdmissionOutcome.DEFERRED
 
     async def _should_skip_router_before_shared_ingress_work(
@@ -755,18 +788,21 @@ class TurnController:
                 source_event_id=prepared_event.event_id,
             )
             if selection is not None:
-                # A consumed interactive answer never enters the gate, and its
-                # response may wait behind this conversation's active turn; the
-                # sender's lane slot must settle now, not at response completion.
-                await reservation_owner.release()
-                source_handed_off = await self._handle_interactive_selection(
+                # As a reaction's answer does, the response runs on a runner-owned task behind this conversation's
+                # earlier messages, so neither its run nor an approval it waits for holds the room's event lane. The
+                # queue and that task own the source from here, so a retry of it must not meet this turn's claim.
+                if (turn_claim := reservation_owner.pending_turn_claim) is not None:
+                    self.deps.turn_store.release_pending_turn_claim(turn_claim)
+                    reservation_owner.pending_turn_claim = None
+                await self.enqueue_interactive_selection(
+                    reservation_owner,
                     room,
                     selection=selection,
-                    transport_sender_id=envelope.origin.transport_sender_id,
                     requester_user_id=envelope.requester_id,
+                    user_id=envelope.origin.transport_sender_id,
                     source_event_id=prepared_event.event_id,
                 )
-                return _IngressAdmissionOutcome.DEFERRED if source_handed_off else _IngressAdmissionOutcome.CONSUMED
+                return _IngressAdmissionOutcome.DEFERRED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
             if (turn_claim := reservation_owner.pending_turn_claim) is not None:
                 self.deps.turn_store.release_pending_turn_claim(turn_claim)
@@ -853,12 +889,41 @@ class TurnController:
                 room.room_id,
             ):
                 return None
+            if await self._edit_queued_message(room, prechecked_event.event, event_info):
+                return None
             return await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
                 event_info,
                 prechecked_event.requester_user_id,
             )
+
+    async def _edit_queued_message(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFormatted,
+        event_info: EventInfo,
+    ) -> bool:
+        """Give a message still waiting for its turn the text its sender edited it to; return whether one did."""
+        original_event_id = event_info.original_event_id
+        if original_event_id is None or not self.deps.coalescing_gate.has_pending_source_event(original_event_id):
+            return False
+        body, content = await extract_visible_edit_body(
+            event.source,
+            self._client(),
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
+        if body is None or content is None:
+            return False
+        return self.deps.coalescing_gate.apply_pending_edit(
+            room_id=room.room_id,
+            source_event_id=original_event_id,
+            sender=event.sender,
+            body=body,
+            new_content=content,
+            for_another_participant=self._mentions_another_participant(room, {"content": content}),
+        )
 
     def _log_unplaceable_event(self, room: nio.MatrixRoom, event: DispatchEvent | MatrixMediaEvent) -> None:
         """Record an event left unanswered because its relation target cannot be read.
@@ -906,7 +971,6 @@ class TurnController:
                 pending_turn, response_event_id = await self.deps.visible_responses.prepare_visible_delivery_turn(
                     TurnRecord.create([event.event_id]),
                     requester_id=requester_user_id,
-                    correlation_id=event.event_id,
                     target=target,
                 )
                 if pending_turn is None:
@@ -1086,6 +1150,7 @@ class TurnController:
                 trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
                 discovery_event_id=self.deps.ingress.discovery_event_id(event),
                 turn_dispatch_recovery=turn_dispatch_recovery_active(),
+                for_another_participant=self._mentions_another_participant(room, prepared_event.source),
             ),
             room=room,
             dispatch_metadata=dispatch_metadata,
@@ -1679,9 +1744,6 @@ class TurnController:
         """Execute one authorized selection while replacement admission remains reserved."""
         if await self._interactive_selection_is_durably_terminal(source_event_id):
             return False
-        reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
-            (source_event_id,),
-        )
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
@@ -1697,7 +1759,6 @@ class TurnController:
                     (selection.question_event_id,) if source_event_id != selection.question_event_id else ()
                 ),
                 requester_id=requester_user_id,
-                correlation_id=source_event_id,
             ),
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,
@@ -1710,30 +1771,20 @@ class TurnController:
             await self._require_durable_interactive_selection(source_event_id)
             return False
         selection_handled_turn = pending_turn
-        recovered_ack_event_id = (
-            await self.deps.visible_responses.recovered_response_event_id(
-                selection_handled_turn,
-                room_id=room.room_id,
-            )
-            if reconcile_visible_response
-            else None
-        )
-        ack_event_id = await self.deps.visible_responses.deliver_recoverable_text(
+        # This acknowledgement is the placeholder the selection's answer then
+        # edits, which is what its `interactive_span_id` below says, so it
+        # is the turn's initial delivery and not its answer. Staging it that way
+        # also keeps it from settling the journal source: a placeholder
+        # discharges nothing, and a crash before the model finished would
+        # otherwise leave "Processing your response..." in the room with
+        # nothing pending to replay.
+        ack_event_id, interactive_span_id = await self.deps.visible_responses.deliver_selection_acknowledgement(
             selection_handled_turn,
             target=response_target,
             response_text=(
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
-            recovered_response_event_id=recovered_ack_event_id,
             delivery_turn_id=source_event_id,
-            # This acknowledgement is the placeholder the selection's answer
-            # then edits, which is what `existing_event_is_placeholder` below
-            # says, so it is the turn's initial delivery and not its answer.
-            # Staging it that way also keeps it from settling the journal
-            # source: a placeholder discharges nothing, and a crash before the
-            # model finished would otherwise leave "Processing your
-            # response..." in the room with nothing pending to replay.
-            as_placeholder=True,
         )
         if not ack_event_id:
             self.deps.logger.error(
@@ -1741,7 +1792,6 @@ class TurnController:
                 source_event_id=source_event_id,
             )
             raise self._interactive_selection_retry_error(source_event_id)
-        selection_handled_turn = canonicalize_turn_record(selection_handled_turn, response_event_id=ack_event_id)
         # A reaction or numeric answer identifies the selection but does not
         # carry the question's attachment context, so rebuild it from the
         # conversation that asked the question.
@@ -1760,17 +1810,10 @@ class TurnController:
             response_event_id = await self._finalize_dispatch_failure(
                 target=response_target,
                 error=error,
+                handled_turn=selection_handled_turn,
                 existing_event_id=ack_event_id,
-                on_visible_response=lambda event_id: self.deps.visible_responses.record_pending_visible_response(
-                    selection_handled_turn,
-                    event_id,
-                ),
-                delivery_turn_id=source_event_id,
             )
             if response_event_id is not None:
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
-                )
                 await self._require_durable_interactive_selection(source_event_id)
                 return False
             raise self._interactive_selection_retry_error(source_event_id) from error
@@ -1785,12 +1828,8 @@ class TurnController:
             attachment_ids=selection_attachment_ids,
         )
 
-        record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
-            handled_turn=selection_handled_turn,
-        )
-
         source_handoff = asyncio.Event()
-        response_event_id = await self.deps.response_runner.generate_response(
+        await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
@@ -1805,8 +1844,7 @@ class TurnController:
                 history_boundary_event_id=source_event_id,
                 member_display_names=room_member_display_names(room),
                 existing_event_id=ack_event_id,
-                existing_event_is_placeholder=True,
-                existing_event_is_recovered=recovered_ack_event_id is not None,
+                interactive_span_id=interactive_span_id,
                 user_id=requester_user_id,
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
@@ -1817,17 +1855,11 @@ class TurnController:
                     terminal_source_event_ids=selection_handled_turn.source_event_ids,
                     thread_history=history,
                 ),
-                on_deferred_outcome_handled=record_deferred_outcome,
-                on_user_stop_handled=record_user_stop,
                 source_handoff=source_handoff,
             ),
         )
         if source_handoff.is_set():
             return True
-        if response_event_id is not None:
-            await self.deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
-            )
         await self._require_durable_interactive_selection(source_event_id)
         return False
 
@@ -1902,110 +1934,40 @@ class TurnController:
         *,
         target: MessageTarget,
         error: Exception,
+        handled_turn: TurnRecord,
         existing_event_id: str | None = None,
-        on_visible_response: Callable[[str], Awaitable[None]] | None = None,
-        delivery_turn_id: str | None = None,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message.
 
-        The edit carries the turn when the caller has one, which puts this
-        failure notice behind the same durable row an answer would use: the
-        journal sources settle inside the enqueue, so the terminal record the
-        caller writes next cannot land while the journal still calls this turn
-        unfinished.
-
-        A failed durable edit is not followed by a direct send, and that is the
-        whole of the ownership rule here. Once the edit has been offered to the
-        outbox, exactly one of two things is true and neither wants another
-        message in the room.
-
-        Either the enqueue was refused, which only the membership fence does,
-        and the conversation this notice belongs to is one the bot has left.
-        Sending anyway puts an old turn's error in front of whoever is in that
-        room now. Or the row exists, attempted and unacknowledged, and the
-        outbox still owes this turn an answer: the next recovery pass resends
-        the frozen envelope and the placeholder becomes the error notice, which
-        is the outcome this method wanted. Sending as well races that pass --
-        no crash required -- and the loser is invisible, because
-        acknowledgement is first-writer-wins, so the room keeps both notices
-        while durable state names only one.
-
-        An earlier version sent anyway and then tried to adopt the message as
-        the row's outcome. Adoption cannot win that race, and it could not tell
-        a fence refusal from a Matrix failure either, because both surface as a
-        false return.
-
-        The remaining direct send is for the case with no durable owner at all:
-        no placeholder to edit, or an edit that never belonged to a turn. There
-        is no row to race and nothing else will ever put this notice in the
-        room.
+        A reply that owns ``existing_event_id`` shows the failure through its
+        records, which settle the journal sources, record the turn answered,
+        and own the notice until it is delivered. Otherwise nothing durable owns
+        the notice, so it is sent directly and the turn records it as its answer.
         """
         error_text = get_user_friendly_error_message(
             error,
             self.deps.agent_name,
             runtime_paths=self.deps.runtime_paths,
         )
-        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
-        if existing_event_id is not None:
-            edited = await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=existing_event_id,
-                    new_text=error_text,
-                    extra_content=terminal_extra_content,
-                    delivery_turn_id=delivery_turn_id,
-                ),
-            )
-            if edited:
-                return existing_event_id
-            if delivery_turn_id is not None:
-                self.deps.logger.info(
-                    "dispatch_failure_notice_left_to_the_outbox",
-                    turn_id=delivery_turn_id,
-                    existing_event_id=existing_event_id,
-                )
-                return None
+        if existing_event_id is not None and await self.deps.delivery_gateway.fail_reply_dispatch(
+            existing_event_id,
+            error_text,
+        ):
+            return existing_event_id
         response_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text=error_text,
-                extra_content=terminal_extra_content,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
             ),
         )
-        if response_event_id is None:
-            return None
-        if on_visible_response is not None:
-            await on_visible_response(response_event_id)
+        if response_event_id is not None:
+            await self.deps.turn_store.record_responded_turn(
+                canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
+            )
         return response_event_id
 
-    def _build_response_settlement_callbacks(
-        self,
-        *,
-        handled_turn: TurnRecord,
-    ) -> tuple[
-        Callable[[str], Awaitable[None]],
-        Callable[[str, int], Awaitable[None]],
-    ]:
-        """Build callbacks that record a deferred handled outcome or a user stop."""
-
-        async def record_deferred_outcome(response_event_id: str) -> None:
-            await record_deferred_outcome_response(
-                self.deps.turn_store,
-                handled_turn,
-                response_event_id,
-            )
-
-        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
-            await record_user_stop_terminal(
-                self.deps.turn_store,
-                handled_turn,
-                response_event_id,
-                stop_receipt_order,
-            )
-
-        return record_deferred_outcome, record_user_stop
-
-    async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
+    async def _execute_response_action(  # noqa: C901, PLR0915
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -2108,22 +2070,6 @@ class TurnController:
                         self.deps.runtime_paths,
                     )
 
-            record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
-                handled_turn=handled_turn,
-            )
-
-            recovered_response_event_id = (
-                await self.deps.visible_responses.recovered_response_event_id(
-                    handled_turn,
-                    room_id=dispatch.target.room_id,
-                )
-                if reconcile_visible_response
-                else None
-            )
-
-            async def record_visible_response(response_event_id: str) -> None:
-                await self.deps.visible_responses.record_pending_visible_response(handled_turn, response_event_id)
-
             async def settle_redacted_sources() -> None:
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
 
@@ -2144,9 +2090,7 @@ class TurnController:
                         discovery_event_ids=handled_turn.discovery_event_ids,
                     ),
                     user_id=dispatch.requester_user_id,
-                    existing_event_id=recovered_response_event_id,
-                    existing_event_is_placeholder=recovered_response_event_id is not None,
-                    existing_event_is_recovered=recovered_response_event_id is not None,
+                    # A replay finds the reply its earlier attempt left through the reply's records.
                     response_envelope=dispatch.envelope,
                     correlation_id=dispatch.correlation_id,
                     matrix_run_metadata=matrix_run_metadata,
@@ -2166,40 +2110,22 @@ class TurnController:
                         thread_history=history,
                     ),
                     on_source_turn_suppressed=settle_redacted_sources,
-                    on_deferred_outcome_handled=record_deferred_outcome,
                     on_no_response_handled=record_no_response,
-                    on_user_stop_handled=record_user_stop,
-                    on_visible_response=record_visible_response,
                 )
+                # The reply's records settle the sources and record the turn answered.
                 if action.kind == "team":
                     assert action.form_team is not None
                     assert team_mode is not None
-                    response_event_id = await self.deps.response_runner.generate_team_response_helper(
+                    await self.deps.response_runner.generate_team_response_helper(
                         response_request,
                         team_agents=action.form_team.eligible_members,
                         team_mode=team_mode.value,
                     )
                 else:
-                    response_event_id = await self.deps.response_runner.generate_response(
-                        response_request,
-                    )
-            except PostLockRequestPreparationError as error:
-                failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
-                response_event_id = await self._finalize_dispatch_failure(
-                    target=dispatch.target,
-                    error=failure,
-                    existing_event_id=error.placeholder_event_id,
-                    on_visible_response=record_visible_response,
-                    delivery_turn_id=handled_turn.anchor_event_id,
-                )
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
-                )
+                    await self.deps.response_runner.generate_response(response_request)
+            except PostLockRequestPreparationError:
+                # The reply's records settled the sources, recorded the turn answered, and owe the notice.
                 return
-            if response_event_id is not None:
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
-                )
 
     async def handle_prepared_turn(self, turn: PreparedTurn) -> None:
         """Dispatch one logical turn emitted directly by the coalescing gate."""
@@ -2308,11 +2234,9 @@ class TurnController:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
-        is_nonterminal_stream = isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
-            STREAM_STATUS_APPROVAL_PENDING,
-            STREAM_STATUS_PENDING,
-            STREAM_STATUS_STREAMING,
-        }
+        is_nonterminal_stream = (
+            isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in UNFINISHED_REPLY_STATUSES
+        )
         if not isinstance(event.body, str) or (is_nonterminal_stream and event_info.is_edit):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         # Another entity's finished reply arrives as an edit of its placeholder; its mentions dispatch like a message.
@@ -2686,6 +2610,7 @@ class TurnController:
                         message_received_depth=envelope.message_received_depth,
                         trust_internal_payload_metadata=True,
                         turn_dispatch_recovery=turn_dispatch_recovery_active(),
+                        for_another_participant=self._mentions_another_participant(room, normalized_event.source),
                     ),
                     room=room,
                     dispatch_metadata=(
@@ -2706,6 +2631,7 @@ class TurnController:
         else:
             reservation_released_or_handed_off = True
             claim_transferred = True
+            self._mark_waiting_for_approval(room, event.source, normalized_target, envelope)
             return ready
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:

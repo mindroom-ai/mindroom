@@ -28,34 +28,9 @@ class ResponseSources:
     pending_event_ids: tuple[str, ...]
     logical_source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
-    edit_receipt_order: int | None = None
 
     def __post_init__(self) -> None:
-        """Validate immutable source identity and ordering inputs."""
+        """Validate immutable source identities."""
         _validate_event_ids("pending_event_ids", self.pending_event_ids, required=True)
         _validate_event_ids("logical_source_event_ids", self.logical_source_event_ids, required=True)
         _validate_event_ids("discovery_event_ids", self.discovery_event_ids, required=False)
-        if self.edit_receipt_order is not None and (
-            not isinstance(self.edit_receipt_order, int)
-            or isinstance(self.edit_receipt_order, bool)
-            or self.edit_receipt_order <= 0
-        ):
-            message = "edit_receipt_order must be None or a positive integer"
-            raise ValueError(message)
-
-
-@dataclass(frozen=True, slots=True)
-class ResponseAttempt:
-    """Immutable response identity carried separately from delivery results."""
-
-    entity_name: str
-    sources: ResponseSources
-
-    def __post_init__(self) -> None:
-        """Require an exact entity and validated source value."""
-        if not isinstance(self.entity_name, str) or not self.entity_name:
-            message = "entity_name must be a non-empty string"
-            raise ValueError(message)
-        if not isinstance(self.sources, ResponseSources):
-            message = "sources must be ResponseSources"
-            raise TypeError(message)
