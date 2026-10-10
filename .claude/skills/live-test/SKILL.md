@@ -40,6 +40,7 @@ The root shell includes Linux Chromium only on Linux so the backend and Node.js 
 - If you see conflicts, create an isolated config, set a unique `MINDROOM_NAMESPACE`, use a unique `mindroom_user.username`, isolate `MINDROOM_STORAGE_PATH`, and choose a non-default `--api-port`.
 - If the isolated run writes its own `.env`, inspect it before hitting authenticated `/api/*` routes because it may contain the instance-specific `MINDROOM_API_KEY`.
 - Keep config, storage, logs, transcripts, and snapshots in an isolated persistent directory under `.baspowers/sdd/` or `~/.codex/worktrees/`.
+- If you create `.baspowers/sdd/` yourself, add a `.gitignore` containing `*` to it so no evidence can be committed.
 - Do not put live-test evidence in a temporary directory.
 
 3. Verify behavior, not just startup.
