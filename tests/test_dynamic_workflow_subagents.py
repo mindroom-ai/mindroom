@@ -491,6 +491,20 @@ async def test_create_checks_grants_against_the_normalized_spec(
     assert created["status"] == "ok", created
 
 
+def test_sync_run_executes_a_subagent_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The synchronous run entry point runs a participant turn on its own event loop."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    spec = _spec([{"id": "critic", "system_prompt": "Critic prompt", "tools": []}])
+
+    with workflow.context():
+        created = json.loads(workflow.tools.create_workflow(spec))
+        run = json.loads(workflow.tools.run_workflow(workflow_id="review", input={}))
+
+    assert created["status"] == "ok", created
+    assert run["status"] == "completed", run
+    assert workflow.model.system_prompts == ["Critic prompt"]
+
+
 @pytest.mark.asyncio
 async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant turn that fails still links its step to the delegation record it wrote."""
