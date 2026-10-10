@@ -234,10 +234,11 @@ class DelegateTools(Toolkit):
             model=model,
             minimal=minimal,
             workspace_root=self._workspace_root,
+            # The copy runs one level deeper, where delegate may no longer be offered.
             available_toolkits=lambda: caller_toolkit_names(
                 self._agent_name,
                 live_delegation_config(self._config),
-                delegation_depth=self._delegation_depth,
+                delegation_depth=self._delegation_depth + 1,
             ),
             cap=self._persona_tools,
         )

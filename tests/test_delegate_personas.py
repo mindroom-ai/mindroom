@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _resolve_delegation_target, drive_delegations
-from mindroom.delegation.lifecycle import prepare_child_turn
+from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -429,6 +429,69 @@ async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypa
         "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
     )
     assert any("pass system_prompt or profile so the copy stays within your tools" in text for text in tool_results)
+
+
+@pytest.mark.asyncio
+async def test_copy_at_max_depth_inherits_tools_without_delegate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy started at the maximum depth inherits its parent's tools except delegate, which it cannot have."""
+    harness = _Harness(tmp_path, monkeypatch, _config(tools=("file", "calculator")))
+    harness.toolkit = DelegateTools(
+        "leader",
+        ["leader", "child"],
+        harness.paths,
+        harness.config,
+        execution_identity=harness.identity,
+        workspace_root=_workspace(harness.paths.storage_root),
+        delegation_depth=MAX_DELEGATION_DEPTH - 2,
+    )
+    harness.model.responses = [
+        ModelResponse(tool_calls=[_call("run_subagent", "n1", task="Read.", system_prompt="Q")]),
+        ModelResponse(content="Grandchild answer."),
+        ModelResponse(content="Child answer."),
+    ]
+
+    result = await harness.run(
+        harness.toolkit.run_subagent(task="Coordinate.", system_prompt="P", tools=["delegate", "file"]),
+    )
+
+    assert "Child answer." in result
+    assert harness.model.system_prompts == ["P", "Q", "P"]
+    records = [
+        json.loads(path.read_text())["child"]
+        for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
+    ]
+    grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
+    assert grandchild["persona"]["tools"] == ["file"]
+
+
+@pytest.mark.asyncio
+async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path: Path) -> None:
+    """On the native path a copy started at the maximum depth inherits its parent's tools except delegate."""
+    config = _config(tools=("file", "calculator"))
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=identity),
+        persona_tools=("delegate", "file"),
+    )
+
+    with tool_runtime_context(context):
+        target = await _resolve_delegation_target(
+            ToolExecution(tool_name="run_subagent", tool_args={"task": "Read.", "system_prompt": "Q"}),
+            None,
+            caller_identity=identity,
+            config=config,
+            runtime_paths=paths,
+            depth=MAX_DELEGATION_DEPTH - 1,
+        )
+
+    assert not isinstance(target, str), target
+    assert target.persona is not None
+    assert target.persona.tools == ("file",)
 
 
 @pytest.mark.asyncio

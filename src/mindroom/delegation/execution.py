@@ -730,10 +730,11 @@ def _resolve_fresh_target(
         model=model,
         minimal=bool(minimal),
         workspace_root=workspace.root if workspace is not None else None,
+        # The copy runs one level deeper, where delegate may no longer be offered.
         available_toolkits=lambda: caller_toolkit_names(
             caller_identity.agent_name,
             live_delegation_config(config),
-            delegation_depth=depth,
+            delegation_depth=depth + 1,
         ),
         cap=context.persona_tools if (context := get_tool_runtime_context()) is not None else None,
     )
