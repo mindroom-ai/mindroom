@@ -18,10 +18,18 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Provider names that select the same model class and so record the same usage identity.
+_PROVIDER_ALIASES = {"gemini": "google", "openai_codex": "codex", "kimi_code": "kimi"}
 # These providers report cache reads and writes beside input_tokens; the others count cache reads inside it.
 _CACHE_EXCLUDED_PROVIDERS = frozenset({"anthropic", "bedrock_claude", "vertexai_claude"})
 # Gemini reports thinking tokens beside output_tokens and bills them as output; the others count them inside it.
-_REASONING_EXCLUDED_PROVIDERS = frozenset({"google", "gemini"})
+_REASONING_EXCLUDED_PROVIDERS = frozenset({"google"})
+
+
+def provider_identity(provider: str) -> str:
+    """Return one name for every configured provider spelling that selects the same model class."""
+    canonical = canonical_provider(provider)
+    return _PROVIDER_ALIASES.get(canonical, canonical)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +76,7 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[st
             logger.warning("budget_pricing_model_unavailable", model=model_name, error=str(error))
             continue
         key = (model.get_provider(), model.id)
-        provider = canonical_provider(model_config.provider)
+        provider = provider_identity(model_config.provider)
         priced = PricedModel(
             pricing=model_config.pricing,
             input_includes_cache=provider not in _CACHE_EXCLUDED_PROVIDERS,

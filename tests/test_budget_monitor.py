@@ -409,3 +409,12 @@ async def test_status_never_marks_bots_over_budget(tmp_path: Path, monkeypatch: 
         over_budget=False,
     )
     await monitor.stop()
+
+
+@pytest.mark.parametrize(("priced", "unpriced"), [("google", "gemini"), ("codex", "openai_codex")])
+def test_provider_aliases_of_a_priced_model_are_swapped_too(tmp_path: Path, priced: str, unpriced: str) -> None:
+    config = _config(monthly_limit_usd=0)
+    config.models["priced"] = ModelConfig(provider=priced, id="shared-model", pricing=ModelPricing(input=1, output=2))
+    config.models["alias"] = ModelConfig(provider=unpriced, id="shared-model")
+
+    assert budget_model(config, _paths(tmp_path), None, ALICE, "alias") == "luna"
