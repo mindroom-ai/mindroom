@@ -11,9 +11,10 @@ from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.config.egress_broker import EgressService
+from mindroom.egress_broker.oauth_source import shared_worker_oauth
 from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
-from mindroom.egress_broker.user_services import effective_config
+from mindroom.egress_broker.user_services import ServiceSource, effective_config
 from mindroom.egress_broker.user_services import service_source as config_service_source
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
-type EgressServiceSource = Literal["config", "user"]
+type EgressServiceSource = ServiceSource
 
 
 def effective_services(
@@ -277,6 +278,7 @@ def service_oauth_provider(snapshot: ApiSnapshot, service: EgressService | None)
 def egress_oauth_provider(
     request: Request,
     service_name: str,
+    worker_target: ResolvedWorkerTarget | None,
     *,
     connecting: bool,
     headers: Mapping[str, str] | None = None,
@@ -289,26 +291,38 @@ def egress_oauth_provider(
     service = config.egress_broker.services.get(service_name) if config is not None else None
     if service is None:
         raise HTTPException(404, "Service is not configured", headers=headers)
-    return oauth_provider_of_service(request, service, connecting=connecting, headers=headers)
+    return oauth_provider_of_service(request, service, worker_target, connecting=connecting, headers=headers)
 
 
 def oauth_provider_of_service(
     request: Request,
     service: EgressService,
+    worker_target: ResolvedWorkerTarget | None,
     *,
     connecting: bool,
     headers: Mapping[str, str] | None = None,
 ) -> OAuthProvider:
     """Return the OAuth provider of an egress service for the connect and disconnect routes.
 
-    A service without a provider, or whose provider the registry does not know, is a 404. Connecting is a 409 while
-    a shared service account is configured for the provider, since personal accounts are not managed then.
-    Disconnecting stays possible, so a personal connection stored earlier can still be revoked.
+    A service without a provider, or whose provider the registry does not know, is a 404. A provider that the broker
+    refuses for `worker_target` (a requester's account in a sandbox several requesters share, see
+    `shared_worker_oauth`) is a 409 for both actions, as the status reports nothing connectable there. Connecting is
+    also a 409 while a shared service account is configured for the provider, since personal accounts are not
+    managed then. Disconnecting stays possible there, so a personal connection stored earlier can still be revoked.
     """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     provider = service_oauth_provider(snapshot, service)
     if provider is None:
         raise HTTPException(404, "Service has no account connection", headers=headers)
+    access = shared_worker_oauth(
+        provider,
+        worker_target,
+        opted_in=service.oauth_on_shared_workers,
+        runtime_paths=snapshot.runtime_paths,
+    )
+    if access == "refused":
+        detail = "Account connection is unavailable here because several users share this agent's sandbox"
+        raise HTTPException(409, detail, headers=headers)
     if connecting and oauth_provider_service_account_configured(provider, snapshot.runtime_paths):
         raise HTTPException(409, "Personal account linking is unavailable for this service", headers=headers)
     return provider

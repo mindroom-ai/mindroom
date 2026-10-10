@@ -31,6 +31,7 @@ key_configured  # Egress service status field reported by the egress APIs (src/m
 key_updated_at  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
 shared_worker_opt_in  # Egress OAuth status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
 egress_services  # JSON response field set on the catalog by its route (src/mindroom/api/connections.py)
+inactive_services  # JSON response field consumed by the personal egress page (src/mindroom/api/egress_credentials.py)
 connect_egress_account  # FastAPI route (src/mindroom/api/egress_credentials.py)
 disconnect_egress_account  # FastAPI route (src/mindroom/api/egress_credentials.py)
 connect_service_account  # FastAPI route (src/mindroom/api/egress_broker.py)

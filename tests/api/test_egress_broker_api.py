@@ -12,7 +12,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from mindroom.api import egress_status, oauth
+from mindroom.api import egress_broker, egress_status, oauth
 from mindroom.config.egress_broker import EgressService
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker import secrets
@@ -804,6 +804,54 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
     assert drive["oauth"]["can_connect"] is False
     assert drive["oauth"]["unavailable_reason"] is None
     assert _service(oauth_broker_client, "gh")["oauth"]["unavailable_reason"] == "shared_sandbox"
+    assert _service(oauth_broker_client, "github")["oauth"] is None
+
+
+@pytest.mark.parametrize("action", ["connect", "disconnect"])
+@pytest.mark.parametrize("agent_name", [None, "test_agent"])
+def test_connect_and_disconnect_are_refused_in_a_scope_the_broker_refuses_the_account_for(
+    oauth_broker_client: TestClient,
+    egress_config_file: Path,
+    action: str,
+    agent_name: str | None,
+) -> None:
+    """The panel offers nothing there, so the routes answer 409 with a readable string until the service opts in."""
+    params = {} if agent_name is None else {"agent_name": agent_name}
+    url = f"/api/egress-broker/services/gh/{action}"
+
+    refused = oauth_broker_client.post(url, params=params)
+    assert refused.status_code == 409, refused.text
+    assert isinstance(refused.json()["detail"], str)
+    assert "share" in refused.json()["detail"]
+    drive = oauth_broker_client.post(f"/api/egress-broker/services/drive/{action}", params=params)
+    assert drive.status_code == 200, drive.text
+
+    _opt_in_to_shared_workers(egress_config_file)
+    allowed = oauth_broker_client.post(url, params=params)
+    assert allowed.status_code == 200, allowed.text
+
+
+def test_an_unreadable_worker_backend_degrades_one_service_without_failing_the_panel(
+    oauth_broker_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared-sandbox check can fail on its own, and that costs only the service that needs it."""
+    real = egress_broker.shared_worker_oauth
+
+    def broken(provider: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if provider.requester_scoped_credentials:
+            msg = "internal-backend-detail"
+            raise RuntimeError(msg)
+        return real(provider, *args, **kwargs)
+
+    monkeypatch.setattr(egress_broker, "shared_worker_oauth", broken)
+    response = oauth_broker_client.get("/api/egress-broker/services")
+
+    assert response.status_code == 200, response.text
+    assert "internal-backend-detail" not in response.text
+    gh = _service(oauth_broker_client, "gh")["oauth"]
+    assert (gh["connected"], gh["can_connect"], gh["unavailable_reason"]) == (False, False, None)
+    assert _service(oauth_broker_client, "drive")["oauth"]["can_connect"] is True
     assert _service(oauth_broker_client, "github")["oauth"] is None
 
 

@@ -19,6 +19,7 @@ from mindroom.egress_broker.user_services import (
     UserServiceConflictError,
     delete_user_service,
     effective_config,
+    inactive_user_services,
     load_user_services,
     save_user_service,
     user_service_hosts_not_allowed,
@@ -195,6 +196,73 @@ def test_invalid_stored_entry_is_skipped_by_name_only(manager: CredentialsManage
     assert skipped == ["bad-auth", "opted-in", "Bad Name", "not-a-dict"]
     assert "carrier-pigeon" not in str(logs)
     assert "x.example.com" not in str(logs)
+
+
+def test_inactive_entries_are_the_shadowed_and_the_invalid_ones_with_their_reason(manager: CredentialsManager) -> None:
+    """The ignored entries are reported by name, shadowing first, without a log line for each listing."""
+    good = _service().authored_model_dump()
+    store = manager.for_primary_runtime_scope(_ALICE, "code")
+    store.save_credentials(
+        USER_SERVICES_CREDENTIAL_SERVICE,
+        {
+            "services": {
+                "good": good,
+                "github": good,
+                "bad-auth": {"rules": [{"host": "x.example.com", "auth": {"type": "carrier-pigeon"}}]},
+                "opted-in": {**good, "oauth_on_shared_workers": True},
+                "Bad Name": good,
+                "not-a-dict": "rules",
+                # Both shadowed and invalid: the operator's service is the reason it is ignored.
+                "both": "rules",
+            },
+        },
+    )
+    config = EgressBrokerConfig.model_validate(
+        {"services": {"github": {"preset": "github"}, "both": {"preset": "openai"}}},
+    )
+
+    with capture_logs() as logs:
+        inactive = inactive_user_services(config, manager, _target())
+
+    assert [(entry.name, entry.reason) for entry in inactive] == [
+        ("Bad Name", "invalid"),
+        ("bad-auth", "invalid"),
+        ("both", "shadowed"),
+        ("github", "shadowed"),
+        ("not-a-dict", "invalid"),
+        ("opted-in", "invalid"),
+    ]
+    assert logs == []
+    assert list(load_user_services(manager, _target())) == ["good", "github"]
+    assert inactive_user_services(config, manager, _target(_BOB)) == []
+    assert inactive_user_services(config, manager, None) == []
+
+
+def test_a_scope_without_ignored_entries_has_no_inactive_ones(manager: CredentialsManager) -> None:
+    """Active services and a missing or malformed document are not reported."""
+    assert inactive_user_services(_CONFIG, manager, _target()) == []
+    _save(manager, _target(), "mine", _service())
+    assert inactive_user_services(_CONFIG, manager, _target()) == []
+    store = manager.for_primary_runtime_scope(_ALICE, "code")
+    store.save_credentials(USER_SERVICES_CREDENTIAL_SERVICE, {"services": ["not", "a", "mapping"]})
+    assert inactive_user_services(_CONFIG, manager, _target()) == []
+
+
+def test_deleting_an_invalid_entry_removes_it_and_its_key(manager: CredentialsManager) -> None:
+    """An entry that no longer validates is no config service's shadow, so its stored key goes with it."""
+    store = manager.for_primary_runtime_scope(_ALICE, "code")
+    store.save_credentials(
+        USER_SERVICES_CREDENTIAL_SERVICE,
+        {"services": {"stale": {"rules": []}, "good": _service().authored_model_dump()}},
+    )
+    save_secret(manager, _target(), "stale", "old-key")
+
+    assert _delete(manager, _target(), "stale") is True
+
+    assert inactive_user_services(_CONFIG, manager, _target()) == []
+    assert list(load_user_services(manager, _target())) == ["good"]
+    assert load_secret(manager, _target(), "stale") is None
+    assert _delete(manager, _target(), "stale") is False
 
 
 def test_malformed_document_reads_as_no_services(manager: CredentialsManager) -> None:

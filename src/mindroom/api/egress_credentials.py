@@ -42,8 +42,10 @@ from mindroom.egress_broker.secrets import OAuthStatus, delete_secret, save_secr
 from mindroom.egress_broker.service import active_audit_log
 from mindroom.egress_broker.user_services import (
     MAX_SERVICE_BYTES,
+    InactiveReason,
     UserServiceConflictError,
     delete_user_service,
+    inactive_user_services,
     save_user_service,
     user_service_hosts_not_allowed,
 )
@@ -85,12 +87,24 @@ class EgressCredentialService(EgressSourceStatus):
     rules: list[EgressRuleSummary]
 
 
+class EgressInactiveService(BaseModel):
+    """A service entry stored in the agent's scope that the broker ignores, so a user can still remove it.
+
+    `shadowed` means an administrator's service has the same name now; `invalid` means the entry no longer
+    validates as a service. Inactive entries count toward the scope's limits, and the delete route removes them.
+    """
+
+    name: str
+    reason: InactiveReason
+
+
 class EgressCredentialAgent(BaseModel):
     """One agent with its egress services.
 
     `shared` is true for a shared or unscoped agent, whose services and keys everyone using it shares, and
     `can_manage` says whether the caller may change them: their own agent, or a shared one they manage. Both are
-    known even when the agent has no services yet.
+    known even when the agent has no services yet. `inactive_services` lists the stored entries of the agent's
+    scope that are not in `services`.
     """
 
     agent_name: str
@@ -98,6 +112,7 @@ class EgressCredentialAgent(BaseModel):
     shared: bool
     can_manage: bool
     services: list[EgressCredentialService]
+    inactive_services: list[EgressInactiveService]
 
 
 class EgressCredentialsResponse(BaseModel):
@@ -166,22 +181,23 @@ async def _personal_oauth_status(
     """Load a service's provider connection state for one agent with the helper behind the portal's status route.
 
     The token refresh is skipped so a listing never waits on the provider; an unknown provider has no status, and
-    any failure to read one provider's state shows that service as not connectable instead of failing the listing.
+    any failure to read one provider's state, the worker backend check included, shows that service as not
+    connectable instead of failing the listing.
     Requester-scoped connections (GitHub and Atlassian) belong to the requester, so every user of the agent manages
     their own, except where the broker refuses them in a shared sandbox (`shared_worker_oauth`).
     """
     provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service)
     if provider is None:
         return None
-    access = shared_worker_oauth(
-        provider,
-        target,
-        opted_in=service.oauth_on_shared_workers,
-        runtime_paths=runtime_paths,
-    )
-    if access == "refused":
-        return shared_worker_unavailable_status(provider, runtime_paths)
     try:
+        access = shared_worker_oauth(
+            provider,
+            target,
+            opted_in=service.oauth_on_shared_workers,
+            runtime_paths=runtime_paths,
+        )
+        if access == "refused":
+            return shared_worker_unavailable_status(provider, runtime_paths)
         result = await oauth.agent_connection_status(
             request,
             provider,
@@ -295,6 +311,20 @@ async def egress_services_for_agent(
     ]
 
 
+async def _inactive_services_for_agent(
+    agent_name: str,
+    requester_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> list[EgressInactiveService]:
+    """List the entries stored in the requester's scope for one agent that the broker ignores."""
+    target = build_connection_agent_target(config, runtime_paths, requester_id, agent_name)
+    # Reading the scope's own services touches the credential store, so it stays off the event loop.
+    inactive = await asyncio.to_thread(inactive_user_services, config.egress_broker, manager, target)
+    return [EgressInactiveService(name=entry.name, reason=entry.reason) for entry in inactive]
+
+
 async def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCredentialAgent]:
     """List every agent the requester may use, with its egress services."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
@@ -332,6 +362,13 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
                 shared=is_shared,
                 can_manage=can_manage,
                 services=services,
+                inactive_services=await _inactive_services_for_agent(
+                    agent_name,
+                    human_requester,
+                    config,
+                    runtime_paths,
+                    manager,
+                ),
             ),
         )
     return agents
@@ -542,8 +579,14 @@ async def _limit_service_body(request: Request) -> None:
         raise HTTPException(413, msg, headers=CONNECTIONS_HEADERS)
 
 
-def _parse_user_service(body: dict[str, Any]) -> EgressService:
-    """Validate a service body like a config service; the operator-only `oauth_on_shared_workers` is not accepted."""
+def _parse_user_service(body: object) -> EgressService:
+    """Validate a service body like a config service; the operator-only `oauth_on_shared_workers` is not accepted.
+
+    Every refusal is a 422 with a string detail, a body that is not a JSON object included.
+    """
+    if not isinstance(body, dict):
+        msg = "A service must be a JSON object"
+        raise _unprocessable(msg)
     if "oauth_on_shared_workers" in body:
         msg = "oauth_on_shared_workers can only be set by an administrator in config.yaml"
         raise _unprocessable(msg)
@@ -599,16 +642,16 @@ def put_user_service(
     request: Request,
     agent_name: str,
     name: str,
-    body: Annotated[dict[str, Any], Body()],
     requester_id: _EgressUser,
     _size: Annotated[None, Depends(_limit_service_body)],
+    body: Annotated[object, Body()] = None,
 ) -> None:
     """Create or replace one of the scope's own services.
 
     The body has the fields of a config service except `oauth_on_shared_workers`. Returns 413 for a body over 16 KiB,
-    409 for the name of a config service, and 422 for an invalid service, a limit (count or size), a placeholder user
-    services may not set, an unknown OAuth provider or one on a shared or unscoped agent, or rules on hosts that
-    `unmatched_hosts: deny` keeps closed.
+    409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
+    an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider
+    or one on a shared or unscoped agent, or rules on hosts that `unmatched_hosts: deny` keeps closed.
     """
     _require_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -641,8 +684,9 @@ def delete_user_service_route(
     """Delete one of the scope's own services together with its stored key.
 
     Returns 404 when the scope has no such service. A config service cannot be deleted, so its name is a 409. An
-    entry stored under a name that a config service has since taken, which the broker ignores, can still be removed,
-    and the key stays because the config service uses it.
+    inactive entry (see `EgressInactiveService`) can still be removed: one stored under a name that a config service
+    has since taken keeps the key, which the config service uses, and one that no longer validates takes its key
+    with it.
     """
     _require_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -666,7 +710,7 @@ async def connect_egress_account(
 ) -> oauth.OAuthConnectResponse:
     """Start the OAuth flow of a service's provider for one agent's credential scope."""
     _require_same_origin(request)
-    _agent, egress_service = await asyncio.to_thread(
+    agent, egress_service = await asyncio.to_thread(
         _resolve_agent_and_service,
         request,
         requester_id,
@@ -675,7 +719,13 @@ async def connect_egress_account(
         require_management=True,
         requester_owned_oauth=True,
     )
-    provider = oauth_provider_of_service(request, egress_service, connecting=True, headers=CONNECTIONS_HEADERS)
+    provider = oauth_provider_of_service(
+        request,
+        egress_service,
+        agent.target,
+        connecting=True,
+        headers=CONNECTIONS_HEADERS,
+    )
     try:
         return await oauth.connect(provider.id, request, agent_name=agent_name)
     except HTTPException as exc:
@@ -696,7 +746,7 @@ async def disconnect_egress_account(
 ) -> dict[str, str]:
     """Reset the OAuth connection of a service's provider for one agent's credential scope."""
     _require_same_origin(request)
-    _agent, egress_service = await asyncio.to_thread(
+    agent, egress_service = await asyncio.to_thread(
         _resolve_agent_and_service,
         request,
         requester_id,
@@ -705,7 +755,13 @@ async def disconnect_egress_account(
         require_management=True,
         requester_owned_oauth=True,
     )
-    provider = oauth_provider_of_service(request, egress_service, connecting=False, headers=CONNECTIONS_HEADERS)
+    provider = oauth_provider_of_service(
+        request,
+        egress_service,
+        agent.target,
+        connecting=False,
+        headers=CONNECTIONS_HEADERS,
+    )
     try:
         return await oauth.disconnect(provider.id, request, agent_name=agent_name)
     except HTTPException as exc:

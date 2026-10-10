@@ -47,10 +47,13 @@ __all__ = [
     "MAX_SERVICE_BYTES",
     "MAX_USER_SERVICES",
     "USER_SERVICES_CREDENTIAL_SERVICE",
+    "InactiveReason",
+    "InactiveUserService",
     "ServiceSource",
     "UserServiceConflictError",
     "delete_user_service",
     "effective_config",
+    "inactive_user_services",
     "load_user_services",
     "save_user_service",
     "service_source",
@@ -80,6 +83,15 @@ _PLACEHOLDER_VALUE = re.compile(r"[A-Za-z0-9._:-]{1,256}")
 
 type _ScopeKey = tuple[object, ...]
 type ServiceSource = Literal["config", "user"]
+type InactiveReason = Literal["shadowed", "invalid"]
+
+
+@dataclass(frozen=True)
+class InactiveUserService:
+    """A stored entry of a scope that the broker ignores: `shadowed` by a config service or `invalid` on load."""
+
+    name: str
+    reason: InactiveReason
 
 
 class UserServiceConflictError(Exception):
@@ -118,6 +130,33 @@ def load_user_services(manager: CredentialsManager, target: ResolvedWorkerTarget
             service = service.model_copy(update={"oauth_provider": None})
         services[name] = service
     return services
+
+
+def inactive_user_services(
+    config: EgressBrokerConfig,
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+) -> list[InactiveUserService]:
+    """List, by name, the scope's stored entries that `effective_config` leaves out, with the reason.
+
+    An entry is `shadowed` when `config` has a service of that name, whether or not it would still validate, and
+    `invalid` when it no longer validates as a user service. Both still count toward the scope's limits, and
+    `delete_user_service` removes either. This reads the store each time and logs nothing, so a listing can call it.
+    """
+    inactive = []
+    for name, authored in sorted(_stored_services(manager, target).items()):
+        reason: InactiveReason
+        if name in config.services:
+            reason = "shadowed"
+        else:
+            try:
+                _validated(name, authored)
+            except ValueError:
+                reason = "invalid"
+            else:
+                continue
+        inactive.append(InactiveUserService(name=name, reason=reason))
+    return inactive
 
 
 def save_user_service(
@@ -186,8 +225,9 @@ def delete_user_service(
 ) -> bool:
     """Delete one of the scope's services and its stored key; return whether the service existed.
 
-    The last service takes the document with it. The key stays when `config_services` has the name: that config
-    service shadows the entry and uses the key in this scope.
+    Any stored entry can be deleted, an inactive one (see `inactive_user_services`) included. The last service takes
+    the document with it. The key stays when `config_services` has the name: that config service shadows the entry
+    and uses the key in this scope.
     """
     with _write_lock:
         stored = _stored_services(manager, target)

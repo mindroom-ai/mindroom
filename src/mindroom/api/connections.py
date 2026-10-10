@@ -60,7 +60,11 @@ class ConnectionTool(BaseModel):
 
 
 class AgentConnections(BaseModel):
-    """Allowed services for one personal or managed shared agent."""
+    """Allowed services for one personal or managed shared agent.
+
+    `egress_services` is a list for an agent whose egress credentials the user may use, empty when it has no
+    services, so the portal can link every such agent to the services page. It is null for any other agent.
+    """
 
     agent_name: str
     agent_display_name: str
@@ -68,7 +72,7 @@ class AgentConnections(BaseModel):
     can_use: bool
     services: list[ConnectionService]
     tools: list[ConnectionTool]
-    egress_services: list[EgressCredentialService] = []
+    egress_services: list[EgressCredentialService] | None = None
 
 
 class ConnectionsCatalog(BaseModel):
@@ -238,8 +242,7 @@ async def catalog(request: Request, context: _ConnectionsContext) -> Connections
                     context.runtime_paths,
                     memberships,
                     manager,
-                )
-                or [],
+                ),
             },
         )
         for agent in context.catalog.agents

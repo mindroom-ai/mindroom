@@ -85,8 +85,8 @@ async def _admin_oauth_status(
     """Load a provider's connection state for the selected scope with the dashboard's OAuth status helper.
 
     The router's dependency has authenticated the request. The token refresh is skipped, as on the personal page,
-    so a stalled provider never stalls the panel. Any failure to read one provider's state shows that service as not
-    connectable instead of failing the panel.
+    so a stalled provider never stalls the panel. Any failure to read one provider's state, the worker backend check
+    included, shows that service as not connectable instead of failing the panel.
     """
     from mindroom.api import config_lifecycle  # noqa: PLC0415
 
@@ -99,15 +99,15 @@ async def _admin_oauth_status(
     if provider is None:
         return None
     worker_target = worker_target_for_credentials_target(target)
-    access = shared_worker_oauth(
-        provider,
-        worker_target,
-        opted_in=service.oauth_on_shared_workers,
-        runtime_paths=target.runtime_paths,
-    )
-    if access == "refused":
-        return shared_worker_unavailable_status(provider, target.runtime_paths)
     try:
+        access = shared_worker_oauth(
+            provider,
+            worker_target,
+            opted_in=service.oauth_on_shared_workers,
+            runtime_paths=target.runtime_paths,
+        )
+        if access == "refused":
+            return shared_worker_unavailable_status(provider, target.runtime_paths)
         result = await oauth.authenticated_connection_status(
             provider_id,
             request,
@@ -193,6 +193,12 @@ def _resolve_scope_and_service(
     return target, worker_target
 
 
+def _scope_worker_target(request: Request, agent_name: str | None) -> ResolvedWorkerTarget | None:
+    """Return the worker target of the selected scope, the one the status listing uses for the same service."""
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=())
+    return worker_target_for_credentials_target(target)
+
+
 @router.get("/services", response_model=ServicesResponse)
 async def get_services(
     request: Request,
@@ -258,9 +264,10 @@ async def connect_service_account(
     """Start the OAuth flow of a service's provider for the selected scope.
 
     Raises 404 if the service is not configured or has no usable OAuth provider, 409 if a service account
-    replaces personal accounts for that provider.
+    replaces personal accounts for that provider or the scope's sandbox is shared by several requesters, where the
+    broker never uses a requester's own account unless the service opts in.
     """
-    provider = egress_oauth_provider(request, name, connecting=True)
+    provider = egress_oauth_provider(request, name, _scope_worker_target(request, agent_name), connecting=True)
     return await oauth.connect(provider.id, request, agent_name=agent_name)
 
 
@@ -270,8 +277,11 @@ async def disconnect_service_account(
     name: str,
     agent_name: Annotated[str | None, Query()] = None,
 ) -> dict[str, str]:
-    """Reset the OAuth connection of a service's provider for the selected scope."""
-    provider = egress_oauth_provider(request, name, connecting=False)
+    """Reset the OAuth connection of a service's provider for the selected scope.
+
+    Raises 404 like the connect route, and 409 where the scope's sandbox is shared by several requesters.
+    """
+    provider = egress_oauth_provider(request, name, _scope_worker_target(request, agent_name), connecting=False)
     return await oauth.disconnect(provider.id, request, agent_name=agent_name)
 
 

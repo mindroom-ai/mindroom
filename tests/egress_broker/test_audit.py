@@ -448,3 +448,91 @@ def test_a_log_from_before_refusal_codes_gains_the_column(tmp_path: Path, sample
     check = sqlite3.connect(path)
     assert [row[1] for row in check.execute("PRAGMA table_info(audit)")].count("code") == 1
     check.close()
+
+
+def _write_log_without_code_column(path: Path) -> None:
+    old = sqlite3.connect(path)
+    old.execute("""
+        CREATE TABLE audit (
+            at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            agent_name TEXT,
+            requester_id TEXT,
+            method TEXT NOT NULL,
+            host TEXT NOT NULL,
+            path TEXT NOT NULL,
+            service TEXT,
+            status INTEGER NOT NULL,
+            bytes_up INTEGER NOT NULL,
+            bytes_down INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL
+        )
+    """)
+    old.commit()
+    old.close()
+
+
+def test_a_concurrent_alter_of_the_same_log_is_tolerated(
+    tmp_path: Path,
+    sample_record: AuditRecord,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another process adding `code` between the column check and the ALTER leaves the log usable, not failing."""
+    path = tmp_path / "racing.db"
+    _write_log_without_code_column(path)
+    real_connect = sqlite3.connect
+    alters = []
+
+    class RacingConnection(sqlite3.Connection):
+        def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+            if sql.startswith("ALTER TABLE audit ADD COLUMN"):
+                alters.append(sql)
+                other = real_connect(path)
+                other.execute(sql)
+                other.commit()
+                other.close()
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(
+        sqlite3,
+        "connect",
+        lambda *args, **kwargs: real_connect(*args, factory=RacingConnection, **kwargs),
+    )
+
+    log = AuditLog(path)
+    log.record(replace(sample_record, kind="denied", status=403, code="bad_request"))
+    (row,) = log.query()
+    log.close()
+
+    assert len(alters) == 1
+    assert row.code == "bad_request"
+    check = real_connect(path)
+    assert [column[1] for column in check.execute("PRAGMA table_info(audit)")].count("code") == 1
+    check.close()
+
+
+def test_another_failure_while_adding_the_column_is_not_swallowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a duplicate column is tolerated; any other error opening the log still surfaces."""
+    path = tmp_path / "broken.db"
+    _write_log_without_code_column(path)
+    real_connect = sqlite3.connect
+
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+            if sql.startswith("ALTER TABLE audit ADD COLUMN"):
+                msg = "database is locked"
+                raise sqlite3.OperationalError(msg)
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(
+        sqlite3,
+        "connect",
+        lambda *args, **kwargs: real_connect(*args, factory=FailingConnection, **kwargs),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        AuditLog(path)

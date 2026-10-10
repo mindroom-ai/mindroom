@@ -95,7 +95,12 @@ class AuditLog:
         # Logs written before refusal codes existed lack the column.
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(audit)")}
         if "code" not in columns:
-            self._conn.execute("ALTER TABLE audit ADD COLUMN code TEXT")
+            try:
+                self._conn.execute("ALTER TABLE audit ADD COLUMN code TEXT")
+            except sqlite3.OperationalError as exc:
+                # Another process opening the same file added it between the check and the ALTER.
+                if "duplicate column name" not in str(exc):
+                    raise
 
         # Create indices for common query patterns
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_at ON audit(at DESC)")
