@@ -551,6 +551,27 @@ def test_empty_authoring_arguments_mean_a_plain_copy(tmp_path: Path) -> None:
     assert request == PersonaRequest(persona=None, model=None, agent_mode="standard")
 
 
+def test_empty_tools_beside_a_profile_run_the_profile(tmp_path: Path) -> None:
+    """A model that fills every optional argument with empty values can still run a profile."""
+    _write_profile(tmp_path, "critic", "---\ndescription: Critic.\ntools: [file]\n---\nCritic prompt.\n")
+
+    request = resolve_persona_request(
+        caller_name="leader",
+        agent_name="leader",
+        system_prompt="",
+        tools=[],
+        profile="critic",
+        model=None,
+        minimal=False,
+        workspace_root=_workspace(tmp_path),
+        available_toolkits=lambda: ["file"],
+    )
+
+    assert isinstance(request, PersonaRequest)
+    assert request.persona is not None
+    assert (request.persona.source_name, request.persona.tools) == ("critic", ("file",))
+
+
 @pytest.mark.asyncio
 async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> None:
     """A native follow-up refuses once the caller's current config lost a persona tool."""

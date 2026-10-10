@@ -354,7 +354,7 @@ def resolve_persona_request(  # noqa: PLR0911
     # Some models fill every optional argument; empty values author nothing.
     system_prompt = system_prompt or None
     profile = profile or None
-    if system_prompt is None and profile is None and not tools:
+    if system_prompt is None and not tools:
         tools = None
     if system_prompt is None and tools is None and profile is None:
         if cap is not None and agent_name == caller_name:

@@ -1035,6 +1035,7 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
     assert isinstance(revoked, str)
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_workflow_grant_runs_for_requester_the_caller_already_serves(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
