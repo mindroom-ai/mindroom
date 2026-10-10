@@ -8480,7 +8480,7 @@ pip_install_package("rich")
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`, or pass `replace_all=True` to replace every match.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
 `apply_patch()` checks every file a patch touches before writing any of them, so a patch that does not apply changes nothing.
-Excluding `edit_file` or `write_file` with `exclude_tools` also excludes `apply_patch()`, so excluding both leaves `coding` unable to change files.
+Excluding `edit_file` or `write_file` with `exclude_tools` also excludes `apply_patch()`, so excluding both leaves `coding` unable to change files, while an `include_tools` list that names `apply_patch` keeps it without the edit tools.
 Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) like [`file`](#file), and `write_file()`, `edit_file()`, and `apply_patch()` refuse paths inside a `.git` directory.
 `coding` has no configuration fields.
 

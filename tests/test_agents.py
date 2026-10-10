@@ -5720,6 +5720,8 @@ def test_deferred_wire_names_follow_the_collision_fallback() -> None:
         tool_hook_bridge=None,
     )
 
-    codex = resolve_tool_dialect(ModelConfig(provider="openai", id="gpt-6-astra"))
+    codex = resolve_tool_dialect(ModelConfig(provider="openai", id="gpt-6-astra", tool_dialect="codex"))
     assert assembly.deferred_wire_tool_names(codex) == {"run_shell_command"}
     assert assembly.deferred_wire_tool_names(resolve_tool_dialect(None)) == {"run_shell_command"}
+    without_collision = replace(assembly, tools=[shell], loaded_tools=("shell",))
+    assert without_collision.deferred_wire_tool_names(codex) == {"exec_command"}

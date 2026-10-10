@@ -74,6 +74,9 @@ def wire_argument(
         if not isinstance(value, accepted) or (kind is not bool and isinstance(value, bool)):
             msg = f"{tool} {name} must be {_KIND_NAMES[kind]}"
             raise DialectArgumentError(msg)
+        if kind is float and not math.isfinite(value):
+            msg = f"{tool} {name} must be a finite number"
+            raise DialectArgumentError(msg)
         return value
     if required:
         msg = f"{tool} requires {name}"

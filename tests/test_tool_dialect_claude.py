@@ -45,6 +45,8 @@ def test_bash_maps_command_timeout_background() -> None:
         to_canonical({"cmd": "ls"})
     with pytest.raises(DialectArgumentError, match="timeout"):
         to_canonical({"command": "ls", "timeout": "soon"})
+    with pytest.raises(DialectArgumentError, match="Bash timeout must be a finite number"):
+        to_canonical({"command": "ls", "timeout": float("inf")})
 
 
 def test_bash_output_and_kill_shell_map_handles() -> None:
