@@ -1963,8 +1963,6 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
 def test_frontend_preset_fixture_matches_the_served_presets() -> None:
     """The preset fixture the UI tests load is exactly what the presets routes serve, so the two cannot drift."""
     fixture_path = Path(__file__).resolve().parents[2] / "frontend" / "src" / "test" / "fixtures" / "egressPresets.json"
-    if not fixture_path.exists():
-        pytest.skip(f"{fixture_path.relative_to(fixture_path.parents[4])} does not exist yet")
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     # The fixture is the payload `{"presets": [...]}` or just its list.
     presets = fixture["presets"] if isinstance(fixture, dict) else fixture
