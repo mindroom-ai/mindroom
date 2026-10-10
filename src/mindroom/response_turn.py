@@ -704,11 +704,6 @@ class StreamingTurnAdapter[ChunkT]:
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
 
-def _turn_run_state(_ctx: ResponseTurnContext) -> TurnRunState:
-    """Start a turn's run state."""
-    return TurnRunState()
-
-
 def _continuation_count_after(run: TurnRunState, joins: int, continuation_count: int) -> int:
     """Spend one dynamic continuation unless the attempt joined ready job results, failing once all are spent."""
     if run.job_joins != joins:
@@ -1032,7 +1027,7 @@ async def run_blocking_response_turn(
     continuation: DynamicContinuationRunState,
 ) -> str:
     """Run one blocking response turn to a final user-visible text."""
-    run = _turn_run_state(ctx)
+    run = TurnRunState()
     try:
         async with (
             response_cli_lifetime() as cli_lifetime,
@@ -1427,7 +1422,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     initial_continuation_count: int = 0,
 ) -> AsyncGenerator[ChunkT | StructuredStreamChunk, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
-    run = _turn_run_state(ctx)
+    run = TurnRunState()
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             await _remove_history_of_redacted_events(ctx, scope_context)
