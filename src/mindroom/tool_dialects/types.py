@@ -34,7 +34,7 @@ class WireFunction:
     to_canonical: Callable[[dict[str, Any]], dict[str, Any]]
     """Translate wire arguments to canonical arguments; raises DialectArgumentError."""
     to_wire: Callable[[dict[str, Any]], dict[str, Any]]
-    """Translate canonical arguments to wire arguments for history recorded in another dialect."""
+    """Translate canonical arguments to wire arguments for the history a request presents."""
     custom_format: dict[str, Any] | None = None
     """Responses API freeform tool format; the call's raw text arrives as the canonical ``input`` argument."""
     carried_notes: tuple[str, ...] = ()

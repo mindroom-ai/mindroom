@@ -396,9 +396,10 @@ async def _background_process(
         with contextlib.suppress(asyncio.CancelledError):
             await monitor_task
         raise
+    started = "Started in the background" if timeout == 0 else f"Command timed out after {timeout}s. Still running"
     return ShellRunResult(
         message=(
-            f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
+            f"{started} (PID {process.pid}).\n"
             f"Handle: {handle}\n"
             "Poll this handle for its output, or stop the command with it."
         ),

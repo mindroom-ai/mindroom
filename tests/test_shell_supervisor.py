@@ -244,7 +244,7 @@ async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
     registry: dict[str, ProcessRecord] = {}
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["bash", "-c", "echo bg-line; sleep 300"], timeout=0)
-        assert "timed out" in result.lower()
+        assert "started in the background" in result.lower()
         handle = _extract_handle(result)
 
         await asyncio.sleep(0.3)

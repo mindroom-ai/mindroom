@@ -196,6 +196,33 @@ async def test_caller_capture_receives_exit_code_and_full_spool(
 
 
 @pytest.mark.asyncio
+async def test_zero_timeout_reports_a_background_start(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """A command started straight into the background, such as Claude's run_in_background, did not time out."""
+    started = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "sleep 30"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=0,
+    )
+    assert started.handle is not None
+    record = registry[started.handle]
+    try:
+        assert started.message == (
+            f"Started in the background (PID {record.pid}).\n"
+            f"Handle: {started.handle}\n"
+            "Poll this handle for its output, or stop the command with it."
+        )
+    finally:
+        kill_command(registry, namespace="test", handle=started.handle, force=True)
+
+
+@pytest.mark.asyncio
 async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the_same(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,
