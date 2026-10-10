@@ -238,7 +238,8 @@ def _seek(lines: list[str], pattern: tuple[str, ...], start: int, *, eof: bool) 
     ):
         normalized_pattern = [normalize(line) for line in pattern]
         for index in candidates:
-            if [normalize(line) for line in lines[index : index + len(pattern)]] == normalized_pattern:
+            # Stop at the first differing line, as Codex does, so a stale hunk fails fast in a large file.
+            if all(normalize(lines[index + offset]) == expected for offset, expected in enumerate(normalized_pattern)):
                 return index
     return None
 
