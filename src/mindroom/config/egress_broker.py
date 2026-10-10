@@ -11,6 +11,24 @@ from mindroom.credential_policy import is_oauth_client_config_service, is_oauth_
 
 _AuthType = Literal["bearer", "basic", "header", "query"]
 
+# RFC 7230 token: the characters allowed in an HTTP header field name.
+_HEADER_NAME_PATTERN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+# Headers that frame the message, route it, or authenticate to the proxy belong to the broker.
+_RESERVED_AUTH_HEADERS = frozenset(
+    {
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "te",
+        "trailer",
+        "proxy-authorization",
+        "proxy-connection",
+        "keep-alive",
+    },
+)
+
 # Reserved env names that cannot be used as placeholder names
 _RESERVED_EXACT = {"PATH", "HOME"}
 _RESERVED_PREFIXES = {"MINDROOM_", "GIT_CONFIG_"}
@@ -18,9 +36,12 @@ _RESERVED_PROXY_VARS = {
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
+    "ALL_PROXY",
+    "NODE_USE_ENV_PROXY",
     "http_proxy",
     "https_proxy",
     "no_proxy",
+    "all_proxy",
 }
 _RESERVED_CA_VARS = {
     "SSL_CERT_FILE",
@@ -69,6 +90,16 @@ class EgressAuth(BaseModel):
         if self.type in ("header", "query") and self.name is None:
             msg = f"{self.type} auth requires name"
             raise ValueError(msg)
+        if self.type == "header" and self.name is not None:
+            if not _HEADER_NAME_PATTERN.fullmatch(self.name):
+                msg = "header auth name must be a valid HTTP header name"
+                raise ValueError(msg)
+            if self.name.lower() in _RESERVED_AUTH_HEADERS:
+                msg = f"header auth name '{self.name}' is reserved for the broker"
+                raise ValueError(msg)
+        if self.type == "query" and not self.name:
+            msg = "query auth requires a non-empty name"
+            raise ValueError(msg)
         return self
 
 
@@ -80,6 +111,8 @@ class EgressRule(BaseModel):
     host: str = Field(description="Host to match (exact, IP, or *.domain.com)")
     port: int | None = Field(
         default=None,
+        ge=1,
+        le=65535,
         description="Port to match; None matches any port",
     )
     path_prefix: str = Field(

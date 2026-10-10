@@ -357,6 +357,9 @@ def test_invalid_host_rejected(host: str) -> None:
         "MINDROOM_X",
         "SSL_CERT_FILE",
         "PATH",
+        "ALL_PROXY",
+        "all_proxy",
+        "NODE_USE_ENV_PROXY",
         "lower",  # Must start with uppercase
     ],
 )
@@ -401,6 +404,59 @@ def test_service_name_mentioning_oauth_elsewhere_accepted(name: str) -> None:
         rules=[EgressRule(host="example.com", auth=EgressAuth(type="bearer"))],
     )
     assert name in EgressBrokerConfig(services={name: service}).services
+
+
+@pytest.mark.parametrize("name", ["", "X Key", "X-Key:", "X-Key\n", "X-Key\r\nInjected: 1", "X/Key", "Clé"])
+def test_header_auth_name_must_be_token(name: str) -> None:
+    """A header auth name must be a valid HTTP header field name."""
+    with pytest.raises(ValueError, match="header name"):
+        EgressAuth(type="header", name=name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Host",
+        "content-length",
+        "Transfer-Encoding",
+        "connection",
+        "Upgrade",
+        "TE",
+        "trailer",
+        "Proxy-Authorization",
+        "proxy-connection",
+        "Keep-Alive",
+    ],
+)
+def test_header_auth_name_rejects_framing_and_routing_headers(name: str) -> None:
+    """The broker owns framing, routing, and proxy headers, so no rule may inject into them."""
+    with pytest.raises(ValueError, match="reserved"):
+        EgressAuth(type="header", name=name)
+
+
+@pytest.mark.parametrize("name", ["Authorization", "X-Api-Key", "x-goog-api-key", "Private-Token"])
+def test_header_auth_name_accepts_common_headers(name: str) -> None:
+    """Ordinary credential headers remain allowed."""
+    assert EgressAuth(type="header", name=name).name == name
+
+
+def test_query_auth_name_must_not_be_empty() -> None:
+    """A query auth name must name a parameter."""
+    with pytest.raises(ValueError, match="query auth requires a non-empty name"):
+        EgressAuth(type="query", name="")
+
+
+@pytest.mark.parametrize("port", [0, -1, 65536])
+def test_rule_port_out_of_range_rejected(port: int) -> None:
+    """Rule ports must be valid TCP ports."""
+    with pytest.raises(ValueError, match="port"):
+        EgressRule(host="example.com", port=port, auth=EgressAuth(type="bearer"))
+
+
+@pytest.mark.parametrize("port", [1, 443, 65535])
+def test_rule_port_in_range_accepted(port: int) -> None:
+    """Valid TCP ports are accepted."""
+    assert EgressRule(host="example.com", port=port, auth=EgressAuth(type="bearer")).port == port
 
 
 def test_host_strips_trailing_dot() -> None:
