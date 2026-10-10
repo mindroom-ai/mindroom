@@ -32,6 +32,8 @@ interface ServicePaths {
 export interface ServiceEditing {
   /** Services with this `source` get Edit and Delete, when the viewer can manage them. */
   editableSource: EgressServiceSource;
+  /** Turns Edit and Delete off while something else is being written. */
+  disabled?: boolean;
   onEdit: (service: EgressCredentialService) => void;
   /** Rejects with an Error whose message the row shows. */
   onDelete: (service: EgressCredentialService) => Promise<void>;
@@ -393,7 +395,7 @@ function EgressServiceRow({
               <Button
                 size="sm"
                 variant="outline"
-                disabled={busy !== null}
+                disabled={busy !== null || serviceEditing.disabled}
                 aria-label={`Edit ${service.display_name} service`}
                 onClick={() => serviceEditing.onEdit(service)}
               >
@@ -402,7 +404,7 @@ function EgressServiceRow({
               <Button
                 size="sm"
                 variant="outline"
-                disabled={busy !== null}
+                disabled={busy !== null || serviceEditing.disabled}
                 aria-label={`Delete ${service.display_name} service`}
                 onClick={() => setConfirm("service")}
               >

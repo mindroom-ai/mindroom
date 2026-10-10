@@ -987,6 +987,27 @@ describe("egress service rows with service editing", () => {
     expect(screen.queryByRole("button", { name: /Edit|Delete/ })).toBeNull();
   });
 
+  it("turns Edit and Delete off while something else is being written", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[mine]}
+        onChanged={vi.fn()}
+        serviceEditing={editing({ disabled: true })}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Edit Mine service" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Delete Mine service" }),
+    ).toBeDisabled();
+    // The key controls are not part of a service write.
+    expect(
+      screen.getByRole("button", { name: "Set Mine API key" }),
+    ).toBeEnabled();
+  });
+
   it("hands the service to the Edit callback", () => {
     const serviceEditing = editing();
     render(

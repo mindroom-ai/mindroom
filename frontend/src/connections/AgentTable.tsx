@@ -265,9 +265,17 @@ export function AgentTable({
                         />
                         {row.original.egress_services?.length ? (
                           <div className="border-t border-border/60">
-                            <h3 className="px-5 pt-4 text-xs font-medium text-muted-foreground">
-                              API keys and accounts
-                            </h3>
+                            <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-4">
+                              <h3 className="text-xs font-medium text-muted-foreground">
+                                API keys and accounts
+                              </h3>
+                              <a
+                                href={`/connections/egress#egress-agent-${row.original.agent_name}`}
+                                className="text-xs font-medium text-primary underline-offset-4 hover:underline"
+                              >
+                                Manage services
+                              </a>
+                            </div>
                             <EgressServiceRows
                               agentName={row.original.agent_name}
                               services={row.original.egress_services}

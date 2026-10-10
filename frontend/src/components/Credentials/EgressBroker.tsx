@@ -8,8 +8,8 @@ import {
 } from "react";
 import { Download, Plus, RefreshCw } from "lucide-react";
 import {
+  DiscardEditsNotice,
   EgressServiceEditor,
-  findBroaderGithubService,
 } from "@/connections/EgressServiceEditor";
 import {
   EgressServiceRows,
@@ -20,6 +20,8 @@ import type {
   AuthoredEgressService,
   EgressCredentialService,
   EgressOAuthStatus,
+  EgressPreset,
+  EgressRuleSummary,
   EgressServiceSource,
 } from "@/connections/types";
 import {
@@ -40,7 +42,11 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import type { ConfigPath } from "@/lib/configSchema";
-import { type SaveConfigResult, useConfigStore } from "@/store/configStore";
+import {
+  type ConfigDraftMark,
+  type SaveConfigResult,
+  useConfigStore,
+} from "@/store/configStore";
 import {
   type Agent,
   type Config,
@@ -65,6 +71,7 @@ interface BrokerService {
   display_name: string | null;
   description: string;
   source: EgressServiceSource;
+  rules: EgressRuleSummary[];
   configured: boolean;
   updated_at: string | null;
   active_source: "key" | "oauth" | null;
@@ -82,6 +89,8 @@ interface AuditRecord {
   service: string | null;
   status: number;
   duration_ms: number;
+  /** The error code the broker refused with; `null` for a forwarded request. */
+  code: string | null;
 }
 
 interface LogFilters {
@@ -118,6 +127,9 @@ const STALE_SAVE_MESSAGE =
 const USER_SERVICE_LABEL = "User service";
 const DELETE_WARNING =
   "This removes the service from the configuration. Saved keys stay stored and apply again if a service with the same name is added back.";
+// Saving writes the whole draft, so the other unsaved changes go out with the service.
+const OTHER_CHANGES_WARNING =
+  "This also saves your other unsaved settings changes.";
 
 type EditorState = { kind: "add" } | { kind: "edit"; name: string };
 
@@ -137,15 +149,25 @@ function operatorServices(
 function saveFailureMessage(
   result: Exclude<SaveConfigResult, { status: "saved" | "stale" }>,
 ): string {
-  const issues = result.diagnostics.flatMap((diagnostic) =>
-    diagnostic.kind === "validation" &&
-    diagnostic.issue.loc[0] === "egress_broker"
-      ? [
-          `${diagnostic.issue.loc.slice(2).join(".")}: ${diagnostic.issue.msg.replace(/^Value error, /, "")}`,
-        ]
-      : [],
-  );
+  const issues = result.diagnostics.flatMap((diagnostic) => {
+    if (
+      diagnostic.kind !== "validation" ||
+      diagnostic.issue.loc[0] !== "egress_broker"
+    )
+      return [];
+    const message = diagnostic.issue.msg.replace(/^Value error, /, "");
+    // An issue on `egress_broker` itself has no field path to show.
+    const where = diagnostic.issue.loc.slice(2).join(".");
+    return [where ? `${where}: ${message}` : message];
+  });
   return issues.length > 0 ? issues.join("; ") : result.message;
+}
+
+async function loadPresets(): Promise<EgressPreset[]> {
+  const payload = await fetchJSON<{ presets: EgressPreset[] }>(
+    API_ENDPOINTS.egressBroker.presets,
+  );
+  return payload.presets;
 }
 
 function canUseEgress(agent: Agent, defaults: Config["defaults"]): boolean {
@@ -171,16 +193,30 @@ function isRequesterScoped(
 
 function ServiceSection({ agentName }: { agentName: string | null }) {
   const config = useConfigStore((state) => state.config);
+  const isDirty = useConfigStore((state) => state.isDirty);
+  const dirtyRoots = useConfigStore((state) => state.dirtyRoots);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
+  const restoreConfigValue = useConfigStore(
+    (state) => state.restoreConfigValue,
+  );
   const saveConfig = useConfigStore((state) => state.saveConfig);
   const [services, setServices] = useState<EgressCredentialService[] | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [pendingEdit, setPendingEdit] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const latest = useRef(0);
   const authoredServices = operatorServices(config);
+  // A save writes the whole draft, so say so when it holds more than this service.
+  const saveWarning = (dirtyRoots ?? []).some(
+    (root) => root !== "egress_broker",
+  )
+    ? OTHER_CHANGES_WARNING
+    : null;
 
   const load = useCallback(async () => {
     const request = ++latest.current;
@@ -215,23 +251,30 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
     };
   }, [load]);
 
-  // Writes one config service through the store, as Settings does, and puts
-  // the draft back when the save fails so no invalid draft stays behind.
+  // Writes one config service through the store, as Settings does. When the
+  // save fails the draft goes back to what it was before this write, dirty
+  // state included, so the editor never leaves an unsaved change behind.
   const writeService = async (
     name: string,
     next: AuthoredEgressService | undefined,
   ) => {
     const path: ConfigPath = ["egress_broker", "services", name];
     const previous = authoredServices[name];
-    updateConfigValue(path, next);
-    const result = await saveConfig();
-    if (result.status === "saved") {
-      await load();
-      return;
+    const before: ConfigDraftMark = { isDirty, dirtyRoots: dirtyRoots ?? [] };
+    setSaving(true);
+    try {
+      updateConfigValue(path, next);
+      const result = await saveConfig();
+      if (result.status === "saved") {
+        await load();
+        return;
+      }
+      if (result.status === "stale") throw new Error(STALE_SAVE_MESSAGE);
+      restoreConfigValue(path, previous, before);
+      throw new Error(saveFailureMessage(result));
+    } finally {
+      setSaving(false);
     }
-    if (result.status === "stale") throw new Error(STALE_SAVE_MESSAGE);
-    updateConfigValue(path, previous);
-    throw new Error(saveFailureMessage(result));
   };
 
   const saveService = async (name: string, service: AuthoredEgressService) => {
@@ -247,6 +290,7 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
   };
 
   const startEdit = (name: string) => {
+    setPendingEdit(null);
     if (authoredServices[name] === undefined) {
       setActionError(
         "This service is not in the loaded configuration. Reload the page and try again.",
@@ -257,11 +301,19 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
     setEditor({ kind: "edit", name });
   };
 
+  // Opening another service's editor would throw away what is typed in this one.
+  const requestEdit = (name: string) => {
+    if (editor !== null && editorDirty) setPendingEdit(name);
+    else startEdit(name);
+  };
+
   const serviceEditing: ServiceEditing = {
     editableSource: "config",
-    onEdit: (service) => startEdit(service.name),
+    disabled: saving,
+    onEdit: (service) => requestEdit(service.name),
     onDelete: (service) => deleteService(service.name),
-    deleteWarning: () => DELETE_WARNING,
+    deleteWarning: () =>
+      saveWarning ? `${DELETE_WARNING} ${saveWarning}` : DELETE_WARNING,
     labels: { user: USER_SERVICE_LABEL },
   };
 
@@ -294,6 +346,12 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
           <AlertDescription>{actionError}</AlertDescription>
         </Alert>
       )}
+      {pendingEdit !== null && (
+        <DiscardEditsNotice
+          onDiscard={() => startEdit(pendingEdit)}
+          onKeep={() => setPendingEdit(null)}
+        />
+      )}
       {editor && (
         <div className="overflow-hidden rounded-md border border-border/60">
           <EgressServiceEditor
@@ -307,10 +365,10 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
               ...Object.keys(authoredServices),
               ...(services ?? []).map((service) => service.name),
             ]}
-            broaderGithubService={findBroaderGithubService(
-              services ?? [],
-              editor.kind === "edit" ? editor.name : undefined,
-            )}
+            otherServices={services ?? []}
+            loadPresets={loadPresets}
+            saveWarning={saveWarning}
+            onDirtyChange={setEditorDirty}
             onSave={saveService}
             onDelete={
               editor.kind === "edit"
@@ -402,6 +460,11 @@ function LogTable({ records }: { records: AuditRecord[] }) {
                 >
                   {record.status}
                 </Badge>
+                {record.code && (
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {record.code}
+                  </span>
+                )}
               </td>
               <td className="whitespace-nowrap px-3 py-2">
                 {record.duration_ms} ms

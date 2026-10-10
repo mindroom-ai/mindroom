@@ -61,12 +61,22 @@ export interface EgressOAuthStatus {
 /** Who defined a service: the administrator in config.yaml or the caller's own scope. */
 export type EgressServiceSource = "config" | "user";
 
+/** Where a rule applies; the server never sends how it authenticates. */
+export interface EgressRuleSummary {
+  host: string;
+  /** `null` matches any port. */
+  port: number | null;
+  path_prefix: string;
+}
+
 export interface EgressCredentialService {
   name: string;
   display_name: string;
   description: string;
   /** Absent for responses that do not say who defined the service. */
   source?: EgressServiceSource;
+  /** Where the service applies, in rule order. Absent in responses from before the server sent it. */
+  rules?: EgressRuleSummary[];
   /** `null` when the caller cannot tell whether the key is shared. */
   is_shared: boolean | null;
   /** Set by the dashboard for the global key that every agent without a worker scope shares. */
@@ -85,6 +95,10 @@ export interface EgressCredentialService {
 export interface EgressCredentialAgent {
   agent_name: string;
   agent_display_name: string;
+  /** A shared or unscoped agent: everyone using it shares its services and keys, and personal accounts are off. */
+  shared: boolean;
+  /** The caller may add, change, and delete services of this agent, even when it has none yet. */
+  can_manage: boolean;
   services: EgressCredentialService[];
 }
 
@@ -112,7 +126,7 @@ export interface EgressRule {
 /** A service as written in config.yaml or stored for a user: a preset stays `{preset: "github"}`. */
 export interface AuthoredEgressService {
   preset?: string;
-  display_name?: string;
+  display_name?: string | null;
   description?: string;
   rules?: EgressRule[];
   placeholder_env?: Record<string, string>;
@@ -120,6 +134,17 @@ export interface AuthoredEgressService {
   /** Operator-only; the personal API rejects it. */
   oauth_on_shared_workers?: boolean;
   restrict_to_rules?: boolean;
+}
+
+/** A built-in service preset as the server expands it. */
+export interface EgressPreset {
+  id: string;
+  display_name: string;
+  description: string;
+  /** The OAuth provider the preset signs in with, if any. */
+  oauth_provider: string | null;
+  rules: EgressRuleSummary[];
+  placeholder_env: Record<string, string>;
 }
 
 /** One row of the request log. */
@@ -133,6 +158,6 @@ export interface EgressLogRecord {
   path: string;
   service: string | null;
   status: number;
-  /** Why the broker refused the request, when the API says. */
-  code?: string | null;
+  /** The error code the broker refused with; `null` for a request it forwarded. */
+  code: string | null;
 }

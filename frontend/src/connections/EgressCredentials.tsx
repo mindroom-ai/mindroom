@@ -4,10 +4,7 @@ import mindroomLogo from "../../../assets/logo/logo-mark-animated.svgz?url";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  EgressServiceEditor,
-  findBroaderGithubService,
-} from "./EgressServiceEditor";
+import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
 import { EgressServiceRows, type ServiceEditing } from "./EgressServiceRows";
 import { type RequestErrorMessages, requestConnection } from "./request";
 import type {
@@ -16,12 +13,14 @@ import type {
   EgressCredentialList,
   EgressCredentialService,
   EgressLogRecord,
+  EgressPreset,
 } from "./types";
 
 const LOG_LIMIT = 50;
 const SERVICE_ERROR_MESSAGES: RequestErrorMessages = {
-  forbidden:
-    "Only credential managers can change the services of a shared agent.",
+  forbidden: "You are not allowed to change the services of this agent.",
+  // The server says why, such as that a shared agent needs a credential manager.
+  forbiddenDetail: true,
   notFound:
     "This agent or service is no longer available. Reload the page to update the list.",
 };
@@ -34,6 +33,14 @@ type LogState =
   | { kind: "loading" }
   | { kind: "ready"; records: EgressLogRecord[] }
   | { kind: "error"; message: string };
+
+async function loadPresets(signal: AbortSignal): Promise<EgressPreset[]> {
+  const data = await requestConnection<{ presets: EgressPreset[] }>(
+    "/api/connections/egress/presets",
+    signal,
+  );
+  return data.presets;
+}
 
 function servicePath(agentName: string, serviceName: string): string {
   return `/api/connections/egress/agents/${encodeURIComponent(agentName)}/services/${encodeURIComponent(serviceName)}`;
@@ -215,13 +222,12 @@ function AgentSection({
   onChanged: () => void;
 }) {
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [pendingEdit, setPendingEdit] =
+    useState<EgressCredentialService | null>(null);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const operation = useRef<AbortController | null>(null);
-  const isShared = agent.services.some((service) => service.is_shared);
-  // An agent without services has no flag to read, so the server decides.
-  const mayWrite =
-    agent.services.length === 0 ||
-    agent.services.some((service) => service.can_manage);
 
   useEffect(() => () => operation.current?.abort(), []);
 
@@ -233,6 +239,7 @@ function AgentSection({
   };
 
   const edit = async (service: EgressCredentialService) => {
+    setPendingEdit(null);
     const controller = newOperation();
     setError(null);
     try {
@@ -255,15 +262,21 @@ function AgentSection({
     }
   };
 
+  // Writes are not interrupted by another action: the rows stay disabled meanwhile.
   const save = async (name: string, service: AuthoredEgressService) => {
     const controller = newOperation();
-    await requestConnection<void>(
-      servicePath(agent.agent_name, name),
-      controller.signal,
-      "PUT",
-      service,
-      SERVICE_ERROR_MESSAGES,
-    );
+    setSaving(true);
+    try {
+      await requestConnection<void>(
+        servicePath(agent.agent_name, name),
+        controller.signal,
+        "PUT",
+        service,
+        SERVICE_ERROR_MESSAGES,
+      );
+    } finally {
+      setSaving(false);
+    }
     if (controller.signal.aborted) return;
     setEditor(null);
     onChanged();
@@ -271,13 +284,18 @@ function AgentSection({
 
   const remove = async (name: string) => {
     const controller = newOperation();
-    await requestConnection<void>(
-      servicePath(agent.agent_name, name),
-      controller.signal,
-      "DELETE",
-      undefined,
-      SERVICE_ERROR_MESSAGES,
-    );
+    setSaving(true);
+    try {
+      await requestConnection<void>(
+        servicePath(agent.agent_name, name),
+        controller.signal,
+        "DELETE",
+        undefined,
+        SERVICE_ERROR_MESSAGES,
+      );
+    } finally {
+      setSaving(false);
+    }
     if (controller.signal.aborted) return;
     setEditor((current) =>
       current?.kind === "edit" && current.name === name ? null : current,
@@ -285,9 +303,16 @@ function AgentSection({
     onChanged();
   };
 
+  // Opening another service's editor would throw away what is typed in this one.
+  const requestEdit = (service: EgressCredentialService) => {
+    if (editor !== null && editorDirty) setPendingEdit(service);
+    else void edit(service);
+  };
+
   const serviceEditing: ServiceEditing = {
     editableSource: "user",
-    onEdit: (service) => void edit(service),
+    disabled: saving,
+    onEdit: requestEdit,
     onDelete: (service) => remove(service.name),
     deleteWarning,
     labels: { config: "Added by your administrator" },
@@ -302,12 +327,12 @@ function AgentSection({
         <h2 id={`egress-agent-${agent.agent_name}`} className="font-semibold">
           {agent.agent_display_name}
         </h2>
-        {isShared && (
+        {agent.shared && (
           <Badge variant="secondary" className="font-normal">
             Shared
           </Badge>
         )}
-        {mayWrite && (
+        {agent.can_manage && (
           <Button
             size="sm"
             variant="outline"
@@ -328,19 +353,24 @@ function AgentSection({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
+      {pendingEdit && (
+        <DiscardEditsNotice
+          onDiscard={() => void edit(pendingEdit)}
+          onKeep={() => setPendingEdit(null)}
+        />
+      )}
       {editor && (
         <div className="border-b border-border/60">
           <EgressServiceEditor
             key={editor.kind === "add" ? "add" : `edit:${editor.name}`}
             context="personal"
-            sharedTarget={isShared}
+            sharedTarget={agent.shared}
             name={editor.kind === "edit" ? editor.name : undefined}
             service={editor.kind === "edit" ? editor.service : null}
             takenNames={agent.services.map((service) => service.name)}
-            broaderGithubService={findBroaderGithubService(
-              agent.services,
-              editor.kind === "edit" ? editor.name : undefined,
-            )}
+            otherServices={agent.services}
+            loadPresets={loadPresets}
+            onDirtyChange={setEditorDirty}
             onSave={save}
             onDelete={
               editor.kind === "edit" ? () => remove(editor.name) : undefined

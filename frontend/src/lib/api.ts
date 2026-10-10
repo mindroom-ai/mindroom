@@ -68,6 +68,7 @@ export const API_ENDPOINTS = {
     account: (service: string, action: "connect" | "disconnect") =>
       `${API_BASE_URL}/api/egress-broker/services/${encodeURIComponent(service)}/${action}`,
     logs: `${API_BASE_URL}/api/egress-broker/logs`,
+    presets: `${API_BASE_URL}/api/egress-broker/presets`,
     caPem: `${API_BASE_URL}/api/egress-broker/ca.pem`,
   },
 

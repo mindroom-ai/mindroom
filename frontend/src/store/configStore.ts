@@ -186,6 +186,33 @@ function configConflictDiagnostics(
   ];
 }
 
+// Sets one value in the draft config. Blocks emptied by removing their last key
+// fall back to their defaults instead of persisting as empty mappings. Nested
+// entries the loaded config authors, such as a room declared without settings,
+// stay.
+function configWithValue(
+  state: Pick<ConfigState, "config" | "loadedConfig">,
+  path: ConfigPath,
+  value: unknown,
+): Config {
+  const [root] = path;
+  let nextConfig = setPathValue(state.config, path, value);
+  for (let depth = path.length - 1; value === undefined && depth > 0; depth--) {
+    const block: ConfigPath = [root, ...path.slice(1, depth)];
+    const emptied = getPathValue(nextConfig, block);
+    if (
+      !isPlainObject(emptied) ||
+      Object.keys(emptied).length > 0 ||
+      (depth > 1 && getPathValue(state.loadedConfig, block) !== undefined)
+    ) {
+      break;
+    }
+    nextConfig = setPathValue(nextConfig, block, undefined);
+  }
+  preserveRawToolEntries(state.config as Config, nextConfig);
+  return nextConfig;
+}
+
 function nextDraftVersion(draftVersion: number): number {
   return draftVersion + 1;
 }
@@ -557,6 +584,12 @@ function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
   };
 }
 
+/** Whether the draft had unsaved changes, and in which roots, at some moment. */
+export interface ConfigDraftMark {
+  isDirty: boolean;
+  dirtyRoots: string[];
+}
+
 interface ConfigState {
   // State
   committedGeneration: number | null;
@@ -623,6 +656,16 @@ interface ConfigState {
   deleteModel: (modelId: string) => void;
   /** Set one config value by key path; undefined removes it. Not for agents or teams. */
   updateConfigValue: (path: ConfigPath, value: unknown) => void;
+  /**
+   * Put a value written with `updateConfigValue` back, together with the dirty
+   * state read before that write, so a write that failed to save leaves the
+   * draft as it was and not dirty only because of it.
+   */
+  restoreConfigValue: (
+    path: ConfigPath,
+    value: unknown,
+    before: ConfigDraftMark,
+  ) => void;
   getAgentToolOverrides: (
     agentId: string,
     toolName: string,
@@ -2097,32 +2140,36 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateConfigValue: (path, value) => {
     set((state) => {
       if (!state.config) return state;
-      const [root] = path;
-      let nextConfig = setPathValue(state.config, path, value);
-      // Blocks emptied by removing their last key fall back to their defaults
-      // instead of persisting as empty mappings. Nested entries the loaded
-      // config authors, such as a room declared without settings, stay.
-      for (
-        let depth = path.length - 1;
-        value === undefined && depth > 0;
-        depth--
-      ) {
-        const block: ConfigPath = [root, ...path.slice(1, depth)];
-        const emptied = getPathValue(nextConfig, block);
-        if (
-          !isPlainObject(emptied) ||
-          Object.keys(emptied).length > 0 ||
-          (depth > 1 && getPathValue(state.loadedConfig, block) !== undefined)
-        ) {
-          break;
-        }
-        nextConfig = setPathValue(nextConfig, block, undefined);
-      }
-      preserveRawToolEntries(state.config, nextConfig);
+      const nextConfig = configWithValue(state, path, value);
       return {
         config: nextConfig,
         rooms: deriveRooms(nextConfig, state.agents, state.teams),
         ...markDraftDirty(state, {}, [[...path]]),
+      };
+    });
+  },
+
+  restoreConfigValue: (path, value, before) => {
+    set((state) => {
+      if (!state.config) return state;
+      const nextConfig = configWithValue(state, path, value);
+      const diagnostics = retainedDraftDiagnostics(state.diagnostics, [
+        [...path],
+      ]);
+      return {
+        config: nextConfig,
+        rooms: deriveRooms(nextConfig, state.agents, state.teams),
+        isDirty: before.isDirty,
+        dirtyRoots: before.dirtyRoots,
+        diagnostics,
+        draftVersion: nextDraftVersion(state.draftVersion),
+        // A conflict keeps its error status; otherwise the draft is as in sync as it was.
+        syncStatus: diagnostics.some(isConfigConflictDiagnostic)
+          ? state.syncStatus
+          : draftSyncStatus({
+              loadedConfig: state.loadedConfig,
+              isDirty: before.isDirty,
+            }),
       };
     });
   },

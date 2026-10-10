@@ -7,6 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
 import { readConfigRoot, useConfigStore } from "@/store/configStore";
 import { EgressBroker } from "./EgressBroker";
 
@@ -39,12 +40,15 @@ const authoredConfig = {
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status });
+const presetsReady = () =>
+  waitFor(() => expect(screen.getByLabelText("Preset")).toBeEnabled());
 
 const row = (name: string, display_name: string) => ({
   name,
   display_name,
   description: "",
   source: "config",
+  rules: [],
   configured: false,
   updated_at: null,
   active_source: null,
@@ -87,6 +91,8 @@ beforeEach(async () => {
         services: [row("github", "GitHub"), row("openai", "OpenAI")],
       });
     if (path === "/api/egress-broker/logs") return json({ records: [] });
+    if (path === "/api/egress-broker/presets")
+      return json({ presets: EGRESS_PRESETS_FIXTURE });
     throw new Error(`Unexpected request: ${String(input)}`);
   });
   useConfigStore.setState({ ...useConfigStore.getInitialState() });
@@ -107,6 +113,7 @@ describe("egress broker panel with the real config store", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit GitHub service" }),
     );
+    await presetsReady();
     fireEvent.click(screen.getByLabelText("Refuse other paths on these hosts"));
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
 
@@ -131,6 +138,7 @@ describe("egress broker panel with the real config store", () => {
     render(<EgressBroker />);
     await screen.findByLabelText("GitHub");
     fireEvent.click(screen.getByRole("button", { name: "Add service" }));
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "claude" },
     });
@@ -180,6 +188,7 @@ describe("egress broker panel with the real config store", () => {
     render(<EgressBroker />);
     await screen.findByLabelText("GitHub");
     fireEvent.click(screen.getByRole("button", { name: "Add service" }));
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "bad" },
     });
@@ -195,5 +204,139 @@ describe("egress broker panel with the real config store", () => {
       authoredConfig.egress_broker.services,
     );
     expect(screen.getByLabelText("Name")).toHaveValue("bad");
+  });
+
+  describe("after a save that fails", () => {
+    const failingSave = () =>
+      json(
+        {
+          detail: [
+            {
+              loc: ["egress_broker", "services", "bad", "rules", 0, "host"],
+              msg: "Value error, host must not contain scheme",
+              type: "value_error",
+            },
+          ],
+        },
+        422,
+      );
+    const addBadService = async () => {
+      render(<EgressBroker />);
+      await screen.findByLabelText("GitHub");
+      fireEvent.click(screen.getByRole("button", { name: "Add service" }));
+      await presetsReady();
+      fireEvent.change(screen.getByLabelText("Name"), {
+        target: { value: "bad" },
+      });
+      fireEvent.change(screen.getByLabelText("Rule 1 host"), {
+        target: { value: "api.example.com" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    };
+
+    it("leaves the draft clean when the editor was the only change", async () => {
+      saveResponse = failingSave;
+      await addBadService();
+      await screen.findByText(/bad.rules.0.host/);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(false);
+      expect(state.dirtyRoots).toEqual([]);
+      expect(state.syncStatus).toBe("synced");
+      expect(state.config).toEqual(state.loadedConfig);
+      // The server's complaint about the editor's own draft does not linger.
+      expect(
+        state.diagnostics.filter(
+          (diagnostic) => diagnostic.kind === "validation",
+        ),
+      ).toEqual([]);
+    });
+
+    it("keeps other unsaved changes dirty and unsaved", async () => {
+      useConfigStore
+        .getState()
+        .updateConfigValue(["router"], { model: "other" });
+      expect(useConfigStore.getState().dirtyRoots).toEqual(["router"]);
+      saveResponse = failingSave;
+      await addBadService();
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Save all changes" }),
+      );
+      await screen.findByText(/bad.rules.0.host/);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toEqual(["router"]);
+      expect(state.config?.router).toEqual({ model: "other" });
+      expect(storedBroker()?.services).toEqual(
+        authoredConfig.egress_broker.services,
+      );
+    });
+
+    it("saves again without the earlier attempt left in the draft", async () => {
+      saveResponse = failingSave;
+      await addBadService();
+      await screen.findByText(/bad.rules.0.host/);
+
+      saveResponse = () => json({ success: true });
+      fireEvent.change(screen.getByLabelText("Name"), {
+        target: { value: "good" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+      await waitFor(() => expect(saveBodies()).toHaveLength(2));
+      expect(Object.keys(saveBodies()[1].egress_broker.services)).toEqual([
+        "github",
+        "openai",
+        "good",
+      ]);
+    });
+
+    it("restores a deleted service and leaves the draft clean when the delete is refused", async () => {
+      saveResponse = () => json({ detail: "Failed to save" }, 500);
+      render(<EgressBroker />);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Delete OpenAI service" }),
+      );
+      fireEvent.click(
+        within(await screen.findByRole("dialog")).getByRole("button", {
+          name: "Delete",
+        }),
+      );
+      await screen.findByText("Failed to save");
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(false);
+      expect(state.config).toEqual(state.loadedConfig);
+      expect(storedBroker()?.services).toEqual(
+        authoredConfig.egress_broker.services,
+      );
+    });
+  });
+
+  it("asks before saving when the draft holds other unsaved changes, then saves them too", async () => {
+    useConfigStore.getState().updateConfigValue(["router"], { model: "other" });
+    render(<EgressBroker />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit GitHub service" }),
+    );
+    await presetsReady();
+    fireEvent.click(screen.getByLabelText("Refuse other paths on these hosts"));
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This also saves your other unsaved settings changes.",
+    );
+    expect(saveBodies()).toHaveLength(0);
+    expect(storedBroker()?.services.github).toEqual({ preset: "github" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save all changes" }));
+    await waitFor(() => expect(saveBodies()).toHaveLength(1));
+    expect(saveBodies()[0].router).toEqual({ model: "other" });
+    expect(saveBodies()[0].egress_broker.services.github).toEqual({
+      preset: "github",
+      restrict_to_rules: true,
+    });
+    await waitFor(() => expect(useConfigStore.getState().isDirty).toBe(false));
   });
 });

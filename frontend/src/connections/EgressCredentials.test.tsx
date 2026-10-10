@@ -7,6 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
 import { EgressCredentials } from "./EgressCredentials";
 import type {
   AuthoredEgressService,
@@ -44,14 +45,24 @@ const agents: EgressCredentialAgent[] = [
   {
     agent_name: "personal",
     agent_display_name: "Personal Mind",
+    shared: false,
+    can_manage: true,
     services: [service],
   },
   {
     agent_name: "shared_dev",
     agent_display_name: "Shared Dev",
+    shared: true,
+    can_manage: false,
     services: [{ ...service, is_shared: true, can_manage: false }],
   },
-  { agent_name: "bare", agent_display_name: "Bare Agent", services: [] },
+  {
+    agent_name: "bare",
+    agent_display_name: "Bare Agent",
+    shared: false,
+    can_manage: true,
+    services: [],
+  },
 ];
 
 const json = (value: unknown, status = 200) =>
@@ -243,21 +254,33 @@ const userService: EgressCredentialService = {
 const configService: EgressCredentialService = {
   ...service,
   source: "config",
+  rules: [{ host: "api.github.com", port: null, path_prefix: "/" }],
 };
 
 const SERVICES = "/api/connections/egress/agents/personal/services";
+const PRESETS = "/api/connections/egress/presets";
+const presetsReady = () =>
+  waitFor(() => expect(screen.getByLabelText("Preset")).toBeEnabled());
 
 describe("egress services on the personal page", () => {
   let listing: EgressCredentialAgent[];
   let authored: Record<string, AuthoredEgressService>;
-  let mutation: (method: string, path: string, body: unknown) => Response;
+  let mutation: (
+    method: string,
+    path: string,
+    body: unknown,
+  ) => Response | Promise<Response>;
   let calls: { method: string; path: string; body: unknown }[];
+  let presets: () => Response;
 
   beforeEach(() => {
+    presets = () => json({ presets: EGRESS_PRESETS_FIXTURE });
     listing = [
       {
         agent_name: "personal",
         agent_display_name: "Personal Mind",
+        shared: false,
+        can_manage: true,
         services: [configService, userService],
       },
     ];
@@ -270,6 +293,7 @@ describe("egress services on the personal page", () => {
       const body = options?.body ? JSON.parse(String(options.body)) : undefined;
       calls.push({ method, path, body });
       if (path === "/api/connections/egress") return json({ agents: listing });
+      if (path === PRESETS) return presets();
       if (method === "GET" && path.startsWith(`${SERVICES}/`))
         return json(authored[decodeURIComponent(path.split("/").pop() ?? "")]);
       if (path.startsWith(SERVICES)) return mutation(method, path, body);
@@ -287,6 +311,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "gh" },
     });
@@ -317,6 +342,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "mine" },
     });
@@ -337,6 +363,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     expect(
       screen.getByRole("form", { name: "Add service" }),
     ).toBeInTheDocument();
@@ -441,45 +468,65 @@ describe("egress services on the personal page", () => {
     ).toBeNull();
   });
 
-  it("offers Add service on a shared agent only to those who can manage it", async () => {
+  it("offers Add service by the agent's own can_manage flag", async () => {
     listing = [
       {
         agent_name: "readonly",
         agent_display_name: "Read Only",
+        shared: true,
+        can_manage: false,
         services: [{ ...configService, is_shared: true, can_manage: false }],
+      },
+      {
+        agent_name: "readonly_empty",
+        agent_display_name: "Read Only Empty",
+        shared: true,
+        can_manage: false,
+        services: [],
       },
       {
         agent_name: "managed",
         agent_display_name: "Managed",
+        shared: true,
+        can_manage: true,
         services: [{ ...userService, is_shared: true, can_manage: true }],
       },
       {
         agent_name: "empty",
         agent_display_name: "Empty",
+        shared: false,
+        can_manage: true,
         services: [],
       },
     ];
     render(<EgressCredentials />);
-    const readonly = await screen.findByRole("region", { name: "Read Only" });
+    const section = async (name: string) =>
+      screen.findByRole("region", { name });
     expect(
-      within(readonly).queryByRole("button", { name: /Add service/ }),
+      within(await section("Read Only")).queryByRole("button", {
+        name: /Add service/,
+      }),
     ).toBeNull();
-    const managed = screen.getByRole("region", { name: "Managed" });
+    // An agent without services is told by its own flag, not guessed.
+    expect(
+      within(await section("Read Only Empty")).queryByRole("button", {
+        name: /Add service/,
+      }),
+    ).toBeNull();
+    const managed = await section("Managed");
     expect(
       within(managed).getByRole("button", { name: "Add service for Managed" }),
     ).toBeInTheDocument();
     expect(
       within(managed).getByRole("button", { name: "Edit My API service" }),
     ).toBeInTheDocument();
-    // Without services there is no flag to read, so the page lets the user try.
+    expect(within(managed).getByText("Shared")).toBeInTheDocument();
     expect(
-      within(screen.getByRole("region", { name: "Empty" })).getByRole(
-        "button",
-        {
-          name: "Add service for Empty",
-        },
-      ),
+      within(await section("Empty")).getByRole("button", {
+        name: "Add service for Empty",
+      }),
     ).toBeInTheDocument();
+    expect(within(await section("Empty")).queryByText("Shared")).toBeNull();
   });
 
   it("turns off account login for a service on a shared agent", async () => {
@@ -487,6 +534,8 @@ describe("egress services on the personal page", () => {
       {
         agent_name: "personal",
         agent_display_name: "Personal Mind",
+        shared: true,
+        can_manage: true,
         services: [{ ...userService, is_shared: true, can_manage: true }],
       },
     ];
@@ -496,6 +545,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "gh" },
     });
@@ -510,21 +560,83 @@ describe("egress services on the personal page", () => {
     });
   });
 
-  it("warns about a config github service when limiting repositories", async () => {
-    listing[0].services = [
-      { ...configService, name: "github", display_name: "GitHub" },
-    ];
-    render(<EgressCredentials />);
+  const limitToRepository = async () => {
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Add service for Personal Mind",
       }),
     );
-    expect(
-      within(
-        screen.getByRole("region", { name: "Limit to repositories" }),
-      ).getByRole("note"),
-    ).toHaveTextContent("GitHub is configured by your administrator");
+    await presetsReady();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "limited" },
+    });
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "github" },
+    });
+    fireEvent.change(screen.getByLabelText("GitHub repositories"), {
+      target: { value: "o/r" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use these repositories" }),
+    );
+  };
+
+  it("warns when a listed service already covers the limited paths more widely", async () => {
+    listing[0].services = [
+      {
+        ...configService,
+        rules: [
+          { host: "api.github.com", port: null, path_prefix: "/" },
+          { host: "github.com", port: null, path_prefix: "/" },
+        ],
+      },
+    ];
+    render(<EgressCredentials />);
+    await limitToRepository();
+
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "A broader rule of GitHub on the same host already covers some of these paths",
+    );
+  });
+
+  it("warns by the real rules, so a config service under another name counts", async () => {
+    listing[0].services = [
+      {
+        ...configService,
+        name: "code-host",
+        display_name: "Code host",
+        rules: [
+          { host: "api.github.com", port: null, path_prefix: "/repos/o/" },
+        ],
+      },
+    ];
+    render(<EgressCredentials />);
+    await limitToRepository();
+
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "A broader rule of Code host",
+    );
+  });
+
+  it("does not warn about a service that covers other hosts or narrower paths", async () => {
+    listing[0].services = [
+      {
+        ...configService,
+        name: "github",
+        rules: [
+          {
+            host: "api.github.com",
+            port: null,
+            path_prefix: "/repos/o/r/issues",
+          },
+          { host: "uploads.github.com", port: null, path_prefix: "/" },
+        ],
+      },
+    ];
+    render(<EgressCredentials />);
+    await limitToRepository();
+
+    expect(screen.queryByRole("note")).toBeNull();
   });
 
   it("shows a name conflict from the server", async () => {
@@ -542,6 +654,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "gh" },
     });
@@ -564,6 +677,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "big" },
     });
@@ -585,6 +699,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "openai" },
@@ -617,6 +732,7 @@ describe("egress services on the personal page", () => {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "openai" },
@@ -629,21 +745,35 @@ describe("egress services on the personal page", () => {
     expect(alert).not.toHaveTextContent("SECRET-INPUT");
   });
 
-  it("explains a refused write on a shared agent", async () => {
-    mutation = () => json({ detail: "Credential management is required" }, 403);
-    render(<EgressCredentials />);
+  const trySaving = async () => {
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Add service for Personal Mind",
       }),
     );
+    await presetsReady();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "openai" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+  };
+
+  it("shows why the server refused a write", async () => {
+    mutation = () => json({ detail: "Credential management is required" }, 403);
+    render(<EgressCredentials />);
+    await trySaving();
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Only credential managers can change the services of a shared agent.",
+      "Credential management is required",
+    );
+  });
+
+  it("falls back to a general message for a refusal without a reason", async () => {
+    mutation = () => json({}, 403);
+    render(<EgressCredentials />);
+    await trySaving();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You are not allowed to change the services of this agent.",
     );
   });
 
@@ -664,6 +794,146 @@ describe("egress services on the personal page", () => {
   });
 });
 
+describe("presets and unsaved edits on the personal page", () => {
+  let listing: EgressCredentialAgent[];
+  let writeResponse: () => Response | Promise<Response>;
+  let calls: { method: string; path: string }[];
+
+  beforeEach(() => {
+    listing = [
+      {
+        agent_name: "personal",
+        agent_display_name: "Personal Mind",
+        shared: false,
+        can_manage: true,
+        services: [
+          { ...userService, name: "one", display_name: "One" },
+          { ...userService, name: "two", display_name: "Two" },
+        ],
+      },
+    ];
+    writeResponse = () => new Response(null, { status: 204 });
+    calls = [];
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      const path = String(input);
+      const method = options?.method ?? "GET";
+      calls.push({ method, path });
+      if (path === "/api/connections/egress") return json({ agents: listing });
+      if (path === PRESETS) return json({ presets: EGRESS_PRESETS_FIXTURE });
+      if (method === "GET") return json({ preset: "openai" });
+      return writeResponse();
+    });
+  });
+
+  const edit = async (name: string) => {
+    fireEvent.click(
+      await screen.findByRole("button", { name: `Edit ${name} service` }),
+    );
+    await screen.findByRole("form", { name: `Edit ${name.toLowerCase()}` });
+    await presetsReady();
+  };
+  const presetRequests = () =>
+    calls.filter((call) => call.path === PRESETS).length;
+
+  it("fetches the presets from the personal API only when an editor opens", async () => {
+    render(<EgressCredentials />);
+    await screen.findByRole("button", { name: "Edit One service" });
+    expect(presetRequests()).toBe(0);
+
+    await edit("One");
+    expect(presetRequests()).toBe(1);
+    expect(
+      within(screen.getByLabelText("Preset"))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["Custom", ...EGRESS_PRESETS_FIXTURE.map((p) => p.display_name)]);
+  });
+
+  it("keeps Edit and Delete off while a save is running", async () => {
+    let finish: (response: Response) => void = () => {};
+    writeResponse = () =>
+      new Promise<Response>((done) => {
+        finish = done;
+      });
+    render(<EgressCredentials />);
+    await edit("One");
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Edit Two service" }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Delete One service" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Delete Two service" }),
+    ).toBeDisabled();
+
+    finish(new Response(null, { status: 204 }));
+    await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
+    expect(
+      screen.getByRole("button", { name: "Edit Two service" }),
+    ).toBeEnabled();
+    // The write ran to the end: nothing started after it replaced or aborted it.
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+  });
+
+  it("asks before replacing an editor that has unsaved changes", async () => {
+    render(<EgressCredentials />);
+    await edit("One");
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "typed but not saved" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Two service" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "You have unsaved changes in the open editor.",
+    );
+    expect(screen.getByRole("form", { name: "Edit one" })).toBeInTheDocument();
+    expect(calls.filter((call) => call.path.endsWith("/services/two"))).toEqual(
+      [],
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+    expect(screen.getByLabelText("Description")).toHaveValue(
+      "typed but not saved",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Two service" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(
+      await screen.findByRole("form", { name: "Edit two" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Description")).toHaveValue("");
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
+  it("opens another service straight away when nothing was changed", async () => {
+    render(<EgressCredentials />);
+    await edit("One");
+    fireEvent.click(screen.getByRole("button", { name: "Edit Two service" }));
+    expect(
+      await screen.findByRole("form", { name: "Edit two" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
+  it("does not ask again once the changes are undone", async () => {
+    render(<EgressCredentials />);
+    await edit("One");
+    const description = screen.getByLabelText("Description");
+    fireEvent.change(description, { target: { value: "x" } });
+    fireEvent.change(description, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Edit Two service" }));
+    expect(
+      await screen.findByRole("form", { name: "Edit two" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("recent requests on the personal page", () => {
   const record = (changes: Partial<EgressLogRecord> = {}): EgressLogRecord => ({
     at: "2026-10-09T10:30:00+00:00",
@@ -674,6 +944,7 @@ describe("recent requests on the personal page", () => {
     path: "/repos/acme/app/issues",
     service: "github",
     status: 201,
+    code: null,
     ...changes,
   });
   let logs: () => Response;

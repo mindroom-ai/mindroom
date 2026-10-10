@@ -182,6 +182,29 @@ describe("brokered API keys on agent cards", () => {
     await expandAgent();
     await screen.findByRole("button", { name: "Connect Mail" });
     expect(screen.queryByText("API keys and accounts")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Manage services" })).toBeNull();
+  });
+
+  it("links the API key section to the agent's services on the personal page", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            {
+              ...catalog([service]).agents[0],
+              egress_services: [egressService],
+            },
+          ],
+        }),
+    });
+    render(<Connections />);
+    await expandAgent();
+
+    const link = await screen.findByRole("link", { name: "Manage services" });
+    expect(link).toHaveAttribute(
+      "href",
+      `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
+    );
   });
 
   it("connects an account from the agent card and refreshes the catalog", async () => {

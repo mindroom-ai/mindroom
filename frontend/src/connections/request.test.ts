@@ -66,3 +66,58 @@ describe("requestConnection error details", () => {
     );
   });
 });
+
+describe("requestConnection 403 details", () => {
+  const messages = { forbidden: "You may not do that." };
+
+  it("keeps the caller's own wording by default", async () => {
+    reply({ detail: "Credential management is required" }, 403);
+    await expect(
+      requestConnection(
+        "/x",
+        new AbortController().signal,
+        "GET",
+        {},
+        messages,
+      ),
+    ).rejects.toThrow("You may not do that.");
+  });
+
+  it("shows the server's reason when asked to, with the wording as the fallback", async () => {
+    reply({ detail: "Credential management is required" }, 403);
+    const asked = { ...messages, forbiddenDetail: true };
+    await expect(
+      requestConnection("/x", new AbortController().signal, "GET", {}, asked),
+    ).rejects.toThrow("Credential management is required");
+    for (const body of [{}, { detail: "" }, { detail: [{ msg: "x" }] }]) {
+      reply(body, 403);
+      await expect(
+        requestConnection("/x", new AbortController().signal, "GET", {}, asked),
+      ).rejects.toThrow("You may not do that.");
+    }
+    vi.mocked(fetch).mockResolvedValue(new Response("<html>", { status: 403 }));
+    await expect(
+      requestConnection("/x", new AbortController().signal, "GET", {}, asked),
+    ).rejects.toThrow("You may not do that.");
+    reply({ detail: "Credential management is required" }, 403);
+    await expect(
+      requestConnection(
+        "/x",
+        new AbortController().signal,
+        "GET",
+        {},
+        { forbiddenDetail: true },
+      ),
+    ).rejects.toThrow("Credential management is required");
+    reply({}, 403);
+    await expect(
+      requestConnection(
+        "/x",
+        new AbortController().signal,
+        "GET",
+        {},
+        { forbiddenDetail: true },
+      ),
+    ).rejects.toThrow("Connections are not available for this account.");
+  });
+});

@@ -7,613 +7,48 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
 import {
+  DiscardEditsNotice,
   EgressServiceEditor,
   type EgressServiceEditorProps,
-  findBroaderGithubService,
-  formFromService,
-  githubRepositoryRules,
-  serializeService,
-  validateService,
 } from "./EgressServiceEditor";
-import type {
-  AuthoredEgressService,
-  EgressCredentialService,
-  EgressRule,
-} from "./types";
-
-type Options = Parameters<typeof serializeService>[1];
-
-const personal = { context: "personal", sharedTarget: false } as const;
-const sharedPersonal = { context: "personal", sharedTarget: true } as const;
-const operator = { context: "operator", sharedTarget: false } as const;
-const newService = { editing: false, takenNames: [] as string[] };
+import type { EgressRule } from "./types";
 
 const bearerRule: EgressRule = {
   host: "api.example.com",
   auth: { type: "bearer" },
 };
 
-const serialize = (
-  service: AuthoredEgressService,
-  options: Options = personal,
-  name = "svc",
-) => serializeService(formFromService(name, service), options, service);
+const baseProps = () => ({
+  service: null,
+  context: "personal" as const,
+  loadPresets: vi.fn(async () => EGRESS_PRESETS_FIXTURE),
+  onSave: vi.fn(async () => undefined),
+  onCancel: vi.fn(),
+});
 
-const errorsFor = (
-  service: AuthoredEgressService | null,
-  changes: Partial<ReturnType<typeof formFromService>> = {},
-  options: Options = personal,
-  settings: { editing: boolean; takenNames: string[] } = newService,
-) =>
-  validateService(
-    { ...formFromService("svc", service), ...changes },
-    options,
-    settings,
-  );
+/** Render the editor and wait until the server's presets are in the dropdown. */
+async function renderEditor(props: Partial<EgressServiceEditorProps> = {}) {
+  const merged = { ...baseProps(), ...props };
+  render(<EgressServiceEditor {...merged} />);
+  await waitFor(() => expect(screen.getByLabelText("Preset")).toBeEnabled());
+  return { onSave: merged.onSave, onCancel: merged.onCancel };
+}
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
-describe("serializing a service", () => {
-  it("writes a custom service with only the fields that matter", () => {
-    expect(
-      serialize({
-        display_name: "Example",
-        description: " Example API ",
-        rules: [
-          {
-            host: " API.Example.com ",
-            port: 8443,
-            path_prefix: "/v1/",
-            auth: { type: "bearer" },
-          },
-          { host: "git.example.com", path_prefix: "/", auth: basicAuth("x") },
-          {
-            host: "b.example.com",
-            auth: { type: "header", name: "x-api-key", template: "{secret}" },
-          },
-          {
-            host: "c.example.com",
-            auth: { type: "query", name: "key", template: "k={secret}" },
-          },
-        ],
-        placeholder_env: { EXAMPLE_API_KEY: "mindroom-brokered" },
-        oauth_provider: "github",
-      }),
-    ).toEqual({
-      display_name: "Example",
-      description: "Example API",
-      rules: [
-        {
-          host: "api.example.com",
-          port: 8443,
-          path_prefix: "/v1/",
-          auth: { type: "bearer" },
-        },
-        { host: "git.example.com", auth: { type: "basic", username: "x" } },
-        { host: "b.example.com", auth: { type: "header", name: "x-api-key" } },
-        {
-          host: "c.example.com",
-          auth: { type: "query", name: "key", template: "k={secret}" },
-        },
-      ],
-      placeholder_env: { EXAMPLE_API_KEY: "mindroom-brokered" },
-      oauth_provider: "github",
-    });
-  });
-
-  it("keeps a preset as the preset, without its expanded fields", () => {
-    expect(serialize({ preset: "github" })).toEqual({ preset: "github" });
-    expect(serialize({ preset: "openai" }, operator)).toEqual({
-      preset: "openai",
-    });
-  });
-
-  it("adds only what the user changed to a preset", () => {
-    expect(serialize({ preset: "github", restrict_to_rules: true })).toEqual({
-      preset: "github",
-      restrict_to_rules: true,
-    });
-    expect(
-      serialize({ preset: "github", display_name: "GitHub work" }),
-    ).toEqual({ preset: "github", display_name: "GitHub work" });
-    expect(serialize({ preset: "github", rules: [bearerRule] })).toEqual({
-      preset: "github",
-      rules: [bearerRule],
-    });
-  });
-
-  it("never writes restrict_to_rules false or empty fields", () => {
-    expect(
-      serialize({
-        rules: [bearerRule],
-        restrict_to_rules: false,
-        description: "",
-        placeholder_env: {},
-      }),
-    ).toEqual({ rules: [bearerRule] });
-  });
-
-  it("drops the preset's account login on a shared agent", () => {
-    expect(serialize({ preset: "github" }, sharedPersonal)).toEqual({
-      preset: "github",
-      oauth_provider: null,
-    });
-    // Presets without a login need nothing, and personal agents keep it.
-    expect(serialize({ preset: "openai" }, sharedPersonal)).toEqual({
-      preset: "openai",
-    });
-    expect(serialize({ preset: "github" })).toEqual({ preset: "github" });
-  });
-
-  it("never writes an account login for a custom service on a shared agent", () => {
-    expect(
-      serialize(
-        { rules: [bearerRule], oauth_provider: "github" },
-        sharedPersonal,
-      ),
-    ).toEqual({ rules: [bearerRule] });
-  });
-
-  it("keeps an operator's oauth_on_shared_workers and never sends it from the personal page", () => {
-    const service = {
-      preset: "github",
-      oauth_on_shared_workers: true,
-    } satisfies AuthoredEgressService;
-    expect(serialize(service, operator)).toEqual(service);
-    expect(serialize(service, personal)).toEqual({ preset: "github" });
-  });
-
-  it("keeps an explicit OAuth override of a preset", () => {
-    expect(
-      serialize({ preset: "github", oauth_provider: null }, operator),
-    ).toEqual({ preset: "github", oauth_provider: null });
-  });
-
-  it("round-trips an authored service through the form", () => {
-    const service: AuthoredEgressService = {
-      preset: "github",
-      restrict_to_rules: true,
-      rules: [
-        {
-          host: "api.github.com",
-          path_prefix: "/repos/o/r",
-          auth: { type: "bearer" },
-        },
-      ],
-      placeholder_env: { GH_TOKEN: "mindroom-brokered" },
-    };
-    expect(serialize(service, operator)).toEqual(service);
-  });
-});
-
-function basicAuth(username: string) {
-  return { type: "basic", username } as const;
-}
-
-describe("validating a service", () => {
-  it("accepts a preset alone and a valid custom service", () => {
-    expect(errorsFor({ preset: "github" })).toEqual([]);
-    expect(errorsFor(null, { name: "svc", rules: [validRule()] })).toEqual([]);
-  });
-
-  it("checks the name of a new service only", () => {
-    expect(errorsFor({ preset: "github" }, { name: "" })[0]).toContain(
-      "Name must start",
-    );
-    expect(errorsFor({ preset: "github" }, { name: "Has Caps" })[0]).toContain(
-      "Name must start",
-    );
-    expect(errorsFor({ preset: "github" }, { name: "_hidden" })[0]).toContain(
-      "Name must start",
-    );
-    expect(errorsFor({ preset: "github" }, { name: "x_oauth" })).toEqual([
-      "Name must not end in _oauth or _oauth_client",
-    ]);
-    expect(
-      errorsFor({ preset: "github" }, { name: "github" }, personal, {
-        editing: false,
-        takenNames: ["github"],
-      }),
-    ).toEqual(["A service named github already exists"]);
-    // An existing service keeps its name, even one that is taken by itself.
-    expect(
-      errorsFor({ preset: "github" }, { name: "github" }, personal, {
-        editing: true,
-        takenNames: ["github"],
-      }),
-    ).toEqual([]);
-  });
-
-  it("requires a rule unless a preset supplies them", () => {
-    expect(errorsFor(null, { rules: [] })).toEqual(["Add at least one rule"]);
-    expect(
-      errorsFor({ preset: "github" }, { replacePresetRules: true, rules: [] }),
-    ).toEqual(["Add at least one rule"]);
-    expect(errorsFor({ preset: "github" }, { rules: [] })).toEqual([]);
-  });
-
-  it.each([
-    ["", "Rule 1: host is required"],
-    ["https://api.example.com", "Rule 1: host must not contain a scheme"],
-    ["api.example.com:8443", "Rule 1: host must not contain a port"],
-    ["api.example.com/v1", "Rule 1: host must not contain a path"],
-    ["*.*.example.com", "Rule 1: host can only have one wildcard label"],
-    ["*.com", "Rule 1: wildcard host must have at least one domain part"],
-    ["api.*.com", "Rule 1: wildcard must be a single leading *. label"],
-  ])("rejects the host %j", (host, message) => {
-    const errors = errorsFor(null, { rules: [{ ...validRule(), host }] });
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain(message);
-  });
-
-  it("accepts a wildcard host and an IP-less plain host", () => {
-    expect(
-      errorsFor(null, { rules: [{ ...validRule(), host: "*.example.com" }] }),
-    ).toEqual([]);
-  });
-
-  it("checks path prefix and port", () => {
-    expect(
-      errorsFor(null, { rules: [{ ...validRule(), pathPrefix: "v1" }] }),
-    ).toEqual(["Rule 1: path prefix must start with /"]);
-    for (const port of ["0", "70000", "abc", "1.5"])
-      expect(errorsFor(null, { rules: [{ ...validRule(), port }] })).toEqual([
-        "Rule 1: port must be a number from 1 to 65535",
-      ]);
-    expect(
-      errorsFor(null, { rules: [{ ...validRule(), port: "8443" }] }),
-    ).toEqual([]);
-  });
-
-  it("checks the fields each auth type needs", () => {
-    const check = (changes: object) =>
-      errorsFor(null, { rules: [{ ...validRule(), ...changes }] });
-    expect(check({ authType: "basic", username: " " })).toEqual([
-      "Rule 1: basic auth needs a username",
-    ]);
-    expect(check({ authType: "header" })).toEqual([
-      "Rule 1: header auth needs a header name",
-    ]);
-    expect(check({ authType: "header", headerOrParam: "bad header" })).toEqual([
-      "Rule 1: header name must be a valid HTTP header name",
-    ]);
-    expect(check({ authType: "query" })).toEqual([
-      "Rule 1: query auth needs a parameter name",
-    ]);
-    expect(
-      check({ authType: "header", headerOrParam: "x-key", template: "token" }),
-    ).toEqual(["Rule 1: template must contain {secret} exactly once"]);
-    expect(
-      check({
-        authType: "query",
-        headerOrParam: "key",
-        template: "{secret}{secret}",
-      }),
-    ).toEqual(["Rule 1: template must contain {secret} exactly once"]);
-    expect(
-      check({
-        authType: "header",
-        headerOrParam: "Authorization",
-        template: "Bearer {secret}",
-      }),
-    ).toEqual([]);
-  });
-
-  it("numbers the rule that has the problem", () => {
-    expect(
-      errorsFor(null, { rules: [validRule(), { ...validRule(), host: "" }] }),
-    ).toEqual(["Rule 2: host is required"]);
-  });
-
-  it("limits a personal service to 50 rules but not an operator service", () => {
-    const rules = Array.from({ length: 51 }, validRule);
-    expect(errorsFor(null, { rules })).toEqual([
-      "A service can have at most 50 rules",
-    ]);
-    expect(errorsFor(null, { rules }, operator)).toEqual([]);
-  });
-
-  it("limits a personal service to 16 KiB", () => {
-    const description = "x".repeat(17 * 1024);
-    expect(errorsFor(null, { rules: [validRule()], description })).toEqual([
-      "A service can take at most 16 KiB",
-    ]);
-    expect(
-      errorsFor(null, { rules: [validRule()], description }, operator),
-    ).toEqual([]);
-  });
-
-  it("applies the personal placeholder rules to personal services only", () => {
-    const placeholders = (name: string, value = "mindroom-brokered") => ({
-      placeholders: [{ name, value }],
-    });
-    expect(errorsFor({ preset: "github" }, placeholders("MY_API_KEY"))).toEqual(
-      [],
-    );
-    expect(
-      errorsFor({ preset: "github" }, placeholders("LD_PRELOAD"))[0],
-    ).toContain(
-      "must match ^[A-Z][A-Z0-9_]*$ and have one of AUTH, CREDENTIAL, KEY",
-    );
-    // A credential word has to be a whole part: PYTHONPATH only contains PAT.
-    expect(
-      errorsFor({ preset: "github" }, placeholders("PYTHONPATH")),
-    ).toHaveLength(1);
-    expect(errorsFor({ preset: "github" }, placeholders("MY_PAT"))).toEqual([]);
-    expect(
-      errorsFor(
-        { preset: "github" },
-        placeholders("MY_API_KEY", "has space"),
-      )[0],
-    ).toContain("placeholder value of MY_API_KEY must be 1 to 256 characters");
-    expect(
-      errorsFor({ preset: "github" }, placeholders("MY_API_KEY", "")),
-    ).toHaveLength(1);
-    // The operator may use any valid variable name and any value.
-    expect(
-      errorsFor(
-        { preset: "github" },
-        placeholders("LD_PRELOAD", "a b"),
-        operator,
-      ),
-    ).toEqual([]);
-  });
-
-  it("rejects badly shaped and repeated placeholder names, and skips blank rows", () => {
-    const rows = (...names: string[]) => ({
-      placeholders: names.map((name) => ({ name, value: "mindroom-brokered" })),
-    });
-    expect(errorsFor({ preset: "github" }, rows("my_key"), operator)).toEqual([
-      "Placeholder name my_key must match ^[A-Z_][A-Z0-9_]*$",
-    ]);
-    expect(
-      errorsFor({ preset: "github" }, rows("A_KEY", "A_KEY"), operator),
-    ).toEqual(["Placeholder A_KEY is listed twice"]);
-    expect(
-      errorsFor(
-        { preset: "github" },
-        { placeholders: [{ name: "", value: "" }] },
-        operator,
-      ),
-    ).toEqual([]);
-    expect(
-      serializeService(
-        {
-          ...formFromService("svc", { preset: "github" }),
-          placeholders: [{ name: " ", value: "" }],
-        },
-        operator,
-      ),
-    ).toEqual({ preset: "github" });
-  });
-});
-
-function validRule() {
-  return {
-    host: "api.example.com",
-    port: "",
-    pathPrefix: "",
-    authType: "bearer" as const,
-    username: "",
-    headerOrParam: "",
-    template: "",
-  };
-}
-
-describe("GitHub repository rules", () => {
-  const none = { uploads: false, graphql: false };
-
-  it("generates the API and git rules for one repository", () => {
-    expect(githubRepositoryRules("basnijholt/agent-cli", none)).toEqual({
-      errors: [],
-      rules: [
-        {
-          host: "api.github.com",
-          path_prefix: "/repos/basnijholt/agent-cli",
-          auth: { type: "bearer" },
-        },
-        {
-          host: "github.com",
-          path_prefix: "/basnijholt/agent-cli",
-          auth: { type: "basic", username: "x-access-token" },
-        },
-        {
-          host: "github.com",
-          path_prefix: "/basnijholt/agent-cli.git",
-          auth: { type: "basic", username: "x-access-token" },
-        },
-      ],
-    });
-  });
-
-  it("makes an owner-wide rule with a trailing slash for owner/*", () => {
-    expect(githubRepositoryRules("mindroom-ai/*", none)).toEqual({
-      errors: [],
-      rules: [
-        {
-          host: "api.github.com",
-          path_prefix: "/repos/mindroom-ai/",
-          auth: { type: "bearer" },
-        },
-        {
-          host: "github.com",
-          path_prefix: "/mindroom-ai/",
-          auth: { type: "basic", username: "x-access-token" },
-        },
-      ],
-    });
-  });
-
-  it("adds uploads.github.com for the same repositories only when ticked", () => {
-    const hosts = (uploads: boolean, input: string) =>
-      githubRepositoryRules(input, { uploads, graphql: false }).rules.filter(
-        (rule) => rule.host === "uploads.github.com",
-      );
-    expect(hosts(false, "o/r")).toEqual([]);
-    expect(hosts(true, "o/r")).toEqual([
-      {
-        host: "uploads.github.com",
-        path_prefix: "/repos/o/r",
-        auth: { type: "bearer" },
-      },
-    ]);
-    expect(hosts(true, "o/*")).toEqual([
-      {
-        host: "uploads.github.com",
-        path_prefix: "/repos/o/",
-        auth: { type: "bearer" },
-      },
-    ]);
-  });
-
-  it("adds /graphql once, only when ticked", () => {
-    const graphql = (tick: boolean) =>
-      githubRepositoryRules("a/b\nc/*", {
-        uploads: false,
-        graphql: tick,
-      }).rules.filter((rule) => rule.path_prefix === "/graphql");
-    expect(graphql(false)).toEqual([]);
-    expect(graphql(true)).toEqual([
-      {
-        host: "api.github.com",
-        path_prefix: "/graphql",
-        auth: { type: "bearer" },
-      },
-    ]);
-  });
-
-  it("combines several lines with both ticks", () => {
-    const { rules } = githubRepositoryRules("a/b\nc/*", {
-      uploads: true,
-      graphql: true,
-    });
-    expect(rules.map((rule) => `${rule.host}${rule.path_prefix}`)).toEqual([
-      "api.github.com/repos/a/b",
-      "github.com/a/b",
-      "github.com/a/b.git",
-      "uploads.github.com/repos/a/b",
-      "api.github.com/repos/c/",
-      "github.com/c/",
-      "uploads.github.com/repos/c/",
-      "api.github.com/graphql",
-    ]);
-  });
-
-  it("ignores blank lines and repeats, trims, and drops a .git suffix", () => {
-    const { rules, errors } = githubRepositoryRules(
-      "\n  o/r  \r\no/r\no/r.git\n\n",
-      none,
-    );
-    expect(errors).toEqual([]);
-    expect(rules).toHaveLength(3);
-    expect(rules[0].path_prefix).toBe("/repos/o/r");
-  });
-
-  it("names each line that is not owner/repo or owner/*", () => {
-    expect(
-      githubRepositoryRules(
-        "https://github.com/o/r\nowner\no/r/extra\no/..\n",
-        none,
-      ),
-    ).toEqual({
-      rules: [],
-      errors: [
-        "https://github.com/o/r is not owner/repo or owner/*",
-        "owner is not owner/repo or owner/*",
-        "o/r/extra is not owner/repo or owner/*",
-        "o/.. is not owner/repo or owner/*",
-      ],
-    });
-    expect(githubRepositoryRules("  \n", none).errors).toEqual([
-      "Enter at least one repository, such as owner/repo",
-    ]);
-  });
-});
-
-describe("finding a broader GitHub service", () => {
-  const service = (
-    changes: Partial<EgressCredentialService>,
-  ): EgressCredentialService => ({
-    name: "other",
-    display_name: "Other",
-    description: "",
-    is_shared: false,
-    can_manage: true,
-    configured: false,
-    updated_at: null,
-    active_source: null,
-    key_configured: false,
-    key_updated_at: null,
-    oauth: null,
-    source: "config",
-    ...changes,
-  });
-
-  it("recognizes the administrator's github service by name or provider", () => {
-    expect(
-      findBroaderGithubService([
-        service({}),
-        service({ name: "github", display_name: "GitHub" }),
-      ]),
-    ).toBe("GitHub");
-    expect(
-      findBroaderGithubService([
-        service({
-          name: "code",
-          display_name: "Code host",
-          oauth: {
-            provider: "github",
-            display_name: "GitHub",
-            connected: false,
-            account_label: null,
-            can_connect: true,
-            reset_required: false,
-            service_account: false,
-            unavailable_reason: null,
-            shared_worker_opt_in: false,
-          },
-        }),
-      ]),
-    ).toBe("Code host");
-  });
-
-  it("ignores user services, other hosts, and the service being edited", () => {
-    expect(
-      findBroaderGithubService([service({ name: "github", source: "user" })]),
-    ).toBeNull();
-    expect(findBroaderGithubService([service({ name: "openai" })])).toBeNull();
-    expect(
-      findBroaderGithubService([service({ name: "github" })], "github"),
-    ).toBeNull();
-  });
-});
-
 describe("the editor form", () => {
-  const renderEditor = (props: Partial<EgressServiceEditorProps> = {}) => {
-    const onSave = vi.fn(async () => undefined);
-    const onCancel = vi.fn();
-    render(
-      <EgressServiceEditor
-        service={null}
-        context="personal"
-        onSave={onSave}
-        onCancel={onCancel}
-        {...props}
-      />,
-    );
-    return { onSave, onCancel };
-  };
   const type = (label: string, value: string) =>
     fireEvent.change(screen.getByLabelText(label), { target: { value } });
   const save = () =>
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
 
   it("saves a custom service in its authored form", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "example");
     type("Display name", "Example");
     type("Rule 1 host", "API.example.com");
@@ -638,7 +73,7 @@ describe("the editor form", () => {
   });
 
   it("adds, fills, and removes rules", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "two");
     type("Rule 1 host", "a.example.com");
     fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
@@ -658,7 +93,7 @@ describe("the editor form", () => {
   });
 
   it("saves a preset alone as just the preset", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "github");
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "github" },
@@ -676,7 +111,7 @@ describe("the editor form", () => {
   });
 
   it("saves a preset with restrict_to_rules without expanding it", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "github");
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "github" },
@@ -691,7 +126,7 @@ describe("the editor form", () => {
   });
 
   it("lets the user replace a preset's rules with their own", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "ai");
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "openai" },
@@ -708,8 +143,8 @@ describe("the editor form", () => {
     });
   });
 
-  it("explains the GraphQL caveat next to the toggle", () => {
-    renderEditor();
+  it("explains the GraphQL caveat next to the toggle", async () => {
+    await renderEditor();
     expect(
       screen.getByText(
         /a listed GraphQL rule reaches every repository the key can\s+reach/,
@@ -719,7 +154,7 @@ describe("the editor form", () => {
   });
 
   it("shows what is wrong instead of saving an invalid form", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "Bad Name");
     save();
     const alert = await screen.findByRole("alert");
@@ -733,7 +168,7 @@ describe("the editor form", () => {
   });
 
   it("rejects a name that is already taken", async () => {
-    const { onSave } = renderEditor({ takenNames: ["github"] });
+    const { onSave } = await renderEditor({ takenNames: ["github"] });
     type("Name", "github");
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "github" },
@@ -749,7 +184,7 @@ describe("the editor form", () => {
     const onSave = vi.fn(async () => {
       throw new Error("service name 'x' is already used by your administrator");
     });
-    renderEditor({ onSave });
+    await renderEditor({ onSave });
     type("Name", "x");
     fireEvent.change(screen.getByLabelText("Preset"), {
       target: { value: "openai" },
@@ -761,8 +196,8 @@ describe("the editor form", () => {
     expect(screen.getByRole("button", { name: "Save service" })).toBeEnabled();
   });
 
-  it("cannot rename the service it edits", () => {
-    renderEditor({ name: "github", service: { preset: "github" } });
+  it("cannot rename the service it edits", async () => {
+    await renderEditor({ name: "github", service: { preset: "github" } });
     expect(screen.getByLabelText("Name")).toBeDisabled();
     expect(screen.getByLabelText("Name")).toHaveValue("github");
     expect(screen.getByLabelText("Preset")).toHaveValue("github");
@@ -771,13 +206,13 @@ describe("the editor form", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps a preset this page does not know", () => {
-    renderEditor({ name: "future", service: { preset: "future_api" } });
+  it("keeps a preset this page does not know", async () => {
+    await renderEditor({ name: "future", service: { preset: "future_api" } });
     expect(screen.getByLabelText("Preset")).toHaveValue("future_api");
   });
 
-  it("shows the placeholder rules as hints in the advanced section", () => {
-    renderEditor();
+  it("shows the placeholder rules as hints in the advanced section", async () => {
+    await renderEditor();
     expect(screen.queryByText(/must be TOKEN, KEY/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
     expect(
@@ -790,8 +225,8 @@ describe("the editor form", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the operator's placeholder rules instead on the dashboard", () => {
-    renderEditor({ context: "operator" });
+  it("shows the operator's placeholder rules instead on the dashboard", async () => {
+    await renderEditor({ context: "operator" });
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
     expect(
       screen.getByText(/MINDROOM_ or GIT_CONFIG_ are reserved/),
@@ -800,7 +235,7 @@ describe("the editor form", () => {
   });
 
   it("adds a placeholder with the brokered value and saves it", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "svc");
     type("Rule 1 host", "a.example.com");
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
@@ -817,8 +252,8 @@ describe("the editor form", () => {
     });
   });
 
-  it("opens the advanced section when the service already has placeholders", () => {
-    renderEditor({
+  it("opens the advanced section when the service already has placeholders", async () => {
+    await renderEditor({
       name: "svc",
       service: { preset: "github", placeholder_env: { GH_TOKEN: "x" } },
     });
@@ -826,7 +261,7 @@ describe("the editor form", () => {
   });
 
   it("disables the account login on a shared agent", async () => {
-    const { onSave } = renderEditor({ sharedTarget: true });
+    const { onSave } = await renderEditor({ sharedTarget: true });
     expect(screen.getByLabelText("Account login (optional)")).toBeDisabled();
     expect(
       screen.getByText(
@@ -851,7 +286,7 @@ describe("the editor form", () => {
   });
 
   it("offers the account login on a personal agent", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderEditor();
     type("Name", "svc");
     type("Rule 1 host", "a.example.com");
     type("Account login (optional)", "atlassian");
@@ -864,7 +299,7 @@ describe("the editor form", () => {
   });
 
   it("keeps oauth_on_shared_workers when an operator edits a service", async () => {
-    const { onSave } = renderEditor({
+    const { onSave } = await renderEditor({
       context: "operator",
       name: "github",
       service: { preset: "github", oauth_on_shared_workers: true },
@@ -882,7 +317,11 @@ describe("the editor form", () => {
       .fn<() => Promise<void>>()
       .mockRejectedValueOnce(new Error("Could not delete it"))
       .mockResolvedValue(undefined);
-    renderEditor({ name: "github", service: { preset: "github" }, onDelete });
+    await renderEditor({
+      name: "github",
+      service: { preset: "github" },
+      onDelete,
+    });
     fireEvent.click(screen.getByRole("button", { name: "Delete service" }));
     expect(onDelete).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Keep" }));
@@ -900,13 +339,13 @@ describe("the editor form", () => {
     await waitFor(() => expect(onDelete).toHaveBeenCalledTimes(2));
   });
 
-  it("has no delete button for a new service", () => {
-    renderEditor({ onDelete: vi.fn() });
+  it("has no delete button for a new service", async () => {
+    await renderEditor({ onDelete: vi.fn() });
     expect(screen.queryByRole("button", { name: "Delete service" })).toBeNull();
   });
 
-  it("cancels without saving", () => {
-    const { onSave, onCancel } = renderEditor();
+  it("cancels without saving", async () => {
+    const { onSave, onCancel } = await renderEditor();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onCancel).toHaveBeenCalled();
     expect(onSave).not.toHaveBeenCalled();
@@ -914,20 +353,8 @@ describe("the editor form", () => {
 });
 
 describe("the GitHub helper in the editor", () => {
-  const renderEditor = (props: Partial<EgressServiceEditorProps> = {}) => {
-    const onSave = vi.fn(async () => undefined);
-    render(
-      <EgressServiceEditor
-        service={{ preset: "github" }}
-        name="github"
-        context="personal"
-        onSave={onSave}
-        onCancel={vi.fn()}
-        {...props}
-      />,
-    );
-    return { onSave };
-  };
+  const renderGithub = (props: Partial<EgressServiceEditorProps> = {}) =>
+    renderEditor({ service: { preset: "github" }, name: "github", ...props });
   const enter = (value: string) =>
     fireEvent.change(screen.getByLabelText("GitHub repositories"), {
       target: { value },
@@ -940,7 +367,7 @@ describe("the GitHub helper in the editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
 
   it("replaces the preset's rules and turns on the restriction", async () => {
-    const { onSave } = renderEditor();
+    const { onSave } = await renderGithub();
     enter("basnijholt/agent-cli");
     apply();
     expect(screen.getByLabelText("Rule 1 host")).toHaveValue("api.github.com");
@@ -982,8 +409,8 @@ describe("the GitHub helper in the editor", () => {
     });
   });
 
-  it("makes owner-wide rules and leaves uploads and GraphQL off by default", () => {
-    renderEditor();
+  it("makes owner-wide rules and leaves uploads and GraphQL off by default", async () => {
+    await renderGithub();
     expect(
       screen.getByLabelText(/Also allow uploads.github.com/),
     ).not.toBeChecked();
@@ -999,8 +426,8 @@ describe("the GitHub helper in the editor", () => {
     expect(screen.queryByLabelText("Rule 3 host")).toBeNull();
   });
 
-  it("adds uploads and GraphQL rules when ticked", () => {
-    renderEditor();
+  it("adds uploads and GraphQL rules when ticked", async () => {
+    await renderGithub();
     fireEvent.click(screen.getByLabelText(/Also allow uploads.github.com/));
     fireEvent.click(screen.getByLabelText(/Also allow GraphQL/));
     enter("o/r");
@@ -1014,8 +441,8 @@ describe("the GitHub helper in the editor", () => {
     expect(screen.getByLabelText("Rule 5 path prefix")).toHaveValue("/graphql");
   });
 
-  it("names the lines it cannot use and changes nothing", () => {
-    renderEditor();
+  it("names the lines it cannot use and changes nothing", async () => {
+    await renderGithub();
     enter("not a repo");
     apply();
     expect(screen.getByRole("alert")).toHaveTextContent(
@@ -1024,18 +451,18 @@ describe("the GitHub helper in the editor", () => {
     expect(screen.queryByLabelText("Rule 1 host")).toBeNull();
   });
 
-  it("is offered for a new custom service and for rules on GitHub hosts only", () => {
+  it("is offered for a new custom service and for rules on GitHub hosts only", async () => {
     cleanup();
-    renderEditor({ name: undefined, service: null });
+    await renderEditor({ name: undefined, service: null });
     expect(screen.getByText("Limit to repositories")).toBeInTheDocument();
     cleanup();
-    renderEditor({ name: "openai", service: { preset: "openai" } });
+    await renderEditor({ name: "openai", service: { preset: "openai" } });
     expect(screen.queryByText("Limit to repositories")).toBeNull();
     cleanup();
-    renderEditor({ name: "code", service: { rules: [bearerRule] } });
+    await renderEditor({ name: "code", service: { rules: [bearerRule] } });
     expect(screen.queryByText("Limit to repositories")).toBeNull();
     cleanup();
-    renderEditor({
+    await renderEditor({
       name: "code",
       service: {
         rules: [{ host: "github.com", auth: { type: "bearer" } }],
@@ -1043,23 +470,459 @@ describe("the GitHub helper in the editor", () => {
     });
     expect(screen.getByText("Limit to repositories")).toBeInTheDocument();
   });
+});
 
-  it("warns when the administrator's service already covers every GitHub path", () => {
-    renderEditor({ broaderGithubService: "GitHub" });
-    const helper = screen.getByRole("region", {
-      name: "Limit to repositories",
-    });
-    expect(within(helper).getByRole("note")).toHaveTextContent(
-      "GitHub is configured by your administrator and already covers every GitHub path, so this limit cannot narrow it",
-    );
+describe("the broader-rule warning", () => {
+  const covering = (
+    display_name: string,
+    path_prefix: string,
+    host = "api.github.com",
+  ) => ({
+    name: display_name.toLowerCase(),
+    display_name,
+    rules: [{ host, port: null, path_prefix }],
   });
+  const restrict = () =>
+    fireEvent.click(screen.getByLabelText("Refuse other paths on these hosts"));
+  const note = () => screen.queryByRole("note");
 
-  it("shows no warning without a broader service", () => {
-    renderEditor();
+  it("names a service that covers a limited repository more widely", async () => {
+    await renderEditor({
+      service: { preset: "github" },
+      name: "limited",
+      otherServices: [covering("GitHub", "/")],
+    });
+    fireEvent.change(screen.getByLabelText("GitHub repositories"), {
+      target: { value: "o/r" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use these repositories" }),
+    );
+
+    expect(note()).toHaveTextContent(
+      "A broader rule of GitHub on the same host already covers some of these paths. Refusing other paths cannot narrow it",
+    );
+    // It sits by the restriction it is about.
     expect(
       within(
-        screen.getByRole("region", { name: "Limit to repositories" }),
-      ).queryByRole("note"),
-    ).toBeNull();
+        screen
+          .getByLabelText("Refuse other paths on these hosts")
+          .closest("div") as HTMLElement,
+      ).getByRole("note"),
+    ).toBe(note());
+  });
+
+  it("appears only while the restriction is on", async () => {
+    await renderEditor({
+      service: {
+        rules: [
+          {
+            host: "api.github.com",
+            path_prefix: "/repos/o/r",
+            auth: { type: "bearer" },
+          },
+        ],
+      },
+      name: "limited",
+      otherServices: [covering("GitHub", "/")],
+    });
+    expect(note()).toBeNull();
+    restrict();
+    expect(note()).not.toBeNull();
+    restrict();
+    expect(note()).toBeNull();
+  });
+
+  it("stays quiet without a shorter covering rule on the same host", async () => {
+    await renderEditor({
+      service: {
+        restrict_to_rules: true,
+        rules: [
+          {
+            host: "api.github.com",
+            path_prefix: "/repos/o/r",
+            auth: { type: "bearer" },
+          },
+        ],
+      },
+      name: "limited",
+      otherServices: [
+        covering("Same", "/repos/o/r"),
+        covering("Longer", "/repos/o/r/issues"),
+        covering("Elsewhere", "/", "github.com"),
+        covering("Sibling", "/repos/other/"),
+        { name: "old", display_name: "Old" },
+      ],
+    });
+    expect(note()).toBeNull();
+  });
+
+  it("ignores the service being edited", async () => {
+    await renderEditor({
+      service: {
+        restrict_to_rules: true,
+        rules: [
+          {
+            host: "api.github.com",
+            path_prefix: "/repos/o/r",
+            auth: { type: "bearer" },
+          },
+        ],
+      },
+      name: "github",
+      otherServices: [covering("GitHub", "/")],
+    });
+    expect(note()).toBeNull();
+  });
+
+  it("uses the preset's own rules while it keeps them", async () => {
+    await renderEditor({
+      service: { preset: "google_drive", restrict_to_rules: true },
+      name: "drive",
+      otherServices: [covering("Google", "/", "www.googleapis.com")],
+    });
+    // The preset's `/drive/` is narrower than the other service's `/`.
+    expect(note()).toHaveTextContent("A broader rule of Google");
+  });
+
+  it("names several services together", async () => {
+    await renderEditor({
+      service: {
+        restrict_to_rules: true,
+        rules: [
+          {
+            host: "api.github.com",
+            path_prefix: "/repos/o/r",
+            auth: { type: "bearer" },
+          },
+        ],
+      },
+      name: "limited",
+      otherServices: [covering("GitHub", "/"), covering("Owner", "/repos/o/")],
+    });
+    expect(note()).toHaveTextContent("A broader rule of GitHub and Owner");
+  });
+});
+
+describe("loading the presets", () => {
+  it("offers what the server returns, by display name", async () => {
+    await renderEditor({
+      loadPresets: vi.fn(async () => [
+        {
+          id: "internal",
+          display_name: "Internal API",
+          description: "",
+          oauth_provider: null,
+          rules: [
+            {
+              host: "api.internal.example.com",
+              port: 8443,
+              path_prefix: "/v1/",
+            },
+          ],
+          placeholder_env: {},
+        },
+      ]),
+    });
+    expect(
+      within(screen.getByLabelText("Preset"))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["Custom", "Internal API"]);
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "internal" },
+    });
+    expect(
+      screen.getByText(
+        "The Internal API preset covers api.internal.example.com:8443/v1/.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("waits for the presets before the form can be saved", async () => {
+    let resolve: (presets: typeof EGRESS_PRESETS_FIXTURE) => void = () => {};
+    const loadPresets = vi.fn(
+      () =>
+        new Promise<typeof EGRESS_PRESETS_FIXTURE>((done) => {
+          resolve = done;
+        }),
+    );
+    render(<EgressServiceEditor {...baseProps()} loadPresets={loadPresets} />);
+    expect(screen.getByLabelText("Preset")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save service" })).toBeDisabled();
+    resolve(EGRESS_PRESETS_FIXTURE);
+    await waitFor(() => expect(screen.getByLabelText("Preset")).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Save service" })).toBeEnabled();
+    expect(loadPresets).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to a custom service when they cannot be loaded", async () => {
+    const onSave = vi.fn(async () => undefined);
+    await renderEditor({
+      loadPresets: vi.fn(async () => {
+        throw new Error("nope");
+      }),
+      onSave,
+    });
+    expect(
+      screen.getByText(/The preset list could not be loaded/),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "own" },
+    });
+    fireEvent.change(screen.getByLabelText("Rule 1 host"), {
+      target: { value: "a.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("own", {
+      rules: [{ host: "a.example.com", auth: { type: "bearer" } }],
+    });
+  });
+
+  it("keeps a preset the server no longer lists", async () => {
+    await renderEditor({
+      name: "old",
+      service: { preset: "retired" },
+      loadPresets: vi.fn(async () => []),
+    });
+    expect(screen.getByLabelText("Preset")).toHaveValue("retired");
+  });
+});
+
+describe("saving with a wider effect", () => {
+  const saveWarning = "This also saves your other unsaved settings changes.";
+  const filled = async (props: Partial<EgressServiceEditorProps> = {}) => {
+    const rendered = await renderEditor({ saveWarning, ...props });
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "svc" },
+    });
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "openai" },
+    });
+    return rendered;
+  };
+  const save = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+  it("asks once before saving, then saves", async () => {
+    const { onSave } = await filled();
+    save();
+    expect(screen.getByRole("alert")).toHaveTextContent(saveWarning);
+    expect(onSave).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Save all changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith("svc", { preset: "openai" });
+  });
+
+  it("goes back without saving", async () => {
+    const { onSave } = await filled();
+    save();
+    fireEvent.click(screen.getByRole("button", { name: "Go back" }));
+    expect(screen.queryByText(saveWarning)).toBeNull();
+    expect(screen.getByRole("button", { name: "Save service" })).toBeEnabled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("asks again after the form changes", async () => {
+    const { onSave } = await filled();
+    save();
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "changed" },
+    });
+    expect(screen.queryByText(saveWarning)).toBeNull();
+    save();
+    expect(screen.getByText(saveWarning)).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("does not ask for an invalid form", async () => {
+    await renderEditor({ saveWarning });
+    save();
+    expect(screen.getByRole("alert")).toHaveTextContent("Name must start");
+    expect(screen.queryByText(saveWarning)).toBeNull();
+  });
+
+  it("saves straight away without a warning", async () => {
+    const { onSave } = await filled({ saveWarning: null });
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+  });
+
+  it("repeats the warning when asking to delete", async () => {
+    await renderEditor({
+      name: "github",
+      service: { preset: "github" },
+      onDelete: vi.fn(),
+      saveWarning,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Delete service" }));
+    expect(
+      screen.getByText(`Delete github? ${saveWarning}`),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("reporting unsaved changes", () => {
+  it("tells the parent when the form differs from what it opened with", async () => {
+    const onDirtyChange = vi.fn();
+    await renderEditor({
+      name: "github",
+      service: { preset: "github" },
+      onDirtyChange,
+    });
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "x" },
+    });
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "" },
+    });
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("says it is clean again when it closes", async () => {
+    const onDirtyChange = vi.fn();
+    await renderEditor({ onDirtyChange });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+    cleanup();
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+});
+
+describe("a service with values emptied on purpose", () => {
+  it("shows what the empty list means and saves it back unchanged", async () => {
+    const { onSave } = await renderEditor({
+      name: "github",
+      service: { preset: "github", placeholder_env: {}, description: "" },
+    });
+    expect(screen.queryByLabelText("Placeholder 1 name")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    expect(
+      screen.getByText(
+        /This service sets none, which drops the placeholders of the GitHub preset/,
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("github", {
+      preset: "github",
+      description: "",
+      placeholder_env: {},
+    });
+  });
+
+  it("offers the preset's placeholders when the service has not set any", async () => {
+    await renderEditor({ name: "github", service: { preset: "github" } });
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    expect(
+      screen.getByText(
+        /Leave the list empty to use the placeholders of the GitHub preset/,
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("a form after a failed save", () => {
+  it("keeps the input, clears the error with the next try, and saves the later edits", async () => {
+    const onSave = vi
+      .fn<(name: string, service: object) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("The server said no"))
+      .mockResolvedValue(undefined);
+    await renderEditor({ onSave });
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "svc" },
+    });
+    fireEvent.change(screen.getByLabelText("Rule 1 host"), {
+      target: { value: "a.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The server said no",
+    );
+    expect(screen.getByLabelText("Name")).toHaveValue("svc");
+    expect(screen.getByLabelText("Rule 1 host")).toHaveValue("a.example.com");
+    expect(screen.getByRole("button", { name: "Save service" })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("Rule 1 host"), {
+      target: { value: "b.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
+    fireEvent.change(screen.getByLabelText("Rule 2 host"), {
+      target: { value: "c.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+    expect(onSave).toHaveBeenLastCalledWith("svc", {
+      rules: [
+        { host: "b.example.com", auth: { type: "bearer" } },
+        { host: "c.example.com", auth: { type: "bearer" } },
+      ],
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows a validation problem found after the server error instead of saving", async () => {
+    const onSave = vi.fn(async () => {
+      throw new Error("The server said no");
+    });
+    await renderEditor({ onSave });
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "svc" },
+    });
+    fireEvent.change(screen.getByLabelText("Rule 1 host"), {
+      target: { value: "a.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    await screen.findByText("The server said no");
+
+    fireEvent.change(screen.getByLabelText("Rule 1 host"), {
+      target: { value: "https://a.example.com" },
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Rule 1: host must not contain a scheme",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the account login field", () => {
+  it("refuses a value that is not a provider id", async () => {
+    const { onSave } = await renderEditor();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "svc" },
+    });
+    fireEvent.change(screen.getByLabelText("Rule 1 host"), {
+      target: { value: "a.example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Account login (optional)"), {
+      target: { value: "Git Hub" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Account login must be a provider id",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+});
+
+describe("asking before discarding an open editor", () => {
+  it("offers to discard or to keep editing", () => {
+    const onDiscard = vi.fn();
+    const onKeep = vi.fn();
+    render(<DiscardEditsNotice onDiscard={onDiscard} onKeep={onKeep} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "You have unsaved changes in the open editor.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(onKeep).toHaveBeenCalled();
+    expect(onDiscard).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(onDiscard).toHaveBeenCalled();
   });
 });

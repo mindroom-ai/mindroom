@@ -16,6 +16,7 @@ import {
   type Mock,
   vi,
 } from "vitest";
+import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
 import { EgressBroker } from "./EgressBroker";
 
 const NOT_RUNNING =
@@ -24,7 +25,14 @@ const NOT_RUNNING =
 let storeState: {
   agents: unknown[];
   config: unknown;
+  isDirty?: boolean;
+  dirtyRoots?: string[];
   updateConfigValue?: (path: string[], value: unknown) => void;
+  restoreConfigValue?: (
+    path: string[],
+    value: unknown,
+    before: { isDirty: boolean; dirtyRoots: string[] },
+  ) => void;
   saveConfig?: () => Promise<unknown>;
 };
 
@@ -93,6 +101,7 @@ const newest = {
   bytes_up: 12,
   bytes_down: 34,
   duration_ms: 87,
+  code: null,
 };
 const oldest = {
   ...newest,
@@ -104,6 +113,8 @@ const oldest = {
   service: null,
   status: 403,
   duration_ms: 3,
+  kind: "denied",
+  code: "host_not_allowed",
 };
 
 const json = (value: unknown, status = 200) =>
@@ -120,6 +131,8 @@ function mockApi() {
     if (url.pathname === "/api/egress-broker/services" && method === "GET")
       return json({ services });
     if (url.pathname === "/api/egress-broker/logs") return logsResponse();
+    if (url.pathname === "/api/egress-broker/presets")
+      return json({ presets: EGRESS_PRESETS_FIXTURE });
     return mutationResponse();
   });
 }
@@ -656,9 +669,11 @@ describe("egress broker request log", () => {
       "example.com",
       "/",
       "-",
-      "403",
+      // The refusal code sits beside the status.
+      "403host_not_allowed",
       "3 ms",
     ]);
+    expect(within(rows[1]).queryByText("host_not_allowed")).toBeNull();
   });
 
   it("says so when no requests are logged", async () => {
@@ -819,17 +834,36 @@ describe("egress broker CA certificate", () => {
 
 describe("egress broker service editor", () => {
   const githubPreset = { preset: "github" };
-  const configRow = (name: string, display_name: string) => ({
+  const configRow = (
+    name: string,
+    display_name: string,
+    rules: { host: string; port: number | null; path_prefix: string }[] = [],
+  ) => ({
     ...github,
     name,
     display_name,
     source: "config",
+    rules,
   });
+  const githubRules = [
+    { host: "api.github.com", port: null, path_prefix: "/" },
+    { host: "uploads.github.com", port: null, path_prefix: "/" },
+    { host: "github.com", port: null, path_prefix: "/" },
+  ];
+  const clean = { isDirty: false, dirtyRoots: [] as string[] };
   let updateConfigValue: Mock<(path: string[], value: unknown) => void>;
+  let restoreConfigValue: Mock<
+    (
+      path: string[],
+      value: unknown,
+      before: { isDirty: boolean; dirtyRoots: string[] },
+    ) => void
+  >;
   let saveConfig: Mock<() => Promise<unknown>>;
 
   beforeEach(() => {
     updateConfigValue = vi.fn<(path: string[], value: unknown) => void>();
+    restoreConfigValue = vi.fn();
     saveConfig = vi.fn<() => Promise<unknown>>(async () => ({
       status: "saved",
     }));
@@ -847,20 +881,37 @@ describe("egress broker service editor", () => {
           },
         },
       },
+      ...clean,
       updateConfigValue,
+      restoreConfigValue,
       saveConfig,
     };
-    services = [configRow("github", "GitHub"), configRow("openai", "OpenAI")];
+    services = [
+      configRow("github", "GitHub", githubRules),
+      configRow("openai", "OpenAI", [
+        { host: "api.openai.com", port: null, path_prefix: "/" },
+      ]),
+    ];
   });
 
   const fill = (label: string, value: string) =>
     fireEvent.change(screen.getByLabelText(label), { target: { value } });
   const save = () =>
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+  const presetsReady = () =>
+    waitFor(() => expect(screen.getByLabelText("Preset")).toBeEnabled());
   const openAdd = async () => {
     render(<EgressBroker />);
     await screen.findByLabelText("GitHub");
     fireEvent.click(screen.getByRole("button", { name: "Add service" }));
+    await presetsReady();
+  };
+  const openEdit = async (name: string) => {
+    render(<EgressBroker />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: `Edit ${name} service` }),
+    );
+    await presetsReady();
   };
 
   it("adds a service to the config through the store, in authored form", async () => {
@@ -884,6 +935,7 @@ describe("egress broker service editor", () => {
     );
     expect(await screen.findByLabelText("Myapi")).toBeInTheDocument();
     expect(screen.queryByRole("form")).toBeNull();
+    expect(restoreConfigValue).not.toHaveBeenCalled();
     // Nothing goes to the personal API or a dashboard write route.
     expect(requests("/api/egress-broker/services", "PUT")).toHaveLength(0);
     expect(
@@ -896,11 +948,23 @@ describe("egress broker service editor", () => {
     expect(requests("/api/egress-broker/services")).toHaveLength(2);
   });
 
-  it("edits a preset service without expanding it", async () => {
+  it("loads the presets from the dashboard API when an editor opens, not before", async () => {
     render(<EgressBroker />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit GitHub service" }),
-    );
+    await screen.findByLabelText("GitHub");
+    expect(requests("/api/egress-broker/presets")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add service" }));
+    await presetsReady();
+    expect(requests("/api/egress-broker/presets")).toHaveLength(1);
+    expect(
+      within(screen.getByLabelText("Preset"))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["Custom", ...EGRESS_PRESETS_FIXTURE.map((p) => p.display_name)]);
+  });
+
+  it("edits a preset service without expanding it", async () => {
+    await openEdit("GitHub");
     const form = screen.getByRole("form", { name: "Edit github" });
     expect(within(form).getByLabelText("Preset")).toHaveValue("github");
     expect(within(form).queryByLabelText("Rule 1 host")).toBeNull();
@@ -917,10 +981,7 @@ describe("egress broker service editor", () => {
   });
 
   it("limits a GitHub service to a repository and saves the rules as authored", async () => {
-    render(<EgressBroker />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit GitHub service" }),
-    );
+    await openEdit("GitHub");
     fill("GitHub repositories", "basnijholt/agent-cli");
     fireEvent.click(
       screen.getByRole("button", { name: "Use these repositories" }),
@@ -949,10 +1010,7 @@ describe("egress broker service editor", () => {
   });
 
   it("keeps the operator-only opt-in when editing a service that has it", async () => {
-    render(<EgressBroker />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit OpenAI service" }),
-    );
+    await openEdit("OpenAI");
     fill("Display name", "OpenAI direct");
     save();
 
@@ -967,10 +1025,19 @@ describe("egress broker service editor", () => {
     );
   });
 
-  it("warns about another GitHub service when adding a limited one", async () => {
+  it("warns when another configured service already covers a limited repository", async () => {
     await openAdd();
+    fill("Name", "limited");
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "github" },
+    });
+    fill("GitHub repositories", "o/r");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use these repositories" }),
+    );
+
     expect(screen.getByRole("note")).toHaveTextContent(
-      "GitHub is configured by your administrator and already covers every GitHub path",
+      "A broader rule of GitHub on the same host already covers some of these paths",
     );
   });
 
@@ -1016,10 +1083,49 @@ describe("egress broker service editor", () => {
     expect(alert).not.toHaveTextContent("unrelated");
     expect(updateConfigValue.mock.calls).toEqual([
       [["egress_broker", "services", "myapi"], { preset: "openai" }],
-      [["egress_broker", "services", "myapi"], undefined],
+    ]);
+    // The draft goes back to the state before the write, dirty flags included.
+    expect(restoreConfigValue.mock.calls).toEqual([
+      [["egress_broker", "services", "myapi"], undefined, clean],
     ]);
     // The editor keeps the user's input for another try.
     expect(screen.getByLabelText("Name")).toHaveValue("myapi");
+  });
+
+  it("shows an issue on the egress_broker section itself without a field path", async () => {
+    saveConfig.mockResolvedValue({
+      status: "error",
+      message: "Configuration validation failed",
+      diagnostics: [
+        {
+          kind: "validation",
+          issue: {
+            loc: ["egress_broker"],
+            msg: "Value error, services must not be empty",
+            type: "value_error",
+          },
+        },
+        {
+          kind: "validation",
+          issue: {
+            loc: ["egress_broker", "services"],
+            msg: "Value error, too many services",
+            type: "value_error",
+          },
+        },
+      ],
+    });
+    await openAdd();
+    fill("Name", "myapi");
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "openai" },
+    });
+    save();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "services must not be empty; too many services",
+    );
+    expect(screen.getByRole("alert")).not.toHaveTextContent(": ");
   });
 
   it("restores the previous service when saving an edit fails", async () => {
@@ -1029,19 +1135,42 @@ describe("egress broker service editor", () => {
         "Configuration changed elsewhere. Your draft has not been saved.",
       diagnostics: [],
     });
-    render(<EgressBroker />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit GitHub service" }),
-    );
+    await openEdit("GitHub");
     fireEvent.click(screen.getByLabelText("Refuse other paths on these hosts"));
     save();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Configuration changed elsewhere",
     );
-    expect(updateConfigValue.mock.calls[1]).toEqual([
-      ["egress_broker", "services", "github"],
-      githubPreset,
+    expect(restoreConfigValue.mock.calls).toEqual([
+      [["egress_broker", "services", "github"], githubPreset, clean],
+    ]);
+  });
+
+  it("hands back the dirty state the draft had before, other roots included", async () => {
+    storeState = { ...storeState, isDirty: true, dirtyRoots: ["models"] };
+    saveConfig.mockResolvedValue({
+      status: "error",
+      message: "Failed to save configuration (Error 500)",
+      diagnostics: [],
+    });
+    await openAdd();
+    fill("Name", "myapi");
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "openai" },
+    });
+    save();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Save all changes" }),
+    );
+
+    await screen.findByText("Failed to save configuration (Error 500)");
+    expect(restoreConfigValue.mock.calls).toEqual([
+      [
+        ["egress_broker", "services", "myapi"],
+        undefined,
+        { isDirty: true, dirtyRoots: ["models"] },
+      ],
     ]);
   });
 
@@ -1058,6 +1187,60 @@ describe("egress broker service editor", () => {
       "The configuration changed while saving",
     );
     expect(updateConfigValue).toHaveBeenCalledTimes(1);
+    expect(restoreConfigValue).not.toHaveBeenCalled();
+  });
+
+  it("asks before a save that also writes other unsaved settings changes", async () => {
+    storeState = { ...storeState, isDirty: true, dirtyRoots: ["agents"] };
+    await openAdd();
+    fill("Name", "myapi");
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "openai" },
+    });
+    save();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This also saves your other unsaved settings changes.",
+    );
+    expect(updateConfigValue).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save all changes" }));
+    await waitFor(() => expect(saveConfig).toHaveBeenCalledTimes(1));
+    expect(updateConfigValue).toHaveBeenCalledWith(
+      ["egress_broker", "services", "myapi"],
+      { preset: "openai" },
+    );
+  });
+
+  it("does not ask when only the egress_broker section is dirty", async () => {
+    storeState = {
+      ...storeState,
+      isDirty: true,
+      dirtyRoots: ["egress_broker"],
+    };
+    await openAdd();
+    fill("Name", "myapi");
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "openai" },
+    });
+    save();
+
+    await waitFor(() => expect(saveConfig).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/other unsaved settings changes/)).toBeNull();
+  });
+
+  it("repeats the warning when deleting, and saves nothing until confirmed", async () => {
+    storeState = { ...storeState, isDirty: true, dirtyRoots: ["models"] };
+    render(<EgressBroker />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete GitHub service" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "This also saves your other unsaved settings changes.",
+    );
+    expect(saveConfig).not.toHaveBeenCalled();
   });
 
   it("deletes a service from the config after confirmation", async () => {
@@ -1069,6 +1252,7 @@ describe("egress broker service editor", () => {
     expect(dialog).toHaveTextContent(
       "removes the service from the configuration",
     );
+    expect(dialog).not.toHaveTextContent("other unsaved settings");
     expect(saveConfig).not.toHaveBeenCalled();
     services = [configRow("openai", "OpenAI")];
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
@@ -1099,17 +1283,93 @@ describe("egress broker service editor", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Failed to save configuration (Error 500)",
     );
-    expect(updateConfigValue.mock.calls[1]).toEqual([
-      ["egress_broker", "services", "github"],
-      githubPreset,
+    expect(restoreConfigValue.mock.calls).toEqual([
+      [["egress_broker", "services", "github"], githubPreset, clean],
     ]);
     expect(screen.getByLabelText("GitHub")).toBeInTheDocument();
+  });
+
+  it("keeps Edit and Delete off while a save is running", async () => {
+    let finish: (result: unknown) => void = () => {};
+    saveConfig.mockImplementation(
+      () =>
+        new Promise((done) => {
+          finish = done;
+        }),
+    );
+    await openEdit("GitHub");
+    fireEvent.click(screen.getByLabelText("Refuse other paths on these hosts"));
+    save();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Edit OpenAI service" }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Delete OpenAI service" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Delete GitHub service" }),
+    ).toBeDisabled();
+
+    finish({ status: "saved" });
+    await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
+    expect(
+      screen.getByRole("button", { name: "Edit OpenAI service" }),
+    ).toBeEnabled();
+    expect(saveConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks before replacing an editor that has unsaved changes", async () => {
+    await openEdit("GitHub");
+    fill("Description", "typed but not saved");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit OpenAI service" }),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "You have unsaved changes in the open editor.",
+    );
+    expect(
+      screen.getByRole("form", { name: "Edit github" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByLabelText("Description")).toHaveValue(
+      "typed but not saved",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit OpenAI service" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(
+      await screen.findByRole("form", { name: "Edit openai" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
+  it("opens another service straight away when nothing was changed", async () => {
+    await openEdit("GitHub");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit OpenAI service" }),
+    );
+    expect(
+      await screen.findByRole("form", { name: "Edit openai" }),
+    ).toBeInTheDocument();
   });
 
   it("lists a scope's own services read-only with a badge", async () => {
     services = [
       configRow("github", "GitHub"),
-      { ...github, name: "mine", display_name: "Mine", source: "user" },
+      {
+        ...github,
+        name: "mine",
+        display_name: "Mine",
+        source: "user",
+        rules: [],
+      },
     ];
     render(<EgressBroker />);
     await screen.findByLabelText("Mine");
