@@ -113,7 +113,10 @@ The normalized origin has a lowercase scheme and host, no path, and no default p
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL` it answers 503.
 Without binding support tokens are not bound, and `MINDROOM_PUBLIC_URL` is not required for this.
 A backend that a user points Chat at could then replay the token to another deployment on the same homeserver until the token expires, so keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
-Upgrade MindRoom backends before the homeserver starts binding, because older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
+Roll out in this order: first MindRoom backends, then MindRoom Chat clients including the iOS app, and only then the homeserver release that binds tokens.
+Older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
+Older Chat clients, including iOS app versions that are still in App Store review, send unbound tokens that a new backend rejects with 401 once the homeserver binds.
+Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](../authorization.md#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.

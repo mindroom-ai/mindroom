@@ -176,6 +176,7 @@ async def test_bound_401_logs_the_audience_but_never_the_token(homeserver: tuple
         "ftp://portal.example.org",
         "https://:443",
         "https://portal.example.org:bad",
+        "https://[::1",
     ],
 )
 async def test_bound_verification_requires_a_valid_public_url(

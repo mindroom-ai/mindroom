@@ -164,7 +164,9 @@ With a binding homeserver, MindRoom requires `MINDROOM_PUBLIC_URL` and binds tok
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL`, sign-in answers 503.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
 On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
-Upgrade MindRoom backends before the homeserver starts binding, because older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
+Roll out in this order: first MindRoom backends, then MindRoom Chat clients including the iOS app, and only then the homeserver release that binds tokens.
+Older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
+Older Chat clients, including iOS app versions that are still in App Store review, send unbound tokens that a new backend rejects with 401 once the homeserver binds.
 
 The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`, and the session lasts one hour.
 Sessions live in MindRoom's memory, so a restart signs everyone out; opening Connections from Chat again signs the user in again.

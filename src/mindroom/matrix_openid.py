@@ -89,10 +89,10 @@ def _bound_audience(paths: RuntimePaths) -> str | None:
 
     urlsplit already lowercases the scheme and host.
     """
-    parsed = urlsplit((paths.env_value("MINDROOM_PUBLIC_URL") or "").strip())
-    scheme = parsed.scheme
-    host = parsed.hostname
     try:
+        parsed = urlsplit((paths.env_value("MINDROOM_PUBLIC_URL") or "").strip())
+        scheme = parsed.scheme
+        host = parsed.hostname
         port = parsed.port
     except ValueError:
         return None
