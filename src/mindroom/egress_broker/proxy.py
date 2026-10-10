@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -37,7 +37,8 @@ if TYPE_CHECKING:
 
 __all__ = ["EgressBroker", "ManageUrl", "SecretResolver"]
 
-type SecretResolver = Callable[[WorkerClaims, str], SecretResult]
+# Awaited on the broker's loop: the resolver chooses which executor each blocking lookup runs on.
+type SecretResolver = Callable[[WorkerClaims, str], Awaitable[SecretResult]]
 type ManageUrl = Callable[[WorkerClaims], str | None]
 
 

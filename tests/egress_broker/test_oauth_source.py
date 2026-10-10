@@ -17,7 +17,14 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker import oauth_source
-from mindroom.egress_broker.oauth_source import Missing, NeedsReconnect, Token, oauth_status, resolve_oauth_token
+from mindroom.egress_broker.oauth_source import (
+    Missing,
+    NeedsReconnect,
+    Token,
+    Unavailable,
+    oauth_status,
+    resolve_oauth_token,
+)
 from mindroom.egress_broker.secrets import OAuthStatus
 from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
@@ -27,6 +34,7 @@ from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
+    TokenEndpointOutcome,
     corrupt_oauth_credential_payload,
     publish_oauth_credentials,
     rotated_token_response,
@@ -34,6 +42,7 @@ from tests.oauth_test_utils import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -179,7 +188,7 @@ def _resolve(
     *,
     provider_id: str = "github",
     service: str = "github",
-) -> Token | Missing | NeedsReconnect:
+) -> Token | Missing | NeedsReconnect | Unavailable:
     return resolve_oauth_token(
         service=service,
         provider_id=provider_id,
@@ -253,7 +262,8 @@ def test_requester_scoped_provider_without_requester_has_no_token(
 
     result = _resolve(config, runtime_paths, manager, _broker_target(None, "shared"))
 
-    assert isinstance(result, Missing)
+    # Without a requester there is no one to bind a connect token to, so the link is the generic authorize page.
+    assert result == Missing(f"{PUBLIC_URL}/api/oauth/github/authorize")
 
 
 def test_missing_connection_offers_a_connect_link(
@@ -374,24 +384,15 @@ def test_concurrent_lookups_refresh_once(
     assert presented == [REFRESH_TOKEN]
 
 
-@pytest.mark.parametrize(
-    ("response", "error_type"),
-    [
-        (httpx.Response(400, json={"error": "invalid_grant"}), "OAuthRefreshRejectedError"),
-        (httpx.Response(503, json={"error": "temporarily_unavailable"}), "OAuthProviderError"),
-    ],
-)
-def test_refresh_failure_needs_reconnect_without_leaking(
+def test_revoked_grant_needs_reconnect_without_leaking(
     config: Config,
     runtime_paths: RuntimePaths,
     manager: CredentialsManager,
     monkeypatch: pytest.MonkeyPatch,
-    response: httpx.Response,
-    error_type: str,
 ) -> None:
-    """A revoked grant or failed refresh asks for a reconnect; logs carry only the error type."""
+    """A grant the provider rejects asks for a reconnect; logs carry only the error type."""
     _connect(manager, _github_store("@alice:example.org"), "stale-access", expires_at=1.0)
-    serve_token_endpoint(monkeypatch, [response])
+    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
 
     with capture_logs() as logs:
         result = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"))
@@ -405,10 +406,82 @@ def test_refresh_failure_needs_reconnect_without_leaking(
         "log_level": "warning",
         "service": "github",
         "provider_id": "github",
-        "error_type": error_type,
+        "error_type": "OAuthRefreshRejectedError",
     } in logs
     for leaked in ("stale-access", REFRESH_TOKEN, urlsplit(result.connect_url).query):
         assert leaked not in repr(logs)
+
+
+def _connect_failure(request: httpx.Request) -> Exception:
+    return httpx.ConnectError("token endpoint unreachable", request=request)
+
+
+def _connect_timeout(request: httpx.Request) -> Exception:
+    return httpx.ConnectTimeout("token endpoint timed out", request=request)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [httpx.Response(503, json={"error": "temporarily_unavailable"}), _connect_failure, _connect_timeout],
+    ids=["provider-503", "network-error", "timeout"],
+)
+def test_transient_refresh_failure_is_retryable_and_backs_off(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: httpx.Response | Callable[[httpx.Request], Exception],
+) -> None:
+    """An outage is `Unavailable`, never a reconnect prompt, and the scope skips the grant until the backoff ends."""
+    store = _github_store("@alice:example.org")
+    _connect(manager, store, "stale-access", expires_at=1.0)
+    outcomes: list[TokenEndpointOutcome] = [outcome]
+    presented = serve_token_endpoint(monkeypatch, outcomes)
+    target = _broker_target("@alice:example.org")
+
+    with capture_logs() as logs:
+        first = _resolve(config, runtime_paths, manager, target)
+        backing_off = _resolve(config, runtime_paths, manager, target)
+    monkeypatch.setattr(oauth_source, "_TRANSIENT_FAILURE_BACKOFF_SECONDS", 0.0)
+    outcomes.append(rotated_token_response())
+    recovered = _resolve(config, runtime_paths, manager, target)
+
+    assert first == backing_off == Unavailable()
+    assert recovered == Token("rotated-access-token")
+    assert presented == [REFRESH_TOKEN, REFRESH_TOKEN]
+    unavailable = [entry for entry in logs if entry["event"] == "egress_broker_oauth_token_unavailable"]
+    assert unavailable == [
+        {
+            "event": "egress_broker_oauth_token_unavailable",
+            "log_level": "warning",
+            "service": "github",
+            "provider_id": "github",
+            "error_type": "OAuthProviderError",
+        },
+    ]
+    assert "stale-access" not in repr(logs)
+    assert REFRESH_TOKEN not in repr(logs)
+    # The stored connection survives an outage, so it is still there when the provider recovers.
+    assert load_oauth_credentials_snapshot_sync(_store_context(runtime_paths, manager, store)).credentials is not None
+
+
+def test_lookups_queued_behind_a_stalled_refresh_do_not_repeat_it(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lookups waiting while a refresh stalls and then fails answer `Unavailable` without sending another grant."""
+    _connect(manager, _github_store("@alice:example.org"), "stale-access", expires_at=1.0)
+    stalled_failure = DelayedTokenEndpointOutcome(0.5, httpx.Response(503, json={"error": "temporarily_unavailable"}))
+    presented = serve_token_endpoint(monkeypatch, [stalled_failure])
+    target = _broker_target("@alice:example.org")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: _resolve(config, runtime_paths, manager, target), range(4)))
+
+    assert results == [Unavailable()] * 4
+    assert presented == [REFRESH_TOKEN]
 
 
 def test_unreadable_connection_requires_reset(
@@ -448,6 +521,23 @@ def test_agent_scoped_provider_follows_the_worker_scope(
 
     assert alice == bob == Token("shared-access")
     assert isinstance(private, Missing)
+
+
+@pytest.mark.usefixtures("demo_registry")
+def test_scoped_worker_never_reads_the_unscoped_store(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """Only unscoped targets drop their worker key: scoped targets keep it and never see the unscoped connection."""
+    _connect(manager, _tool_target("@alice:example.org", None), "unscoped-access", provider=_DEMO)
+
+    results = [
+        _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org", scope), provider_id="demo")
+        for scope in ("shared", "user", "user_agent")
+    ]
+
+    assert all(isinstance(result, Missing) for result in results)
 
 
 @pytest.mark.usefixtures("demo_registry")

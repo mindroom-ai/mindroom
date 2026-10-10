@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.config.egress_broker import EgressService
 from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.egress_broker.secrets import (
     EgressServiceStatus,
     OAuthStatus,
@@ -312,8 +312,17 @@ def test_service_status_prefers_the_key_over_oauth(
     """A stored key is the active source whenever it is set; a connected OAuth account is used otherwise."""
     manager = _manager(tmp_path)
     target = _claims(worker_scope="user_agent").to_worker_target()
+    saved_at = None
     if key:
         save_secret(manager, target, "github", "secret-value")
+        stored = load_scoped_credentials(
+            egress_credential_service("github"),
+            credentials_manager=manager,
+            worker_target=target,
+            primary_built_tool=True,
+        )
+        assert stored is not None
+        saved_at = stored["_updated_at"]
     calls: list[tuple[str, ResolvedWorkerTarget | None]] = []
 
     def oauth_status(provider_id: str, scope: ResolvedWorkerTarget | None) -> OAuthStatus:
@@ -327,10 +336,9 @@ def test_service_status_prefers_the_key_over_oauth(
         configured=active_source is not None,
         active_source=active_source,  # type: ignore[arg-type]
         key_configured=key,
-        key_updated_at=status.key_updated_at,
+        key_updated_at=saved_at,
         oauth=_oauth(connected=oauth_connected),
     )
-    assert (status.key_updated_at is not None) == key
     assert calls == [("github", target)]
     assert "secret-value" not in repr(status)
 

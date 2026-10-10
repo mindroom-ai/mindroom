@@ -24,7 +24,7 @@ from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
-from mindroom.egress_broker.proxy import EgressBroker, ManageUrl, SecretResolver
+from mindroom.egress_broker.proxy import EgressBroker, ManageUrl
 from mindroom.egress_broker.secrets import Secret, SecretMissing
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
@@ -340,7 +340,7 @@ class BrokerFactory:
         config: EgressBrokerConfig | None = None,
         *,
         secrets: dict[str, str] | None = None,
-        resolve_secret: SecretResolver | None = None,
+        resolve_secret: Callable[[WorkerClaims, str], SecretResult] | None = None,
         dial_policy: DialPolicy | None = None,
         manage_url: ManageUrl | None = None,
         max_body_bytes: int = 1 << 30,
@@ -350,7 +350,7 @@ class BrokerFactory:
         """Start a broker on an ephemeral loopback port; `secrets` maps service names to secrets.
 
         `resolve_secret` replaces the `secrets` lookup, and `config_provider` replaces the fixed `config`,
-        when a test needs a callback that changes or fails.
+        when a test needs a callback that changes or fails. Both are plain functions; the broker awaits the lookup.
         """
         current = config or EgressBrokerConfig()
         stored = dict(secrets or {})
@@ -358,7 +358,7 @@ class BrokerFactory:
             lambda _claims, service: Secret(stored[service]) if service in stored else SecretMissing()
         )
 
-        def recording_lookup(claims: WorkerClaims, service: str) -> SecretResult:
+        async def recording_lookup(claims: WorkerClaims, service: str) -> SecretResult:
             self.resolved.append(service)
             return lookup(claims, service)
 

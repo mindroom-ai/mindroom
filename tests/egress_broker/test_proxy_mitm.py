@@ -25,7 +25,7 @@ from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, Egress
 from mindroom.egress_broker.ca import materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.mitm import _verifying_context
-from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect
+from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect, SecretUnavailable
 from tests.egress_broker.conftest import audit_records, connect_request, proxy_authorization, read_raw_response
 
 if TYPE_CHECKING:
@@ -411,6 +411,30 @@ async def test_oauth_reconnect_required_gets_403_without_reaching_upstream(
     [record] = await audit_records(audit, 1)
     assert (record.kind, record.status, record.service, record.path) == ("denied", 403, "svc", "/echo")
     assert "one-time-token" not in repr(logs)
+
+
+@pytest.mark.asyncio
+async def test_oauth_refresh_outage_gets_retryable_503(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+) -> None:
+    """A provider outage is a retryable 503 that names the service and provider, with no reconnect prompt."""
+    await broker(
+        _config(),
+        resolve_secret=lambda _claims, _service: SecretUnavailable(provider="github"),
+        manage_url=lambda _claims: MANAGE_URL,
+    )
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "oauth_refresh_failed", "service": "svc", "provider": "github"}
+    assert tls_upstream.hits == []
+    [record] = await audit_records(audit, 1)
+    assert (record.kind, record.status, record.service, record.path) == ("request", 503, "svc", "/echo")
 
 
 @pytest.mark.asyncio

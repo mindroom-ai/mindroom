@@ -6,6 +6,7 @@ import asyncio
 import functools
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -17,13 +18,21 @@ from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import broker_execution_env, primary_callback_hosts
-from mindroom.egress_broker.oauth_source import Missing, Token, oauth_status, resolve_oauth_token
+from mindroom.egress_broker.oauth_source import (
+    Missing,
+    NeedsReconnect,
+    OAuthTokenResult,
+    Token,
+    oauth_status,
+    resolve_oauth_token,
+)
 from mindroom.egress_broker.proxy import EgressBroker
 from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
     SecretNeedsReconnect,
     SecretResult,
+    SecretUnavailable,
     load_secret,
     service_status,
 )
@@ -59,6 +68,10 @@ _THREAD_NAME = "mindroom-egress-broker"
 _DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - workers reach the broker over the container or pod network
 _DEFAULT_TOKEN_TTL_SECONDS = 604800
 _STOP_TIMEOUT_SECONDS = 5.0
+# OAuth lookups can wait up to a token endpoint's deadline, so they get a small pool of their own: a stalled
+# provider holds at most these threads, never the loop's default executor that key lookups, audit writes, and
+# leaf certificates share.
+_OAUTH_LOOKUP_WORKERS = 4
 
 
 @dataclass(frozen=True)
@@ -195,24 +208,29 @@ class _LastGoodConfig:
         return config.egress_broker if config is not None else EgressBrokerConfig()
 
 
-def _resolve_secret(
+async def _resolve_secret(
     claims: WorkerClaims,
     name: str,
     *,
     config: _LastGoodConfig,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
+    oauth_executor: ThreadPoolExecutor,
 ) -> SecretResult:
-    """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token."""
+    """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token.
+
+    The key is read on the loop's default executor; the OAuth lookup, which may refresh, runs on `oauth_executor`.
+    """
     target = claims.to_worker_target()
-    if key := load_secret(credentials_manager, target, name):
+    if key := await asyncio.to_thread(load_secret, credentials_manager, target, name):
         return Secret(key)
     current = config.current()
     egress_service = current.egress_broker.services.get(name) if current is not None else None
     if current is None or egress_service is None or egress_service.oauth_provider is None:
         return SecretMissing()
     provider_id = egress_service.oauth_provider
-    result = resolve_oauth_token(
+    lookup = functools.partial(
+        resolve_oauth_token,
         service=name,
         provider_id=provider_id,
         config=current,
@@ -220,6 +238,11 @@ def _resolve_secret(
         credentials_manager=credentials_manager,
         worker_target=target,
     )
+    result = await asyncio.get_running_loop().run_in_executor(oauth_executor, lookup)
+    return _oauth_secret_result(provider_id, result)
+
+
+def _oauth_secret_result(provider_id: str, result: OAuthTokenResult) -> SecretResult:
     if isinstance(result, Token):
         return Secret(result.value)
     if isinstance(result, Missing):
@@ -227,11 +250,13 @@ def _resolve_secret(
         if result.connect_url is None:
             return SecretMissing()
         return SecretMissing(provider=provider_id, connect_url=result.connect_url)
-    return SecretNeedsReconnect(
-        provider=provider_id,
-        connect_url=result.connect_url,
-        reset_required=result.reset_required,
-    )
+    if isinstance(result, NeedsReconnect):
+        return SecretNeedsReconnect(
+            provider=provider_id,
+            connect_url=result.connect_url,
+            reset_required=result.reset_required,
+        )
+    return SecretUnavailable(provider=provider_id)
 
 
 class _BrokerService:
@@ -255,6 +280,7 @@ class _BrokerService:
         self._credentials_manager = credentials_manager
         self.runtime: _BrokerRuntime | None = None
         self._audit: AuditLog | None = None
+        self._oauth_executor: ThreadPoolExecutor | None = None
         self._thread: threading.Thread | None = None
         self._listening = threading.Event()
         self._start_error: Exception | None = None
@@ -272,6 +298,10 @@ class _BrokerService:
         credentials_manager = self._credentials_manager
         link = manage_url(self._runtime_paths)
         config = _LastGoodConfig(self._config_provider)
+        self._oauth_executor = oauth_executor = ThreadPoolExecutor(
+            max_workers=_OAUTH_LOOKUP_WORKERS,
+            thread_name_prefix="mindroom-egress-oauth",
+        )
         broker = EgressBroker(
             ca=ca,
             signer=signer,
@@ -281,6 +311,7 @@ class _BrokerService:
                 config=config,
                 runtime_paths=self._runtime_paths,
                 credentials_manager=credentials_manager,
+                oauth_executor=oauth_executor,
             ),
             audit=audit,
             dial_policy=dial_policy,
@@ -306,6 +337,9 @@ class _BrokerService:
         if self._request_stop is not None:
             with suppress(RuntimeError):  # The loop already ended on its own.
                 self._request_stop()
+        if self._oauth_executor is not None:
+            # A lookup stalled on a token endpoint ends within that endpoint's deadline; stopping never waits for it.
+            self._oauth_executor.shutdown(wait=False, cancel_futures=True)
         if self._thread is not None:
             self._thread.join(_STOP_TIMEOUT_SECONDS)
             if self._thread.is_alive():

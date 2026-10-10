@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.egress_broker.secrets import OAuthStatus
 from mindroom.logging_config import get_logger
@@ -39,17 +39,30 @@ if TYPE_CHECKING:
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-__all__ = ["Missing", "NeedsReconnect", "OAuthTokenResult", "Token", "oauth_status", "resolve_oauth_token"]
+__all__ = [
+    "Missing",
+    "NeedsReconnect",
+    "OAuthTokenResult",
+    "Token",
+    "Unavailable",
+    "oauth_status",
+    "resolve_oauth_token",
+]
 
 logger = get_logger(__name__)
 
 _warned_unknown_providers: set[tuple[str, str]] = set()
 _warned_unknown_providers_lock = threading.Lock()
 # Each connect link stores a one-time token in the OAuth state file, so a worker retrying in a loop would grow it
-# without bound; one scope reuses its link for this long, well inside the token's 10-minute lifetime.
+# without bound. A link is reused for this long per provider, reason, and resolved OAuth target; the target carries
+# the caller's identity, so reuse is per caller, finer than the credential scope. 60 s is well inside the token's
+# 10-minute lifetime.
 _CONNECT_URL_REUSE_SECONDS = 60.0
 _connect_urls: dict[tuple[object, ...], tuple[float, str | None]] = {}
 _connect_urls_lock = threading.Lock()
+# After a refresh fails for a reason that may pass (a provider outage, a timeout, a network error), lookups for
+# that credential scope answer at once for this long instead of running the grant again.
+_TRANSIENT_FAILURE_BACKOFF_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -68,13 +81,33 @@ class Missing:
 
 @dataclass(frozen=True)
 class NeedsReconnect:
-    """The scope's connection cannot supply a token: the grant was revoked, refresh failed, or it is unreadable."""
+    """The scope's connection cannot supply a token until the user acts: the grant was revoked or is unreadable."""
 
     connect_url: str | None = field(default=None, repr=False)
     reset_required: bool = False
 
 
-type OAuthTokenResult = Token | Missing | NeedsReconnect
+@dataclass(frozen=True)
+class Unavailable:
+    """Refreshing the scope's token failed for a reason that may pass, such as a provider outage; retry later."""
+
+
+type OAuthTokenResult = Token | Missing | NeedsReconnect | Unavailable
+
+
+@dataclass
+class _RefreshGate:
+    """Serializes the broker's refreshes of one credential scope and remembers its last transient failure."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    failed_at: float | None = None
+
+    def backing_off(self) -> bool:
+        return self.failed_at is not None and time.monotonic() - self.failed_at < _TRANSIENT_FAILURE_BACKOFF_SECONDS
+
+
+_refresh_gates: dict[tuple[object, ...], _RefreshGate] = {}
+_refresh_gates_lock = threading.Lock()
 
 
 def resolve_oauth_token(
@@ -88,8 +121,11 @@ def resolve_oauth_token(
 ) -> OAuthTokenResult:
     """Return a fresh access token from the scope's connection to `provider_id`, refreshing it when near expiry.
 
-    `service` names the egress service in the one warning logged for a provider id the registry does not know.
-    Blocks on the OAuth transaction owner, so callers on an event loop run it in a thread.
+    Only a rejected grant or an unreadable credential asks the user to act (`NeedsReconnect`); any other refresh
+    failure is `Unavailable`, as the tools treat it, and the scope then answers `Unavailable` without another grant
+    for `_TRANSIENT_FAILURE_BACKOFF_SECONDS`. `service` names the egress service in the one warning logged for a
+    provider id the registry does not know. Blocks on the OAuth transaction owner, and on another lookup refreshing
+    the same scope, so callers on an event loop run it in a thread.
     """
     provider = _registered_provider(service, provider_id, config, runtime_paths)
     if provider is None:
@@ -98,20 +134,9 @@ def resolve_oauth_token(
     if provider.requester_scoped_credentials and context.worker_target is None:
         # No requester to bind the connection to, so there is no stored token to use.
         return Missing(_connect_url(context))
-    try:
-        credentials = refresh_oauth_credentials_blocking(context)
-    except OAuthProviderError as exc:
-        logger.warning(
-            "egress_broker_oauth_token_unavailable",
-            service=service,
-            provider_id=provider.id,
-            error_type=type(exc).__name__,
-        )
-        if isinstance(exc, OAuthCredentialUnreadableError):
-            # Unreadable state must be reset from the dashboard before a new connection can be stored.
-            return NeedsReconnect(reset_required=True)
-        reason = OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
-        return NeedsReconnect(_connect_url(context, reason))
+    credentials = _refreshed_credentials(service, context)
+    if isinstance(credentials, NeedsReconnect | Unavailable):
+        return credentials
     token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
     if not oauth_credentials_usable(provider, runtime_paths, credentials) or not isinstance(token, str) or not token:
         return Missing(_connect_url(context))
@@ -171,6 +196,55 @@ def _registered_provider(
     return provider
 
 
+def _refreshed_credentials(
+    service: str,
+    context: OAuthCredentialContext,
+) -> dict[str, Any] | NeedsReconnect | Unavailable | None:
+    """Refresh the scope's credentials through its gate; a failed refresh becomes the result to return."""
+    gate = _refresh_gate(context)
+    with gate.lock:
+        # Lookups queued behind a failed refresh answer here instead of each repeating the grant.
+        if gate.backing_off():
+            return Unavailable()
+        try:
+            credentials = refresh_oauth_credentials_blocking(context)
+        except (OAuthCredentialUnreadableError, OAuthRefreshRejectedError) as exc:
+            terminal = exc
+        except OAuthProviderError as exc:
+            gate.failed_at = time.monotonic()
+            _log_token_unavailable(service, context.provider, exc)
+            return Unavailable()
+        else:
+            gate.failed_at = None
+            return credentials
+    _log_token_unavailable(service, context.provider, terminal)
+    if isinstance(terminal, OAuthCredentialUnreadableError):
+        # Unreadable state must be reset from the dashboard before a new connection can be stored.
+        return NeedsReconnect(reset_required=True)
+    return NeedsReconnect(_connect_url(context, OAUTH_REFRESH_REJECTED_REASON))
+
+
+def _log_token_unavailable(service: str, provider: OAuthProvider, exc: OAuthProviderError) -> None:
+    logger.warning(
+        "egress_broker_oauth_token_unavailable",
+        service=service,
+        provider_id=provider.id,
+        error_type=type(exc).__name__,
+    )
+
+
+def _refresh_gate(context: OAuthCredentialContext) -> _RefreshGate:
+    """Return the gate of the context's credential store: one per provider, worker scope, and worker key."""
+    target = context.worker_target
+    key = (
+        context.runtime_paths.storage_root,
+        context.provider.id,
+        None if target is None else (target.worker_scope, target.worker_key),
+    )
+    with _refresh_gates_lock:
+        return _refresh_gates.setdefault(key, _RefreshGate())
+
+
 def _credential_context(
     provider: OAuthProvider,
     config: Config,
@@ -200,7 +274,7 @@ def _connectable(provider: OAuthProvider, runtime_paths: RuntimePaths) -> bool:
 
 
 def _connect_url(context: OAuthCredentialContext, reason: str | None = None) -> str | None:
-    """Return the scope's connect link, minting at most one per scope and reason every reuse period."""
+    """Return the caller's connect link, minting at most one per caller, provider, and reason every reuse period."""
     if not _connectable(context.provider, context.runtime_paths):
         return None
     key = (context.runtime_paths.storage_root, context.provider.id, context.worker_target, reason)

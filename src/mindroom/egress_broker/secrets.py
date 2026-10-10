@@ -24,6 +24,7 @@ __all__ = [
     "SecretNeedsReconnect",
     "SecretResult",
     "SecretStatus",
+    "SecretUnavailable",
     "delete_secret",
     "egress_credential_service",
     "load_secret",
@@ -243,7 +244,7 @@ class SecretMissing:
 
 @dataclass(frozen=True)
 class SecretNeedsReconnect:
-    """The scope's OAuth connection exists but cannot supply a token: the grant was revoked or refresh failed.
+    """The scope's OAuth connection cannot supply a token until the user reconnects: its grant was revoked.
 
     `reset_required` means the stored credential is unreadable and must be reset before reconnecting.
     """
@@ -253,7 +254,14 @@ class SecretNeedsReconnect:
     reset_required: bool = False
 
 
-type SecretResult = Secret | SecretMissing | SecretNeedsReconnect
+@dataclass(frozen=True)
+class SecretUnavailable:
+    """Refreshing the scope's OAuth token failed for a reason that may pass, such as a provider outage."""
+
+    provider: str
+
+
+type SecretResult = Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable
 
 
 @dataclass(frozen=True)

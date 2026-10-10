@@ -22,7 +22,7 @@ from mindroom.egress_broker._relay import (
     upstream_request_headers,
 )
 from mindroom.egress_broker.rules import RuleMatch, host_has_rules, inject_credentials, match_rule
-from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect
+from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect, SecretUnavailable
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -261,19 +261,25 @@ class TlsInterceptor:
     async def _secret(self, client: Peer, entry: AuditEntry, service: str) -> str | None:
         """Return the worker scope's secret for `service`; otherwise answer the client, audit, and return None."""
         try:
-            result = await asyncio.to_thread(self._resolve_secret, entry.claims, service)
+            result = await self._resolve_secret(entry.claims, service)
             if isinstance(result, Secret) and result.value:
                 return result.value
-            body = self._refusal(entry.claims, service, result)
+            status, body = self._refusal(entry.claims, service, result)
         except Exception as exc:
             logger.warning("egress_broker_secret_lookup_failed", error_type=type(exc).__name__)
             await self._relay.reject(client, entry, 502, {"error": "broker_error"})
             return None
-        await self._relay.deny(client, entry, body)
+        if status == 403:
+            await self._relay.deny(client, entry, body)
+        else:
+            await self._relay.reject(client, entry, status, body)
         return None
 
-    def _refusal(self, claims: WorkerClaims, service: str, result: SecretResult) -> dict[str, object]:
-        """Return the 403 body for a lookup without a secret: where to reconnect, or where to set one."""
+    def _refusal(self, claims: WorkerClaims, service: str, result: SecretResult) -> tuple[int, dict[str, object]]:
+        """Return the status and body for a lookup without a secret: retry later, reconnect, or set one."""
+        if isinstance(result, SecretUnavailable):
+            # The provider may recover, so this is a retryable failure, not a prompt to reconnect.
+            return 503, {"error": "oauth_refresh_failed", "service": service, "provider": result.provider}
         if isinstance(result, SecretNeedsReconnect):
             reconnect: dict[str, object] = {
                 "error": "oauth_connection_required",
@@ -283,7 +289,7 @@ class TlsInterceptor:
             }
             if result.reset_required:
                 reconnect["reset_required"] = True
-            return reconnect
+            return 403, reconnect
         missing: dict[str, object] = {
             "error": "credential_not_configured",
             "service": service,
@@ -292,7 +298,7 @@ class TlsInterceptor:
         if isinstance(result, SecretMissing) and result.provider is not None:
             missing["provider"] = result.provider
             missing["connect_url"] = result.connect_url
-        return missing
+        return 403, missing
 
     async def _forward(
         self,

@@ -876,3 +876,87 @@ async def test_missing_connection_returns_connect_url(
     assert body["manage_url"] == f"{_PUBLIC_URL}/connections/egress"
     assert body["connect_url"].startswith(f"{_PUBLIC_URL}/api/oauth/github/authorize?connect_token=")
     assert tls_upstream.hits == []
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_provider_outage_is_a_retryable_503_off_the_shared_executor(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled then failing token endpoint answers 503 to every waiter after one grant and never delays key lookups.
+
+    OAuth lookups run on the broker's own OAuth pool, and requests within the backoff skip the endpoint entirely.
+    """
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    keyed = {"rules": [{"host": "localhost", "path_prefix": "/echo", "auth": {"type": "bearer"}}]}
+    github = {
+        "rules": [{"host": "localhost", "path_prefix": "/ok", "auth": {"type": "bearer"}}],
+        "oauth_provider": "github",
+    }
+    config = _config(keyed=keyed, github=github)
+    target = _target()
+    save_secret(manager, target, "keyed", "s3cret")
+    _connect_github(manager, "@alice:example.org", "stale-oauth", expires_at=1.0)
+    grant_started = threading.Event()
+    outage = httpx.Response(503, json={"error": "temporarily_unavailable"})
+    presented = serve_token_endpoint(
+        monkeypatch,
+        [DelayedTokenEndpointOutcome(2.0, outage)],
+        request_received=grant_started,
+    )
+    lookup_threads: list[str] = []
+    real_resolve_oauth_token = service.resolve_oauth_token
+
+    def recording_resolve_oauth_token(**kwargs: Any) -> object:  # noqa: ANN401
+        lookup_threads.append(threading.current_thread().name)
+        return real_resolve_oauth_token(**kwargs)
+
+    monkeypatch.setattr(service, "resolve_oauth_token", recording_resolve_oauth_token)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        worker_env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        assert apply_runner_ca_bundle(worker_env, tmp_path / "runner")
+        async with httpx.AsyncClient(
+            proxy=worker_env["HTTPS_PROXY"],
+            verify=ssl.create_default_context(cafile=worker_env["SSL_CERT_FILE"]),
+            trust_env=False,
+        ) as client:
+            stalled = [asyncio.create_task(client.get(tls_upstream.url("/ok"))) for _ in range(2)]
+            assert await asyncio.to_thread(grant_started.wait, 5)
+            keyed_response = await client.get(tls_upstream.url("/echo"))
+            assert not any(task.done() for task in stalled)
+            outage_responses = await asyncio.gather(*stalled)
+            within_backoff = await client.get(tls_upstream.url("/ok"))
+    assert keyed_response.json()["headers"]["authorization"] == ["Bearer s3cret"]
+    for response in (*outage_responses, within_backoff):
+        assert response.status_code == 503
+        assert response.json() == {"error": "oauth_refresh_failed", "service": "github", "provider": "github"}
+    assert presented == [_OAUTH_REFRESH_TOKEN]
+    assert "/ok" not in tls_upstream.hits
+    assert len(lookup_threads) == 3
+    assert all(name.startswith("mindroom-egress-oauth") for name in lookup_threads)
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream")
+@pytest.mark.asyncio
+async def test_unconnectable_provider_gives_the_plain_missing_credential_body(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """Without an OAuth client to connect, the 403 names neither a provider nor a connect link, only the key page."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=_target())
+        response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "github",
+        "manage_url": f"{_PUBLIC_URL}/connections/egress",
+    }
