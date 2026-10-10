@@ -456,10 +456,10 @@ def _pagination_hint(start: int, end: int, total: int) -> str:
 def _edit_match_error(match_count: int, *, replace_all: bool) -> str | None:
     """Return the edit error for *match_count* matches, or None when the edit may proceed."""
     if match_count == 0:
-        return "Error: old_text not found in file."
+        return "Error: the text to replace was not found in the file."
     if match_count > 1 and not replace_all:
         return (
-            f"Error: old_text matches {match_count} locations. "
+            f"Error: the text to replace matches {match_count} locations. "
             "Provide more context to make the match unique, or set replace_all to replace every match."
         )
     return None
@@ -641,7 +641,7 @@ class CodingTools(Toolkit):
 
         """
         if not old_text:
-            return "Error: old_text must be non-empty."
+            return "Error: the text to replace must not be empty."
 
         result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir, writable=True)
         if isinstance(result, str):

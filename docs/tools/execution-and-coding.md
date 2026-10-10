@@ -76,10 +76,10 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 
 ### Tool names per model family
 
-Claude and OpenAI models see `shell` and `coding` under the names and arguments of the coding agents they were trained in, chosen by the model's [`tool_dialect`](../configuration/models.md#tool-dialect).
-Claude models see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
-OpenAI GPT and Codex models see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
-When tool filters leave `apply_patch` out of `coding`, or an approval rule can gate any file edit, these models see `edit_file` and `write_file` instead.
+A model can see `shell` and `coding` under the names and arguments of the coding agent it was trained in, chosen by the model's [`tool_dialect`](../configuration/models.md#tool-dialect).
+Claude models, which use the `claude` dialect by default, see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
+Models set to `tool_dialect: codex` see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
+When tool filters leave `apply_patch` out of `coding`, or approval can apply to any file edit, these models see `edit_file` and `write_file` instead.
 `exec_command` moves a command to the background after 10 seconds unless the model asks to wait longer (at most 30), and the model then polls it with `write_stdin`.
 Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees, so a hook that guards `edit_file` and `write_file` should also handle `apply_patch`.
 
@@ -138,7 +138,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `run_shell_command()` accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
-Claude and OpenAI models, which call it as `Bash` or `exec_command`, get the whole output up to that 50 KiB cap instead of the last 100 lines.
+Models in the `claude` or `codex` dialect, which call it as `Bash` or `exec_command`, get the whole output up to that 50 KiB cap instead of the last 100 lines.
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
 `workdir` runs the command in a directory relative to the workspace instead of the workspace itself.
@@ -229,7 +229,7 @@ pip_install_package("rich")
 
 ## [`coding`]
 
-`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, plus `apply_patch()` for OpenAI models.
+`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, plus `apply_patch()` for models in the `codex` dialect.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`, or pass `replace_all=True` to replace every match.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.

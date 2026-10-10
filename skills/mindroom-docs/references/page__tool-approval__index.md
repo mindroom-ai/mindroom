@@ -33,7 +33,7 @@ tool_approval:
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
-OpenAI models edit files with `apply_patch` only when none of `edit_file`, `write_file`, and `apply_patch` can need approval; when a rule can gate any of them, they edit with `edit_file` and `write_file` under your rules for those.
+Models in the `codex` [tool dialect](https://docs.mindroom.chat/configuration/models/#tool-dialect) edit files with `apply_patch` only when none of `edit_file`, `write_file`, and `apply_patch` can need approval; when a matching rule or a `require_approval` default can apply to any of them, they edit with `edit_file` and `write_file` under your rules for those.
 
 ## Approving and Denying
 

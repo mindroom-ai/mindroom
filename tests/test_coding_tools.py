@@ -283,7 +283,7 @@ class TestEditFile:
         """Rejects empty old_text instead of attempting a replacement."""
         result = tools.edit_file("hello.py", "", "replacement")
         assert "Error" in result
-        assert "non-empty" in result
+        assert "must not be empty" in result
 
 
 class TestWriteFile:
@@ -1654,6 +1654,14 @@ def test_multiple_match_error_points_to_replace_all(tools: CodingTools, tmp_base
     (tmp_base / "dup.txt").write_text("x\nx\n")
 
     assert tools.edit_file("dup.txt", "x", "y") == (
-        "Error: old_text matches 2 locations. "
+        "Error: the text to replace matches 2 locations. "
         "Provide more context to make the match unique, or set replace_all to replace every match."
     )
+
+
+def test_edit_errors_do_not_name_a_dialect_specific_argument(tools: CodingTools, tmp_base: Path) -> None:
+    """Claude's Edit calls the text old_string, so edit errors describe it instead of naming old_text."""
+    (tmp_base / "a.txt").write_text("x\n")
+
+    assert tools.edit_file("a.txt", "missing", "y") == "Error: the text to replace was not found in the file."
+    assert tools.edit_file("a.txt", "", "y") == "Error: the text to replace must not be empty."

@@ -147,13 +147,9 @@ def test_apply_patch_custom_format_only_with_custom_tools() -> None:
     assert function["function"]["parameters"]["required"] == ["input"]
 
 
-@pytest.mark.parametrize(
-    ("provider", "model_id"),
-    [("openai", "gpt-6-astra"), ("codex", "gpt-6.1-sol"), ("openrouter", "openai/gpt-6-luna")],
-)
-def test_resolve_tool_dialect_returns_codex_for_openai_and_codex(provider: str, model_id: str) -> None:
-    """OpenAI GPT and Codex models get the Codex dialect."""
-    assert resolve_tool_dialect(ModelConfig(provider=provider, id=model_id)) is CODEX_DIALECT
+def test_codex_dialect_is_selected_explicitly() -> None:
+    """GPT models get the Codex dialect only when tool_dialect asks for it."""
+    assert resolve_tool_dialect(ModelConfig(provider="codex", id="gpt-6.1-sol", tool_dialect="codex")) is CODEX_DIALECT
 
 
 def test_kill_shell_command_takes_the_session_id() -> None:

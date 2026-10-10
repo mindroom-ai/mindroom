@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -737,11 +738,10 @@ def _approval_consistent_toolkits(toolkits: dict[str, Toolkit], config: Config) 
 
     consistent: dict[str, Toolkit] = {}
     for name, toolkit in toolkits.items():
-        names = {*toolkit.functions, *toolkit.async_functions}
         kept = without_implied_exclusions(
             toolkit,
             removed=set(),
-            gated={function for function in names if tool_may_require_approval(config, function)},
+            may_require_approval=partial(tool_may_require_approval, config),
             registered_tool_name=name,
         )
         if kept is not None:

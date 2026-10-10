@@ -9,7 +9,6 @@ model a thread runs next.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Any
@@ -42,11 +41,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"})
-_CODEX_PROVIDERS = frozenset({"codex", "openai_codex"})
-# These providers also front OpenAI-compatible servers, so only OpenAI model IDs select the Codex dialect.
-_OPENAI_MODEL_PROVIDERS = frozenset({"openai", "azure"})
-# Fine-tuned OpenAI models keep their base model's ID after the ft: prefix.
-_OPENAI_MODEL_ID = re.compile(r"(?:ft:)?(?:gpt-|o\d|codex)")
 
 # apply_patch exists for Codex models; every other dialect edits with edit_file and write_file.
 _MINDROOM_DIALECT = ToolDialect(name="mindroom", replaced={APPLY_PATCH: FILE_EDITS})
@@ -72,19 +66,17 @@ class _ToolCallError:
 
 
 def _resolve_tool_dialect_name(model_config: ModelConfig) -> DialectName:
-    """Return the dialect for *model_config*, detecting the model family when ``tool_dialect`` is ``auto``."""
+    """Return the dialect for *model_config*; ``auto`` gives Claude models Claude Code's tools.
+
+    GPT models keep MindRoom's tools under ``auto``: measured on graded terminal tasks, the Codex dialect passed
+    no more tasks and cost more tokens, so it is selected only by ``tool_dialect: codex``.
+    """
     if model_config.tool_dialect != "auto":
         return model_config.tool_dialect
     provider = canonical_provider(model_config.provider)
-    model_id = model_config.id.strip().lower()
-    if provider == "openrouter":
-        vendor, _, model_id = model_id.partition("/")
-        provider = {"anthropic": "anthropic", "openai": "openai"}.get(vendor, provider)
-    if provider in _CLAUDE_PROVIDERS:
+    if provider == "openrouter" and model_config.id.strip().lower().startswith("anthropic/"):
         return "claude"
-    if provider in _CODEX_PROVIDERS or (provider in _OPENAI_MODEL_PROVIDERS and _OPENAI_MODEL_ID.match(model_id)):
-        return "codex"
-    return "mindroom"
+    return "claude" if provider in _CLAUDE_PROVIDERS else "mindroom"
 
 
 def resolve_tool_dialect(model_config: ModelConfig | None) -> ToolDialect:

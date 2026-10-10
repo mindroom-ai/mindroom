@@ -1861,8 +1861,9 @@ Blank `display_name` or `icon` values count as unset.
 ## Tool Dialect
 
 Claude and OpenAI models are trained inside their vendors' coding agents, so MindRoom shows each model the shell and file-editing tools in the shape it knows: `claude` follows Claude Code, `codex` follows the Codex CLI, and `mindroom` keeps MindRoom's own tools.
-With `auto`, Claude models (on `anthropic`, `vertexai_claude`, `bedrock_claude`, or OpenRouter `anthropic/` IDs) use `claude`; GPT, o-series, and Codex models (on `openai`, `azure`, `codex`, or OpenRouter `openai/` IDs) use `codex`; every other model uses `mindroom`.
-Set `tool_dialect` explicitly when the model ID does not reveal the family, such as an Azure deployment name or a Claude model behind an OpenAI-compatible endpoint.
+With `auto`, Claude models (on `anthropic`, `vertexai_claude`, `bedrock_claude`, or OpenRouter `anthropic/` IDs) use `claude`, and every other model uses `mindroom`.
+GPT models keep `mindroom` under `auto` because on graded coding tasks `codex` solved no more tasks and used more tokens; set `tool_dialect: codex` to give a GPT model the Codex CLI's tools anyway.
+Set `tool_dialect: claude` for a Claude model whose provider does not reveal the family, such as one behind an OpenAI-compatible endpoint.
 The dialect follows the model that answers, so switching a thread's model also switches its tools from the next reply on.
 [Execution and Coding](https://docs.mindroom.chat/tools/execution-and-coding/) lists the tool names each dialect uses.
 
@@ -8321,10 +8322,10 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 
 ### Tool names per model family
 
-Claude and OpenAI models see `shell` and `coding` under the names and arguments of the coding agents they were trained in, chosen by the model's [`tool_dialect`](https://docs.mindroom.chat/configuration/models/#tool-dialect).
-Claude models see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
-OpenAI GPT and Codex models see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
-When tool filters leave `apply_patch` out of `coding`, or an approval rule can gate any file edit, these models see `edit_file` and `write_file` instead.
+A model can see `shell` and `coding` under the names and arguments of the coding agent it was trained in, chosen by the model's [`tool_dialect`](https://docs.mindroom.chat/configuration/models/#tool-dialect).
+Claude models, which use the `claude` dialect by default, see `run_shell_command`, `check_shell_command`, `kill_shell_command`, `read_file`, `edit_file`, and `write_file` as Claude Code's `Bash`, `BashOutput`, `KillShell`, `Read`, `Edit`, and `Write`.
+Models set to `tool_dialect: codex` see `run_shell_command` and `check_shell_command` as the Codex CLI's `exec_command` and `write_stdin`, and edit files with `apply_patch` patches instead of `edit_file` and `write_file`; `write_stdin` only polls, because commands cannot receive input.
+When tool filters leave `apply_patch` out of `coding`, or approval can apply to any file edit, these models see `edit_file` and `write_file` instead.
 `exec_command` moves a command to the background after 10 seconds unless the model asks to wait longer (at most 30), and the model then polls it with `write_stdin`.
 Approval rules, tool hooks, and the tool calls shown in chat always use the MindRoom names above, whichever names the model sees, so a hook that guards `edit_file` and `write_file` should also handle `apply_patch`.
 
@@ -8383,7 +8384,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `run_shell_command()` accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
 If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
-Claude and OpenAI models, which call it as `Bash` or `exec_command`, get the whole output up to that 50 KiB cap instead of the last 100 lines.
+Models in the `claude` or `codex` dialect, which call it as `Bash` or `exec_command`, get the whole output up to that 50 KiB cap instead of the last 100 lines.
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
 `workdir` runs the command in a directory relative to the workspace instead of the workspace itself.
@@ -8474,7 +8475,7 @@ pip_install_package("rich")
 
 ## [`coding`]
 
-`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, plus `apply_patch()` for OpenAI models.
+`coding` provides `read_file()`, `edit_file()`, `write_file()`, `grep()`, `find_files()`, and `ls()`, plus `apply_patch()` for models in the `codex` dialect.
 `read_file()` returns line-numbered output with pagination hints when a file is truncated.
 `edit_file()` replaces text that must match exactly one location, tolerating whitespace and Unicode differences, and returns a unified diff; when a match is not unique, include more surrounding text in `old_text`, or pass `replace_all=True` to replace every match.
 `grep()` and `find_files()` skip gitignored paths and hidden paths below the directory they search, so naming a dot directory as the path searches it, and `grep()` still searches a file named directly as its path; `ls()` shows dotfiles and marks directories with `/`.
@@ -13253,7 +13254,7 @@ tool_approval:
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
-OpenAI models edit files with `apply_patch` only when none of `edit_file`, `write_file`, and `apply_patch` can need approval; when a rule can gate any of them, they edit with `edit_file` and `write_file` under your rules for those.
+Models in the `codex` [tool dialect](https://docs.mindroom.chat/configuration/models/#tool-dialect) edit files with `apply_patch` only when none of `edit_file`, `write_file`, and `apply_patch` can need approval; when a matching rule or a `require_approval` default can apply to any of them, they edit with `edit_file` and `write_file` under your rules for those.
 
 ## Approving and Denying
 

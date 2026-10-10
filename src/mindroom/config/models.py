@@ -691,7 +691,7 @@ class ModelConfig(BaseModel):
         description=(
             "Names and argument shapes of the shell and file-editing tools this model sees: claude follows Claude "
             "Code, codex follows the Codex CLI, mindroom keeps MindRoom's own; auto picks claude for Claude models "
-            "and codex for OpenAI GPT and Codex models, otherwise mindroom"
+            "and mindroom for every other model"
         ),
     )
     stream_idle_timeout_seconds: float | None = Field(

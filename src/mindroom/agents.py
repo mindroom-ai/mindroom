@@ -922,7 +922,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     return without_implied_exclusions(
         toolkit,
         removed=set(),
-        gated={name for name in _function_names(toolkit) if tool_may_require_approval(config, name)},
+        may_require_approval=partial(tool_may_require_approval, config),
         registered_tool_name=tool_name,
     )
 
@@ -1309,14 +1309,13 @@ def without_implied_exclusions(
     toolkit: Toolkit,
     *,
     removed: set[str],
-    gated: set[str],
+    may_require_approval: Callable[[str], bool],
     registered_tool_name: str,
 ) -> Toolkit | None:
-    """Hide a function that does what another does, such as apply_patch, whenever either is hidden or gated.
+    """Hide a function that does what another does, such as apply_patch, when either is hidden or may need approval.
 
     Approval rules are usually written for edit_file and write_file, so models edit with those whenever any of
-    them may need approval. *removed* names functions this surface already hid and *gated* those that may need
-    approval.
+    them may need approval, even when an allowlist left them out. *removed* names functions this surface hid.
     """
     metadata = TOOL_METADATA.get(registered_tool_name)
     present = _function_names(toolkit)
@@ -1324,7 +1323,7 @@ def without_implied_exclusions(
         name
         for key, names in (metadata.implied_exclusions or {} if metadata is not None else {}).items()
         for name in names
-        if name in present and (key in removed or (key in present and (key in gated or name in gated)))
+        if name in present and (key in removed or may_require_approval(key) or may_require_approval(name))
     }
     if not hidden:
         return toolkit
@@ -1623,11 +1622,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             toolkit = without_implied_exclusions(
                 toolkit,
                 removed=built - _function_names(toolkit),
-                gated={
-                    name
-                    for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
-                    if function.requires_confirmation is True
-                },
+                may_require_approval=partial(tool_may_require_approval, config),
                 registered_tool_name=tool_name,
             )
         if toolkit:
