@@ -723,6 +723,51 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
     assert [call.tool_name for call in calls] == ["counter"]
 
 
+async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier_attempts(
+    journal_store: EventJournalStore,
+) -> None:
+    """An edit redoes the turn, so its regeneration is told only about the attempts of that edit a restart cut short."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, first = await _claimed(principal)
+    runtime = reply_scope.ReplyRuntime(
+        store=principal,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=lambda _ended: None,
+    )
+    lost_regeneration = replace(
+        first,
+        span_id="span-2",
+        kind=SpanKind.REGENERATION,
+        delivery_id="$edit",
+        claimed_at_ns=40,
+        outcome=SpanOutcome.LOST,
+    )
+    for span_id, tool_name in ((first.span_id, "before_edit"), (lost_regeneration.span_id, "edit_attempt")):
+        await principal.replies.record_tool_call(
+            span_id=span_id,
+            call_id=tool_name,
+            entry_json=reply_scope._entry_json(
+                ToolTraceEntry(type="tool_call_completed", tool_name=tool_name, args_preview="{}", result_preview="1"),
+            ),
+            now_ns=20,
+        )
+    paused = replace(first, outcome=SpanOutcome.PAUSED)
+    current = replace(lost_regeneration, span_id="span-3", claimed_at_ns=60, outcome=None)
+    await _apply(
+        journal_store,
+        rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply, spans=(paused, lost_regeneration, current)),
+    )
+
+    handle = reply_scope.SpanHandle(runtime=runtime, span=current, reply=reply, base=Presentation())
+    calls = await runtime.interrupted_tool_calls(handle)
+
+    assert [call.tool_name for call in calls] == ["edit_attempt"]
+
+
 async def test_a_departure_ends_the_rooms_replies_and_refuses_their_rows(journal_store: EventJournalStore) -> None:
     """Leaving a room ends its running replies gone with their spans released; a later row changes nothing."""
     principal = journal_store.principal(PRINCIPAL)

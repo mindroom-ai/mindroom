@@ -2535,6 +2535,7 @@ def journal_edit_regenerator_deps(bot: RuntimeBot, principal: PrincipalStore) ->
             thread_id=target.resolved_thread_id,
             source_event_ids=record.source_event_ids,
             excluded_senders=persisted_bot_user_ids(bot.runtime_paths),
+            whole_room=bot._room_scope_is_single_conversation(target.room_id),
         )
 
     return {

@@ -2123,12 +2123,19 @@ class TestLatestVisibleEvent:
 class TestLaterMessage:
     """Whether someone wrote after a turn's messages, which decides whether an edit of them regenerates."""
 
-    async def _later(self, store: PrincipalStore, *sources: str, thread_id: str | None = "$root") -> bool:
+    async def _later(
+        self,
+        store: PrincipalStore,
+        *sources: str,
+        thread_id: str | None = "$root",
+        whole_room: bool = False,
+    ) -> bool:
         return await store.later_message_exists(
             room_id=ROOM,
             thread_id=thread_id,
             source_event_ids=sources,
             excluded_senders=frozenset({BOB}),
+            whole_room=whole_room,
         )
 
     async def test_a_later_message_in_the_thread_counts(self, alice: PrincipalStore) -> None:
@@ -2166,6 +2173,14 @@ class TestLaterMessage:
 
         assert await self._later(alice, "$root")
         assert not await self._later(alice, "$root", thread_id=None)
+
+    async def test_in_room_mode_a_message_in_any_thread_counts(self, alice: PrincipalStore) -> None:
+        """When the room is one conversation, a later message sent in one of its threads is a later turn."""
+        await admit(alice, "$asked", ts=1_000)
+        await admit(alice, "$threaded", ts=2_000, thread_id="$other-root")
+
+        assert not await self._later(alice, "$asked", thread_id=None)
+        assert await self._later(alice, "$asked", thread_id=None, whole_room=True)
 
 
 class TestProjectedInteractivePrompts:

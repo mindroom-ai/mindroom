@@ -1968,7 +1968,7 @@ class TurnController:
             )
         return response_event_id
 
-    async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
+    async def _execute_response_action(  # noqa: C901, PLR0915
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -2124,20 +2124,9 @@ class TurnController:
                     )
                 else:
                     await self.deps.response_runner.generate_response(response_request)
-            except PostLockRequestPreparationError as error:
-                if error.reply_owned:
-                    # The reply's records settled the sources, recorded the turn answered, and owe the notice.
-                    return
-                failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
-                response_event_id = await self._finalize_dispatch_failure(
-                    target=dispatch.target,
-                    error=failure,
-                    handled_turn=handled_turn,
-                )
-                if response_event_id is None:
-                    # Nothing answered the turn, so it stays pending for a retry.
-                    msg = "Dispatch failure notice was not delivered"
-                    raise RuntimeError(msg) from failure
+            except PostLockRequestPreparationError:
+                # The reply's records settled the sources, recorded the turn answered, and owe the notice.
+                return
 
     async def handle_prepared_turn(self, turn: PreparedTurn) -> None:
         """Dispatch one logical turn emitted directly by the coalescing gate."""

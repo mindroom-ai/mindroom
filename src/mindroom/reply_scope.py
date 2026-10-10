@@ -300,12 +300,18 @@ class ReplyRuntime:
         return tuple(deserialize_tool_trace([json.loads(entry) for entry in stored]))
 
     async def interrupted_tool_calls(self, handle: SpanHandle) -> tuple[ToolTraceEntry, ...]:
-        """Return the tool calls of the attempts this span takes over: the latest spans that left its turn unanswered."""
+        """Return the tool calls of the attempts this span takes over: the latest spans that left its turn unanswered.
+
+        A regeneration redoes its edit's turn, so it takes over only the earlier attempts of the same edit.
+        """
+        regeneration = handle.span.kind is rl.SpanKind.REGENERATION
         interrupted: list[str] = []
         for span in reversed(await self.store.replies.spans(handle.reply_id)):
             if span.span_id == handle.span_id:
                 continue
-            if span.outcome not in _INTERRUPTED_OUTCOMES:
+            if span.outcome not in _INTERRUPTED_OUTCOMES or (
+                regeneration and span.delivery_id != handle.span.delivery_id
+            ):
                 break
             interrupted.append(span.span_id)
         return await self._span_tool_calls(tuple(reversed(interrupted)))

@@ -517,6 +517,7 @@ class PrincipalStore:
         thread_id: str | None,
         source_event_ids: tuple[str, ...],
         excluded_senders: frozenset[str],
+        whole_room: bool = False,
     ) -> bool:
         """Return whether someone outside ``excluded_senders`` wrote in the conversation after these sources."""
         return await self._backend.read(
@@ -527,6 +528,7 @@ class PrincipalStore:
                 thread_id=thread_id,
                 source_event_ids=source_event_ids,
                 excluded_senders=excluded_senders,
+                whole_room=whole_room,
             ),
         )
 

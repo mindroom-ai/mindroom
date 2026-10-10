@@ -859,17 +859,13 @@ def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget
 
 
 class PostLockRequestPreparationError(RuntimeError):
-    """Raised when post-lock request preparation fails before generation starts."""
+    """Raised when post-lock request preparation fails before generation starts.
 
-    def __init__(
-        self,
-        message: str = "Post-lock request preparation failed",
-        *,
-        reply_owned: bool = False,
-    ) -> None:
+    It only escapes a claimed reply, whose records then own the failure notice.
+    """
+
+    def __init__(self, message: str = "Post-lock request preparation failed") -> None:
         super().__init__(message)
-        # The reply's records already own the visible failure notice.
-        self.reply_owned = reply_owned
 
 
 def _paused_answer() -> PausedAnswer:
@@ -991,29 +987,22 @@ class _TeamResponseRequest:
     resolution_reason: str | None = None
 
 
-def _post_lock_error(
-    error: Exception,
-    early_placeholder: _EarlyPlaceholderState,
-    *,
-    reply_owned: bool,
-) -> Exception:
+def _post_lock_error(error: Exception, early_placeholder: _EarlyPlaceholderState) -> Exception:
     """Return the error a locked response failed with, as a dispatch failure once it showed an early placeholder.
 
-    Retries and errors the reply already owns are returned as they are.
+    Retries and dispatch failures are returned as they are.
     """
     if (
-        isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
+        isinstance(
+            error,
+            (ReplyMembershipPendingError, RevisionSnapshotChangedError, PostLockRequestPreparationError),
+        )
         or not early_placeholder.placeholder_sent
         or early_placeholder.settlement_started
-        or (isinstance(error, PostLockRequestPreparationError) and error.reply_owned)
     ):
         return error
-    mapped = PostLockRequestPreparationError(reply_owned=reply_owned)
-    mapped.__cause__ = (
-        error.__cause__
-        if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
-        else error
-    )
+    mapped = PostLockRequestPreparationError()
+    mapped.__cause__ = error
     return mapped
 
 
@@ -2970,7 +2959,8 @@ class ResponseRunner:
         still exists, so a hold whose end never reached this bot, as after a
         departure it did not see, cannot keep it waiting. A recheck that lands
         while a pause is still committing can take the new approval for an
-        ended one, which only lets a waiting message run early.
+        ended one and drop its hold, so messages that arrive while that
+        approval waits are answered without waiting for it.
         """
         while True:
             try:
@@ -3145,17 +3135,10 @@ class ResponseRunner:
             )
         except BaseException as error:
             handle = current_span()
-            mapped = (
-                _post_lock_error(error, early_placeholder, reply_owned=handle is not None)
-                if isinstance(error, Exception)
-                else error
-            )
+            mapped = _post_lock_error(error, early_placeholder) if isinstance(error, Exception) else error
             # The locked operation ends its span before the lock is released;
             # this covers what raises outside it.
             await self._exit_unended_span(handle, mapped, target=resolved_target)
-            if handle is not None and isinstance(mapped, PostLockRequestPreparationError) and not mapped.reply_owned:
-                # The span's exit ended the reply with this error, which its records now own.
-                raise PostLockRequestPreparationError(reply_owned=True) from mapped.__cause__ or mapped
             if mapped is error:
                 raise
             raise mapped from mapped.__cause__
@@ -3188,11 +3171,7 @@ class ResponseRunner:
             )
         except BaseException as error:
             handle = current_span()
-            mapped = (
-                _post_lock_error(error, early_placeholder, reply_owned=handle is not None)
-                if isinstance(error, Exception)
-                else error
-            )
+            mapped = _post_lock_error(error, early_placeholder) if isinstance(error, Exception) else error
             await self._exit_unended_span(handle, mapped, target=target)
             if mapped is error:
                 raise

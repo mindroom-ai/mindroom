@@ -82,7 +82,8 @@ The create, each pause, and every terminal update are durable rows, recorded wit
 Each progress edit is a direct edit recorded first by `write_ahead`, which raises the confirmed sequence of the previous edit.
 A note a rule decides without a payload (an ownerless Stop, a restart, a settlement without an answer) is an owed write that `settle_reply_debt` renders and enqueues.
 Recovery renders from the possibly-shown presentation, so a restart continues below what the reply may already show.
-A replay, or a regeneration retried after one, tells the model which tool calls the attempts it takes over recorded, those spans that ended `lost`, `released`, `paused`, or `superseded` since the reply's last answer, so it does not repeat a finished call.
+A replay tells the model which tool calls the attempts it takes over recorded, those spans that ended `lost`, `released`, `paused`, or `superseded` since the reply's last answer, so it does not repeat a finished call.
+A regeneration redoes its edit's turn, so it is told only about the earlier attempts of the same edit, such as one a restart cut short.
 
 ## Stop
 
@@ -187,7 +188,6 @@ Edits:
 - When the stopped reply's terminal row is still unresolved, or the approval that holds it has not ended yet, the regeneration's claim is deferred and the edit is dispatched again later; if someone wrote in the conversation meanwhile, the retried edit is ignored and the reply keeps what the Stop left: its cancelled note, or an approved answer that was already final.
 - Each retry of a deferred edit runs the `message:received` hooks again, because the edit's revision is recorded only when its regeneration claims.
 - An edit whose claim stays blocked by an unresolved row or by the approval it waits for is retried once the row resolves or the approval ends; if that wake is lost, the journal's scan for work without a live owner retries it within 30 seconds.
-- After a restart, a regeneration may be told about tool calls the attempt before the edit made, which errs toward not repeating a side effect.
 - A regeneration that a journal failure stops before its claim settles its edit after the edit already stopped the streaming or held reply, so the reply keeps what the Stop left, such as its partial answer with the cancelled note.
 
 Tool calls and the restart account:

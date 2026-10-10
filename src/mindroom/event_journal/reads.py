@@ -247,17 +247,22 @@ def later_message_exists(
     thread_id: str | None,
     source_event_ids: tuple[str, ...],
     excluded_senders: frozenset[str],
+    whole_room: bool = False,
 ) -> bool:
     """Return whether a message from someone outside ``excluded_senders`` came after these sources in one conversation.
 
-    A source no longer visible counts as nothing coming after it.
+    A source no longer visible counts as nothing coming after it. With
+    ``whole_room``, the room is one conversation, so a message in any of its
+    threads counts.
     """
     placeholders = ", ".join("?" for _ in source_event_ids)
     excluded = ", ".join("?" for _ in excluded_senders) or "NULL"
+    thread_clause = "" if whole_room else "AND later.thread_id = ?"
+    thread_params = () if whole_room else (encode_thread_id(thread_id),)
     row = transaction.fetchone(
         f"""
         SELECT 1 AS present FROM visible_messages AS later
-        WHERE later.principal_id = ? AND later.room_id = ? AND later.thread_id = ?
+        WHERE later.principal_id = ? AND later.room_id = ? {thread_clause}
           AND later.logical_event_id NOT IN ({placeholders})
           AND later.sender NOT IN ({excluded})
           AND later.created_ts > (
@@ -270,7 +275,7 @@ def later_message_exists(
         (
             principal_id,
             room_id,
-            encode_thread_id(thread_id),
+            *thread_params,
             *source_event_ids,
             *excluded_senders,
             *source_event_ids,
