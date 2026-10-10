@@ -555,10 +555,16 @@ class ToolJobRuntime:
         depth: int,
         timeout: float | None = None,  # noqa: ASYNC109
         claim: JobClaim | None = None,
+        approval_timeout: float | None = None,
     ) -> _JobWait:
-        """Wait without cancelling execution, keeping or taking the outcome's claim unless another waiter has."""
+        """Wait without cancelling execution, keeping or taking the outcome's claim unless another waiter has.
+
+        ``approval_timeout`` bounds only how long the wait lasts while the job awaits approval; ``timeout`` bounds it all.
+        """
         timeout = validate_wait_timeout(timeout)
-        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+        now = asyncio.get_running_loop().time()
+        deadline = None if timeout is None else now + timeout
+        approval_deadline = None if approval_timeout is None else now + approval_timeout
         retained = False
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
@@ -585,7 +591,11 @@ class ToolJobRuntime:
                         snapshot = await self._snapshot(entry)
                         retained = claim is not None
                         return _JobWait(snapshot, claim)
-                    remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
+                    now = asyncio.get_running_loop().time()
+                    remaining = None if deadline is None else deadline - now
+                    if entry.job.status == "awaiting_approval" and approval_deadline is not None:
+                        approval_remaining = approval_deadline - now
+                        remaining = approval_remaining if remaining is None else min(remaining, approval_remaining)
                     if human_notified.is_set() or (remaining is not None and remaining <= 0):
                         return _JobWait(await self._snapshot(entry))
                     changed = entry.changed

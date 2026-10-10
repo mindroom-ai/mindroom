@@ -195,8 +195,9 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
 class _GatedTools(Toolkit):
     """One policy-gated report writer whose every run is observable."""
 
-    def __init__(self, effects: list[str]) -> None:
+    def __init__(self, effects: list[str], gate: asyncio.Event | None = None) -> None:
         self.effects = effects
+        self.gate = gate
         super().__init__(name="reports", tools=[self.write_report])
         bind_toolkit_construction(self, ToolConstruction("reports", None))
         bind_toolkit_authority(self, authored_name="reports")
@@ -204,6 +205,8 @@ class _GatedTools(Toolkit):
     async def write_report(self, title: str) -> str:
         """Write one report."""
         self.effects.append(title)
+        if self.gate is not None:
+            await self.gate.wait()
         return f"wrote {title}"
 
 
@@ -245,6 +248,7 @@ class _GatedRun:
     approval_wait_timeout: float | None
     stopped: bool = False
     effects: list[str] = field(default_factory=list)
+    gate: asyncio.Event | None = None
 
     async def __aenter__(self) -> _GatedRun:
         self.config = Config(
@@ -278,9 +282,9 @@ class _GatedRun:
         await self.runtime.shutdown()
         self.storage.close()
 
-    def agent(self) -> Agent:
+    def agent(self, **budget: float) -> Agent:
         toolkit = apply_tool_approval_capability(
-            _GatedTools(self.effects),
+            _GatedTools(self.effects, self.gate),
             self.config,
             supports_native_tool_approval=True,
             approvals_as_jobs=True,
@@ -288,7 +292,7 @@ class _GatedRun:
         model = DelegationModel(
             id="test",
             responses=[
-                ModelResponse(tool_calls=[_call("write_report", "write-1", title="q3")]),
+                ModelResponse(tool_calls=[_call("write_report", "write-1", title="q3", **budget)]),
                 ModelResponse(content="done"),
             ],
         )
@@ -409,3 +413,40 @@ async def test_shutdown_while_a_call_waits_for_approval_says_it_did_not_run(
     [(card_run_id, _, _)] = run.cards.requested
     assert card_run_id in run.cards.settled
     assert run.effects == []
+
+
+@pytest.mark.asyncio
+async def test_a_call_its_policy_approves_waits_like_any_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a human decision is bounded: a call the policy approves on its own blocks until it finishes."""
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0, gate=asyncio.Event()) as run:
+        agent = run.agent()
+        # The function asks as its job, but the policy approves this call, as a script or exemption can.
+        run.config.tool_approval = ToolApprovalConfig(default="auto_approve")
+        async with execution_resources():
+            with tool_runtime_context(run.context):
+                reply = asyncio.create_task(agent.arun("Write", session_id=run.context.session_id))
+                while not run.effects:  # noqa: ASYNC110
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
+                assert not reply.done()
+                assert run.gate is not None
+                run.gate.set()
+                response = await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
+        assert (_tool_result(response), run.cards.requested) == ("wrote q3", [])
+
+
+@pytest.mark.asyncio
+async def test_a_calls_own_budget_does_not_outlast_its_approval_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long budget the model asks for still goes on once the decision has taken the approval wait."""
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0.05) as run:
+        async with execution_resources():
+            with tool_runtime_context(run.context):
+                response = await asyncio.wait_for(
+                    run.agent(wait_timeout=600).arun("Write", session_id=run.context.session_id),
+                    JOB_TEST_TIMEOUT,
+                )
+        handle = json.loads(_tool_result(response))
+        assert (handle["status"], run.effects) == ("awaiting_approval", [])

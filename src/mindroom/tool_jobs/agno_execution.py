@@ -434,22 +434,12 @@ async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolW
     return success, timer, call, result
 
 
-def _wait_budget(
-    call: FunctionCall,
-    *,
-    mode: ToolWaitMode,
-    depth: int,
-    job_approval: bool,
-    context: ToolRuntimeContext,
-) -> float | None:
+def _wait_budget(call: FunctionCall, *, mode: ToolWaitMode, depth: int) -> float | None:
     """Return how long the caller waits for this call's job, or raise ValueError for an unusable budget."""
     wait_timeout = None
     if mode != "native":
         _validate_wait_timeout_parameter(call.function)
         wait_timeout = read_wait_timeout(call.arguments, owned_execution=job_owns_execution() or depth > 0)
-    if job_approval and wait_timeout is None:
-        # The reply waits this long for the decision, then goes on while the job waits for it.
-        wait_timeout = context.config.background_tool_jobs.approval_wait_timeout
     if call.function.stop_after_tool_call and wait_timeout is not None:
         msg = "wait_timeout is not supported for tools that stop the current model step"
         raise ValueError(msg)
@@ -511,7 +501,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         if job_approval and mode != "managed":
             return _unaskable(call)
         try:
-            wait_timeout = _wait_budget(call, mode=mode, depth=depth, job_approval=job_approval, context=context)
+            wait_timeout = _wait_budget(call, mode=mode, depth=depth)
         except ValueError as error:
             return _failed_call(call, error)
         owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
@@ -581,7 +571,17 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 reattach=True,
             )
             with Timer() as timer:
-                waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
+                waited = await runtime.wait(
+                    job_id,
+                    owner=owner,
+                    depth=depth,
+                    timeout=wait_timeout,
+                    claim=claim,
+                    # The reply waits this long for a human decision, then goes on while the job waits for it.
+                    approval_timeout=context.config.background_tool_jobs.approval_wait_timeout
+                    if job_approval
+                    else None,
+                )
             if waited.claim is None:
                 call.result = format_job_handle(waited.job)
                 response = True, timer, call, FunctionExecutionResult(status="success", result=call.result)
