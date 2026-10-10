@@ -24,6 +24,7 @@ from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
+    RealtimeCallUsage,
     RealtimeVoiceBridge,
     SpeechServiceOptions,
     VoiceAgentOptions,
@@ -214,6 +215,85 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     await bridge.aclose()
 
     fake_model.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_realtime_session_records_its_latest_token_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LiveKit reports cumulative session usage; the call keeps one record with the latest totals."""
+    from livekit.agents.metrics.usage import AgentSessionUsage, LLMModelUsage, TTSModelUsage  # noqa: PLC0415
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+            self.handlers: dict[str, Callable[[object], None]] = {}
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            return
+
+        def generate_reply(self, **_kwargs: object) -> None:
+            return
+
+        def on(self, event: str, callback: Callable[[object], None]) -> None:
+            self.handlers[event] = callback
+
+        async def aclose(self) -> None:
+            return
+
+    fake_session = FakeSession()
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    recorded: list[RealtimeCallUsage] = []
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        recorded.append(usage)
+
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            record_usage=record_usage,
+        ),
+    )
+
+    for inputs, outputs in ((900, 300), (2000, 700)):
+        fake_session.handlers["session_usage_updated"](
+            SimpleNamespace(
+                usage=AgentSessionUsage(
+                    model_usage=[
+                        LLMModelUsage(
+                            provider="openai",
+                            model="gpt-realtime-2.1",
+                            input_tokens=inputs,
+                            input_cached_tokens=inputs // 2,
+                            input_audio_tokens=inputs - 100,
+                            output_tokens=outputs,
+                            output_audio_tokens=outputs - 50,
+                        ),
+                        TTSModelUsage(provider="openai", model="tts", characters_count=10),
+                    ],
+                ),
+            ),
+        )
+    await bridge.aclose()
+
+    assert len({usage.usage_id for usage in recorded}) == 1
+    latest = recorded[-1]
+    assert (latest.model, latest.input_tokens, latest.output_tokens) == ("gpt-realtime-2.1", 2000, 700)
+    assert (latest.cache_read_tokens, latest.audio_input_tokens, latest.audio_output_tokens) == (1000, 1900, 650)
 
 
 @pytest.mark.asyncio

@@ -22,9 +22,10 @@ import functools
 import json
 from dataclasses import dataclass, field, replace
 from inspect import isasyncgenfunction, iscoroutinefunction
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from agno.metrics import ModelMetrics, RunMetrics
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -76,7 +77,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage
+    from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -104,14 +105,17 @@ class CallAgentResponse:
     turn_id: str | None = None
 
 
-async def record_call_voice_usage(
-    usage: LiveVoiceUsage,
+async def _save_call_usage(
     *,
+    kind: Literal["live_voice", "realtime_voice"],
+    usage_id: str,
+    created_at: float,
+    run: dict[str, object],
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
 ) -> None:
-    """Upsert billed voice duration in the same caller-owned ledger as its delegate."""
+    """Upsert one call's billed usage in the same caller-owned ledger as its delegate."""
     agent_name = execution_identity.agent_name
     session_id = execution_identity.session_id
     if agent_name is None or session_id is None:
@@ -122,23 +126,91 @@ async def record_call_voice_usage(
         functools.partial(
             save_independent_usage,
             session_id=session_id,
-            usage_id=f"live_voice:{usage.provider_session_id}",
-            kind="live_voice",
+            usage_id=f"{kind}:{usage_id}",
+            kind=kind,
             requester_id=execution_identity.requester_id,
             initial_session=AgnoAgentSession(
                 session_id=session_id,
                 agent_id=agent_name,
-                created_at=int(usage.created_at),
-                updated_at=int(usage.created_at),
+                created_at=int(created_at),
+                updated_at=int(created_at),
             ),
-            run={
-                "model_provider": "OpenAI",
-                "model": usage.model,
-                "created_at": usage.created_at,
-                "voice_seconds": usage.duration_seconds,
-                "voice_finalized": usage.finalized,
-            },
+            run=run,
         ),
+    )
+
+
+async def record_call_voice_usage(
+    usage: LiveVoiceUsage,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    """Upsert billed GPT-Live voice duration for the caller."""
+    await _save_call_usage(
+        kind="live_voice",
+        usage_id=usage.provider_session_id,
+        created_at=usage.created_at,
+        run={
+            "model_provider": "OpenAI",
+            "model": usage.model,
+            "created_at": usage.created_at,
+            "voice_seconds": usage.duration_seconds,
+            "voice_finalized": usage.finalized,
+        },
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+
+
+async def record_call_token_usage(
+    usage: RealtimeCallUsage,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    """Upsert a realtime call's cumulative speech-model tokens for the caller."""
+    model = ModelMetrics(
+        id=usage.model,
+        provider="OpenAI",
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_tokens=usage.input_tokens + usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        audio_input_tokens=usage.audio_input_tokens,
+        audio_output_tokens=usage.audio_output_tokens,
+        audio_total_tokens=usage.audio_input_tokens + usage.audio_output_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
+    )
+    metrics = RunMetrics(
+        input_tokens=model.input_tokens,
+        output_tokens=model.output_tokens,
+        total_tokens=model.total_tokens,
+        cache_read_tokens=model.cache_read_tokens,
+        cache_write_tokens=model.cache_write_tokens,
+        audio_input_tokens=model.audio_input_tokens,
+        audio_output_tokens=model.audio_output_tokens,
+        audio_total_tokens=model.audio_total_tokens,
+        reasoning_tokens=model.reasoning_tokens,
+        details={"model": [model]},
+    )
+    await _save_call_usage(
+        kind="realtime_voice",
+        usage_id=usage.usage_id,
+        created_at=usage.created_at,
+        run=RunOutput(
+            model=usage.model,
+            model_provider="OpenAI",
+            created_at=int(usage.created_at),
+            metrics=metrics,
+        ).to_dict(),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
     )
 
 
