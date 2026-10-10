@@ -336,3 +336,30 @@ def test_logs_filtering_with_real_audit_log(
         assert len(records) == 1
 
     audit.close()
+
+
+@pytest.mark.parametrize("agent_name", [None, "test_agent"])
+def test_credentials_list_omits_egress_secrets(broker_test_client: TestClient, agent_name: str | None) -> None:
+    """The Credentials tab lists only services its status route serves, so egress secrets stay out."""
+    params = {} if agent_name is None else {"agent_name": agent_name}
+    response = broker_test_client.put(
+        "/api/egress-broker/services/github/secret",
+        params=params,
+        json={"secret": "s3cret"},
+    )
+    assert response.status_code == 204
+    response = broker_test_client.post(
+        "/api/credentials/openai/api-key",
+        params=params,
+        json={"service": "openai", "api_key": "sk-test"},
+    )
+    assert response.status_code == 200
+
+    response = broker_test_client.get("/api/credentials/list", params=params)
+    assert response.status_code == 200
+    services = response.json()
+    assert "openai" in services
+    assert "egress_github" not in services
+    for service in services:
+        status = broker_test_client.get(f"/api/credentials/{service}/status", params=params)
+        assert status.status_code == 200, service
