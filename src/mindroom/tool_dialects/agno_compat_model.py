@@ -46,8 +46,10 @@ _TOOL_DIALECT_INVOKE_MARKER = "_mindroom_tool_dialect_invoke"
 # and provider-specific tool names on October 9, 2026 found nothing.
 # Upstream PR: None identified.
 # Remove when: Agno exposes a per-model tool presentation hook that renames and reshapes definitions,
-# history calls, and incoming calls while dispatching the original Function.
+# history calls, and incoming calls while dispatching the original Function, and that can hide a Function
+# from both the request and dispatch, as apply_patch beside the edit tools.
 # Coverage: tests/test_tool_dialect_binding.py::test_wire_call_dispatches_canonical_function;
+# tests/test_tool_dialect_binding.py::test_hidden_function_cannot_be_called;
 # tests/test_tool_dialect_binding.py::test_switching_dialect_rerenders_history;
 # tests/test_tool_dialect_binding.py::test_chat_completions_replays_calls_in_wire_form;
 # tests/test_tool_dialect_binding.py::test_overrides_bind_to_deepcopied_model.
