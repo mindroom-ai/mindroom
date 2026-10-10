@@ -2729,6 +2729,51 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
     assert continuation.team_member_model_names == (("general", "large"),)
 
 
+@pytest.mark.asyncio
+async def test_approval_pause_keeps_the_reply_correlation_when_the_request_names_none(tmp_path: Path) -> None:
+    """A reply resumed after approval keeps the identity its tools saw before the pause."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread", reply_to_event_id="$question"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+        ),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=request.room_id,
+        thread_id=request.thread_id,
+        resolved_thread_id=request.response_envelope.target.resolved_thread_id,
+        session_id=paused.session_id,
+    )
+
+    with (
+        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-reply-correlation")),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+    ):
+        async with _in_reply_span(runner, request, placeholder_event_id=None) as (_edit_text, _send_text):
+            await runner._suspend_for_approval(
+                paused,
+                request=request,
+                target=request.response_envelope.target,
+                execution_identity=identity,
+                entity_kind="agent",
+                history_scope=runner.deps.state_writer.history_scope(),
+                show_tool_calls=True,
+            )
+
+    continuation = await runner.deps.approval_store.approval_continuation("approval-reply-correlation")
+    assert continuation is not None
+    assert continuation.correlation_id == "$question"
+
+
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
 async def test_agent_continuation_executes_real_agno_confirmation(
@@ -7859,6 +7904,27 @@ async def test_overlapping_drains_keep_snapshot_ownership() -> None:
     assert await second_drain
     assert runner.pending_inbox_response_count == 0
     await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_tools_get_the_reply_correlation_when_the_request_names_none(tmp_path: Path) -> None:
+    """Tools see the reply's identity even for requests without one, such as interactive selections."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    build_dispatch_context = coordinator.deps.tool_runtime.build_dispatch_context
+    observed: list[str | None] = []
+
+    def recording_build_dispatch_context(*args: object, correlation_id: str | None = None, **kwargs: object) -> object:
+        observed.append(correlation_id)
+        return build_dispatch_context(*args, correlation_id=correlation_id, **kwargs)
+
+    with patch.object(
+        coordinator.deps.tool_runtime,
+        "build_dispatch_context",
+        side_effect=recording_build_dispatch_context,
+    ):
+        await coordinator.prepare_response_runtime(_plain_request(_target(reply_to_event_id="$selection")))
+
+    assert observed == ["$selection"]
 
 
 @pytest.mark.asyncio

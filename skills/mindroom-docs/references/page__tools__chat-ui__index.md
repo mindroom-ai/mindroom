@@ -49,7 +49,8 @@ A sent request returns `UI action request sent.`
 
 The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
 The agent's first worker browser call in a conversation, `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
-The agent calls `show_computer()` or `open_panel(panel="computer")` only to show the panel again, for example when the user should log in or after they closed it.
+The agent calls `show_computer()` or `open_panel(panel="computer")` only to show the panel again in a later reply, for example when the user should log in or after they closed it.
+One reply shows the panel once.
 Opening the Computer panel does not navigate or take control:
 
 ```python

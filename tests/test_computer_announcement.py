@@ -219,7 +219,7 @@ async def test_team_member_browser_call_does_not_announce_the_response_owners_co
     events: list[str],
 ) -> None:
     """A member's browser runs under the response owner's context, and a notice would name the owner."""
-    monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", set())
+    monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", {})
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
     toolkit = _attach(_fake_browser(events), "browser", config, runtime_paths)
     owner = make_chat_ui_context(tmp_path / "owner", agent_name="general")
