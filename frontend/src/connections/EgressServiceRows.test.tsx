@@ -730,7 +730,7 @@ describe("connected accounts", () => {
     ).toBeNull();
   });
 
-  it("offers Reconnect when the saved connection needs a reset", () => {
+  it("offers only Reset connection while the saved connection needs a reset", () => {
     render(
       <EgressServiceRows
         agentName="personal"
@@ -738,10 +738,43 @@ describe("connected accounts", () => {
         onChanged={vi.fn()}
       />,
     );
+    const github = row("GitHub");
+    expect(within(github).getByText("Reset required")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Reconnect GitHub" }),
+      within(github).getByRole("button", { name: "Reset GitHub connection" }),
     ).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
+    // Connecting reads the unreadable connection first, so it cannot work until the reset.
+    expect(
+      within(github).queryByRole("button", { name: /Connect/ }),
+    ).toBeNull();
+  });
+
+  it("lets a user without key rights disconnect their requester-scoped account", () => {
+    render(
+      <EgressServiceRows
+        agentName="shared_dev"
+        services={[
+          withAccount(
+            {
+              connected: true,
+              account_label: "octocat",
+              shared_worker_opt_in: true,
+            },
+            {
+              is_shared: true,
+              can_manage: false,
+              configured: true,
+              active_source: "oauth",
+            },
+          ),
+        ]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Disconnect GitHub" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /API key/ })).toBeNull();
   });
 
   it("explains that personal accounts are not used on a shared agent", () => {

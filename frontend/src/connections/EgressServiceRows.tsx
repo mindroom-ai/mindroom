@@ -33,7 +33,7 @@ function statusLabel(service: EgressCredentialService): string {
       return oauth.account_label
         ? `Connected as ${oauth.account_label}`
         : "Connected";
-    return "Not set";
+    return oauth.reset_required ? "Reset required" : "Not set";
   }
   if (!service.configured) return "Not set";
   const updated = service.updated_at ? new Date(service.updated_at) : null;
@@ -253,16 +253,17 @@ function EgressServiceRow({
                 : "Managed by credential managers"}
             </span>
           )}
-          {oauth?.can_connect && !oauth.connected && (
+          {/* Connecting reads the saved connection first, so an unreadable one needs a reset before. */}
+          {oauth?.can_connect && !oauth.connected && !oauth.reset_required && (
             <Button
               size="sm"
               disabled={busy !== null}
-              aria-label={`${oauth.reset_required ? "Reconnect" : "Connect"} ${oauth.display_name}`}
+              aria-label={`Connect ${oauth.display_name}`}
               onClick={() => void connect()}
             >
               {busy === "connect"
                 ? "Connecting…"
-                : `${oauth.reset_required ? "Reconnect" : "Connect"} ${oauth.display_name}`}
+                : `Connect ${oauth.display_name}`}
             </Button>
           )}
           {busy === "connect" && (

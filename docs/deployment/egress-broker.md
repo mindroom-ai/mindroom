@@ -216,7 +216,7 @@ When the id is not in MindRoom's OAuth registry (for example a plugin provider t
 
 **Connected account problems** do not reach the worker as plain missing credentials:
 
-- A revoked or rejected grant, or a stored credential that cannot be read, returns 403 `oauth_connection_required`. The user reconnects (an unreadable credential must first be reset from the dashboard Tools tab, and then the response has `reset_required` and no link).
+- A revoked or rejected grant, or a stored credential that cannot be read, returns 403 `oauth_connection_required`. The user reconnects (an unreadable credential must first be reset, with the egress row's **Reset connection** button or from the dashboard Tools tab, and then the response has `reset_required` and no link).
 - A provider outage, timeout, or network failure while refreshing returns 503 `oauth_refresh_failed`. The grant is fine, so the worker retries later and the user does not reconnect. After such a failure the broker answers the same credential store with 503 immediately for 30 seconds instead of asking the provider again.
 - Logs carry the service, the provider id, and the error type, never tokens or connect links.
 
@@ -292,6 +292,7 @@ The OAuth part comes from the same helper as the Connections portal's per-provid
 
 On the personal egress page, the dashboard panel, and the Connections portal cards, a service with an account provider shows **Connect <Provider>** as its primary action.
 It opens the provider's login in a popup; a connected row then reads "Connected as <account>" with a **Disconnect** button.
+A row whose saved connection cannot be read reads "Reset required" and offers only **Reset connection**; **Connect** returns once the reset is done.
 **Use an API key instead** keeps the Set, Replace, and Remove actions, and a row with a key set says the key is in use.
 On a shared or unscoped agent a GitHub or Atlassian row offers no **Connect** and says personal accounts are not used there, unless the service sets `oauth_on_shared_workers`, in which case the row warns that everyone using the agent can act with the connected account.
 
@@ -608,7 +609,7 @@ Agents with the [`egress_credentials` tool](#agent-tool) can look up which servi
 
 The account for that scope was revoked at the provider or its credential cannot be read.
 Reconnect through `connect_url`, or on the egress page when the response has no link (a shared agent).
-When the response has `reset_required`, reset the provider connection from the dashboard Tools tab first, because MindRoom cannot read the stored credential.
+When the response has `reset_required`, reset the provider connection first, with the service row's **Reset connection** button on the egress page or the dashboard panel, or from the dashboard Tools tab, because MindRoom cannot read the stored credential.
 Alternatively set an API key for the service, which takes priority over the account.
 
 **503 `oauth_refresh_failed` errors:**
