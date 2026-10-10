@@ -151,7 +151,7 @@ Authorization stays with each entry point, while capability comes only from the 
 
 - The delegate path requires the caller's own name in `delegate_to`, on start and on every follow-up, using the existing `authorize_delegation` recheck.
 - The workflow path requires the caller to still have the `dynamic_workflow` tool, on every step.
-- Requester authorization is unchanged: the requester must still be allowed to use the caller.
+- Requester authorization is unchanged on the delegate path; the workflow path does not recheck the requester's individual access to the caller, because a participant is the caller's own copy and a requester may reach a team member only through the team's access.
 - The maximum delegation depth of 3 applies to authored children started through `delegate`; workflow participants cannot start children because they never receive `delegate`.
 
 `authorize_delegation` gains a typed grant parameter that selects the delegate-allowlist rule or the workflow rule, so `run_delegated_child_response` stops assuming the delegate allowlist.
@@ -177,7 +177,7 @@ Participant kinds become `subagent`, the default, and `room_agent`.
 {"id": "research", "kind": "room_agent", "agent": "research"}
 ```
 
-A `subagent` participant carries either `profile` or the inline persona fields `system_prompt`, `tools`, `model`, `mode`, and `description`, never both.
+A `subagent` participant carries either `profile` or the inline persona fields `system_prompt`, `tools`, `model`, and `mode`, never both, plus an optional `description`.
 `ephemeral_agent` and its `name`, `role`, and `instructions` fields are removed.
 `room_agent` participants keep their current behavior and schema.
 

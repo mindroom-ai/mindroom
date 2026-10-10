@@ -1,5 +1,7 @@
 # Authored Subagents Implementation Plan
 
+> This is the plan as executed; review rounds later renamed and merged several helpers and tests it names, so the design spec and the code are the current reference.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: implement this plan task-by-task with the skill named in **Execution**. Steps use checkbox (`- [ ]`) syntax.
 
 **Execution:** baspowers:executing-plans — the user prefers inline implementation with a fresh-context reviewer after each substantial task and a final whole-branch review.

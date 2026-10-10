@@ -153,9 +153,8 @@ Find the three most serious risks in the proposal you are given, each with evide
 
 `description` is required, `tools`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
 An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt` or `tools`.
-Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters; and each file is limited to 64 KiB.
+Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters, and each file is limited to 64 KiB.
 On the agent's next run, its `run_subagent` tool lists every profile with its description and every invalid profile with the reason, or only how many profiles exist when that list would exceed 2,000 characters, in which case the agent lists `subagents/` itself.
-The list covers at most 256 profiles and 1 MiB of profile files; a profile left out still runs by name.
 A subagent keeps the persona it started with, so editing or deleting a profile affects only subagents started afterwards.
 
 Authoring errors:
@@ -164,8 +163,8 @@ Authoring errors:
 - `Cannot delegate: unknown tool '<entry>'. Your tools: ...` - `tools` names a toolkit or function the caller does not have.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
-- `Cannot delegate: subagent profiles need an agent workspace.` - give the agent `memory_backend: file` or a `private:` configuration.
-- `Subagent tool '<entry>' is no longer available to you; start a new subagent.` - the caller lost a tool the subagent uses; start a new one.
+- `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
+- `Subagent tool '<entry>' is no longer available to you; start a new subagent.` - the caller lost a tool the subagent uses.
 - `Cannot delegate: tool '<entry>' is not available to you.` - the caller's tool configuration excludes that function, or the tool is unavailable in this conversation, for example because it failed to load or the conversation is a voice call; fix the configuration or name a tool the caller can use here.
 
 ### Delegation Records
@@ -214,7 +213,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
-    It runs with the caller's credentials, worker routing, and plugin hooks, and a participant used by several steps continues one session.
+    A participant used by several steps continues one session.
     Each run uses the prompt, tools, and model its participants had when the run started, even if a profile changes during the run.
     Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
   - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
