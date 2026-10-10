@@ -2,8 +2,9 @@
 
 Tokens come only from `mindroom.oauth.credential_lifecycle`, which refreshes a token near expiry under the
 same serialized transaction the tools sharing that connection use. Credential scope follows each provider's own
-policy, so a requester-scoped provider such as GitHub uses the requester from the verified proxy token even on a
-shared agent. Logs carry the service, the provider id, and error types, never tokens or connect links.
+policy, so a requester-scoped provider such as GitHub uses the requester from the verified proxy token. Such a
+requester's own account is used only on a worker that belongs to that requester; see `shared_worker_oauth`.
+Logs carry the service, the provider id, and error types, never tokens or connect links.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.egress_broker.secrets import OAuthStatus
 from mindroom.logging_config import get_logger
@@ -43,10 +44,13 @@ __all__ = [
     "Missing",
     "NeedsReconnect",
     "OAuthTokenResult",
+    "SharedWorkerOAuth",
     "Token",
     "Unavailable",
     "oauth_status",
     "resolve_oauth_token",
+    "shared_worker_oauth",
+    "shared_worker_unavailable_status",
 ]
 
 logger = get_logger(__name__)
@@ -63,6 +67,8 @@ _connect_urls_lock = threading.Lock()
 # After a refresh fails for a reason that may pass (a provider outage, a timeout, a network error), lookups for
 # that credential scope answer at once for this long instead of running the grant again.
 _TRANSIENT_FAILURE_BACKOFF_SECONDS = 30.0
+# Worker scopes whose sandbox belongs to one requester.
+_REQUESTER_WORKER_SCOPES = frozenset({"user", "user_agent"})
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,7 @@ class Unavailable:
 
 
 type OAuthTokenResult = Token | Missing | NeedsReconnect | Unavailable
+type SharedWorkerOAuth = Literal["refused", "allowed"]
 
 
 @dataclass
@@ -130,6 +137,9 @@ def resolve_oauth_token(
     provider = _registered_provider(service, provider_id, config, runtime_paths)
     if provider is None:
         return Missing()
+    if shared_worker_oauth(provider, worker_target, opted_in=_oauth_on_shared_workers(config, service)) == "refused":
+        # Connecting an account would not change that, so there is no link either.
+        return Missing()
     context = _credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
     if provider.requester_scoped_credentials and context.worker_target is None:
         # No requester to bind the connection to, so there is no stored token to use.
@@ -154,12 +164,16 @@ def oauth_status(
 ) -> OAuthStatus | None:
     """Return the scope's connection state for `provider_id` without refreshing; None for an unknown provider.
 
-    A stored connection whose access token expired still counts as connected while it can be refreshed.
-    Binding the keyword arguments gives `secrets.service_status` its `oauth_status` reader.
+    A stored connection whose access token expired still counts as connected while it can be refreshed. A None
+    `worker_target` is the global store that agents without a worker scope read. Binding the keyword arguments
+    gives `secrets.service_status` its `oauth_status` reader.
     """
     provider = _registered_provider(service, provider_id, config, runtime_paths)
     if provider is None:
         return None
+    access = shared_worker_oauth(provider, worker_target, opted_in=_oauth_on_shared_workers(config, service))
+    if access == "refused":
+        return shared_worker_unavailable_status(provider, runtime_paths)
     context = _credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
     credentials = None
     reset_required = False
@@ -177,7 +191,50 @@ def oauth_status(
         can_connect=_connectable(provider, runtime_paths),
         reset_required=reset_required,
         service_account=oauth_provider_service_account_configured(provider, runtime_paths),
+        shared_worker_opt_in=access == "allowed",
     )
+
+
+def shared_worker_oauth(
+    provider: OAuthProvider,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    opted_in: bool,
+) -> SharedWorkerOAuth | None:
+    """Return whether the broker uses a requester's own account on a worker that several requesters share.
+
+    A requester-scoped provider (GitHub, Atlassian) supplies the calling requester's own token. On a `shared`
+    worker, or one without a worker scope (a None target is the global store such agents read), every requester's
+    commands run in one sandbox, so another user's later command can read an earlier caller's proxy token, for
+    example from a background process's environment, and act with that caller's account until the token expires.
+    Such accounts are "refused" there unless the service sets `oauth_on_shared_workers`, which makes them
+    "allowed". None means the rule does not apply: the provider follows the worker scope, or the worker belongs to
+    one requester. Injection, placeholders, the status APIs, and the agent tool all decide through this.
+    """
+    if not provider.requester_scoped_credentials:
+        return None
+    if worker_target is not None and worker_target.worker_scope in _REQUESTER_WORKER_SCOPES:
+        return None
+    return "allowed" if opted_in else "refused"
+
+
+def shared_worker_unavailable_status(provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthStatus:
+    """Return the status of a provider that `shared_worker_oauth` refuses: nothing to use, connect, or reset."""
+    return OAuthStatus(
+        provider=provider.id,
+        display_name=provider.display_name,
+        connected=False,
+        account_label=None,
+        can_connect=False,
+        reset_required=False,
+        service_account=oauth_provider_service_account_configured(provider, runtime_paths),
+        unavailable_reason="shared_worker",
+    )
+
+
+def _oauth_on_shared_workers(config: Config, service: str) -> bool:
+    egress_service = config.egress_broker.services.get(service)
+    return egress_service is not None and egress_service.oauth_on_shared_workers
 
 
 def _registered_provider(

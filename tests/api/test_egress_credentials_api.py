@@ -466,6 +466,8 @@ def test_status_shows_the_oauth_connection_and_a_stored_key_wins(oauth_egress_po
         "can_connect": True,
         "reset_required": False,
         "service_account": False,
+        "unavailable_reason": None,
+        "shared_worker_opt_in": False,
     }
 
     _connect_account(portal, "alice", "personal", "drive", "google_drive")
@@ -617,13 +619,50 @@ def test_shared_agent_connection_is_managed_but_visible_to_users(oauth_egress_po
     assert user["can_connect"] is False
 
 
-def test_requester_scoped_provider_connects_the_requester(oauth_egress_portal: dict[str, Any]) -> None:
-    """GitHub-style providers store the connection per requester even on a shared agent."""
+def _opt_in_to_shared_workers(portal: dict[str, Any]) -> None:
+    """Let the requester-scoped `gh` service use connected accounts on shared and unscoped workers."""
+    portal["payload"]["egress_broker"]["services"]["gh"]["oauth_on_shared_workers"] = True
+    _publish_config(main.app, portal["paths"], portal["payload"])
+    _use_runtime_auth_settings(main.app)
+
+
+def test_requester_scoped_provider_on_a_shared_agent_is_unavailable_without_the_opt_in(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """Everyone's commands share a shared agent's worker, so a GitHub account is neither used nor offered there."""
     portal = oauth_egress_portal
+    _connect_account(portal, "bob", "personal", "gh", "github")
+    assert _egress_row(portal, "bob", "personal", "gh")["oauth"]["connected"] is True
+
+    for user in ("alice", "bob"):
+        row = _egress_row(portal, user, "shared_dev", "gh")
+        assert row["oauth"] == {
+            "provider": "github",
+            "display_name": "Test Drive",
+            "connected": False,
+            "account_label": None,
+            "can_connect": False,
+            "reset_required": False,
+            "service_account": False,
+            "unavailable_reason": "shared_worker",
+            "shared_worker_opt_in": False,
+        }
+        assert row["active_source"] is None
+        assert row["configured"] is False
+    # Agent-scoped providers keep their shared connection on the same agent.
+    assert _egress_row(portal, "bob", "shared_dev", "drive")["oauth"]["unavailable_reason"] is None
+
+
+def test_requester_scoped_provider_connects_the_requester(oauth_egress_portal: dict[str, Any]) -> None:
+    """With the opt-in, GitHub-style providers store the connection per requester even on a shared agent."""
+    portal = oauth_egress_portal
+    _opt_in_to_shared_workers(portal)
     _connect_account(portal, "bob", "shared_dev", "gh", "github")
 
-    assert _egress_row(portal, "bob", "shared_dev", "gh")["oauth"]["connected"] is True
+    bob = _egress_row(portal, "bob", "shared_dev", "gh")["oauth"]
+    assert (bob["connected"], bob["unavailable_reason"], bob["shared_worker_opt_in"]) == (True, None, True)
     assert _egress_row(portal, "alice", "shared_dev", "gh")["oauth"]["connected"] is False
+    assert _egress_row(portal, "bob", "personal", "gh")["oauth"]["shared_worker_opt_in"] is False
 
 
 def _enable_service_account(portal: dict[str, Any]) -> None:
@@ -793,6 +832,8 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
         "can_connect": False,
         "reset_required": False,
         "service_account": True,
+        "unavailable_reason": None,
+        "shared_worker_opt_in": False,
     }
     assert row["active_source"] == "oauth"
     config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
@@ -848,6 +889,8 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
         "can_connect": False,
         "reset_required": False,
         "service_account": False,
+        "unavailable_reason": None,
+        "shared_worker_opt_in": False,
     }
     listing = portal["client"].get("/api/connections/egress", headers=portal["headers"]["alice"])
     assert listing.status_code == 200, listing.text
@@ -916,8 +959,9 @@ def test_key_status_is_read_off_the_event_loop(
 def test_disconnecting_a_requester_scoped_account_leaves_other_users_connected(
     oauth_egress_portal: dict[str, Any],
 ) -> None:
-    """On a shared agent each user's GitHub connection is their own."""
+    """On a shared agent with the opt-in each user's GitHub connection is their own."""
     portal = oauth_egress_portal
+    _opt_in_to_shared_workers(portal)
     _connect_account(portal, "alice", "shared_dev", "gh", "github")
     _connect_account(portal, "bob", "shared_dev", "gh", "github")
 
@@ -934,8 +978,9 @@ def test_disconnecting_a_requester_scoped_account_leaves_other_users_connected(
 def test_plain_user_of_a_shared_agent_connects_their_own_requester_scoped_account(
     oauth_egress_portal: dict[str, Any],
 ) -> None:
-    """GitHub-style connections belong to the requester, so connecting needs no credential management."""
+    """GitHub-style connections belong to the requester, so with the opt-in connecting needs no management."""
     portal = oauth_egress_portal
+    _opt_in_to_shared_workers(portal)
     client = portal["client"]
 
     before = _egress_row(portal, "alice", "shared_dev", "gh")

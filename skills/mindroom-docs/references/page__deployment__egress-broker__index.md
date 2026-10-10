@@ -139,6 +139,7 @@ egress_broker:
 | `rules` | Yes, unless a preset supplies them | Routing rules for the service |
 | `placeholder_env` | No | Placeholder environment variables for workers |
 | `oauth_provider` | No | MindRoom OAuth provider id (such as `github`, `google_drive`, `atlassian`) whose connected account supplies the secret when no API key is stored; see [Secret sources](#secret-sources) |
+| `oauth_on_shared_workers` | No | Default `false`. Set `true` to use a requester's own GitHub or Atlassian account on `shared` and unscoped agents too, which lets every user of such an agent act with other users' connected accounts; see [Personal accounts on shared agents](#personal-accounts-on-shared-agents). Presets never set it |
 
 **Rule fields:**
 
@@ -196,7 +197,7 @@ They never reach a worker, its environment, or its filesystem; the worker holds 
 
 **Which account a request uses:**
 
-- The account follows the provider's own credential policy. GitHub and Atlassian are requester-scoped: the broker uses the requester named in the worker's verified token, even on a `shared` agent, so each user's requests use that user's own account and never another user's.
+- The account follows the provider's own credential policy. GitHub and Atlassian are requester-scoped: the broker uses the requester named in the worker's verified token, so each user's requests use that user's own account. By default the broker uses such an account only on `user` and `user_agent` agents (see [Personal accounts on shared agents](#personal-accounts-on-shared-agents)).
 - The Google providers follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
 - A call without a requester has no requester-scoped account (GitHub or Atlassian) to use.
 
@@ -214,6 +215,25 @@ When the id is not in MindRoom's OAuth registry (for example a plugin provider t
 - A revoked or rejected grant, or a stored credential that cannot be read, returns 403 `oauth_connection_required`. The user reconnects (an unreadable credential must first be reset from the dashboard Tools tab, and then the response has `reset_required` and no link).
 - A provider outage, timeout, or network failure while refreshing returns 503 `oauth_refresh_failed`. The grant is fine, so the worker retries later and the user does not reconnect. After such a failure the broker answers the same credential store with 503 immediately for 30 seconds instead of asking the provider again.
 - Logs carry the service, the provider id, and the error type, never tokens or connect links.
+
+### Personal accounts on shared agents
+
+A `shared` agent, and an agent without a worker scope, runs every requester's commands in one sandbox.
+A proxy token minted for one user's call stays readable there for its lifetime (for example in the environment of a process that call left running), so a later command from another user could use it to act with the first user's GitHub or Atlassian account until the token expires.
+
+So on those agents the broker does not use requester-scoped accounts at all:
+
+- It injects no GitHub or Atlassian account and adds no placeholder variables for it, and a matched request without an API key gets a 403 `credential_not_configured` with only `manage_url`.
+- The status API reports the account part with `unavailable_reason: "shared_worker"`, not connected and not connectable, and the egress pages say "Personal accounts are not used on shared agents; add an API key or ask an administrator" instead of offering **Connect**.
+- The [`egress_credentials` tool](#agent-tool) reports such a service as not configured and not connectable.
+
+Give those agents an API key instead, or move users who need their own account to a `user` or `user_agent` agent.
+The Google providers are not affected: their connection on a shared agent is the agent's own, maintained by its credential managers.
+
+An operator who accepts the risk can set `oauth_on_shared_workers: true` on the service.
+The broker then injects the calling requester's own account on shared and unscoped agents as well, and anyone who can run commands on such an agent can act with any other user's connected account until that user's proxy token expires (`MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS`, default 7 days).
+The status API marks those rows with `shared_worker_opt_in: true`, and the egress pages warn "Everyone using this agent can act with the connected account until its access expires".
+Use it only where everyone who can use the agent may act with each other's accounts, such as a single-user deployment.
 
 ## Secret management
 
@@ -251,13 +271,17 @@ The status API returns, for each service and scope, whether a key is set and whe
     "account_label": "alice@example.org",
     "can_connect": true,
     "reset_required": false,
-    "service_account": false
+    "service_account": false,
+    "unavailable_reason": null,
+    "shared_worker_opt_in": false
   }
 }
 ```
 
 The example is abbreviated: each service also has `display_name`, `description`, and `updated_at` (the key's timestamp, kept for older clients), and the personal API adds `is_shared` and `can_manage`.
 `oauth` is `null` for a service without an account provider.
+`unavailable_reason` is `"shared_worker"` when the scope is a shared or unscoped agent and the provider is GitHub or Atlassian without `oauth_on_shared_workers`; the account part is then not connected and not connectable.
+`shared_worker_opt_in` is `true` on such a scope when the service sets `oauth_on_shared_workers` (see [Personal accounts on shared agents](#personal-accounts-on-shared-agents)).
 The OAuth part comes from the same helper as the Connections portal's per-provider status, so the egress pages and the portal agree.
 
 ### Connecting an account
@@ -265,6 +289,7 @@ The OAuth part comes from the same helper as the Connections portal's per-provid
 On the personal egress page, the dashboard panel, and the Connections portal cards, a service with an account provider shows **Connect <Provider>** as its primary action.
 It opens the provider's login in a popup; a connected row then reads "Connected as <account>" with a **Disconnect** button.
 **Use an API key instead** keeps the Set, Replace, and Remove actions, and a row with a key set says the key is in use.
+On a shared or unscoped agent a GitHub or Atlassian row offers no **Connect** and says personal accounts are not used there, unless the service sets `oauth_on_shared_workers`, in which case the row warns that everyone using the agent can act with the connected account.
 
 An agent can also send a user straight to the login: the 403 `credential_not_configured` and `oauth_connection_required` responses and the [`egress_credentials` tool](#agent-tool) point at where to connect, and the broker's responses carry a `connect_url`, a short-lived single-use link.
 The link carries only the connect target, not a login: the browser that opens it must be signed in to MindRoom as the requester the link was minted for, and only a link for a shared scope skips that sign-in.
@@ -275,7 +300,7 @@ Who may connect an account follows who may set a key, with one exception:
 
 - For `user` and `user_agent` agents, each user connects their own account on the personal page.
 - For `shared` and unscoped agents, administrators and the agent's `credential_managers` connect and disconnect accounts, and set keys.
-- GitHub and Atlassian are the exception. Their connections belong to the requester, so any user who may use the agent can connect their own account on a shared agent too. API keys on shared agents stay with the managers.
+- GitHub and Atlassian are the exception where the service sets `oauth_on_shared_workers`. Their connections belong to the requester, so any user who may use the agent can then connect their own account on a shared agent too. Without that setting a shared agent does not use these accounts, so its rows offer no connection. API keys on shared agents stay with the managers.
 
 The personal egress page and its API, `/api/connections/egress`, authenticate with `require_connections_user`: they need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
 Without that signed identity gate, such as on a lab host that has no upstream proxy, only the dashboard can manage secrets.
@@ -341,7 +366,7 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 ```
 
 - `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`. An explicit key wins over a connected account. The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
-- A service with nothing configured also reports `can_connect_account`. When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id. It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, or a stored connection is unreadable and needs a reset first; `provider` is then `null`. A `true` value says the provider can be connected, not that this user may connect it: for providers that are not requester-scoped (the Google providers) on a shared agent, only administrators and credential managers can.
+- A service with nothing configured also reports `can_connect_account`. When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id. It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection is unreadable and needs a reset first, or the agent is shared or unscoped and the provider is GitHub or Atlassian without `oauth_on_shared_workers`; `provider` is then `null`. A `true` value says the provider can be connected, not that this user may connect it: for providers that are not requester-scoped (the Google providers) on a shared agent, only administrators and credential managers can.
 - `display_name` falls back to the service name when the service sets none.
 - `manage_url` is the personal egress page when trusted upstream auth is enabled and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
 - The tool never returns secret values, access tokens, connect links, or update timestamps, and its note tells the agent not to ask users to paste a key into the chat. Users connect accounts and add keys at `manage_url`; the one-time `connect_url` only appears in the broker's HTTP responses to worker code.
@@ -557,7 +582,7 @@ The broker has these known limits in the initial release:
 - **Service accounts are not injected:** a Google provider served by `GOOGLE_SERVICE_ACCOUNT_FILE` cannot supply the broker's secret, so such a service needs an API key.
 - **No body or websocket frame substitutions:** the broker injects into headers and query parameters only; path, body, and websocket frame substitutions planned for a later release.
 - **Background-script workers not yet covered:** the broker environment reaches dedicated Docker and Kubernetes workers and the static runner; background-script workers are not yet wired.
-- **Shared static runner is not an isolation boundary:** a scoped call's token lives in a process shared with other users' calls, valid for the token TTL, so keep the TTL short where that matters and use dedicated workers for isolation.
+- **Shared static runner is not an isolation boundary:** a scoped call's token lives in a process shared with other users' calls, valid for the token TTL, so keep the TTL short where that matters and use dedicated `user` or `user_agent` workers for isolation. A dedicated `shared` or unscoped worker does not isolate requesters either.
 - **Broker approvals stay with Squid:** the broker does not enforce approved-egress grants itself; in the Kubernetes chain Squid does, and the broker takes Agent Vault's place as its parent.
 
 ## Troubleshooting
@@ -592,6 +617,7 @@ The broker answers further requests for the same credential store with 503 for 3
 Check that the service has an `oauth_provider` (presets set it) and that the id exists in the OAuth registry; an unknown id logs a warning naming the service and leaves the service on API keys only.
 An API key stored for the scope wins over the account, so remove the key to use the account.
 A provider served by a shared service account shows "Uses a shared service account" and is never injected.
+A GitHub or Atlassian account is not used on a shared or unscoped agent unless the service sets `oauth_on_shared_workers`; see [Personal accounts on shared agents](#personal-accounts-on-shared-agents).
 
 **407 authentication errors:**
 

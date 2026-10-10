@@ -7,6 +7,7 @@ import json
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+import pytest
 from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
@@ -29,8 +30,6 @@ from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oau
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -371,13 +370,43 @@ def test_connected_account_is_the_active_source_without_a_key(tmp_path: Path) ->
     assert _entry(bob, "github")["configured"] is False
 
 
-def test_github_account_is_per_requester_on_a_shared_agent(tmp_path: Path) -> None:
-    """GitHub follows the requester even on a shared agent: Alice's connection serves Alice and never Bob."""
+@pytest.mark.parametrize("worker_scope", ["shared", None], ids=["shared", "unscoped"])
+def test_github_account_is_not_offered_where_requesters_share_a_worker(
+    tmp_path: Path,
+    worker_scope: str | None,
+) -> None:
+    """The broker never uses a GitHub account on a shared or unscoped worker, so the tool neither counts nor offers it."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = get_runtime_credentials_manager(runtime_paths)
     _configure_github_client(manager)
     _connect_github(manager, "@alice:example.org")
     context = _context(runtime_paths, _PRESET_SERVICES)
+
+    alice = _list(
+        EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target("@alice:example.org", worker_scope)),
+        context,
+    )
+
+    assert _entry(alice, "github") == {
+        "name": "github",
+        "display_name": "GitHub",
+        "configured": False,
+        "active_source": None,
+        "can_connect_account": False,
+        "provider": None,
+    }
+
+
+def test_github_account_is_per_requester_on_a_shared_agent_with_the_opt_in(tmp_path: Path) -> None:
+    """With `oauth_on_shared_workers`, GitHub follows the requester on a shared agent: Alice's account is not Bob's."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    _configure_github_client(manager)
+    _connect_github(manager, "@alice:example.org")
+    context = _context(
+        runtime_paths,
+        {**_PRESET_SERVICES, "github": {"preset": "github", "oauth_on_shared_workers": True}},
+    )
 
     alice = _list(
         EgressCredentialsTools(runtime_paths=runtime_paths, worker_target=_target("@alice:example.org", "shared")),

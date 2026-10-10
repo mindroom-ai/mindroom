@@ -234,6 +234,18 @@ function EgressServiceRow({
               Uses a shared service account
             </span>
           )}
+          {oauth?.unavailable_reason === "shared_worker" && (
+            <span className="text-xs text-muted-foreground">
+              Personal accounts are not used on shared agents; add an API key or
+              ask an administrator
+            </span>
+          )}
+          {oauth?.shared_worker_opt_in && (
+            <span className="text-xs text-amber-600 dark:text-amber-400">
+              Everyone using this agent can act with the connected account until
+              its access expires
+            </span>
+          )}
           {!service.can_manage && (
             <span className="text-xs text-muted-foreground">
               {oauth?.can_connect

@@ -31,6 +31,10 @@ class EgressOAuthStatus(BaseModel):
 
     `connected` means the broker would inject a personal access token. `service_account` marks a provider that a
     shared service account serves instead: the broker cannot inject that, and personal accounts are not connectable.
+    `unavailable_reason` is `shared_worker` where the broker never uses a requester's own account (GitHub,
+    Atlassian) because several requesters share the worker; nothing is connected or connectable then.
+    `shared_worker_opt_in` marks such a worker whose service allows it anyway (`oauth_on_shared_workers`), so every
+    user of the agent can act with the connected account.
     """
 
     provider: str
@@ -40,6 +44,8 @@ class EgressOAuthStatus(BaseModel):
     can_connect: bool
     reset_required: bool
     service_account: bool
+    unavailable_reason: Literal["shared_worker"] | None
+    shared_worker_opt_in: bool
 
 
 class EgressSourceStatus(BaseModel):

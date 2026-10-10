@@ -447,6 +447,8 @@ def test_services_status_has_key_and_oauth_parts(oauth_broker_client: TestClient
         "can_connect": True,
         "reset_required": False,
         "service_account": False,
+        "unavailable_reason": None,
+        "shared_worker_opt_in": False,
     }
     assert _service(oauth_broker_client, "ghost")["oauth"] is None
 
@@ -493,17 +495,42 @@ def test_disconnect_clears_the_connection(oauth_broker_client: TestClient, agent
     assert drive["active_source"] is None
 
 
+def _opt_in_to_shared_workers(egress_config_file: Path) -> None:
+    """Let the requester-scoped `gh` service use connected accounts on shared and unscoped workers."""
+    from mindroom.api import config_lifecycle, main  # noqa: PLC0415
+
+    config = yaml.safe_load(egress_config_file.read_text(encoding="utf-8"))
+    config["egress_broker"]["services"]["gh"]["oauth_on_shared_workers"] = True
+    egress_config_file.write_text(yaml.dump(config), encoding="utf-8")
+    config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
+
+
+def test_requester_scoped_provider_is_unavailable_on_the_dashboard_scopes_without_the_opt_in(
+    oauth_broker_client: TestClient,
+) -> None:
+    """The panel's scopes are shared or unscoped workers, where the broker never uses a GitHub-style account."""
+    for scope in (None, "test_agent"):
+        gh = _service(oauth_broker_client, "gh", scope)
+        assert gh["oauth"]["unavailable_reason"] == "shared_worker"
+        assert (gh["oauth"]["connected"], gh["oauth"]["can_connect"]) == (False, False)
+        assert gh["active_source"] is None
+        assert _service(oauth_broker_client, "drive", scope)["oauth"]["unavailable_reason"] is None
+
+
 @pytest.mark.parametrize("agent_name", [None, "test_agent"])
 def test_requester_scoped_provider_status_follows_the_dashboard_requester(
     oauth_broker_client: TestClient,
+    egress_config_file: Path,
     agent_name: str | None,
 ) -> None:
-    """A GitHub-style connection belongs to the dashboard user, so the panel shows it in every scope."""
+    """With the opt-in, a GitHub-style connection belongs to the dashboard user, so the panel shows it everywhere."""
+    _opt_in_to_shared_workers(egress_config_file)
     _connect(oauth_broker_client, "gh", "github", agent_name)
 
     for scope in (None, "test_agent"):
         gh = _service(oauth_broker_client, "gh", scope)
         assert gh["oauth"]["connected"] is True
+        assert gh["oauth"]["shared_worker_opt_in"] is True
         assert gh["active_source"] == "oauth"
 
     response = oauth_broker_client.post(
@@ -600,7 +627,8 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
     drive = _service(oauth_broker_client, "drive")
     assert drive["oauth"]["connected"] is False
     assert drive["oauth"]["can_connect"] is False
-    assert _service(oauth_broker_client, "gh")["oauth"]["can_connect"] is True
+    assert drive["oauth"]["unavailable_reason"] is None
+    assert _service(oauth_broker_client, "gh")["oauth"]["unavailable_reason"] == "shared_worker"
     assert _service(oauth_broker_client, "github")["oauth"] is None
 
 

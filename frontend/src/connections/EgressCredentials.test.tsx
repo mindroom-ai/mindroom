@@ -35,6 +35,8 @@ const account: EgressOAuthStatus = {
   can_connect: true,
   reset_required: false,
   service_account: false,
+  unavailable_reason: null,
+  shared_worker_opt_in: false,
 };
 const agents: EgressCredentialAgent[] = [
   {

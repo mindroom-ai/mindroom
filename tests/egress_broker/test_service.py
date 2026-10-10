@@ -9,6 +9,7 @@ import ssl
 import stat
 import threading
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
@@ -771,16 +772,51 @@ async def test_placeholder_env_when_only_oauth_is_connected(
 
 
 @pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.parametrize("scope", ["shared", None], ids=["shared", "unscoped"])
 @pytest.mark.asyncio
-async def test_requester_scoped_oauth_on_a_shared_agent_injects_the_callers_token(
+async def test_requester_scoped_oauth_is_not_used_where_requesters_share_a_worker(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+    scope: WorkerScope | None,
+) -> None:
+    """On a shared or unscoped worker a connected GitHub account is never injected, placeheld, or offered.
+
+    Another requester's later command could read the proxy token from the shared sandbox, so the 403 names only the
+    key page: no provider and no connect link.
+    """
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    _connect_github(manager, "@alice:example.org", "alice-oauth")
+    target = _target(scope=scope)
+    if target.worker_key is None:
+        # An unscoped call is routed to a worker that its proxy token names.
+        target = replace(target, worker_key="v1:local:unscoped:code")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        response = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert "GH_TOKEN" not in env
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "github",
+        "manage_url": f"{_PUBLIC_URL}/connections/egress",
+    }
+    assert tls_upstream.hits == []
+
+
+@pytest.mark.usefixtures("allow_loopback", "trust_upstream", "github_oauth_client")
+@pytest.mark.asyncio
+async def test_requester_scoped_oauth_on_a_shared_agent_injects_the_callers_token_with_the_opt_in(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
     tls_upstream: Upstream,
     tmp_path: Path,
 ) -> None:
-    """Two requesters on one shared agent each get their own GitHub token, from their own verified proxy token."""
+    """With `oauth_on_shared_workers`, two requesters on one shared agent each get their own GitHub token."""
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
-    config = _config(github=_GITHUB_OAUTH)
+    config = _config(github={**_GITHUB_OAUTH, "oauth_on_shared_workers": True})
     _connect_github(manager, "@alice:example.org", "alice-oauth")
     _connect_github(manager, "@bob:example.org", "bob-oauth")
     alice = _target(scope="shared")
@@ -791,6 +827,7 @@ async def test_requester_scoped_oauth_on_a_shared_agent_injects_the_callers_toke
         bob_env = execution_env_for_worker(runtime_paths, config=config, worker_target=bob)
         alice_response = await _get_through(alice_env, tls_upstream.url("/echo"), tmp_path / "runner")
         bob_response = await _get_through(bob_env, tls_upstream.url("/echo"), tmp_path / "runner")
+    assert alice_env["GH_TOKEN"] == _PLACEHOLDER
     assert alice_response.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
     assert bob_response.json()["headers"]["authorization"] == ["Bearer bob-oauth"]
 

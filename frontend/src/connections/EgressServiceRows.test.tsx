@@ -40,6 +40,8 @@ const githubAccount: EgressOAuthStatus = {
   can_connect: true,
   reset_required: false,
   service_account: false,
+  unavailable_reason: null,
+  shared_worker_opt_in: false,
 };
 const withAccount = (
   account: Partial<EgressOAuthStatus> = {},
@@ -740,6 +742,54 @@ describe("connected accounts", () => {
       screen.getByRole("button", { name: "Reconnect GitHub" }),
     ).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
+  });
+
+  it("explains that personal accounts are not used on a shared agent", () => {
+    render(
+      <EgressServiceRows
+        agentName="shared_dev"
+        services={[
+          withAccount(
+            { can_connect: false, unavailable_reason: "shared_worker" },
+            { is_shared: true },
+          ),
+        ]}
+        onChanged={vi.fn()}
+      />,
+    );
+    const github = row("GitHub");
+    expect(
+      within(github).getByText(
+        "Personal accounts are not used on shared agents; add an API key or ask an administrator",
+      ),
+    ).toBeVisible();
+    expect(
+      within(github).queryByRole("button", { name: /Connect/ }),
+    ).toBeNull();
+    expect(
+      within(github).getByRole("button", { name: "Use an API key instead" }),
+    ).toBeEnabled();
+  });
+
+  it("warns that everyone using a shared agent can act with an opted-in account", () => {
+    render(
+      <EgressServiceRows
+        agentName="shared_dev"
+        services={[
+          withAccount({ shared_worker_opt_in: true }, { is_shared: true }),
+        ]}
+        onChanged={vi.fn()}
+      />,
+    );
+    const github = row("GitHub");
+    expect(
+      within(github).getByText(
+        "Everyone using this agent can act with the connected account until its access expires",
+      ),
+    ).toBeVisible();
+    expect(
+      within(github).getByRole("button", { name: "Connect GitHub" }),
+    ).toBeEnabled();
   });
 
   it("resets an unreadable connection after confirmation", async () => {

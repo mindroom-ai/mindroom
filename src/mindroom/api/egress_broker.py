@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Annotated
 
@@ -21,7 +22,7 @@ from mindroom.api.egress_status import (
     egress_service_status,
     unavailable_egress_oauth_status,
 )
-from mindroom.egress_broker.oauth_source import oauth_status
+from mindroom.egress_broker.oauth_source import oauth_status, shared_worker_oauth, shared_worker_unavailable_status
 from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
 from mindroom.logging_config import get_logger
@@ -29,6 +30,7 @@ from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
+    from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.egress_broker.secrets import OAuthStatus
 
@@ -85,7 +87,7 @@ async def _admin_oauth_status(
     config: Config,
     target: RequestCredentialsTarget,
     name: str,
-    provider_id: str,
+    service: EgressService,
 ) -> OAuthStatus | None:
     """Load a provider's connection state for the selected scope with the dashboard's OAuth status helper.
 
@@ -94,20 +96,27 @@ async def _admin_oauth_status(
     """
     from mindroom.api import config_lifecycle  # noqa: PLC0415
 
+    provider_id = service.oauth_provider
+    if provider_id is None:
+        return None
     provider = load_oauth_providers_for_snapshot(config_lifecycle.bind_current_request_snapshot(request)).get(
         provider_id,
     )
     if provider is None:
         return None
+    worker_target = worker_target_for_credentials_target(target)
+    access = shared_worker_oauth(provider, worker_target, opted_in=service.oauth_on_shared_workers)
+    if access == "refused":
+        return shared_worker_unavailable_status(provider, target.runtime_paths)
     try:
         result = await oauth.authenticated_connection_status(provider_id, request, agent_name=target.agent_name)
-        return await egress_oauth_status(
+        status = await egress_oauth_status(
             result,
             can_manage=True,
             stored_connection=partial(
                 oauth_status,
                 provider_id,
-                worker_target_for_credentials_target(target),
+                worker_target,
                 service=name,
                 config=config,
                 runtime_paths=target.runtime_paths,
@@ -122,6 +131,7 @@ async def _admin_oauth_status(
             error_type=type(exc).__name__,
         )
         return unavailable_egress_oauth_status(provider)
+    return replace(status, shared_worker_opt_in=access == "allowed")
 
 
 async def _load_service_statuses_for_target(
@@ -139,11 +149,7 @@ async def _load_service_statuses_for_target(
 
     services: list[_ServiceStatus] = []
     for name, service_config in config.egress_broker.services.items():
-        oauth_part = (
-            await _admin_oauth_status(request, config, target, name, service_config.oauth_provider)
-            if service_config.oauth_provider is not None
-            else None
-        )
+        oauth_part = await _admin_oauth_status(request, config, target, name, service_config)
         sources = await egress_service_status(target.base_manager, worker_target, service_config, name, oauth_part)
         services.append(
             _ServiceStatus(

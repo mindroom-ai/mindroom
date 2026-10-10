@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from mindroom.config.egress_broker import EgressBrokerConfig, EgressService
 from mindroom.config.main import Config
+from mindroom.egress_broker.presets import EGRESS_PRESETS
 
 
 def test_spec_example_config_loads() -> None:
@@ -212,3 +213,21 @@ def test_preset_service_names_keep_existing_service_name_rules() -> None:
     """Presets do not bypass service-name validation."""
     with pytest.raises(ValidationError, match="_oauth"):
         EgressBrokerConfig(services={"github_oauth": {"preset": "github"}})  # type: ignore[dict-item]
+
+
+def test_oauth_on_shared_workers_defaults_off_and_no_preset_sets_it() -> None:
+    """Requester-scoped accounts stay off shared workers unless the operator opts in, never through a preset."""
+    service = EgressService.model_validate({"preset": "github"})
+
+    assert service.oauth_on_shared_workers is False
+    assert all("oauth_on_shared_workers" not in preset for preset in EGRESS_PRESETS.values())
+
+
+def test_oauth_on_shared_workers_survives_the_authored_dump() -> None:
+    """The opt-in is an authored field, so saving config keeps it next to the preset reference."""
+    config = Config(egress_broker={"services": {"github": {"preset": "github", "oauth_on_shared_workers": True}}})
+
+    dumped = config.authored_model_dump()["egress_broker"]
+
+    assert dumped == {"services": {"github": {"preset": "github", "oauth_on_shared_workers": True}}}
+    assert Config(**config.authored_model_dump()).egress_broker.services["github"].oauth_on_shared_workers is True

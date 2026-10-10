@@ -49,6 +49,13 @@ export interface EgressOAuthStatus {
   reset_required: boolean;
   /** A shared service account serves this provider, so personal accounts are not connectable. */
   service_account: boolean;
+  /**
+   * `shared_worker` when the broker never uses a personal account here because
+   * several users share the agent's worker; nothing is connected or connectable.
+   */
+  unavailable_reason: "shared_worker" | null;
+  /** The service allows personal accounts on this shared worker anyway, so every user of the agent can act with one. */
+  shared_worker_opt_in: boolean;
 }
 
 export interface EgressCredentialService {

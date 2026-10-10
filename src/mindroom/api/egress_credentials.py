@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Annotated
 
@@ -25,7 +26,7 @@ from mindroom.api.egress_status import (
 )
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.egress_broker.oauth_source import oauth_status
+from mindroom.egress_broker.oauth_source import oauth_status, shared_worker_oauth, shared_worker_unavailable_status
 from mindroom.egress_broker.secrets import OAuthStatus, delete_secret, save_secret
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -126,11 +127,16 @@ async def _personal_oauth_status(
 
     The token refresh is skipped so a listing never waits on the provider; an unknown provider has no status, and
     any failure to read one provider's state shows that service as not connectable instead of failing the listing.
-    Requester-scoped connections (GitHub) belong to the requester, so every user of the agent manages their own.
+    Requester-scoped connections (GitHub and Atlassian) belong to the requester, so every user of the agent manages
+    their own, except where the broker refuses them on a shared worker (`shared_worker_oauth`).
     """
     provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service_name)
     if provider is None:
         return None
+    opted_in = config.egress_broker.services[service_name].oauth_on_shared_workers
+    access = shared_worker_oauth(provider, target, opted_in=opted_in)
+    if access == "refused":
+        return shared_worker_unavailable_status(provider, runtime_paths)
     try:
         result = await oauth.agent_connection_status(
             request,
@@ -141,7 +147,7 @@ async def _personal_oauth_status(
             config=config,
             refresh=False,
         )
-        return await egress_oauth_status(
+        status = await egress_oauth_status(
             result,
             can_manage=can_manage or provider.requester_scoped_credentials,
             stored_connection=partial(
@@ -162,6 +168,7 @@ async def _personal_oauth_status(
             error_type=type(exc).__name__,
         )
         return unavailable_egress_oauth_status(provider)
+    return replace(status, shared_worker_opt_in=access == "allowed")
 
 
 async def _build_service_for_agent(

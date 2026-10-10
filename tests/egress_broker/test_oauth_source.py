@@ -91,6 +91,12 @@ def config() -> Config:
 
 
 @pytest.fixture
+def opted_in_config() -> Config:
+    """Return a config whose `github` service lets requester-scoped accounts work on shared workers."""
+    return Config(egress_broker={"services": {"github": {"preset": "github", "oauth_on_shared_workers": True}}})
+
+
+@pytest.fixture
 def demo_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Register the non-requester-scoped demo provider beside GitHub."""
     registry = {"demo": _DEMO, "github": github_oauth_provider()}
@@ -232,35 +238,113 @@ def test_connected_account_yields_its_token(
     assert "alice-access" not in repr(result)
 
 
-def test_requester_scoped_provider_on_shared_agent_uses_the_claims_requester(
+@pytest.mark.parametrize("scope", ["shared", None], ids=["shared", "unscoped"])
+def test_requester_scoped_provider_is_unavailable_on_workers_requesters_share(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    scope: WorkerScope | None,
+) -> None:
+    """Every requester's commands share a shared or unscoped worker, so no one's GitHub account is used there.
+
+    The token would sit in a sandbox another user's later command can read, so there is no token, no connect link,
+    and the status says why instead of offering a connection.
+    """
+    _connect(
+        manager,
+        _github_store("@alice:example.org"),
+        "alice-access",
+        _oauth_claims={"email": "alice@example.org"},
+        _oauth_claims_verified=True,
+    )
+    # An unscoped call's token names its routed worker; its tool target has no worker key.
+    tool_target = _tool_target("@alice:example.org", scope)
+    claims = WorkerClaims.from_worker_target(replace(tool_target, worker_key=tool_target.worker_key or "unscoped"))
+    assert claims is not None
+    alice = claims.to_worker_target()
+
+    result = _resolve(config, runtime_paths, manager, alice)
+    status = _status(config, runtime_paths, manager, alice)
+
+    assert result == Missing(None)
+    assert status == OAuthStatus(
+        provider="github",
+        display_name="GitHub",
+        connected=False,
+        account_label=None,
+        can_connect=False,
+        reset_required=False,
+        unavailable_reason="shared_worker",
+    )
+
+
+def test_status_without_a_worker_target_treats_it_as_unscoped(
     config: Config,
     runtime_paths: RuntimePaths,
     manager: CredentialsManager,
 ) -> None:
-    """On a shared agent, GitHub still uses the calling requester's own connection and never another requester's."""
+    """The global store serves agents without a worker scope, so its status follows the shared-worker rule too."""
     _connect(manager, _github_store("@alice:example.org"), "alice-access")
 
-    alice = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org", "shared"))
-    bob = _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"))
+    status = oauth_status(
+        "github",
+        None,
+        service="github",
+        config=config,
+        runtime_paths=runtime_paths,
+        credentials_manager=manager,
+    )
+
+    assert status is not None
+    assert (status.connected, status.can_connect, status.unavailable_reason) == (False, False, "shared_worker")
+
+
+def test_opt_in_uses_the_callers_account_on_a_shared_worker(
+    opted_in_config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """With `oauth_on_shared_workers`, a shared worker gets the calling requester's own connection, never another's."""
+    _connect(manager, _github_store("@alice:example.org"), "alice-access")
+
+    alice = _resolve(opted_in_config, runtime_paths, manager, _broker_target("@alice:example.org", "shared"))
+    bob = _resolve(opted_in_config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"))
     _connect(manager, _github_store("@bob:example.org"), "bob-access")
-    bob_connected = _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"))
+    bob_connected = _resolve(opted_in_config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"))
+    status = _status(opted_in_config, runtime_paths, manager, _broker_target("@alice:example.org", "shared"))
 
     assert alice == Token("alice-access")
     assert isinstance(bob, Missing)
     assert bob.connect_url is not None
     assert bob.connect_url.startswith(GITHUB_CONNECT_PREFIX)
     assert bob_connected == Token("bob-access")
+    assert status is not None
+    assert (status.connected, status.unavailable_reason, status.shared_worker_opt_in) == (True, None, True)
+
+
+def test_requester_scoped_status_on_a_private_worker_has_no_shared_worker_flags(
+    opted_in_config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """The opt-in only matters on shared workers: a private worker's status carries neither flag."""
+    _connect(manager, _github_store("@alice:example.org"), "alice-access")
+
+    status = _status(opted_in_config, runtime_paths, manager, _broker_target("@alice:example.org"))
+
+    assert status is not None
+    assert (status.connected, status.unavailable_reason, status.shared_worker_opt_in) == (True, None, False)
 
 
 def test_requester_scoped_provider_without_requester_has_no_token(
-    config: Config,
+    opted_in_config: Config,
     runtime_paths: RuntimePaths,
     manager: CredentialsManager,
 ) -> None:
     """A call without a requester has no GitHub connection to use, even when another requester has one."""
     _connect(manager, _github_store("@alice:example.org"), "alice-access")
 
-    result = _resolve(config, runtime_paths, manager, _broker_target(None, "shared"))
+    result = _resolve(opted_in_config, runtime_paths, manager, _broker_target(None, "shared"))
 
     # Without a requester there is no one to bind a connect token to, so the link is the generic authorize page.
     assert result == Missing(f"{PUBLIC_URL}/api/oauth/github/authorize")
@@ -524,6 +608,22 @@ def test_agent_scoped_provider_follows_the_worker_scope(
 
 
 @pytest.mark.usefixtures("demo_registry")
+def test_agent_scoped_provider_on_a_shared_worker_is_not_gated(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """The shared-worker rule is for requester-scoped providers; an agent's shared connection is its own scope."""
+    _connect(manager, _tool_target("@alice:example.org", "shared"), "shared-access", provider=_DEMO)
+
+    status = _status(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"), provider_id="demo")
+
+    assert status is not None
+    assert (status.connected, status.can_connect) == (True, True)
+    assert (status.unavailable_reason, status.shared_worker_opt_in) == (None, False)
+
+
+@pytest.mark.usefixtures("demo_registry")
 def test_scoped_worker_never_reads_the_unscoped_store(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -575,8 +675,8 @@ def test_status_reports_connection_without_refreshing(
     )
     presented = serve_token_endpoint(monkeypatch, [])
 
-    alice = _status(config, runtime_paths, manager, _broker_target("@alice:example.org", "shared"))
-    bob = _status(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"))
+    alice = _status(config, runtime_paths, manager, _broker_target("@alice:example.org"))
+    bob = _status(config, runtime_paths, manager, _broker_target("@bob:example.org"))
 
     assert alice == OAuthStatus(
         provider="github",
@@ -607,14 +707,12 @@ def test_status_with_a_service_account_matches_what_the_broker_injects(
     monkeypatch.setattr(oauth_source, "oauth_provider_service_account_configured", lambda *_args: True)
     _connect(manager, _github_store("@alice:example.org"), "alice-access", expires_at=FUTURE)
 
-    alice = _status(config, runtime_paths, manager, _broker_target("@alice:example.org", "shared"))
-    bob = _status(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared"))
+    alice = _status(config, runtime_paths, manager, _broker_target("@alice:example.org"))
+    bob = _status(config, runtime_paths, manager, _broker_target("@bob:example.org"))
 
     assert alice is not None
     assert (alice.service_account, alice.connected, alice.can_connect) == (True, True, False)
     assert bob is not None
     assert (bob.service_account, bob.connected, bob.can_connect) == (True, False, False)
-    assert _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org", "shared")) == Token(
-        "alice-access",
-    )
-    assert _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org", "shared")) == Missing(None)
+    assert _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org")) == Token("alice-access")
+    assert _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org")) == Missing(None)
