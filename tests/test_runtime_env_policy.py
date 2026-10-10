@@ -594,7 +594,10 @@ def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_ide
 
 def test_computer_origins_remain_primary_runtime_configuration() -> None:
     """Browser origin policy must not enter worker startup or execution env."""
-    env = {"MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]'}
+    env = {
+        "MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]',
+        "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://chat.example.org"]',
+    }
     assert runtime_env_policy.public_worker_startup_env(env) == {}
     assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
     assert runtime_env_policy.worker_extra_env(env) == {}
