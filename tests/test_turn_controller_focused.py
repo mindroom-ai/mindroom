@@ -1987,6 +1987,39 @@ async def test_router_voice_echo_for_a_bot_account_is_display_only(tmp_path: Pat
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("sender_name", [ROUTER_AGENT_NAME, "research"])
+@pytest.mark.parametrize("skip_mentions", [True, False])
+async def test_moved_thread_copy_that_names_an_agent_starts_no_turn(
+    config: Config,
+    tmp_path: Path,
+    sender_name: str,
+    skip_mentions: bool,
+) -> None:
+    """A copied message that names an agent wakes it unless the copy carries the mention guard."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+    event = _text_event(
+        "@general could you help with this?",
+        event_id="$moved-copy:localhost",
+        thread_id=_THREAD_ROOT,
+        sender=_entity_user_id(config, sender_name),
+    )
+    content = event.source["content"]
+    content["m.mentions"] = {}
+    if skip_mentions:
+        content[constants.SKIP_MENTIONS_KEY] = True
+    if sender_name == ROUTER_AGENT_NAME:
+        content[constants.ORIGINAL_SENDER_KEY] = _SENDER
+
+    await harness.deliver(room, event)
+
+    # Without the guard the agent wakes, and the relay sender, never the original human, is the requester.
+    expected_requesters = [] if skip_mentions else [_entity_user_id(config, sender_name)]
+    assert [request.user_id for request in harness.runner.requests] == expected_requesters
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_a_file_that_ignores_mentions_keeps_the_mention_in_text_batched_with_it(
     config: Config,
     tmp_path: Path,

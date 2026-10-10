@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.state import resolve_room_id
+from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
 if TYPE_CHECKING:
@@ -168,3 +169,31 @@ async def resolve_canonical_tool_thread_target(
         requested_thread_id=requested_thread_id,
         canonical_thread_id=canonical_thread_id,
     )
+
+
+async def resolve_current_room_thread_root(
+    context: ToolRuntimeContext,
+    thread_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Return the root of one thread in the current room, or why none resolves.
+
+    The active thread is already its root; an explicit thread root or reply
+    event ID resolves through the thread's relations and fails closed.
+    """
+    if thread_id is None:
+        if context.resolved_thread_id is None:
+            return None, "thread_id is required when no active thread context is available."
+        return context.resolved_thread_id, None
+    target = await resolve_canonical_tool_thread_target(
+        context,
+        room_id=context.room_id,
+        thread_id=thread_id,
+        normalize_thread_id=lambda room_id, event_id: resolve_thread_root_event_id_for_client(
+            context.client,
+            room_id,
+            event_id,
+            relations=context.relations,
+        ),
+        fail_closed_on_normalization_error=True,
+    )
+    return target.canonical_thread_id, target.error

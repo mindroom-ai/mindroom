@@ -165,6 +165,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import FrameType
 
+    import nio
+
     from mindroom.config_reload import ConfigReloadStatus
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
@@ -1476,6 +1478,13 @@ class _MultiAgentOrchestrator:
         if router_bot is None or router_bot.client is None:
             return None
         return build_hook_matrix_admin(router_bot.client, self.runtime_paths, config=self.config)
+
+    def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
+        """Return the Matrix client of one running managed entity."""
+        bot = self.agent_bots.get(entity_name)
+        if bot is None or not bot.running:
+            return None
+        return bot.client
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
