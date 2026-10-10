@@ -40,6 +40,7 @@ _HOP_BY_HOP = {
 # Percent-decoding rounds checked for dot segments; a path still changing after these is refused outright.
 _MAX_DECODE_LAYERS = 4
 _SEGMENT_SEPARATORS = re.compile(r"[/\\]")
+_SEGMENT_TAIL = re.compile(r"[;?#]")
 
 
 @dataclass(frozen=True)
@@ -136,9 +137,13 @@ def path_matches(prefix: str, path: str) -> bool:
 def _has_dot_segment(path: str) -> bool:
     """Return whether any segment between slashes or backslashes is ``.`` or ``..``.
 
-    ``;`` parameters and surrounding whitespace are removed first, as lenient servers read ``..;`` or ``..%20``.
+    Anything from ``;``, ``?``, or ``#`` on and surrounding whitespace are removed first, as lenient servers read
+    ``..;`` or ``..%20``, and a server that decodes and re-parses reads ``..%3f`` as ``..`` plus a query.
     """
-    return any(segment.partition(";")[0].strip() in {".", ".."} for segment in _SEGMENT_SEPARATORS.split(path))
+    return any(
+        _SEGMENT_TAIL.split(segment, maxsplit=1)[0].strip() in {".", ".."}
+        for segment in _SEGMENT_SEPARATORS.split(path)
+    )
 
 
 def is_ambiguous_path(path: str) -> bool:

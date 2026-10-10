@@ -514,7 +514,7 @@ The broker returns these errors to worker code:
 | Plain HTTP request matching a rule | 403 JSON `{"error": "tls_required", "service": "<name>"}` |
 | `Host` header inside an intercepted tunnel naming a different host than the CONNECT target | 403 JSON `{"error": "host_mismatch"}` |
 | Non-origin-form request target (absolute, authority, or asterisk form) inside an intercepted tunnel | 400 JSON `{"error": "bad_request"}` |
-| Path on a host with rules with empty segments or backslashes, or with a dot segment, NUL, or invalid UTF-8 in it or any percent-decoded form of it | 400 JSON `{"error": "bad_request"}` |
+| Path on a host with rules with empty segments or raw backslashes, or with a dot segment, NUL, or invalid UTF-8 in it or any percent-decoded form of it | 400 JSON `{"error": "bad_request"}` |
 | Path no rule matches on a host where a service sets `restrict_to_rules` | 403 JSON `{"error": "path_not_allowed"}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked"}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed"}` with service list hint |
