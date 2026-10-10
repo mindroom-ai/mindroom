@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.claude_wire_blocks import (
@@ -13,11 +15,25 @@ from mindroom.claude_wire_blocks import (
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 
 if TYPE_CHECKING:
+    from agno.metrics import MessageMetrics
     from agno.models.response import ModelResponse
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
+_TOKEN_COUNTERS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+    "audio_total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+)
+# Usage from message_start of the Claude stream this task is reading; a task reads one stream at a time.
+_STREAM_START_USAGE: ContextVar[MessageMetrics | None] = ContextVar("claude_stream_start_usage", default=None)
 
 # AGNO_COMPAT: Claude requests include unsupported sampling controls.
 # Reason: Agno 3.0.9 moves sampling controls into extra_body even for current
@@ -38,9 +54,20 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # another stable terminal-metadata interface.
 # Coverage: tests/test_compaction_summary_provider_compat.py::test_summary_uses_stop_reason_and_raw_body_precedence.
 
+# AGNO_COMPAT: Claude streams report usage only when they complete.
+# Reason: Agno 3.0.9 reads stream usage only from the final message_stop snapshot, although
+# Anthropic reports input and cache usage in message_start. A reply stopped before message_stop
+# records no usage for that request, though Anthropic bills the input and cache tokens it reported.
+# Upstream issue: Tracking gap; no issue identified.
+# Upstream PR: None identified.
+# Remove when: The pinned Agno parser reports message_start usage and counts only the remainder
+# when the final usage arrives.
+# Coverage: tests/test_claude_stream_usage.py::test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start;
+# tests/test_claude_stream_usage.py::test_completed_claude_stream_counts_its_usage_once.
+
 
 class ClaudeProviderSDKCompat:
-    """Sanitize Agno-built requests and preserve terminal metadata."""
+    """Sanitize Agno-built requests, preserve terminal metadata, and count stream usage as it is reported."""
 
     id: str
 
@@ -76,6 +103,34 @@ class ClaudeProviderSDKCompat:
             **kwargs,
         )
         parsed.provider_data = {**(parsed.provider_data or {}), "stop_reason": response.stop_reason}
+        return parsed
+
+    def _parse_provider_response_delta(
+        self,
+        response: object,
+        response_format: dict[str, Any] | type[Any] | None = None,
+    ) -> ModelResponse:
+        # Only Claude models parse these events, so the provider SDK is already loaded.
+        from anthropic.types import RawMessageStartEvent  # noqa: PLC0415
+        from anthropic.types.beta import BetaRawMessageStartEvent  # noqa: PLC0415
+
+        parsed = super()._parse_provider_response_delta(  # ty: ignore[unresolved-attribute]
+            response,
+            response_format=response_format,
+        )
+        if isinstance(response, (RawMessageStartEvent, BetaRawMessageStartEvent)):
+            start = self._get_metrics(response.message.usage)  # ty: ignore[unresolved-attribute]
+            _STREAM_START_USAGE.set(start)
+            parsed.response_usage = start
+            return parsed
+        start = _STREAM_START_USAGE.get()
+        final = parsed.response_usage
+        if start is not None and final is not None:
+            _STREAM_START_USAGE.set(None)
+            parsed.response_usage = replace(
+                final,
+                **{name: getattr(final, name) - getattr(start, name) for name in _TOKEN_COUNTERS},
+            )
         return parsed
 
 
