@@ -40,6 +40,7 @@ from mindroom.background_tasks import (
     run_coroutine_until_complete,
     wait_for_future_until_complete,
 )
+from mindroom.budgets.monitor import budget_model
 from mindroom.claude_prompt_cache import (
     aclose_anthropic_async_client,
     arefresh_session_backed_bedrock_async_client,
@@ -484,8 +485,17 @@ async def build_call_tools(
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
+    if enable_responder and active_model_name is not None:
+        active_model_name = budget_model(
+            config,
+            runtime_paths,
+            context.budget_monitor,
+            requester_id,
+            active_model_name,
+        )
     context = replace(
         context,
+        active_model_name=active_model_name,
         tool_function_filter=functools.partial(
             _function_available_during_call,
             config=config,

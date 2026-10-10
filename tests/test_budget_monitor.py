@@ -374,7 +374,8 @@ async def test_rescans_wait_for_the_minimum_interval(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_idle_tick_rescans_when_the_month_rolls_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_idle_tick_rescans_usage_no_reply_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Voice calls and helpers add spend without a finished reply, so the tick rescans on its own."""
     scans = _Scans(monkeypatch, {ALICE: 12.0})
     clock = _Clock()
     monitor = BudgetMonitor(
@@ -385,14 +386,10 @@ async def test_idle_tick_rescans_when_the_month_rolls_over(tmp_path: Path, monke
         tick_seconds=0.05,
     )
     monitor.sync()
-    await _until(lambda: scans.calls == 1)
-    await _quiet()
-    assert scans.calls == 1
+    await _until(lambda: scans.calls >= 2)
 
     clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
-    await _until(lambda: scans.calls == 2)
-
-    snapshot = monitor.status().snapshot
-    assert snapshot is not None
-    assert snapshot.period_start == date(2026, 11, 1)
+    await _until(
+        lambda: (snapshot := monitor.status().snapshot) is not None and snapshot.period_start == date(2026, 11, 1),
+    )
     await monitor.stop()

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MIN_SCAN_INTERVAL_SECONDS = 30.0
-# Activity rescans on its own; the tick only notices a new month while the runtime is idle.
+# Finished replies rescan sooner; the tick also catches voice calls, helpers, and a new month.
 _TICK_SECONDS = 300.0
 
 
@@ -238,8 +238,6 @@ class BudgetMonitor:
             config = self.config_provider()
             if config is None or config.budgets is None:
                 self._requested = False
-                continue
-            if not self._requested and self._current_snapshot() is not None:
                 continue
             if last_scan_started is not None:
                 delay = last_scan_started + self.min_scan_interval_seconds - time.monotonic()

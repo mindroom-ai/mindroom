@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, nullcontext
+from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -22,8 +23,9 @@ from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.invite_router import InviteRouterTools
 from mindroom.history.types import HistoryScope
@@ -935,7 +937,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
                 runtime_paths=runtime_paths,
                 target=target,
                 hook_registry=hook_registry,
-                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),
+                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler, budgets=None),
             )
 
         def build_execution_identity(
@@ -1027,7 +1029,7 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
                 relations=make_relation_lookup(),
                 conversation_reader=make_conversation_reader_mock(),
                 hook_registry=MagicMock(),
-                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),  # type: ignore[arg-type]
+                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler, budgets=None),  # type: ignore[arg-type]
                 active_model_name=active_model_name,
             )
             contexts.append(context)
@@ -1549,6 +1551,73 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
 
 
 @pytest.mark.asyncio
+async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A voice call must not keep an over-budget requester on a priced model."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="large")},
+        models={
+            "large": ModelConfig(provider="openai", id="large-model", pricing=ModelPricing(input=5, output=30)),
+            "cheap": ModelConfig(provider="openai", id="cheap-model"),
+        },
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0),
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    ai_calls: list[ResponseTurnContext] = []
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **kwargs: object) -> ToolRuntimeContext:
+            context = _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
+            return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
+
+        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace()
+
+        async def run_in_context(
+            self,
+            *,
+            tool_context: ToolRuntimeContext,
+            operation: Callable[[], Awaitable[str]],
+        ) -> str:
+            assert tool_context.active_model_name == "cheap"
+            return await operation()
+
+    async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    async def fake_ai_response(turn: ResponseTurnContext, **_kwargs: object) -> str:
+        ai_calls.append(turn)
+        return "answer"
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        MagicMock(return_value=SimpleNamespace(additional_context="", model=None)),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", MagicMock())
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+    )
+    assert tooling.responder is not None
+
+    await tooling.responder("hello", None)
+
+    assert [turn.active_model_name for turn in ai_calls] == ["cheap"]
+    assert tooling.close is not None
+    await tooling.close()
+
+
+@pytest.mark.asyncio
 async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1558,7 +1627,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     runtime_paths = test_runtime_paths(tmp_path)
     first_scheduler = object()
     second_scheduler = object()
-    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler)
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler, budgets=None)
     execution_identity = SimpleNamespace()
     ready_knowledge = SimpleNamespace(vector_db=None)
     resolver_calls: list[dict[str, object]] = []

@@ -58,13 +58,13 @@ It includes the user's agent and team replies, delegated agents, and helper work
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 Gemini thinking tokens are charged at the output price.
 Audio tokens, internal work with no requester (`system:internal`), and usage without a date or requester are not charged.
-Spend updates within about a minute of a reply finishing, so a user can go slightly over their cap before the fallback applies.
+Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
 A reply that already started finishes on its model.
 
 ## Over-Budget Replies
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
-This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
+This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, voice call replies, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
 Models without prices keep running, because they add no spend.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
 Requests without a human requester, such as unauthenticated OpenAI-compatible calls, are never budgeted.
