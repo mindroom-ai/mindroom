@@ -294,6 +294,7 @@ async def test_call_agent_cache_build_cancellation_reclaims_completed_agent(
             knowledge=None,
             knowledge_identity=(),
             refresh_scheduler=None,
+            active_model_name=cache.active_model_name,
         ),
     )
     try:
@@ -370,6 +371,7 @@ async def test_call_agent_cache_refreshes_session_client_before_reused_turn(
                 knowledge=None,
                 knowledge_identity=(),
                 refresh_scheduler=None,
+                active_model_name=cache.active_model_name,
                 operation=_use_client,
             )
             == "ok"
@@ -379,6 +381,7 @@ async def test_call_agent_cache_refreshes_session_client_before_reused_turn(
                 knowledge=None,
                 knowledge_identity=(),
                 refresh_scheduler=None,
+                active_model_name=cache.active_model_name,
                 operation=_use_client,
             )
             == "ok"
@@ -431,6 +434,7 @@ async def test_call_agent_cache_prewarms_and_reuses_anthropic_async_client(
             knowledge=None,
             knowledge_identity=(),
             refresh_scheduler=None,
+            active_model_name=cache.active_model_name,
         )
         first_client = cached_agent.model.get_async_client()
         second_client = cached_agent.model.get_async_client()
@@ -471,6 +475,7 @@ async def test_call_agent_cache_closes_prewarmed_async_client_on_aclose(
         knowledge=None,
         knowledge_identity=(),
         refresh_scheduler=None,
+        active_model_name=cache.active_model_name,
     )
     async_client = vars(model)["async_client"]
     try:
@@ -515,6 +520,7 @@ async def test_call_agent_cache_closes_prewarmed_async_client_on_replacement(
         knowledge=None,
         knowledge_identity=(1,),
         refresh_scheduler=None,
+        active_model_name=cache.active_model_name,
     )
     first_async_client = vars(first_model)["async_client"]
     second_async_client = None
@@ -523,6 +529,7 @@ async def test_call_agent_cache_closes_prewarmed_async_client_on_replacement(
             knowledge=None,
             knowledge_identity=(2,),
             refresh_scheduler=None,
+            active_model_name=cache.active_model_name,
         )
         second_async_client = vars(second_model)["async_client"]
 
@@ -1613,6 +1620,93 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
     await tooling.responder("hello", None)
 
     assert [turn.active_model_name for turn in ai_calls] == ["cheap"]
+    assert tooling.close is not None
+    await tooling.close()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_crosses_the_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each new voice reply must check the budget again, not keep the model from call setup."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="large")},
+        models={
+            "large": ModelConfig(provider="openai", id="large-model", pricing=ModelPricing(input=5, output=30)),
+            "cheap": ModelConfig(provider="openai", id="cheap-model"),
+        },
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=10),
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    spend = {"usd": 0.0}
+
+    class _Monitor:
+        def _spend_usd(self, _user_id: str) -> float:
+            return spend["usd"]
+
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=None, budgets=_Monitor())
+    turn_models: list[str | None] = []
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **kwargs: object) -> ToolRuntimeContext:
+            context = _runtime_context(
+                config=config,
+                runtime_paths=runtime_paths,
+                target=target,
+                orchestrator=orchestrator,
+            )
+            return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
+
+        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace()
+
+        async def run_in_context(
+            self,
+            *,
+            tool_context: ToolRuntimeContext,
+            operation: Callable[[], Awaitable[str]],
+        ) -> str:
+            turn_models.append(tool_context.active_model_name)
+            return await operation()
+
+    async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    ai_models: list[str | None] = []
+
+    async def fake_ai_response(turn: ResponseTurnContext, **_kwargs: object) -> str:
+        ai_models.append(turn.active_model_name)
+        return "answer"
+
+    create_agent_mock = MagicMock(
+        side_effect=lambda *_args, **_kwargs: SimpleNamespace(additional_context="", model=None),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", MagicMock())
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+    )
+    assert tooling.responder is not None
+
+    first = await tooling.responder("first", None)
+    assert tooling.finalize_spoken_response is not None
+    assert tooling.finalize_spoken_response(first.turn_id, first.text, False) is None
+    spend["usd"] = 12.0
+    await tooling.responder("second", None)
+
+    assert ai_models == ["large", "cheap"]
+    assert turn_models == ["large", "cheap"]
+    assert [call.kwargs["active_model_name"] for call in create_agent_mock.call_args_list] == ["large", "cheap"]
     assert tooling.close is not None
     await tooling.close()
 
