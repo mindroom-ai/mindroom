@@ -50,6 +50,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
@@ -929,6 +930,37 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     gateway.edit_text.assert_awaited_once()
     assert gateway.edit_text.await_args.args[0].event_id == "$thinking"
     assert gateway.edit_text.await_args.args[0].new_text == "hooked final body"
+
+
+@pytest.mark.asyncio
+async def test_after_response_receives_the_reply_tool_trace(tmp_path: Path) -> None:
+    """after_response hooks see the tool calls that produced the delivered reply."""
+    traces_seen: list[tuple[ToolTraceEntry, ...]] = []
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def after(ctx: AfterResponseContext) -> None:
+        traces_seen.append(ctx.result.tool_trace)
+
+    registry = HookRegistry.from_plugins([_plugin("test-after-tool-trace", [after])])
+    _config_value, response_hooks = _response_hook_service(tmp_path, registry)
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-trace")
+    search = ToolTraceEntry(type="tool_call_completed", tool_name="web_search", args_preview='{"query": "cafes"}')
+
+    await lifecycle.finalize(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$reply",
+            is_visible_response=True,
+            final_visible_body="Try Café Noir.",
+            delivery_kind="sent",
+            tool_trace=(search,),
+        ),
+        build_post_response_outcome=lambda _delivered: ResponseOutcome(),
+        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+    )
+
+    assert traces_seen == [(search,)]
+    assert traces_seen[0][0] is not search
 
 
 @pytest.mark.asyncio

@@ -414,6 +414,7 @@ async def test_downstream_hook_sends_advance_existing_message_received_depth(
                 delivery_kind="sent",
                 response_kind="ai",
                 envelope=envelope,
+                tool_trace=(),
             ),
             **base_kwargs,
         )
@@ -491,6 +492,7 @@ async def test_non_message_hook_dispatch_starts_synthetic_chain_at_depth_one(
                 delivery_kind="sent",
                 response_kind="ai",
                 envelope=envelope,
+                tool_trace=(),
             ),
             **base_kwargs,
         )
