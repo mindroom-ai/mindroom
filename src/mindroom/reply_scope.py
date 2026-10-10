@@ -22,7 +22,14 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.event_journal.replies import AppliedTransition, ApprovalEnded, Decide, ReplyCreation, TurnCompleted
+from mindroom.event_journal.replies import (
+    AppliedTransition,
+    ApprovalEnded,
+    Decide,
+    ReplyCreation,
+    TurnCompleted,
+    WakeApproval,
+)
 from mindroom.logging_config import get_logger
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -274,7 +281,7 @@ class ReplyRuntime:
         for effect in effects:
             if isinstance(effect, TurnCompleted):
                 await self.complete_turn(effect.record)
-            elif isinstance(effect, rl.WakeApproval):
+            elif isinstance(effect, WakeApproval):
                 await self._wake_fenced_approval(effect.approval_id)
             elif isinstance(effect, ApprovalEnded):
                 self.claim_may_proceed(effect.reply_id)

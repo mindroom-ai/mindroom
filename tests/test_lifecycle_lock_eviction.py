@@ -91,8 +91,9 @@ async def test_an_approval_hold_keeps_its_conversation_busy_without_taking_its_l
     coordinator = ResponseLifecycleCoordinator()
     targets = _fill_lock_table(coordinator)
     held = targets[0]
-    assert coordinator.hold_for_approval("approval-1", held)
-    assert not coordinator.hold_for_approval("approval-1", held)
+    coordinator.hold_for_approval("approval-1", held)
+    # Holding again changes nothing: one release frees the conversation.
+    coordinator.hold_for_approval("approval-1", held)
     assert coordinator.is_held_for_approval(held)
     assert coordinator.has_active_response_for_target(held)
     assert not coordinator.is_held_for_approval(targets[1])

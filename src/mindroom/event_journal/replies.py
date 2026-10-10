@@ -22,7 +22,6 @@ from mindroom.reply_lifecycle import (
     SettleSources,
     Span,
     Transition,
-    WakeApproval,
 )
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
@@ -45,6 +44,13 @@ class TurnCompleted:
     """After commit: the turn ledger learns a turn a reply's settlement recorded answered."""
 
     record: TurnRecord
+
+
+@dataclass(frozen=True, slots=True)
+class WakeApproval:
+    """After commit: wake the source of an approval a transition fenced, so its failure settlement runs."""
+
+    approval_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +156,8 @@ def _run(
                 post_commit.append(TurnCompleted(completed))
         case FenceApproval(approval_id=approval_id, disposition=disposition):
             approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
-        case CancelSpan() | WakeApproval():
+            post_commit.append(WakeApproval(approval_id))
+        case CancelSpan():
             post_commit.append(effect)
         case _:
             msg = f"Reply effect {effect!r} has no transactional owner yet"

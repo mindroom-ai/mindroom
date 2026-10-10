@@ -85,13 +85,7 @@ class _FinalizedVisibleEcho:
 
 @dataclass
 class TurnStore:
-    """Own durable turn state and absent-record history import for one entity.
-
-    A present handled-turn ledger row owns the complete record. Agno run
-    metadata supplies a candidate only when the requested identity is absent.
-    Import publication waits for conflicting writes and returns any record that
-    acquired the requested identity while metadata was loading.
-    """
+    """Own durable turn state for one entity; its handled-turn ledger row owns the complete record."""
 
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)

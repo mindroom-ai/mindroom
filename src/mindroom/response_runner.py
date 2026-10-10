@@ -1519,12 +1519,9 @@ class ResponseRunner:
                     task.cancel()
             await asyncio.gather(admission_opened, shutdown_requested, return_exceptions=True)
 
-    def _show_tool_calls(self, agent_name: str | None = None) -> bool:
-        """Return tool-call visibility for the current or target agent."""
-        return show_tool_calls_for_agent(
-            self.deps.runtime.config,
-            agent_name or self.deps.agent_name,
-        )
+    def _show_tool_calls(self) -> bool:
+        """Return tool-call visibility for this agent."""
+        return show_tool_calls_for_agent(self.deps.runtime.config, self.deps.agent_name)
 
     async def _failed_approval_handoff(
         self,

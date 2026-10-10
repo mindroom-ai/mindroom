@@ -70,6 +70,15 @@ def _table_query(postgres: bool, table: str) -> str:
     )
 
 
+def _columns(database: _LegacyDatabase, table: str) -> set[str]:
+    sql = (
+        f"SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}'"  # noqa: S608
+        if database.postgres
+        else f"SELECT name FROM pragma_table_info('{table}')"  # noqa: S608
+    )
+    return {str(row[0]) for row in database.query(sql)}
+
+
 # A card and a call of the pending approval, as approval cards and calls were kept before the upgrade.
 _CARD_AND_CALL = """
 INSERT INTO approval_cards VALUES ('@router:example.org', '$card', 'approval', 0, 'call', 7);
@@ -104,6 +113,8 @@ async def test_an_approval_an_earlier_release_left_pending_is_cancelled(
             await store.close()
         assert legacy_database.query("SELECT * FROM approval_cards") == []
         assert legacy_database.query("SELECT * FROM approval_continuation_calls") == []
+        # The emptied call table comes back with the columns the earlier release lacked.
+        assert {"toolkit_name", "arguments_digest"} <= _columns(legacy_database, "approval_continuation_calls")
 
 
 @pytest.mark.asyncio

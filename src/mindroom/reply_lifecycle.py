@@ -244,7 +244,11 @@ class SettleSources:
 
 @dataclass(frozen=True, slots=True)
 class FenceApproval:
-    """In the transaction: fence the reply's approval continuation for failure."""
+    """In the transaction: fence the reply's approval continuation for failure; after commit, wake its source.
+
+    The source's worker then runs the failure settlement, which expires the
+    approval's cards.
+    """
 
     approval_id: str
     disposition: FailureDisposition
@@ -259,14 +263,7 @@ class CancelSpan:
     by_stop: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class WakeApproval:
-    """After commit: wake the approval source so its failure settlement runs."""
-
-    approval_id: str
-
-
-type Effect = SettleSources | FenceApproval | CancelSpan | WakeApproval
+type Effect = SettleSources | FenceApproval | CancelSpan
 
 
 @dataclass(frozen=True, slots=True)
@@ -518,7 +515,7 @@ def _unmodeled(reply: Reply, span: Span | None, *, reason: str, now_ns: int) -> 
         updated = _clear_current(updated, span.span_id)
         effects.append(CancelSpan(span.span_id))
     if reply.approval_id is not None:
-        effects += [FenceApproval(reply.approval_id, "failed"), WakeApproval(reply.approval_id)]
+        effects.append(FenceApproval(reply.approval_id, "failed"))
     else:
         effects.append(SettleSources(reply.last_span_id))
     owed = OwedWrite(reply.last_span_id, NoteKind.ERROR, _UNMODELED_ERROR_TEXT)
@@ -681,8 +678,7 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
             if reply is not None and reply.approval_id == request.approval_id:
                 return ended
             # The approval that asked to resume fails too, so its recovery does not retry it forever.
-            failing = (FenceApproval(request.approval_id, "failed"), WakeApproval(request.approval_id))
-            return replace(ended, effects=(*ended.effects, *failing))
+            return replace(ended, effects=(*ended.effects, FenceApproval(request.approval_id, "failed")))
         span = _new_span(request, reply, SpanKind.APPROVAL_RESUME)
         return claimed(_make_current(_set_state(reply, ReplyState.ACTIVE, request.now_ns), span, request.now_ns), span)
 
@@ -928,9 +924,8 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
         owed = OwedWrite(span.span_id, NoteKind.APPROVAL_FAILED)
         updated = _set_state(updated, ReplyState.FAILED, now_ns)
         disposition = "failed"
-    effects.insert(0, FenceApproval(reply.approval_id, disposition))
     # Its cards are live: the approval runtime's failure settlement expires them.
-    effects.append(WakeApproval(reply.approval_id))
+    effects.insert(0, FenceApproval(reply.approval_id, disposition))
     return Transition(
         outcome=Outcome.APPLIED,
         reply=replace(updated, owed_write=owed),
@@ -1420,11 +1415,12 @@ def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> T
         # settlement ends the reply.
         if reply.approval_id is None:
             return _unmodeled(recorded, unended, reason="stop_on_an_unheld_approval_reply", now_ns=now_ns)
-        effects: list[Effect] = [FenceApproval(reply.approval_id, "cancelled_by_user")]
-        if live is not None:
-            effects.append(CancelSpan(live.span_id, by_stop=True))
-        effects.append(WakeApproval(reply.approval_id))
-        return Transition(outcome=Outcome.APPLIED, reply=recorded, effects=tuple(effects))
+        cancel = () if live is None else (CancelSpan(live.span_id, by_stop=True),)
+        return Transition(
+            outcome=Outcome.APPLIED,
+            reply=recorded,
+            effects=(FenceApproval(reply.approval_id, "cancelled_by_user"), *cancel),
+        )
     if live is not None:
         return Transition(outcome=Outcome.APPLIED, reply=recorded, effects=(CancelSpan(live.span_id, by_stop=True),))
     # No span is running: the Stop applies directly. A span nobody runs any
@@ -1560,7 +1556,7 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
             outcome=Outcome.APPLIED,
             reply=_gone(updated, now_ns),
             spans=spans,
-            effects=(FenceApproval(reply.approval_id, "cancelled_by_user"), *cancel, WakeApproval(reply.approval_id)),
+            effects=(FenceApproval(reply.approval_id, "cancelled_by_user"), *cancel),
         )
     # A regeneration a restart or retry left waiting for its replay still holds the answer it would replace.
     waiting = span if not live and span is not None and span.outcome in _SOURCES_PENDING_OUTCOMES else None

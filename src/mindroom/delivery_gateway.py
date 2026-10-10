@@ -795,7 +795,6 @@ class DeliveryGateway:
         claimed: MatrixDelivery,
         *,
         retry_sync_recovery: bool,
-        operation: str = "send_message",
     ) -> DeliveredMatrixEvent:
         """Send one claimed delivery exactly as it was frozen, continuations included.
 
@@ -812,7 +811,7 @@ class DeliveryGateway:
             _reply_row_wire_content(claimed),
             transaction_id=claimed.transaction_id,
             what="delivery",
-            operation="edit_message" if claimed.edits_event_id is not None else operation,
+            operation="edit_message" if claimed.edits_event_id is not None else "send_message",
             retry_sync_recovery=retry_sync_recovery,
         )
         for index, continuation in enumerate(_continuation_payloads(claimed.result), start=1):
@@ -2573,7 +2572,7 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
             return await self._finalize_streamed_response(request)
 
-    async def _finalize_interrupted_stream(  # noqa: PLR0911
+    async def _finalize_interrupted_stream(
         self,
         request: FinalizeStreamedResponseRequest,
         *,
@@ -2610,13 +2609,12 @@ class DeliveryGateway:
                     stream_outcome=stream_outcome,
                     failure_reason=failure_reason,
                 )
-            cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
+            # The reply's records remove the placeholder; nothing stays visible.
+            await self._cleanup_completed_placeholder_only_stream(
                 failure_reason=failure_reason,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )
-            if cleanup_outcome.event_id is not None:
-                return replace(cleanup_outcome, cancel_source=cancel_source)
             return outcome(event_id=None)
         if stream_outcome.visible_event_id is not None:
             return outcome(
@@ -2726,26 +2724,12 @@ class DeliveryGateway:
                     )
 
             if stream_outcome.failure_reason is not None and stream_outcome.visible_body_state != "visible_body":
-                failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
-                if (
-                    request.initial_delivery_kind == "edited"
-                    and streamed_event_id is not None
-                    and visible_stream_event_id is None
-                ):
+                failure_reason = stream_outcome.failure_reason
+                if request.initial_delivery_kind == "edited" and streamed_event_id is not None:
                     return FinalDeliveryOutcome(
                         terminal_status="error",
                         event_id=streamed_event_id,
                         is_visible_response=True,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-                if visible_stream_event_id is not None:
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=visible_stream_event_id,
-                        is_visible_response=True,
-                        final_visible_body=streamed_text or None,
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -2759,25 +2743,11 @@ class DeliveryGateway:
                 )
 
             if stream_outcome.visible_body_state != "visible_body":
-                if (
-                    request.initial_delivery_kind == "edited"
-                    and not request.existing_event_is_placeholder
-                    and stream_outcome.visible_body_state == "none"
-                ):
-                    existing_visible_event_id = request.existing_event_id or streamed_event_id
-                    if existing_visible_event_id is not None:
-                        return FinalDeliveryOutcome(
-                            terminal_status="error",
-                            event_id=existing_visible_event_id,
-                            is_visible_response=True,
-                            failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
-                            tool_trace=tuple(request.tool_trace or ()),
-                            extra_content=request.extra_content,
-                        )
+                # An edited stream that showed nothing below an answer already returned above.
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=None,
-                    failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+                    failure_reason="stream_completed_without_visible_body",
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )

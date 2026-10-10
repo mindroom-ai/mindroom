@@ -68,32 +68,6 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
     transaction.execute("UPDATE visible_messages SET membership_epoch = 0 WHERE membership_epoch != 0")
 
 
-# LEGACY_COMPAT: Approval calls without persisted toolkit origins.
-# Legacy format: approval_continuation_calls without a toolkit_name column, written before per-call toolkit origins.
-# Last legacy release: v2026.9.139; replacement: v2026.9.140 added per-call toolkit_name storage.
-# Handling: Add the nullable column. The continuation upgrade runs first in the same transaction and cancels every
-# continuation an earlier release left, so no call without a recorded origin remains to resume.
-# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_an_earlier_release_left_pending_is_cancelled.
-def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozenset[str]) -> None:
-    """Add the toolkit origin column inside the schema transaction."""
-    if "toolkit_name" not in columns:
-        transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN toolkit_name TEXT")
-
-
-# LEGACY_COMPAT: Approval calls without persisted argument digests.
-# Legacy format: approval_continuation_calls without an arguments_digest column, written before per-call argument
-# digests.
-# Last legacy release: v2026.10.35; replacement: v2026.10.36 stores a SHA-256 digest of each paused call's
-# canonical arguments.
-# Handling: Add the nullable column. The continuation upgrade runs first in the same transaction and cancels every
-# continuation an earlier release left, so every remaining call records its digest.
-# Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_an_earlier_release_left_pending_is_cancelled.
-def upgrade_approval_argument_digests(transaction: Transaction, columns: frozenset[str]) -> None:
-    """Add the argument digest column inside the schema transaction."""
-    if "arguments_digest" not in columns:
-        transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN arguments_digest TEXT")
-
-
 _PRE_REPLY_OUTBOX_COLUMNS = (
     "principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id, "
     "payload_json, result_json, edits_event_id, edit_target_pending, attempted, retired, "

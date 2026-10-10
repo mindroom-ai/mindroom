@@ -17,8 +17,6 @@ from psycopg.rows import dict_row
 
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
-    upgrade_approval_argument_digests,
-    upgrade_approval_toolkit_origins,
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
 )
@@ -182,13 +180,6 @@ class PostgresBackend:
             upgrade_continuation_identity(_PostgresTransaction(cursor), existing_tables, continuation_columns)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
-            cursor.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'approval_continuation_calls'",
-            )
-            call_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
-            upgrade_approval_argument_digests(_PostgresTransaction(cursor), call_columns)
-            upgrade_approval_toolkit_origins(_PostgresTransaction(cursor), call_columns)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

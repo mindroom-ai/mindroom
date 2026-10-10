@@ -25,8 +25,6 @@ from mindroom.logging_config import get_logger
 
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
-    upgrade_approval_argument_digests,
-    upgrade_approval_toolkit_origins,
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
 )
@@ -210,11 +208,6 @@ class SqliteBackend:
             upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
-            call_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")
-            )
-            upgrade_approval_argument_digests(_SqliteTransaction(connection), call_columns)
-            upgrade_approval_toolkit_origins(_SqliteTransaction(connection), call_columns)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()

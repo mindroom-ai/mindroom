@@ -235,18 +235,17 @@ class ResponseLifecycleCoordinator:
     # A pending approval counts as an active response turn of its conversation, by approval.
     _approval_holds: dict[str, ResponseLifecycleKey] = field(default_factory=dict)
 
-    def hold_for_approval(self, approval_id: str, target: MessageTarget) -> bool:
-        """Keep a conversation busy while an approval of its reply is pending; return whether this hold is new.
+    def hold_for_approval(self, approval_id: str, target: MessageTarget) -> None:
+        """Keep a conversation busy while an approval of its reply is pending; holding it again changes nothing.
 
         Later messages wait as they wait behind a running response. The hold
         does not take the lifecycle lock, so the approval's own resume and
         settlement still run.
         """
         if approval_id in self._approval_holds:
-            return False
+            return
         self._approval_holds[approval_id] = target.lifecycle_key
         self._get_or_create_queued_signal(target).begin_response_turn()
-        return True
 
     def release_approval_hold(self, approval_id: str) -> None:
         """End the hold of an approval that ended, letting its conversation's waiting messages run."""

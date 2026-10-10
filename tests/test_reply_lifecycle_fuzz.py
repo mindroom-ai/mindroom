@@ -36,7 +36,6 @@ from mindroom.reply_lifecycle import (
     SpanSources,
     StopFacts,
     TerminalWrite,
-    WakeApproval,
     WriteFacts,
     WriteStage,
     _RowIntent,
@@ -237,9 +236,6 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self.model.cancel_requested.add(span_id)
             case FenceApproval(approval_id=approval_id, disposition=disposition):
                 self._fence(approval_id, disposition)
-            case WakeApproval():
-                # The wake only makes the settlement run sooner; the drain runs it regardless.
-                pass
             case _:
                 msg = f"unmodelled effect {effect!r}"
                 raise AssertionError(msg)

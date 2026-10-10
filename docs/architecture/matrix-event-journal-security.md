@@ -82,7 +82,7 @@ Specialized approval cleanup and withdrawal of a superseded, unattempted `INITIA
 `approval_cards` retains only the durable delivery reference, exact continuation and tool-call identity, and membership epoch while a card is actionable.
 
 `approval_continuations.context_json` may contain the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` required to resume an approved call.
-What the paused reply showed lives in its reply record (below); a continuation an earlier release wrote can still carry `response_text`, `response_presentation_state`, and `response_tool_trace` keys.
+What the paused reply showed lives in its reply record (below).
 The continuation is deleted after terminal delivery or cleanup, and a foreign-key cascade removes its calls.
 
 `reply_messages` keeps each AI reply's presentation in `presentation_json`, and what its latest progress edit may have shown in `possibly_shown_json`: the visible text, the tool trace, and structured team presentation state.
