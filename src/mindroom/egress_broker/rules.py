@@ -8,12 +8,15 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import quote, unquote, urlparse
 
-from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule  # noqa: TC001
+from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService  # noqa: TC001
 
 __all__ = [
+    "EgressRules",
     "Route",
     "RuleMatch",
+    "config_covers_rule",
     "host_has_rules",
+    "host_not_allowed",
     "inject_credentials",
     "is_ambiguous_path",
     "match_rule",
@@ -56,9 +59,9 @@ class Route:
     """How the broker handles one request, decided from the target host, port, and path alone.
 
     `match` names the rule whose service secret is injected. `refusal` is the error code when the request
-    is refused instead: `bad_request` (400) for an ambiguous path, `path_not_allowed` (403) for a path no rule
-    lists on a host restricted to its rules. With neither, the request is forwarded without credentials;
-    when `host_has_rules` is false no rule names the host at all, so `unmatched_hosts` decides.
+    is refused instead: `bad_request` (400) for an ambiguous path, `path_not_allowed` (403) for a path that a
+    restricted host's rules do not list (see `route_request`). With neither, the request is forwarded without
+    credentials; when `host_has_rules` is false no applicable rule names the host, so `unmatched_hosts` decides.
     """
 
     host_has_rules: bool
@@ -178,6 +181,52 @@ def host_has_rules(config: EgressBrokerConfig, host: str, port: int) -> bool:
     return any(_rule_applies(rule, host, port) for service in config.services.values() for rule in service.rules)
 
 
+def config_covers_rule(config: EgressBrokerConfig, rule: EgressRule) -> bool:
+    """Return whether `config` has a rule for every host and port that `rule` can match.
+
+    A wildcard rule is covered only by the same wildcard, and a rule for any port only by a rule for any port.
+    """
+    return any(
+        (covering.port is None or covering.port == rule.port) and _host_matches(covering.host, rule.host)
+        for service in config.services.values()
+        for covering in service.rules
+    )
+
+
+@dataclass(frozen=True)
+class EgressRules:
+    """The rules one requester's traffic matches: the operator's config and its merge with the scope's own services.
+
+    The scope's services can narrow operator policy, never widen it. Under `unmatched_hosts: deny` a user rule
+    applies only on hosts the operator's services name (`applicable`), and on a host where an operator service sets
+    `restrict_to_rules` only operator rules decide which paths are allowed (`route_request`). Top-level settings
+    come from the operator's config.
+    """
+
+    operator: EgressBrokerConfig
+    effective: EgressBrokerConfig
+
+    @classmethod
+    def from_config(cls, config: EgressBrokerConfig) -> EgressRules:
+        """Return the rules of a config without user services."""
+        return cls(operator=config, effective=config)
+
+    @property
+    def unmatched_hosts(self) -> Literal["passthrough", "deny"]:
+        """Return what happens to hosts without applicable rules, as the operator configured it."""
+        return self.operator.unmatched_hosts
+
+    def applicable(self, host: str, port: int) -> EgressBrokerConfig:
+        """Return the config whose rules apply on `host`:`port`: the operator's alone where `deny` keeps user rules out."""
+        if self.operator.unmatched_hosts == "deny" and not host_has_rules(self.operator, host, port):
+            return self.operator
+        return self.effective
+
+    def intercepts(self, host: str, port: int) -> bool:
+        """Return whether a CONNECT to `host`:`port` is intercepted: an applicable rule names it."""
+        return host_has_rules(self.applicable(host, port), host, port)
+
+
 def match_rule(config: EgressBrokerConfig, host: str, port: int, path: str) -> RuleMatch | None:
     """Find the best matching rule for the given request.
 
@@ -209,24 +258,38 @@ def match_rule(config: EgressBrokerConfig, host: str, port: int, path: str) -> R
     return RuleMatch(service=service_name, rule=rule)
 
 
-def route_request(config: EgressBrokerConfig, host: str, port: int, path: str) -> Route:
-    """Decide how to handle a request for `path` (origin-form, query removed) on `host`:`port`.
+def host_not_allowed(rules: EgressRules) -> dict[str, object]:
+    """Return the 403 body for a host `deny` refuses; it lists the operator's services, whose hosts are reachable."""
+    return {"error": "host_not_allowed", "services": list(rules.operator.services)}
 
-    Hosts without rules are left to `unmatched_hosts` whatever their path. On a host with rules,
-    an ambiguous path is refused before matching, so path tricks cannot select a different rule.
-    A path no rule matches is forwarded without credentials, unless a service with rules on this host
-    sets `restrict_to_rules`, in which case it is refused.
-    """
-    host = host.lower()
-    services_on_host = [
+
+def _services_on_host(config: EgressBrokerConfig, host: str, port: int) -> list[EgressService]:
+    return [
         service
         for service in config.services.values()
         if any(_rule_applies(rule, host, port) for rule in service.rules)
     ]
+
+
+def route_request(rules: EgressRules, host: str, port: int, path: str) -> Route:
+    """Decide how to handle a request for `path` (origin-form, query removed) on `host`:`port`.
+
+    Hosts without applicable rules are left to `unmatched_hosts` whatever their path. On a host with rules,
+    an ambiguous path is refused before matching, so path tricks cannot select a different rule. Where an operator
+    service on the host sets `restrict_to_rules`, a path no operator rule lists is refused whatever user rules say.
+    Otherwise the most specific applicable rule, operator's or user's, picks the credential. A path no rule matches
+    is forwarded without credentials, unless any service with rules on the host restricts it, then it is refused.
+    """
+    host = host.lower()
+    config = rules.applicable(host, port)
+    services_on_host = _services_on_host(config, host, port)
     if not services_on_host:
         return Route(host_has_rules=False)
     if is_ambiguous_path(path):
         return Route(host_has_rules=True, refusal="bad_request")
+    operator_restricts = any(service.restrict_to_rules for service in _services_on_host(rules.operator, host, port))
+    if operator_restricts and match_rule(rules.operator, host, port, path) is None:
+        return Route(host_has_rules=True, refusal="path_not_allowed")
     match = match_rule(config, host, port, path)
     if match is not None:
         return Route(host_has_rules=True, match=match)

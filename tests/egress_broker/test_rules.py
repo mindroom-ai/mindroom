@@ -14,7 +14,9 @@ from mindroom.config.egress_broker import (
     EgressService,
 )
 from mindroom.egress_broker.rules import (
+    EgressRules,
     Route,
+    config_covers_rule,
     host_has_rules,
     inject_credentials,
     is_ambiguous_path,
@@ -24,6 +26,11 @@ from mindroom.egress_broker.rules import (
     strip_request_headers,
     strip_response_headers,
 )
+
+
+def _route(config: EgressBrokerConfig, host: str, port: int, path: str) -> Route:
+    """Route a request against a config without user services."""
+    return route_request(EgressRules.from_config(config), host, port, path)
 
 
 def test_exact_host_beats_wildcard() -> None:
@@ -278,8 +285,8 @@ def test_route_matches_injects_and_forwards_unmatched_paths_without_restriction(
     """Without `restrict_to_rules`, an unmatched path on a rule host is forwarded without credentials."""
     config = _github_repo_config(restrict=False)
 
-    matched = route_request(config, "api.github.com", 443, "/repos/basnijholt/agent-cli/pulls")
-    unmatched = route_request(config, "API.GITHUB.COM", 443, "/repos/basnijholt/agent-cli-old")
+    matched = _route(config, "api.github.com", 443, "/repos/basnijholt/agent-cli/pulls")
+    unmatched = _route(config, "API.GITHUB.COM", 443, "/repos/basnijholt/agent-cli-old")
 
     assert matched.host_has_rules
     assert matched.match is not None
@@ -298,11 +305,11 @@ def test_route_refuses_ambiguous_paths_only_on_rule_hosts(path: str) -> None:
     """Ambiguous paths get 400 `bad_request` on hosts with rules; hosts without rules are left alone."""
     config = _github_repo_config(restrict=False)
 
-    refused = route_request(config, "api.github.com", 443, path)
+    refused = _route(config, "api.github.com", 443, path)
 
     assert refused == Route(host_has_rules=True, refusal="bad_request")
     assert refused.refusal_status == 400
-    assert route_request(config, "example.com", 443, path) == Route(host_has_rules=False)
+    assert _route(config, "example.com", 443, path) == Route(host_has_rules=False)
 
 
 def test_restrict_to_rules_refuses_unmatched_paths() -> None:
@@ -310,20 +317,18 @@ def test_restrict_to_rules_refuses_unmatched_paths() -> None:
     config = _github_repo_config(restrict=True)
 
     for path in ["/repos/basnijholt/agent-cli-old", "/repos/basnijholt/other", "/user", "/"]:
-        refused = route_request(config, "api.github.com", 443, path)
+        refused = _route(config, "api.github.com", 443, path)
         assert refused == Route(host_has_rules=True, refusal="path_not_allowed")
         assert refused.refusal_status == 403
-    allowed = route_request(config, "api.github.com", 443, "/repos/basnijholt/agent-cli/issues")
+    allowed = _route(config, "api.github.com", 443, "/repos/basnijholt/agent-cli/issues")
     assert allowed.match is not None
-    assert route_request(config, "example.com", 443, "/user") == Route(host_has_rules=False)
+    assert _route(config, "example.com", 443, "/user") == Route(host_has_rules=False)
 
 
 def test_restrict_to_rules_refuses_graphql_unless_listed() -> None:
     """GraphQL can reach any repository the key can, so a restricted service refuses it unless a rule lists it."""
-    assert route_request(_github_repo_config(restrict=True), "api.github.com", 443, "/graphql").refusal == (
-        "path_not_allowed"
-    )
-    listed = route_request(_github_repo_config(restrict=True, graphql=True), "api.github.com", 443, "/graphql")
+    assert _route(_github_repo_config(restrict=True), "api.github.com", 443, "/graphql").refusal == ("path_not_allowed")
+    listed = _route(_github_repo_config(restrict=True, graphql=True), "api.github.com", 443, "/graphql")
     assert listed.match is not None
     assert listed.match.rule.path_prefix == "/graphql"
 
@@ -342,11 +347,11 @@ def test_restrict_from_any_service_on_the_host_applies() -> None:
     )
     config = EgressBrokerConfig(services={"open": open_service, "restricting": restricting})
 
-    assert route_request(config, "api.example.com", 443, "/c").refusal == "path_not_allowed"
-    open_route = route_request(config, "api.example.com", 443, "/b/x")
+    assert _route(config, "api.example.com", 443, "/c").refusal == "path_not_allowed"
+    open_route = _route(config, "api.example.com", 443, "/b/x")
     assert open_route.match is not None
     assert open_route.match.service == "open"
-    assert route_request(config, "other.example.com", 443, "/c") == Route(
+    assert _route(config, "other.example.com", 443, "/c") == Route(
         host_has_rules=True,
         match=match_rule(config, "other.example.com", 443, "/c"),
     )
@@ -356,8 +361,113 @@ def test_restrict_from_any_service_on_the_host_applies() -> None:
         rules=[EgressRule(host="api.example.com", port=8443, path_prefix="/a", auth=EgressAuth(type="bearer"))],
     )
     config = EgressBrokerConfig(services={"open": open_service, "port_bound": port_bound})
-    assert route_request(config, "api.example.com", 443, "/c") == Route(host_has_rules=True)
-    assert route_request(config, "api.example.com", 8443, "/c").refusal == "path_not_allowed"
+    assert _route(config, "api.example.com", 443, "/c") == Route(host_has_rules=True)
+    assert _route(config, "api.example.com", 8443, "/c").refusal == "path_not_allowed"
+
+
+def _rule(host: str, path_prefix: str = "/", *, port: int | None = None) -> EgressRule:
+    return EgressRule(host=host, port=port, path_prefix=path_prefix, auth=EgressAuth(type="bearer"))
+
+
+def _merged(
+    operator: dict[str, EgressService],
+    user: dict[str, EgressService],
+    *,
+    deny: bool = False,
+) -> EgressRules:
+    """Return an operator config merged with one scope's user services, as the broker builds them."""
+    unmatched = "deny" if deny else "passthrough"
+    return EgressRules(
+        operator=EgressBrokerConfig(unmatched_hosts=unmatched, services=operator),
+        effective=EgressBrokerConfig(unmatched_hosts=unmatched, services={**operator, **user}),
+    )
+
+
+def test_deny_keeps_user_rules_to_hosts_and_ports_the_operator_names() -> None:
+    """Under deny a user rule counts only where an operator rule names the host and port, wildcards included."""
+    operator = EgressService(
+        rules=[_rule("api.example.com"), _rule("*.cdn.example.com"), _rule("ports.example.com", port=8443)],
+    )
+    mine = EgressService(
+        rules=[
+            _rule("api.example.com", "/mine"),
+            _rule("evil.example.com"),
+            _rule("a.cdn.example.com"),
+            _rule("ports.example.com"),
+        ],
+    )
+    rules = _merged({"op": operator}, {"mine": mine}, deny=True)
+
+    assert not rules.intercepts("evil.example.com", 443)
+    assert route_request(rules, "evil.example.com", 443, "/x") == Route(host_has_rules=False)
+    assert not rules.intercepts("ports.example.com", 443)
+    assert rules.intercepts("ports.example.com", 8443)
+    on_operator_host = route_request(rules, "api.example.com", 443, "/mine/x")
+    assert on_operator_host.match is not None
+    assert on_operator_host.match.service == "mine"
+    under_wildcard = route_request(rules, "a.cdn.example.com", 443, "/x")
+    assert under_wildcard.match is not None
+    assert under_wildcard.match.service == "mine"
+    # Under passthrough the same user hosts are the scope's own to intercept.
+    assert _merged({"op": operator}, {"mine": mine}).intercepts("evil.example.com", 443)
+
+
+def test_operator_restriction_is_decided_by_operator_rules_alone() -> None:
+    """User rules cannot open a path an operator's restricted host leaves out, but a narrower one picks its own key."""
+    rules = _merged(
+        {"op": EgressService(restrict_to_rules=True, rules=[_rule("api.github.com", "/repos/o/")])},
+        {
+            "open-all": EgressService(rules=[_rule("api.github.com")]),
+            "narrow": EgressService(rules=[_rule("api.github.com", "/repos/o/a")]),
+        },
+    )
+
+    for path in ["/repos/other/x", "/graphql", "/"]:
+        assert route_request(rules, "api.github.com", 443, path).refusal == "path_not_allowed"
+    narrow = route_request(rules, "api.github.com", 443, "/repos/o/a/pulls")
+    assert narrow.match is not None
+    assert narrow.match.service == "narrow"
+    operator = route_request(rules, "api.github.com", 443, "/repos/o/b")
+    assert operator.match is not None
+    assert operator.match.service == "op"
+    assert route_request(rules, "api.github.com", 443, "/repos/o/a/../../x").refusal == "bad_request"
+
+
+def test_user_restriction_still_narrows_its_scope() -> None:
+    """A user service's own `restrict_to_rules` refuses unlisted paths on its host, even next to open operator rules."""
+    rules = _merged(
+        {"op": EgressService(rules=[_rule("api.example.com", "/op")])},
+        {"mine": EgressService(restrict_to_rules=True, rules=[_rule("api.example.com", "/mine")])},
+    )
+
+    assert route_request(rules, "api.example.com", 443, "/other").refusal == "path_not_allowed"
+    operator = route_request(rules, "api.example.com", 443, "/op/x")
+    assert operator.match is not None
+    assert operator.match.service == "op"
+    assert route_request(EgressRules.from_config(rules.operator), "api.example.com", 443, "/other") == Route(
+        host_has_rules=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("covering", "rule", "covered"),
+    [
+        (_rule("api.example.com"), _rule("api.example.com", "/x"), True),
+        (_rule("*.example.com"), _rule("api.example.com"), True),
+        (_rule("*.example.com"), _rule("*.example.com"), True),
+        (_rule("api.example.com"), _rule("*.example.com"), False),
+        (_rule("*.example.com"), _rule("*.api.example.com"), False),
+        (_rule("*.example.com"), _rule("example.com"), False),
+        (_rule("api.example.com", port=8443), _rule("api.example.com"), False),
+        (_rule("api.example.com", port=8443), _rule("api.example.com", port=8443), True),
+        (_rule("api.example.com"), _rule("api.example.com", port=8443), True),
+    ],
+)
+def test_config_covers_rule(covering: EgressRule, rule: EgressRule, covered: bool) -> None:
+    """A config covers a rule when it has a rule for every host and port that rule can match."""
+    config = EgressBrokerConfig(services={"op": EgressService(rules=[covering])})
+
+    assert config_covers_rule(config, rule) is covered
 
 
 def test_inject_bearer() -> None:

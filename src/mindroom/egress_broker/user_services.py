@@ -7,6 +7,10 @@ the scope's egress secrets: one document under the reserved credential name `egr
 `effective_config` puts the config services first and appends the scope's own services. A user service named like
 a config service is ignored, so operator services never change; top-level settings such as `unmatched_hosts` come
 from config only. Merged configs are cached per scope, and every save or delete in this process drops the cache.
+
+User services can narrow operator policy, never widen it: `rules.EgressRules` keeps them inside `deny` and inside an
+operator's `restrict_to_rules`. They never inherit a key stored under their name, and on shared or unscoped agents
+they cannot use an OAuth connection, which would let a manager route the agent's shared account to any host.
 """
 
 from __future__ import annotations
@@ -16,7 +20,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.config.egress_broker import EgressService, validate_egress_service_name
-from mindroom.egress_broker.secrets import delete_egress_document, load_egress_document, save_egress_document
+from mindroom.egress_broker.rules import config_covers_rule
+from mindroom.egress_broker.secrets import (
+    delete_egress_document,
+    delete_secret,
+    load_egress_document,
+    save_egress_document,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -35,6 +45,7 @@ __all__ = [
     "effective_config",
     "load_user_services",
     "save_user_service",
+    "user_service_hosts_not_allowed",
 ]
 
 logger = get_logger(__name__)
@@ -42,6 +53,9 @@ logger = get_logger(__name__)
 USER_SERVICES_CREDENTIAL_SERVICE = "egress__services"
 MAX_USER_SERVICES = 50
 MAX_RULES_PER_SERVICE = 50
+
+# Worker scopes whose services belong to one requester; only these may use that requester's OAuth connections.
+_PERSONAL_WORKER_SCOPES = frozenset({"user", "user_agent"})
 
 type _ScopeKey = tuple[object, ...]
 
@@ -58,14 +72,20 @@ def load_user_services(manager: CredentialsManager, target: ResolvedWorkerTarget
     """Return the scope's own services; `target=None` is the global store that unscoped agents read.
 
     An entry that no longer validates is skipped with a warning naming it, so one bad entry spares the rest.
+    Outside a personal scope an entry's `oauth_provider` is dropped, so no OAuth token is resolved or reported for it.
     """
     services: dict[str, EgressService] = {}
     for name, authored in _stored_services(manager, target).items():
         try:
-            services[name] = _validated(name, authored)
+            service = _validated(name, authored)
         except ValueError as exc:
             # The entry holds whatever the user typed, so only its name and the error type are logged.
             logger.warning("egress_broker_user_service_invalid", service=name, error_type=type(exc).__name__)
+            continue
+        if service.oauth_provider is not None and not _personal_scope(target):
+            logger.warning("egress_broker_user_service_oauth_ignored", service=name)
+            service = service.model_copy(update={"oauth_provider": None})
+        services[name] = service
     return services
 
 
@@ -79,20 +99,33 @@ def save_user_service(
 ) -> None:
     """Add or replace one of the scope's services, stored as authored so a preset stays a preset.
 
+    A new name starts without a key: any key stored under it in the scope, for example one left by a removed config
+    service, is deleted first. Replacing an existing service keeps its key.
+
     Raises UserServiceConflictError when `config_services` has the name, and ValueError for an invalid name, a
-    service that sets `oauth_on_shared_workers`, a service with more than 50 rules, or a 51st service in the scope.
+    service that sets `oauth_on_shared_workers`, an OAuth provider (a preset's included) on a shared or unscoped
+    agent, a service with more than 50 rules, or a 51st service in the scope.
     """
     validate_egress_service_name(name)
     if name in config_services:
         raise UserServiceConflictError(name)
     _check_user_service(service)
+    if service.oauth_provider is not None and not _personal_scope(target):
+        msg = (
+            "oauth_provider is only available for services of user and user_agent agents; "
+            "on a shared or unscoped agent set oauth_provider to null and use an API key"
+        )
+        raise ValueError(msg)
     with _write_lock:
         stored = _stored_services(manager, target)
-        if name not in stored and len(stored) >= MAX_USER_SERVICES:
+        new = name not in stored
+        if new and len(stored) >= MAX_USER_SERVICES:
             msg = f"a scope can have at most {MAX_USER_SERVICES} services of its own; delete one before adding another"
             raise ValueError(msg)
         stored[name] = service.authored_model_dump()
         try:
+            if new:
+                delete_secret(manager, target, name)
             save_egress_document(manager, target, USER_SERVICES_CREDENTIAL_SERVICE, {"services": stored})
         finally:
             # Dropped even when the write fails: it may have replaced the document before failing.
@@ -100,9 +133,9 @@ def save_user_service(
 
 
 def delete_user_service(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name: str) -> bool:
-    """Delete one of the scope's services and return whether it existed; the last one takes the document with it.
+    """Delete one of the scope's services and its stored key; return whether the service existed.
 
-    The service's stored key, if any, stays in the scope.
+    The last service takes the document with it.
     """
     with _write_lock:
         stored = _stored_services(manager, target)
@@ -114,6 +147,7 @@ def delete_user_service(manager: CredentialsManager, target: ResolvedWorkerTarge
                 save_egress_document(manager, target, USER_SERVICES_CREDENTIAL_SERVICE, {"services": stored})
             else:
                 delete_egress_document(manager, target, USER_SERVICES_CREDENTIAL_SERVICE)
+            delete_secret(manager, target, name)
         finally:
             _cache.invalidate()
     return True
@@ -139,6 +173,23 @@ def effective_config(
     merged = config.model_copy(update={"services": {**config.services, **own}}) if own else config
     _cache.store(key, generation, config, merged)
     return merged
+
+
+def user_service_hosts_not_allowed(config: EgressBrokerConfig, service: EgressService) -> list[str]:
+    """Return the hosts of `service`'s rules that could reach past the operator's `config`, for a save to refuse.
+
+    Under `unmatched_hosts: deny` the broker applies a user rule only on hosts and ports a config rule names. This
+    lists, in rule order without repeats, each rule host that config does not cover for every host and port the rule
+    can match. Under `passthrough` every host is allowed, so the list is empty.
+    """
+    if config.unmatched_hosts != "deny":
+        return []
+    hosts = [rule.host for rule in service.rules if not config_covers_rule(config, rule)]
+    return list(dict.fromkeys(hosts))
+
+
+def _personal_scope(target: ResolvedWorkerTarget | None) -> bool:
+    return target is not None and target.worker_scope in _PERSONAL_WORKER_SCOPES
 
 
 def _stored_services(manager: CredentialsManager, target: ResolvedWorkerTarget | None) -> dict[str, object]:

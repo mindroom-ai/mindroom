@@ -24,8 +24,8 @@ if TYPE_CHECKING:
     import ssl
     from collections.abc import Awaitable, Callable
 
-    from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.egress_broker.audit import AuditLog
+    from mindroom.egress_broker.rules import EgressRules
     from mindroom.egress_broker.tokens import WorkerClaims
 
 __all__ = [
@@ -248,12 +248,12 @@ class Relay:
     """Per-request work both listener paths share: reading rules, dialing, streaming, answering, and auditing."""
 
     audit: AuditLog
-    config_provider: Callable[[WorkerClaims], EgressBrokerConfig]
+    config_provider: Callable[[WorkerClaims], EgressRules]
     dial_policy: DialPolicy
     max_body_bytes: int
     idle_timeout: float
 
-    async def read_config(self, client: Peer, entry: AuditEntry) -> EgressBrokerConfig | None:
+    async def read_rules(self, client: Peer, entry: AuditEntry) -> EgressRules | None:
         """Return the rules for the entry's requester; when the provider fails, answer 502, audit, and return None.
 
         The provider runs in a thread: it may read the requester scope's own services from the credential store.

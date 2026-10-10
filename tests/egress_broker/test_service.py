@@ -1129,12 +1129,13 @@ async def test_user_service_edits_apply_to_the_running_broker(
     runtime_paths = tmp_runtime_paths(**_broker_env(_free_port()))
     config = _config()
     target = _target()
-    save_secret(manager, target, "mine", "alice-key")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
         before = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
         mine = EgressService.model_validate(_GITHUB)
         save_user_service(manager, target, "mine", mine, config_services=config.egress_broker.services)
+        # A new service starts without a key, so the key is set after it.
+        save_secret(manager, target, "mine", "alice-key")
         saved = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
         assert delete_user_service(manager, target, "mine")
         deleted = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
@@ -1170,3 +1171,27 @@ async def test_user_service_uses_only_its_scopes_oauth_connection(
     assert bob_response.status_code == 403
     assert (bob_response.json()["error"], bob_response.json()["provider"]) == ("credential_not_configured", "github")
     assert tls_upstream.hits == ["/echo"]
+
+
+@pytest.mark.usefixtures("allow_loopback")
+@pytest.mark.asyncio
+async def test_user_service_cannot_open_a_host_under_deny(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    raw_proxy: Callable[[int, bytes], Awaitable[RawResponse]],
+) -> None:
+    """Under deny the running broker refuses a host only Alice's service names, as if her service did not exist."""
+    port = _free_port()
+    runtime_paths = tmp_runtime_paths(**_broker_env(port))
+    config = Config(egress_broker={"unmatched_hosts": "deny", "services": {"openai": _OPENAI}})
+    target = _target()
+    mine = EgressService.model_validate(_GITHUB)
+    save_user_service(manager, target, "mine", mine, config_services=config.egress_broker.services)
+    save_secret(manager, target, "mine", "alice-key")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        connect = connect_request(f"localhost:{tls_upstream.port}", authorization=proxy_authorization(_token(env)))
+        response = await raw_proxy(port, connect)
+    assert (response.status, response.json()) == (403, {"error": "host_not_allowed", "services": ["openai"]})
+    assert tls_upstream.hits == []

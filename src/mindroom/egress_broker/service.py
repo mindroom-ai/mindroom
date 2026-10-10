@@ -27,6 +27,7 @@ from mindroom.egress_broker.oauth_source import (
     resolve_oauth_token,
 )
 from mindroom.egress_broker.proxy import EgressBroker
+from mindroom.egress_broker.rules import EgressRules
 from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
@@ -209,15 +210,17 @@ class _LastGoodConfig:
             self._config = config
         return self._config
 
-    def egress(self, claims: WorkerClaims) -> EgressBrokerConfig:
+    def rules(self, claims: WorkerClaims) -> EgressRules:
         """Return the rules for one requester: the config's services plus their scope's own services.
 
         Reads the scope's store on a cache miss, so the broker calls it in a thread.
         """
         config = self.current()
         if config is None:
-            return EgressBrokerConfig()
-        return effective_config(config.egress_broker, self._credentials_manager, claims.to_worker_target())
+            return EgressRules.from_config(EgressBrokerConfig())
+        operator = config.egress_broker
+        effective = effective_config(operator, self._credentials_manager, claims.to_worker_target())
+        return EgressRules(operator=operator, effective=effective)
 
 
 async def _resolve_secret(
@@ -322,7 +325,7 @@ class _BrokerService:
         broker = EgressBroker(
             ca=ca,
             signer=signer,
-            config_provider=config.egress,
+            config_provider=config.rules,
             resolve_secret=functools.partial(
                 _resolve_secret,
                 config=config,

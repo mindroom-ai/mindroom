@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
+from mindroom.egress_broker.rules import EgressRules
 from mindroom.egress_broker.tokens import TokenSigner
 from tests.egress_broker.conftest import (
     DEFAULT_CLAIMS,
@@ -113,6 +114,96 @@ async def test_unmatched_host_is_blind_tunnel(
     assert echoed["path"] == "/echo"
     assert "proxy-authorization" not in echoed["headers"]
     assert "authorization" not in echoed["headers"]
+
+
+def _with_user_services(operator: EgressBrokerConfig, **user: EgressService) -> EgressRules:
+    """Return the operator's config merged with one scope's user services, as the broker builds them."""
+    effective = operator.model_copy(update={"services": {**operator.services, **user}})
+    return EgressRules(operator=operator, effective=effective)
+
+
+@pytest.mark.asyncio
+async def test_deny_ignores_user_rules_on_hosts_the_operator_does_not_name(
+    broker: BrokerFactory,
+    raw_proxy: RawProxy,
+    tls_upstream: Upstream,
+    http_upstream: Upstream,
+) -> None:
+    """Under deny a host only a user service names is refused on CONNECT and plain HTTP and is never intercepted."""
+    operator = EgressBrokerConfig(unmatched_hosts="deny", services=_config("api.github.com").services)
+    mine = EgressService(rules=[EgressRule(host="localhost", auth=EgressAuth(type="bearer"))])
+    started = await broker(
+        config_provider=lambda _claims: _with_user_services(operator, mine=mine),
+        secrets={"mine": "k"},
+    )
+    token = broker.token()
+
+    connect = await raw_proxy(
+        started.port,
+        connect_request(f"localhost:{tls_upstream.port}", authorization=proxy_authorization(token)),
+    )
+    plain = await raw_proxy(started.port, _plain_get(http_upstream, "/echo", token))
+
+    denied = {"error": "host_not_allowed", "services": ["svc"]}
+    assert (connect.status, connect.json()) == (403, denied)
+    assert (plain.status, plain.json()) == (403, denied)
+    assert broker.resolved == []
+    assert tls_upstream.hits == []
+    assert http_upstream.hits == []
+
+
+@pytest.mark.asyncio
+async def test_deny_lets_user_rules_work_on_operator_hosts(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """Under deny a user rule on a host the operator names applies, and its more specific path gets the user's key."""
+    operator = EgressBrokerConfig(
+        unmatched_hosts="deny",
+        services={"op": EgressService(rules=[EgressRule(host="localhost", auth=EgressAuth(type="bearer"))])},
+    )
+    mine = EgressService(rules=[EgressRule(host="localhost", path_prefix="/echo", auth=EgressAuth(type="bearer"))])
+    await broker(
+        config_provider=lambda _claims: _with_user_services(operator, mine=mine),
+        secrets={"op": "operator-key", "mine": "user-key"},
+    )
+
+    response = await proxy_client(broker.token()).get(tls_upstream.url("/echo"))
+
+    assert response.json()["headers"]["authorization"] == ["Bearer user-key"]
+    assert broker.resolved == ["mine"]
+
+
+@pytest.mark.asyncio
+async def test_operator_restriction_refuses_paths_only_a_user_rule_lists(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """A user rule for `/` cannot open a path that a restricting operator service leaves out."""
+    operator = EgressBrokerConfig(
+        services={
+            "op": EgressService(
+                restrict_to_rules=True,
+                rules=[EgressRule(host="localhost", path_prefix="/ok", auth=EgressAuth(type="bearer"))],
+            ),
+        },
+    )
+    mine = EgressService(rules=[EgressRule(host="localhost", auth=EgressAuth(type="bearer"))])
+    await broker(
+        config_provider=lambda _claims: _with_user_services(operator, mine=mine),
+        secrets={"op": "operator-key", "mine": "user-key"},
+    )
+    client = proxy_client(broker.token())
+
+    refused = await client.get(tls_upstream.url("/echo"))
+    allowed = await client.get(tls_upstream.url("/ok"))
+
+    assert (refused.status_code, refused.json()) == (403, {"error": "path_not_allowed"})
+    assert allowed.status_code == 200
+    assert tls_upstream.hits == ["/ok"]
+    assert broker.resolved == ["op"]
 
 
 @pytest.mark.asyncio

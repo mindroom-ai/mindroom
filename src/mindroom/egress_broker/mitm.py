@@ -21,16 +21,15 @@ from mindroom.egress_broker._relay import (
     serve_peer,
     upstream_request_headers,
 )
-from mindroom.egress_broker.rules import RuleMatch, inject_credentials, route_request
+from mindroom.egress_broker.rules import RuleMatch, host_not_allowed, inject_credentials, route_request
 from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect, SecretUnavailable
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.egress_broker._relay import Relay
     from mindroom.egress_broker.ca import BrokerCA
     from mindroom.egress_broker.proxy import ManageUrl, SecretResolver
-    from mindroom.egress_broker.rules import Route
+    from mindroom.egress_broker.rules import EgressRules, Route
     from mindroom.egress_broker.secrets import SecretResult
     from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
@@ -184,16 +183,16 @@ class TlsInterceptor:
         host_header = next((value for name, value in request.headers if name == b"host"), None)
         if not await self._admit(client, entry, tunnel, origin_form=origin_form, host_header=host_header):
             return False
-        config = await self._relay.read_config(client, entry)
-        if config is None:
+        rules = await self._relay.read_rules(client, entry)
+        if rules is None:
             return False
-        route = route_request(config, tunnel.host, tunnel.port, entry.path)
+        route = route_request(rules, tunnel.host, tunnel.port, entry.path)
         upstream_request = await self._upstream_request(
             client,
             entry,
             tunnel,
             request,
-            config,
+            rules,
             route=route,
             host_header=host_header,
         )
@@ -234,14 +233,14 @@ class TlsInterceptor:
         entry: AuditEntry,
         tunnel: _Tunnel,
         request: h11.Request,
-        config: EgressBrokerConfig,
+        rules: EgressRules,
         *,
         route: Route,
         host_header: bytes | None,
     ) -> h11.Request | None:
         """Return the request to send upstream, injected when a rule matches; otherwise answer, audit, and return None."""
-        if not route.host_has_rules and config.unmatched_hosts == "deny":
-            await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
+        if not route.host_has_rules and rules.unmatched_hosts == "deny":
+            await self._relay.deny(client, entry, host_not_allowed(rules))
             return None
         if route.refusal is not None:
             await self._relay.deny(client, entry, {"error": route.refusal}, status=route.refusal_status)

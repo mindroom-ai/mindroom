@@ -10,7 +10,8 @@ from structlog.testing import capture_logs
 from mindroom.config.egress_broker import EgressBrokerConfig, EgressService
 from mindroom.credentials import CredentialsManager
 from mindroom.egress_broker import user_services
-from mindroom.egress_broker.rules import route_request
+from mindroom.egress_broker.rules import EgressRules, host_has_rules, route_request
+from mindroom.egress_broker.secrets import load_secret, save_secret
 from mindroom.egress_broker.user_services import (
     MAX_RULES_PER_SERVICE,
     MAX_USER_SERVICES,
@@ -20,6 +21,7 @@ from mindroom.egress_broker.user_services import (
     effective_config,
     load_user_services,
     save_user_service,
+    user_service_hosts_not_allowed,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -226,7 +228,7 @@ def test_effective_config_puts_config_services_first_and_ignores_shadowed_user_s
     assert list(effective.services) == ["github", "mine"]
     assert effective.services["github"] is _CONFIG.services["github"]
     assert effective.unmatched_hosts == "deny"
-    assert route_request(effective, "evil.example.com", 443, "/").host_has_rules is False
+    assert not host_has_rules(effective, "evil.example.com", 443)
     assert _CONFIG.services.keys() == {"github"}
 
 
@@ -306,10 +308,87 @@ def test_restrict_to_rules_on_a_user_service_applies_only_to_its_scope(manager: 
         },
     )
     _save(manager, _target(), "repo", restricted)
+    # Under passthrough, so the user host is the scope's own to intercept.
+    config = EgressBrokerConfig.model_validate({"services": {"github": {"preset": "github"}}})
 
-    alice = effective_config(_CONFIG, manager, _target())
-    bob = effective_config(_CONFIG, manager, _target(_BOB))
+    alice = EgressRules(operator=config, effective=effective_config(config, manager, _target()))
+    bob = EgressRules(operator=config, effective=effective_config(config, manager, _target(_BOB)))
 
     assert route_request(alice, "api.example.com", 443, "/repos/alice/x/pulls").match is not None
     assert route_request(alice, "api.example.com", 443, "/repos/bob/y").refusal == "path_not_allowed"
     assert route_request(bob, "api.example.com", 443, "/repos/bob/y").host_has_rules is False
+
+
+def test_hosts_outside_deny_are_reported_for_a_save_check() -> None:
+    """Under deny the helper names each user host no config rule covers; under passthrough it names none."""
+    service = EgressService.model_validate(
+        {
+            "rules": [
+                {"host": "api.github.com", "path_prefix": "/repos/o/a", "auth": {"type": "bearer"}},
+                {"host": "evil.example.com", "auth": {"type": "bearer"}},
+                {"host": "evil.example.com", "path_prefix": "/again", "auth": {"type": "bearer"}},
+                {"host": "*.github.com", "auth": {"type": "bearer"}},
+            ],
+        },
+    )
+    passthrough = EgressBrokerConfig.model_validate({"services": {"github": {"preset": "github"}}})
+
+    assert user_service_hosts_not_allowed(_CONFIG, service) == ["evil.example.com", "*.github.com"]
+    assert user_service_hosts_not_allowed(passthrough, service) == []
+
+
+def test_a_new_service_never_inherits_a_stored_key(manager: CredentialsManager) -> None:
+    """Saving a new name clears a key left under it; replacing the service keeps its key; deleting removes it."""
+    for target in (_target(), _target(scope="shared")):
+        # For example a key a since-removed config service of the same name left behind.
+        save_secret(manager, target, "mine", "left-behind")
+        _save(manager, target, "mine", _service())
+        assert load_secret(manager, target, "mine") is None
+
+        save_secret(manager, target, "mine", "own-key")
+        _save(manager, target, "mine", _service("other.example.com"))
+        assert load_secret(manager, target, "mine") == "own-key"
+
+        assert delete_user_service(manager, target, "mine")
+        assert load_secret(manager, target, "mine") is None
+
+
+@pytest.mark.parametrize("scope", ["shared", None], ids=["shared", "unscoped"])
+def test_oauth_provider_is_refused_outside_personal_scopes(
+    manager: CredentialsManager,
+    scope: WorkerScope | None,
+) -> None:
+    """A manager cannot route a shared or unscoped agent's OAuth connection to an arbitrary host, preset or not."""
+    for target in (_target(scope=scope), None) if scope is None else (_target(scope=scope),):
+        for authored in ({"oauth_provider": "github"}, {"preset": "github"}):
+            with pytest.raises(ValueError, match="oauth_provider"):
+                _save(
+                    manager,
+                    target,
+                    "mine",
+                    EgressService.model_validate({**_service().authored_model_dump(), **authored}),
+                )
+        _save(manager, target, "keyed", EgressService.model_validate({"preset": "github", "oauth_provider": None}))
+        assert load_user_services(manager, target)["keyed"].oauth_provider is None
+
+    _save(manager, _target(), "personal", _service(oauth_provider="github"))
+    assert load_user_services(manager, _target())["personal"].oauth_provider == "github"
+
+
+def test_stored_oauth_provider_is_ignored_outside_personal_scopes(manager: CredentialsManager) -> None:
+    """An OAuth provider stored for a shared agent anyway is dropped on load, so nothing resolves or reports a token."""
+    store = manager.for_primary_runtime_agent_scope("code")
+    store.save_credentials(
+        USER_SERVICES_CREDENTIAL_SERVICE,
+        {"services": {"team": {"preset": "github"}}},
+    )
+
+    with capture_logs() as logs:
+        loaded = load_user_services(manager, _target(scope="shared"))
+
+    assert loaded["team"].oauth_provider is None
+    assert [rule.host for rule in loaded["team"].rules] == ["api.github.com", "uploads.github.com", "github.com"]
+    assert effective_config(_CONFIG, manager, _target(scope="shared")).services["team"].oauth_provider is None
+    assert [(entry["event"], entry["service"]) for entry in logs] == [
+        ("egress_broker_user_service_oauth_ignored", "team"),
+    ]

@@ -25,6 +25,7 @@ from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.proxy import EgressBroker, ManageUrl
+from mindroom.egress_broker.rules import EgressRules
 from mindroom.egress_broker.secrets import Secret, SecretMissing
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
@@ -345,15 +346,21 @@ class BrokerFactory:
         manage_url: ManageUrl | None = None,
         max_body_bytes: int = 1 << 30,
         head_timeout: float = 30.0,
-        config_provider: Callable[[WorkerClaims], EgressBrokerConfig] | None = None,
+        config_provider: Callable[[WorkerClaims], EgressBrokerConfig | EgressRules] | None = None,
     ) -> EgressBroker:
         """Start a broker on an ephemeral loopback port; `secrets` maps service names to secrets.
 
         `resolve_secret` replaces the `secrets` lookup, and `config_provider` replaces the fixed `config`,
-        when a test needs a callback that changes, fails, or depends on the requester's claims. Both are plain
-        functions; the broker awaits the lookup.
+        when a test needs a callback that changes, fails, or depends on the requester's claims. It returns a config,
+        or `EgressRules` to add user services. Both are plain functions; the broker awaits the lookup.
         """
         current = config or EgressBrokerConfig()
+        provider = config_provider or (lambda _claims: current)
+
+        def rules_for(claims: WorkerClaims) -> EgressRules:
+            value = provider(claims)
+            return value if isinstance(value, EgressRules) else EgressRules.from_config(value)
+
         stored = dict(secrets or {})
         lookup = resolve_secret or (
             lambda _claims, service: Secret(stored[service]) if service in stored else SecretMissing()
@@ -366,7 +373,7 @@ class BrokerFactory:
         broker = EgressBroker(
             ca=self.ca,
             signer=self.signer,
-            config_provider=config_provider or (lambda _claims: current),
+            config_provider=rules_for,
             resolve_secret=recording_lookup,
             audit=self.audit,
             dial_policy=dial_policy or DialPolicy(allow_loopback=True),

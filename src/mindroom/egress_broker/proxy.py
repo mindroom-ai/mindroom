@@ -24,21 +24,21 @@ from mindroom.egress_broker._relay import (
 )
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.mitm import TlsInterceptor
-from mindroom.egress_broker.rules import host_has_rules, route_request
+from mindroom.egress_broker.rules import host_not_allowed, route_request
 
 if TYPE_CHECKING:
     import ssl
 
-    from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.egress_broker.audit import AuditLog
     from mindroom.egress_broker.ca import BrokerCA
+    from mindroom.egress_broker.rules import EgressRules
     from mindroom.egress_broker.secrets import SecretResult
     from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
 __all__ = ["ConfigProvider", "EgressBroker", "ManageUrl", "SecretResolver"]
 
 # Called in a thread with the verified requester's claims; returns the rules that requester's traffic matches.
-type ConfigProvider = Callable[[WorkerClaims], EgressBrokerConfig]
+type ConfigProvider = Callable[[WorkerClaims], EgressRules]
 # Awaited on the broker's loop: the resolver chooses which executor each blocking lookup runs on.
 type SecretResolver = Callable[[WorkerClaims, str], Awaitable[SecretResult]]
 type ManageUrl = Callable[[WorkerClaims], str | None]
@@ -217,14 +217,14 @@ class EgressBroker:
             await send_json(client, 400, {"error": "bad_request"})
             return
         entry = AuditEntry(claims=claims, kind="tunnel", method="CONNECT", host=host, path="")
-        config = await self._relay.read_config(client, entry)
-        if config is None:
+        rules = await self._relay.read_rules(client, entry)
+        if rules is None:
             return
-        if host_has_rules(config, host, port):
+        if rules.intercepts(host, port):
             await self._interceptor.intercept(client, token, claims, host, port)
             return
-        if config.unmatched_hosts == "deny":
-            await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
+        if rules.unmatched_hosts == "deny":
+            await self._relay.deny(client, entry, host_not_allowed(rules))
             return
         await self._tunnel(client, entry, port)
 
@@ -255,12 +255,12 @@ class EgressBroker:
             return False
         path = target.split(b"?", 1)[0].decode("ascii")
         entry = AuditEntry(claims=claims, kind="request", method=request.method.decode("ascii"), host=host, path=path)
-        config = await self._relay.read_config(client, entry)
-        if config is None:
+        rules = await self._relay.read_rules(client, entry)
+        if rules is None:
             return False
-        route = route_request(config, host, port, path)
-        if config.unmatched_hosts == "deny" and not route.host_has_rules:
-            await self._relay.deny(client, entry, {"error": "host_not_allowed", "services": list(config.services)})
+        route = route_request(rules, host, port, path)
+        if rules.unmatched_hosts == "deny" and not route.host_has_rules:
+            await self._relay.deny(client, entry, host_not_allowed(rules))
             return False
         if route.refusal is not None:
             await self._relay.deny(client, entry, {"error": route.refusal}, status=route.refusal_status)
