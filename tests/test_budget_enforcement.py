@@ -397,3 +397,24 @@ def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) ->
 
     assert payload["status"] == "error"
     assert "not allowed by permissions.models" in payload["message"]
+
+
+def test_a_reply_that_crosses_the_cap_still_runs_its_workflow(tmp_path: Path) -> None:
+    """The caller's reply started on the priced model; its workflow then runs on the fallback."""
+    context = _make_context(tmp_path)
+    _budget_context_config(context.config)
+    context = replace(context, active_model_name="default")
+    tool = DynamicWorkflowTools()
+    model = SyntheticModel(id="participant")
+
+    with (
+        tool_runtime_context(context),
+        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model) as get_model,
+        patch.object(dynamic_workflow_module, "Agent", Mock(return_value=_fake_stream_agent(content="done"))),
+    ):
+        create_payload = json.loads(tool.create_workflow(_workflow_spec()))
+        run_payload = json.loads(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert create_payload["status"] == "ok"
+    assert run_payload["status"] == "completed"
+    assert get_model.call_args.args[2] == "luna"

@@ -57,11 +57,14 @@ def budget_model(
     monitor: BudgetMonitor | None,
     requester_id: str | None,
     model_name: str,
+    *,
+    log_fallback: bool = True,
 ) -> str:
     """Return the model a reply for this requester should use under their budget.
 
     ``config`` is the snapshot ``model_name`` was resolved from, so the fallback names a model it defines.
     Without a monitor no spend is known yet, as before the first scan.
+    Callers that only check, without choosing a reply model, pass ``log_fallback=False``.
     """
     budgets = config.budgets
     if budgets is None or requester_id is None:
@@ -78,14 +81,15 @@ def budget_model(
     spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
     if spend < limit:
         return model_name
-    logger.info(
-        "budget_fallback_applied",
-        requester_id=canonical_requester_id,
-        model=model_name,
-        fallback_model=budgets.fallback_model,
-        spend_usd=round(spend, 4),
-        limit_usd=limit,
-    )
+    if log_fallback:
+        logger.info(
+            "budget_fallback_applied",
+            requester_id=canonical_requester_id,
+            model=model_name,
+            fallback_model=budgets.fallback_model,
+            spend_usd=round(spend, 4),
+            limit_usd=limit,
+        )
     return budgets.fallback_model
 
 

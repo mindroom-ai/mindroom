@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model
@@ -463,3 +464,16 @@ async def test_an_incomplete_price_table_is_rebuilt_on_the_next_scan(
 
     assert builds == [False, True]
     await monitor.stop()
+
+
+def test_checking_the_budget_quietly_logs_no_fallback(tmp_path: Path) -> None:
+    config = _config(monthly_limit_usd=0)
+    paths = _paths(tmp_path)
+
+    with capture_logs() as logs:
+        assert budget_model(config, paths, None, ALICE, "astra", log_fallback=False) == "luna"
+        assert budget_model(config, paths, None, ALICE, "astra") == "luna"
+
+    assert [entry["event"] for entry in logs if entry["event"] == "budget_fallback_applied"] == [
+        "budget_fallback_applied",
+    ]

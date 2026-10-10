@@ -145,6 +145,8 @@ class ThreadModelTools(Toolkit):
             context.budget_monitor,
             context.requester_id,
             model_name,
+            # Only a switch for the current response chooses a reply model now.
+            log_fallback=when == "after-toolcall",
         )
         if when == "after-toolcall" and budgeted_model_name != model_name:
             model = context.config.models[budgeted_model_name]

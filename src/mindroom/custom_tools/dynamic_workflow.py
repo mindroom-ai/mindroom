@@ -953,7 +953,10 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
             )
             raise DynamicWorkflowError(msg)
         # The caller's model is already the budgeted one, so compare the participant's budgeted model with it.
-        if participant_kind != "room_agent" and _model_refs(context, _budgeted_model(context, model_name)).isdisjoint(
+        if participant_kind != "room_agent" and _model_refs(
+            context,
+            _budgeted_model(context, model_name, log_fallback=False),
+        ).isdisjoint(
             caller_models,
         ):
             requested_model = raw_model if raw_model is not None else model_name
@@ -991,20 +994,21 @@ def _spec_tool_names(spec: dict[str, object]) -> list[str]:
     return tool_names
 
 
-def _budgeted_model(context: ToolRuntimeContext, model_name: str) -> str:
+def _budgeted_model(context: ToolRuntimeContext, model_name: str, *, log_fallback: bool = True) -> str:
     return budget_model(
         context.config,
         context.runtime_paths,
         context.budget_monitor,
         context.requester_id,
         model_name,
+        log_fallback=log_fallback,
     )
 
 
 def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
     """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
     substitutes = {
-        _budgeted_model(context, model_name)
+        _budgeted_model(context, model_name, log_fallback=False)
         for model_name in context.config.models
         if not _model_refs(context, model_name).isdisjoint(model_refs)
     }
@@ -1012,7 +1016,9 @@ def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) 
 
 
 def _caller_allowed_model_refs(context: ToolRuntimeContext) -> set[str]:
-    model_names = {_caller_runtime_model_name(context)}
+    caller_model_name = _caller_runtime_model_name(context)
+    # A reply can cross the cap after it started, so its own model's budget substitute is allowed too.
+    model_names = {caller_model_name, _budgeted_model(context, caller_model_name, log_fallback=False)}
     refs: set[str] = set()
     for model_name in model_names:
         if model_name is None:

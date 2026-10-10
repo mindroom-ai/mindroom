@@ -57,7 +57,8 @@ Spend is the cost of the user's [recorded token usage](usage.md#token-usage) sin
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 Gemini thinking tokens are charged at the output price.
-Audio tokens, internal work with no requester (`system:internal`), and usage without a date or requester are not charged.
+Audio tokens count at the model's text prices.
+Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
 Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
 A reply that already started finishes on its model.
 
