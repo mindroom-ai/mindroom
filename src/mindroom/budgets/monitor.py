@@ -161,7 +161,6 @@ class BudgetMonitor:
     _snapshot: SpendSnapshot | None = field(default=None, init=False)
     # Priced models are instantiated to learn their recorded identity, so the table is kept per config object.
     _prices: tuple[Config, Mapping[tuple[str, str], PricedModel]] | None = field(default=None, init=False)
-    _requested: bool = field(default=False, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
 
@@ -231,7 +230,6 @@ class BudgetMonitor:
         return snapshot
 
     def _request_scan(self) -> None:
-        self._requested = True
         self._wake.set()
 
     async def _run(self) -> None:
@@ -239,17 +237,16 @@ class BudgetMonitor:
         while True:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=self.tick_seconds)
-            self._wake.clear()
             config = self.config_provider()
             if config is None or config.budgets is None:
-                self._requested = False
+                self._wake.clear()
                 continue
             if last_scan_started is not None:
                 delay = last_scan_started + self.min_scan_interval_seconds - time.monotonic()
                 if delay > 0:
                     await asyncio.sleep(delay)
-            # Requests that arrive during the scan set this again and earn one trailing scan.
-            self._requested = False
+            # Requests made while waiting are covered by this scan; ones made during it earn one trailing scan.
+            self._wake.clear()
             last_scan_started = time.monotonic()
             await self._scan()
 
