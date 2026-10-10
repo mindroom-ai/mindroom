@@ -108,6 +108,7 @@ Common errors:
 - `Cannot delegate: Unknown model '<model>'. Available models: ...` - `model` is not an alias in `models:`.
 - `Cannot delegate: the maximum delegation depth was reached.` - the chain of subagents is already 3 deep.
 - `Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up.` - the child's previous turn has not finished.
+- `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a workflow participant, whose tools work only inside its run.
 - `Cannot delegate an empty task. Please provide a task description.` - `task` or `message` is empty.
 
 ### Authored Subagents

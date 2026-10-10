@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools import dynamic_workflow as workflow_module
+from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
@@ -225,6 +226,31 @@ async def test_preapproved_participant_tool_runs(tmp_path: Path, monkeypatch: py
     assert run["status"] == "completed", run
     assert workflow.model.responses == []
     assert "add" in workflow.model.offered[0]
+
+
+@pytest.mark.asyncio
+async def test_participant_cannot_be_continued_outside_its_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant's tools exist only under its workflow's pre-approval, so continue_subagent refuses it."""
+    config = _config(
+        tools=[{"dynamic_workflow": {"allowed_tools": ["calculator"]}}, "calculator"],
+        approval_default="require_approval",
+    )
+    config.agents["leader"].delegate_to = ["leader"]
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}]))
+    assert run["status"] == "completed", run
+    [record] = (workflow.paths.storage_root / "subagent_sessions").glob("*.json")
+    subagent_id = json.loads(record.read_text())["child"]["subagent_id"]
+    toolkit = DelegateTools("leader", ["leader"], workflow.paths, config)
+
+    with workflow.context():
+        result = await toolkit.continue_subagent(subagent_id=subagent_id, message="Again")
+
+    assert "belongs to a Dynamic Workflow run" in result
+    assert workflow.model.system_prompts == ["Add."]
 
 
 def _write_legacy_revision(tmp_path: Path) -> DynamicWorkflowStore:

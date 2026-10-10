@@ -329,7 +329,10 @@ def follow_up_refusal(
     *,
     delegation_depth: int,
 ) -> str | None:
-    """Refuse a follow-up once the caller lost a tool its subagent names."""
+    """Refuse a follow-up of a workflow participant, or once the caller lost a tool its subagent names."""
+    if persona is not None and persona.source_kind == "workflow":
+        # A participant's tools are usable only under its workflow's pre-approval.
+        return "Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent."
     if persona is None or persona.tools is None:
         return None
     available = caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth)

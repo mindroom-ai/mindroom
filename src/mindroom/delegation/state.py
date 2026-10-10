@@ -84,7 +84,7 @@ class DelegationChild:
     agent_mode: AgentMode = "standard"
     # LEGACY_COMPAT: Delegated children persisted without a persona.
     # Legacy format: Parent delegation state and subagent session records omitted persona; every child ran its configured prompt.
-    # Last legacy release: v2026.10.227; replacement: the next release persists each child's authored persona or null.
+    # Last legacy release: v2026.10.229; replacement: the next release persists each child's authored persona or null.
     # Handling: The dataclass default and from_dict read an absent persona as a configured-agent child, so retained children keep their behavior.
     # Coverage: tests/test_delegation_sessions.py::test_child_snapshot_without_persona_reads_as_configured_child.
     persona: SubagentPersona | None = None
