@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EgressServiceRows } from "./EgressServiceRows";
+import { EgressServiceRows, type ServiceEditing } from "./EgressServiceRows";
 import type { EgressCredentialService, EgressOAuthStatus } from "./types";
 
 const github: EgressCredentialService = {
@@ -902,5 +902,165 @@ describe("connected accounts", () => {
     expect(
       screen.getByRole("button", { name: "Set GitHub API key" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("egress service rows with service editing", () => {
+  const mine: EgressCredentialService = {
+    ...github,
+    name: "mine",
+    display_name: "Mine",
+    source: "user",
+  };
+  const theirs: EgressCredentialService = {
+    ...github,
+    name: "theirs",
+    display_name: "Theirs",
+    source: "config",
+  };
+  const editing = (
+    overrides: Partial<ServiceEditing> = {},
+  ): ServiceEditing => ({
+    editableSource: "user",
+    onEdit: vi.fn(),
+    onDelete: vi.fn(async () => undefined),
+    deleteWarning: (service) => `Deleting ${service.name} cannot be undone.`,
+    labels: { config: "Added by your administrator" },
+    ...overrides,
+  });
+
+  it("offers Edit and Delete for the editable source and labels the rest", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[mine, theirs]}
+        onChanged={vi.fn()}
+        serviceEditing={editing()}
+      />,
+    );
+    expect(
+      within(row("Mine")).getByRole("button", { name: "Edit Mine service" }),
+    ).toBeInTheDocument();
+    expect(
+      within(row("Mine")).getByRole("button", { name: "Delete Mine service" }),
+    ).toBeInTheDocument();
+    expect(
+      within(row("Mine")).queryByText("Added by your administrator"),
+    ).toBeNull();
+    expect(
+      within(row("Theirs")).queryByRole("button", { name: /Edit|Delete/ }),
+    ).toBeNull();
+    expect(
+      within(row("Theirs")).getByText("Added by your administrator"),
+    ).toBeInTheDocument();
+  });
+
+  it("hides Edit and Delete from someone who cannot manage the service", () => {
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[{ ...mine, can_manage: false }]}
+        onChanged={vi.fn()}
+        serviceEditing={editing()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /Edit|Delete/ })).toBeNull();
+  });
+
+  it("offers nothing without service editing or without a known source", () => {
+    const { rerender } = render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[mine]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /Edit|Delete/ })).toBeNull();
+    rerender(
+      <EgressServiceRows
+        agentName="personal"
+        services={[{ ...mine, source: undefined }]}
+        onChanged={vi.fn()}
+        serviceEditing={editing()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /Edit|Delete/ })).toBeNull();
+  });
+
+  it("hands the service to the Edit callback", () => {
+    const serviceEditing = editing();
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[mine]}
+        onChanged={vi.fn()}
+        serviceEditing={serviceEditing}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit Mine service" }));
+    expect(serviceEditing.onEdit).toHaveBeenCalledWith(mine);
+  });
+
+  it("deletes only after the warning is confirmed", async () => {
+    const serviceEditing = editing();
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[mine]}
+        onChanged={vi.fn()}
+        serviceEditing={serviceEditing}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete Mine service" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Deleting mine cannot be undone.");
+    expect(serviceEditing.onDelete).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(serviceEditing.onDelete).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete Mine service" }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Delete",
+      }),
+    );
+    await waitFor(() =>
+      expect(serviceEditing.onDelete).toHaveBeenCalledWith(mine),
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("shows why a delete failed and keeps the row", async () => {
+    const serviceEditing = editing({
+      onDelete: vi.fn(async () => {
+        throw new Error("Service is not a service of your own");
+      }),
+    });
+    render(
+      <EgressServiceRows
+        agentName="personal"
+        services={[mine]}
+        onChanged={vi.fn()}
+        serviceEditing={serviceEditing}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete Mine service" }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Delete",
+      }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Service is not a service of your own",
+    );
+    expect(
+      screen.getByRole("button", { name: "Delete Mine service" }),
+    ).toBeEnabled();
   });
 });

@@ -58,10 +58,15 @@ export interface EgressOAuthStatus {
   shared_worker_opt_in: boolean;
 }
 
+/** Who defined a service: the administrator in config.yaml or the caller's own scope. */
+export type EgressServiceSource = "config" | "user";
+
 export interface EgressCredentialService {
   name: string;
   display_name: string;
   description: string;
+  /** Absent for responses that do not say who defined the service. */
+  source?: EgressServiceSource;
   /** `null` when the caller cannot tell whether the key is shared. */
   is_shared: boolean | null;
   /** Set by the dashboard for the global key that every agent without a worker scope shares. */
@@ -85,4 +90,49 @@ export interface EgressCredentialAgent {
 
 export interface EgressCredentialList {
   agents: EgressCredentialAgent[];
+}
+
+export type EgressAuthType = "bearer" | "basic" | "header" | "query";
+
+/** How a rule adds the secret; `username` is for basic, `name` for header and query. */
+export interface EgressAuth {
+  type: EgressAuthType;
+  username?: string;
+  name?: string;
+  template?: string;
+}
+
+export interface EgressRule {
+  host: string;
+  port?: number;
+  path_prefix?: string;
+  auth: EgressAuth;
+}
+
+/** A service as written in config.yaml or stored for a user: a preset stays `{preset: "github"}`. */
+export interface AuthoredEgressService {
+  preset?: string;
+  display_name?: string;
+  description?: string;
+  rules?: EgressRule[];
+  placeholder_env?: Record<string, string>;
+  oauth_provider?: string | null;
+  /** Operator-only; the personal API rejects it. */
+  oauth_on_shared_workers?: boolean;
+  restrict_to_rules?: boolean;
+}
+
+/** One row of the request log. */
+export interface EgressLogRecord {
+  at: string;
+  /** `denied` rows were refused by the broker. */
+  kind?: string;
+  agent_name: string | null;
+  method: string;
+  host: string;
+  path: string;
+  service: string | null;
+  status: number;
+  /** Why the broker refused the request, when the API says. */
+  code?: string | null;
 }

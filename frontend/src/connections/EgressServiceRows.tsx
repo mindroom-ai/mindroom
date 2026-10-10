@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import { type RequestErrorMessages, requestConnection } from "./request";
-import type { EgressCredentialService } from "./types";
+import type { EgressCredentialService, EgressServiceSource } from "./types";
 
 type AccountAction = "connect" | "disconnect";
 
@@ -23,6 +23,21 @@ interface ServicePaths {
   secret: string;
   connect: string;
   disconnect: string;
+}
+
+/**
+ * Controls for the services a viewer defines themselves, and a label for the
+ * ones someone else defined. `source` tells them apart.
+ */
+export interface ServiceEditing {
+  /** Services with this `source` get Edit and Delete, when the viewer can manage them. */
+  editableSource: EgressServiceSource;
+  onEdit: (service: EgressCredentialService) => void;
+  /** Rejects with an Error whose message the row shows. */
+  onDelete: (service: EgressCredentialService) => Promise<void>;
+  deleteWarning: (service: EgressCredentialService) => string;
+  /** Label for services of another source, such as "Added by your administrator". */
+  labels: Partial<Record<EgressServiceSource, string>>;
 }
 
 function statusLabel(service: EgressCredentialService): string {
@@ -59,19 +74,23 @@ function EgressServiceRow({
   service,
   onChanged,
   errorMessages,
+  serviceEditing,
 }: {
   paths: ServicePaths;
   service: EgressCredentialService;
   onChanged: () => void;
   errorMessages?: RequestErrorMessages;
+  serviceEditing?: ServiceEditing;
 }) {
   const [editing, setEditing] = useState(false);
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState<
-    "save" | "remove" | "connect" | "disconnect" | null
+    "save" | "remove" | "connect" | "disconnect" | "delete" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<"key" | "account" | null>(null);
+  const [confirm, setConfirm] = useState<"key" | "account" | "service" | null>(
+    null,
+  );
   const operation = useRef<AbortController | null>(null);
   const keyLabel = `${service.display_name} API key`;
   const oauth = service.oauth;
@@ -83,6 +102,15 @@ function EgressServiceRow({
     oauth !== null &&
     (oauth.connected || oauth.reset_required) &&
     (service.can_manage || oauth.can_connect);
+
+  const sourceLabel =
+    serviceEditing && service.source
+      ? serviceEditing.labels[service.source]
+      : undefined;
+  const canEditService =
+    serviceEditing !== undefined &&
+    service.source === serviceEditing.editableSource &&
+    service.can_manage;
 
   useEffect(() => () => operation.current?.abort(), []);
 
@@ -145,6 +173,24 @@ function EgressServiceRow({
         );
     } finally {
       if (!controller.signal.aborted) setBusy(null);
+    }
+  };
+
+  const deleteService = async () => {
+    setConfirm(null);
+    if (!serviceEditing) return;
+    setBusy("delete");
+    setError(null);
+    try {
+      await serviceEditing.onDelete(service);
+    } catch (cause) {
+      setError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "Could not delete the service. Try again.",
+      );
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -229,6 +275,11 @@ function EgressServiceRow({
           >
             {statusLabel(service)}
           </Badge>
+          {sourceLabel && (
+            <Badge variant="outline" className="font-normal">
+              {sourceLabel}
+            </Badge>
+          )}
           {oauth?.service_account && (
             <span className="text-xs text-muted-foreground">
               Uses a shared service account
@@ -337,6 +388,28 @@ function EgressServiceRow({
               )}
             </>
           )}
+          {canEditService && serviceEditing && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null}
+                aria-label={`Edit ${service.display_name} service`}
+                onClick={() => serviceEditing.onEdit(service)}
+              >
+                Edit service
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null}
+                aria-label={`Delete ${service.display_name} service`}
+                onClick={() => setConfirm("service")}
+              >
+                {busy === "delete" ? "Deleting…" : "Delete service"}
+              </Button>
+            </>
+          )}
         </div>
       </div>
       {service.can_manage && editing && (
@@ -406,6 +479,32 @@ function EgressServiceRow({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {canEditService && serviceEditing && (
+        <Dialog
+          open={confirm === "service"}
+          onOpenChange={(open) => !open && setConfirm(null)}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete {service.display_name}?</DialogTitle>
+              <DialogDescription>
+                {serviceEditing.deleteWarning(service)}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => void deleteService()}
+              >
+                Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
       {oauth && (
         <Dialog
           open={confirm === "account"}
@@ -478,12 +577,15 @@ export function EgressServiceRows({
   services,
   onChanged,
   errorMessages,
+  serviceEditing,
   ...target
 }: ServiceTarget & {
   services: EgressCredentialService[];
   onChanged: () => void;
   /** Wording for 403 and 404 responses outside the Connections portal. */
   errorMessages?: RequestErrorMessages;
+  /** Edit and delete controls for the services the viewer defines. */
+  serviceEditing?: ServiceEditing;
 }) {
   return (
     <ul>
@@ -494,6 +596,7 @@ export function EgressServiceRows({
           service={service}
           onChanged={onChanged}
           errorMessages={errorMessages}
+          serviceEditing={serviceEditing}
         />
       ))}
     </ul>

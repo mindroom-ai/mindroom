@@ -4,6 +4,33 @@ export interface RequestErrorMessages {
   notFound?: string;
 }
 
+// Conflicts, oversized bodies, and invalid bodies explain themselves.
+const USER_FACING_DETAIL_STATUSES = new Set([409, 413, 422]);
+
+/**
+ * Read an error `detail` that is either a string or FastAPI's list of
+ * `{loc, msg}` items; the items' `input` is never read.
+ */
+function detailMessage(detail: unknown): string | null {
+  if (typeof detail === "string") return detail || null;
+  if (!Array.isArray(detail)) return null;
+  const messages = detail.flatMap((item: unknown) => {
+    if (typeof item !== "object" || item === null) return [];
+    const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+    if (typeof msg !== "string" || !msg) return [];
+    const where = Array.isArray(loc)
+      ? loc
+          .filter(
+            (part) => typeof part === "string" || typeof part === "number",
+          )
+          .filter((part, index) => !(index === 0 && part === "body"))
+          .join(".")
+      : "";
+    return [where ? `${where}: ${msg}` : msg];
+  });
+  return messages.length ? messages.join("; ") : null;
+}
+
 /**
  * Send a same-origin Connections API request and parse its JSON response.
  *
@@ -11,7 +38,8 @@ export interface RequestErrorMessages {
  * @param signal - Abort signal for canceling the request.
  * @param method - HTTP method.
  * @param body - JSON object for POST and PUT requests, empty by default.
- * @param messages - Optional wording for 403 and 404 responses.
+ * @param messages - Optional wording for 403 and 404 responses. The `detail`
+ * of a 409, 413, or 422 response is shown as is.
  * @returns A `Promise<T>` that resolves to the parsed response payload, or
  * `undefined` for an empty `204` response.
  */
@@ -48,13 +76,14 @@ export async function requestConnection<T>(
     );
   if (response.status === 404 && messages.notFound)
     throw new Error(messages.notFound);
-  if (response.status === 422) {
-    // Validation messages are written for the user and never echo submitted values.
+  if (USER_FACING_DETAIL_STATUSES.has(response.status)) {
+    // These messages are written for the user and never echo submitted values.
     const detail = await response
       .json()
       .then((payload: { detail?: unknown }) => payload.detail)
       .catch(() => null);
-    if (typeof detail === "string" && detail) throw new Error(detail);
+    const message = detailMessage(detail);
+    if (message) throw new Error(message);
   }
   if (!response.ok)
     throw new Error("Could not complete the request. Try again.");

@@ -6,12 +6,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { Download, RefreshCw } from "lucide-react";
-import { EgressServiceRows } from "@/connections/EgressServiceRows";
+import { Download, Plus, RefreshCw } from "lucide-react";
+import {
+  EgressServiceEditor,
+  findBroaderGithubService,
+} from "@/connections/EgressServiceEditor";
+import {
+  EgressServiceRows,
+  type ServiceEditing,
+} from "@/connections/EgressServiceRows";
 import type { RequestErrorMessages } from "@/connections/request";
 import type {
+  AuthoredEgressService,
   EgressCredentialService,
   EgressOAuthStatus,
+  EgressServiceSource,
 } from "@/connections/types";
 import {
   API_ENDPOINTS,
@@ -30,7 +39,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { useConfigStore } from "@/store/configStore";
+import type { ConfigPath } from "@/lib/configSchema";
+import { type SaveConfigResult, useConfigStore } from "@/store/configStore";
 import {
   type Agent,
   type Config,
@@ -54,6 +64,7 @@ interface BrokerService {
   name: string;
   display_name: string | null;
   description: string;
+  source: EgressServiceSource;
   configured: boolean;
   updated_at: string | null;
   active_source: "key" | "oauth" | null;
@@ -102,6 +113,41 @@ function errorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message ? cause.message : fallback;
 }
 
+const STALE_SAVE_MESSAGE =
+  "The configuration changed while saving. Reload the page and check the service list.";
+const USER_SERVICE_LABEL = "User service";
+const DELETE_WARNING =
+  "This removes the service from the configuration. Saved keys stay stored and apply again if a service with the same name is added back.";
+
+type EditorState = { kind: "add" } | { kind: "edit"; name: string };
+
+// The store holds the config as authored, so a preset service reads
+// `{preset: "github"}` and goes back the same way.
+function operatorServices(
+  config: Config | null,
+): Record<string, AuthoredEgressService> {
+  const section = (
+    config as unknown as {
+      egress_broker?: { services?: Record<string, AuthoredEgressService> };
+    } | null
+  )?.egress_broker;
+  return section?.services ?? {};
+}
+
+function saveFailureMessage(
+  result: Exclude<SaveConfigResult, { status: "saved" | "stale" }>,
+): string {
+  const issues = result.diagnostics.flatMap((diagnostic) =>
+    diagnostic.kind === "validation" &&
+    diagnostic.issue.loc[0] === "egress_broker"
+      ? [
+          `${diagnostic.issue.loc.slice(2).join(".")}: ${diagnostic.issue.msg.replace(/^Value error, /, "")}`,
+        ]
+      : [],
+  );
+  return issues.length > 0 ? issues.join("; ") : result.message;
+}
+
 function canUseEgress(agent: Agent, defaults: Config["defaults"]): boolean {
   const inherited =
     agent.include_default_tools === false
@@ -124,11 +170,17 @@ function isRequesterScoped(
 }
 
 function ServiceSection({ agentName }: { agentName: string | null }) {
+  const config = useConfigStore((state) => state.config);
+  const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
+  const saveConfig = useConfigStore((state) => state.saveConfig);
   const [services, setServices] = useState<EgressCredentialService[] | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [editor, setEditor] = useState<EditorState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const latest = useRef(0);
+  const authoredServices = operatorServices(config);
 
   const load = useCallback(async () => {
     const request = ++latest.current;
@@ -163,15 +215,111 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
     };
   }, [load]);
 
+  // Writes one config service through the store, as Settings does, and puts
+  // the draft back when the save fails so no invalid draft stays behind.
+  const writeService = async (
+    name: string,
+    next: AuthoredEgressService | undefined,
+  ) => {
+    const path: ConfigPath = ["egress_broker", "services", name];
+    const previous = authoredServices[name];
+    updateConfigValue(path, next);
+    const result = await saveConfig();
+    if (result.status === "saved") {
+      await load();
+      return;
+    }
+    if (result.status === "stale") throw new Error(STALE_SAVE_MESSAGE);
+    updateConfigValue(path, previous);
+    throw new Error(saveFailureMessage(result));
+  };
+
+  const saveService = async (name: string, service: AuthoredEgressService) => {
+    await writeService(name, service);
+    setEditor(null);
+  };
+
+  const deleteService = async (name: string) => {
+    await writeService(name, undefined);
+    setEditor((current) =>
+      current?.kind === "edit" && current.name === name ? null : current,
+    );
+  };
+
+  const startEdit = (name: string) => {
+    if (authoredServices[name] === undefined) {
+      setActionError(
+        "This service is not in the loaded configuration. Reload the page and try again.",
+      );
+      return;
+    }
+    setActionError(null);
+    setEditor({ kind: "edit", name });
+  };
+
+  const serviceEditing: ServiceEditing = {
+    editableSource: "config",
+    onEdit: (service) => startEdit(service.name),
+    onDelete: (service) => deleteService(service.name),
+    deleteWarning: () => DELETE_WARNING,
+    labels: { user: USER_SERVICE_LABEL },
+  };
+
   return (
     <section aria-labelledby="egress-services-heading" className="space-y-2">
-      <h3 id="egress-services-heading" className="text-sm font-medium">
-        Service keys and accounts
-      </h3>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 id="egress-services-heading" className="text-sm font-medium">
+          Service keys and accounts
+        </h3>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={config === null || editor !== null}
+          onClick={() => {
+            setActionError(null);
+            setEditor({ kind: "add" });
+          }}
+        >
+          <Plus className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+          Add service
+        </Button>
+      </div>
       {error && (
         <Alert variant="destructive" className="p-2">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
+      )}
+      {actionError && (
+        <Alert variant="destructive" className="p-2">
+          <AlertDescription>{actionError}</AlertDescription>
+        </Alert>
+      )}
+      {editor && (
+        <div className="overflow-hidden rounded-md border border-border/60">
+          <EgressServiceEditor
+            key={editor.kind === "add" ? "add" : `edit:${editor.name}`}
+            context="operator"
+            name={editor.kind === "edit" ? editor.name : undefined}
+            service={
+              editor.kind === "edit" ? authoredServices[editor.name] : null
+            }
+            takenNames={[
+              ...Object.keys(authoredServices),
+              ...(services ?? []).map((service) => service.name),
+            ]}
+            broaderGithubService={findBroaderGithubService(
+              services ?? [],
+              editor.kind === "edit" ? editor.name : undefined,
+            )}
+            onSave={saveService}
+            onDelete={
+              editor.kind === "edit"
+                ? () => deleteService(editor.name)
+                : undefined
+            }
+            onCancel={() => setEditor(null)}
+          />
+        </div>
       )}
       {!services && !error && (
         <p role="status" className="text-sm text-muted-foreground">
@@ -180,8 +328,8 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
       )}
       {services?.length === 0 && (
         <p className="text-sm text-muted-foreground">
-          No egress services are configured yet. Add them under{" "}
-          <code>egress_broker.services</code> in the config.
+          No egress services are configured yet. Use Add service, or add them
+          under <code>egress_broker.services</code> in the config.
         </p>
       )}
       {services && services.length > 0 && (
@@ -202,6 +350,7 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
             services={services}
             onChanged={() => void load()}
             errorMessages={SECRET_ERROR_MESSAGES}
+            serviceEditing={serviceEditing}
           />
         </div>
       )}
