@@ -2790,7 +2790,6 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
             new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
         ),
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_completed_sync_task),
     ):
@@ -2879,7 +2878,6 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
             new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
         ),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
@@ -2989,7 +2987,6 @@ async def test_startup_membership_publication_serializes_config_reload(
             new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
         ),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
@@ -3058,11 +3055,11 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     orchestrator.agent_bots = {"router": router_bot}
     orchestrator.config = current_config
     orchestrator.running = True
-    orchestrator._startup_maintenance.startup_cutoff_ms = 123456
+    orchestrator._startup_maintenance.started = True
 
     maintenance_started = asyncio.Event()
     maintenance_released = asyncio.Event()
-    replayed: list[tuple[list[object], object, int]] = []
+    replayed: list[tuple[list[object], object]] = []
 
     async def blocked_startup_maintenance() -> None:
         maintenance_started.set()
@@ -3073,8 +3070,8 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         orchestrator._startup_maintenance.task = old_maintenance_task
         await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
 
-        def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
-            replayed.append((bots, config, startup_cutoff_ms))
+        def replay_startup_maintenance(bots: list[object], config: object) -> None:
+            replayed.append((bots, config))
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
@@ -3095,7 +3092,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
 
         assert updated is False
         assert old_maintenance_task.cancelled()
-        assert replayed == [([router_bot], new_config, 123456)]
+        assert replayed == [([router_bot], new_config)]
         mark_startup_runtime_support_ready.assert_awaited_once()
     finally:
         maintenance_released.set()
@@ -3153,12 +3150,11 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
         patch.object(orchestrator, "_update_unchanged_bots", side_effect=replace_general_bot),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as recover,
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
         patch.object(orchestrator._computer_runtime, "bind_if_ready"),
         patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
     ):
-        orchestrator._startup_maintenance.start([router_bot, old_bot], current_config, startup_cutoff_ms=123456)
+        orchestrator._startup_maintenance.start([router_bot, old_bot], current_config)
         first_maintenance_task = orchestrator._startup_maintenance.task
         assert first_maintenance_task is not None
         try:
@@ -3173,7 +3169,6 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
 
     assert first_maintenance_task.cancelled()
     assert setup_calls == [[router_bot, old_bot], [router_bot, new_bot]]
-    assert recover.await_args.args[:2] == ([router_bot, new_bot], new_config)
 
 
 def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -> None:

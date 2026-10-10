@@ -27,7 +27,6 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_runner import ResponseShutdownTimeoutError
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
-from mindroom.stop import StopManager
 from tests.conftest import unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -37,11 +36,11 @@ from tests.test_edit_regenerator import (
     NEW_RESPONSE_EVENT_ID,
     ORIGINAL_EVENT_ID,
     USER_ID,
-    _acknowledge_test_edit,
     _edit_event,
     _harness,
     _turn_record,
 )
+from tests.test_response_attempt import _Span
 from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _store
 
@@ -71,6 +70,7 @@ def _dispatcher(
             on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=lambda _event_id: False,
+            replies_ended=lambda _reply_ids: None,
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@bot:localhost"),
     )
@@ -92,10 +92,8 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     attempt = ResponseAttemptRunner(
         ResponseAttemptDeps(
             client=harness.regenerator.deps.runtime.client,
-            stop_manager=StopManager(),
             logger=MagicMock(),
             show_stop_button=lambda: False,
-            config=harness.config,
         ),
     )
 
@@ -111,16 +109,23 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
                 target=request.response_envelope.target,
                 existing_event_id=request.existing_event_id,
                 response_function=model,
+                span=_Span().attempt(),
                 on_cancelled=cancelled.append,
             ),
         )
         return None if cancelled else result
 
-    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store, generate_response=generate)
+    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store)
+    harness.generate_response.side_effect = generate
 
     async def callback(room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
-        await harness.regenerator.handle_message_edit(room, event, EventInfo.from_event(event.source), USER_ID)
-        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        handed_off = await harness.regenerator.handle_message_edit(
+            room,
+            event,
+            EventInfo.from_event(event.source),
+            USER_ID,
+        )
+        return TurnDispatchOutcome.DEFERRED if handed_off else TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     dispatcher = _dispatcher(principal, callback)
     bot = _bot(tmp_path / "bot")
@@ -132,19 +137,26 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     dispatcher.start()
     await asyncio.wait_for(started.wait(), timeout=2)
     await bot.stop(shutdown_intent=shutdown_intent)
+    # The process ends with it the regeneration running off the room's lane.
+    for regeneration in harness.regenerations:
+        regeneration.cancel()
+    await asyncio.gather(*harness.regenerations, return_exceptions=True)
 
     assert await principal.is_pending(EDIT_EVENT_ID)
     interrupted = store.get_turn_record(ORIGINAL_EVENT_ID)
     assert interrupted is not None
-    assert not interrupted.source_event_revisions
+    # The turn took the edit when its regeneration claimed the reply.
+    assert interrupted.source_event_revisions == {ORIGINAL_EVENT_ID: (1_000_001, EDIT_EVENT_ID)}
 
-    async def recover(request: ResponseRequest) -> str:
-        await _acknowledge_test_edit(tmp_path, request, NEW_RESPONSE_EVENT_ID, store, journal_store=journal_store)
+    async def recover(_request: ResponseRequest) -> str:
+        # Its answer's span settles the edit it answered.
+        await principal.settle(EDIT_EVENT_ID)
         return NEW_RESPONSE_EVENT_ID
 
-    harness.regenerator.deps = replace(harness.regenerator.deps, generate_response=recover)
+    harness.generate_response.side_effect = recover
     recovered = _dispatcher(principal, callback)
     assert await recovered.drain_once() == 1
+    await asyncio.gather(*harness.regenerations)
     _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store, agent_name=AGENT_NAME)
     recovered_record = reopened.get_turn_record(ORIGINAL_EVENT_ID)
@@ -402,39 +414,6 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
 
 
 @pytest.mark.asyncio
-async def test_explicit_stop_keeps_edited_revision_terminal_after_restart(
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-) -> None:
-    """A durable user STOP remains final even when the exact edit callback is replayed."""
-    store = await _store(journal_store, agent_name=AGENT_NAME)
-    await store.record_responded_turn(_turn_record())
-    harness = _harness(tmp_path, turn_record=None)
-    generations = 0
-
-    async def stop(request: ResponseRequest) -> str:
-        nonlocal generations
-        generations += 1
-        assert request.on_user_stop_handled is not None
-        await request.on_user_stop_handled(NEW_RESPONSE_EVENT_ID, 2)
-        return NEW_RESPONSE_EVENT_ID
-
-    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store, generate_response=stop)
-    event, event_info = _edit_event()
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID)
-    _reset_handled_turn_ledger_runtime()
-    reopened = await _store(journal_store, agent_name=AGENT_NAME)
-    stopped_record = reopened.get_turn_record(ORIGINAL_EVENT_ID)
-    assert stopped_record is not None
-    assert stopped_record.completed
-    assert stopped_record.user_stop_receipt_order == 2
-    assert stopped_record.source_event_revisions[ORIGINAL_EVENT_ID] == (1_000_001, EDIT_EVENT_ID)
-    harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=reopened)
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID)
-    assert generations == 1
-
-
-@pytest.mark.asyncio
 async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR0915
     tmp_path: Path,
     journal_store: EventJournalStore,
@@ -455,10 +434,8 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
     attempt = ResponseAttemptRunner(
         ResponseAttemptDeps(
             client=bot.client,
-            stop_manager=StopManager(),
             logger=MagicMock(),
             show_stop_button=lambda: False,
-            config=bot.config,
         ),
     )
 
@@ -480,7 +457,7 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
             raise
 
     async def callback(_room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
-        await attempt.run(ResponseAttemptRequest(target=_target(), response_function=model))
+        await attempt.run(ResponseAttemptRequest(target=_target(), response_function=model, span=_Span().attempt()))
         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     dispatcher = _dispatcher(principal, callback)

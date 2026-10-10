@@ -32,10 +32,12 @@ _SELF = (
     ],
 )
 def test_self_notice_names_every_agent_the_reader_can_ask(available: list[str], expected_suffix: str) -> None:
+    """The notice lists every agent the reader can ask in the room."""
     assert managed_room_notice(available=available) == _SELF + expected_suffix
 
 
 def test_notice_about_several_unavailable_agents_uses_plural_wording() -> None:
+    """Several unavailable agents are named together, with plural wording."""
     assert managed_room_notice(available=["Research"], unavailable=["General", "Mind"]) == (
         "This room is managed in the MindRoom configuration, and General and Mind aren't among its agents, "
         "so they can't answer here. To talk to them, create a new room and invite them. "
@@ -44,6 +46,7 @@ def test_notice_about_several_unavailable_agents_uses_plural_wording() -> None:
 
 
 def test_router_never_posts_the_join_notice(tmp_path: Path) -> None:
+    """The router does not post the managed-room notice when it joins."""
     room_id = "!managed:localhost"
     config = bind_runtime_paths(
         Config(agents={"research": AgentConfig(display_name="Research", rooms=[room_id])}),

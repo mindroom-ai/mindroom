@@ -2791,13 +2791,18 @@ Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unav
 
 The check runs between completed tool batches and never interrupts a running tool.
 Queued messages are handled after the active response finishes either way.
+A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
 The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
 
 ## Message Edits
 
-When a user edits a message that already received an agent response, the agent regenerates its reply for the updated content and edits its previous reply in place.
+When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
+If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
+While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
 Edits by agents never trigger regeneration.
 When another agent's reply finishes with a mention of this agent, it reaches this agent as a new message.
 
@@ -4536,7 +4541,8 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
-The agent is told which visible tool calls already finished so it does not repeat side effects; calls hidden by `show_tool_calls: false` cannot be passed on, so it is only warned that they may have run.
+The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
+Nothing blocks a repeated call, so a model can still occasionally run one again.
 
 ## Large Messages
 
@@ -6568,7 +6574,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
@@ -10402,7 +10408,7 @@ create_playlist("MindRoom Picks", description="Tracks from this week's chat")
 
 # Matrix & Threads
 
-These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, and summarize threads, make low-level Matrix API calls, and reuse conversation attachments.
+These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, make low-level Matrix API calls, and reuse conversation attachments.
 This page also covers automatic thread summaries.
 
 ## Tools On This Page
@@ -10412,6 +10418,7 @@ This page also covers automatic thread summaries.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and list shared tags on Matrix threads.
 - [`thread_resolution`] - Resolve or reopen threads in the current room.
+- [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
@@ -10425,7 +10432,7 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 These tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
-`thread_tags`, `thread_resolution`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root; other tools need the thread root ID itself.
+`thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root; other tools need the thread root ID itself.
 Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
@@ -10540,6 +10547,33 @@ agents:
 ```
 
 To close out finished threads, find candidates with `list_thread_tags(exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
+
+## [`thread_move`]
+
+`thread_move` lets an agent move a thread from the current room into another room, for example to file a conversation under the room of the project it belongs to.
+It is not in starter configs or default tool sets.
+
+Matrix cannot move messages between rooms, so `move_thread(room_id, thread_id=None)` copies the thread into a new thread in the target room and copies its tags.
+The original thread gets a `Moved to <link>` notice and is marked `resolved`.
+`room_id` accepts a room ID, alias, or configured room name.
+Without `thread_id`, it moves the active thread.
+
+Each agent re-posts its own messages, so the agents in the thread continue the conversation in the new thread with its earlier messages as context.
+The router re-posts messages from people, and from agents that are not in the target room, prefixed with the author's name.
+The copies never trigger agent replies.
+
+```yaml
+agents:
+  general:
+    tools:
+      - thread_move
+```
+
+A move is refused when the requester is not joined to the target room, when the router or the agent doing the move is not in it, when the original room is end-to-end encrypted and the target room is not, or when the thread cannot be read in full.
+Copies have new timestamps and keep only the latest edit of each message.
+Reactions, notices such as thread summaries, and replies still being written are not copied.
+Earlier tool-call results, per-thread model choices, agent modes, todos, scheduled tasks, and pending approvals stay with the original thread.
+Agents count only the people who post after the move, so until two people have posted in the moved thread, an agent that took part may answer untagged messages there.
 
 ## [`thread_summary`]
 
@@ -13249,7 +13283,8 @@ tool_approval:
 - An unanswered card expires after its `timeout_days` and the call is denied.
 - A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 
-While approval is pending, the agent stops typing and the conversation can continue.
+While approval is pending, the agent stops typing and counts as still responding in that conversation: later messages to it there wait until the approval ends and get a ⏳ reaction, while other conversations and agents carry on.
+Stopping the reply with 🛑, or deleting the message it answers, cancels the approval and expires its card, and deleting the message also removes the reply; an edit that regenerates the reply cancels it too (see [Message Edits](https://docs.mindroom.chat/configuration/threads/#message-edits)).
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
 
@@ -17732,6 +17767,12 @@ A refused database is left untouched.
 | `has never been used by this install` | The configured database is new or empty, usually because the connection URL points somewhere new. | Check `event_journal` and the variable named by `database_url_env` and point them back at the bound database; adopt only if you want to start the journal's history fresh. |
 | `is a different journal from the one this install is bound to` | The configured database belongs to another install, usually because the connection URL points at it. | Point `event_journal` back at the bound database, or adopt deliberately. |
 | `could not be read` or `does not name a generation` | The binding file is corrupt or truncated. | Delete `<storage>/tracking/event_journal_binding.json`, then run `mindroom journal adopt` against the database you want; the file holds nothing the database does not. |
+| `Another MindRoom is already running with the storage at` | A second `mindroom run` uses the same storage root. | Stop the other process; one storage root runs one MindRoom. |
+| `Another MindRoom runtime is already using this event journal` | Another storage root's runtime is bound to the same journal database. | Run one runtime per journal; two would both answer every message. |
+
+A PostgreSQL journal is claimed with a session advisory lock, so its connection must be direct or session-pooled; a transaction-pooling proxy cannot hold it.
+If that session is lost, MindRoom shuts down rather than keep running unclaimed; a process supervisor such as Kubernetes or systemd restarts it.
+After a runtime's host is lost without closing that session, a replacement is refused with `Another MindRoom runtime is already using this event journal` for about a minute on a direct connection, or for the pooler's client timeout behind a session pooler, until the old session is dropped; a supervisor's retries get through after that.
 
 Do not adopt just because startup refused: a connection URL that drifted to a fresh database is the common cause, and adopting would abandon the real journal's history instead of finding it.
 
@@ -18117,6 +18158,13 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to durable reply records
+
+Upgrade while no agent is replying.
+Stop the previous backend once in-progress replies have finished, and decide pending tool approvals first: the upgrade cancels every approval of a paused reply still waiting or not yet resumed, while approvals of scheduled calls are kept.
+A cancelled approval's card may stay visible, but clicking it does nothing, its reply keeps what it showed, and the request is not answered, so resend it if needed.
+A reply that was still streaming when the previous backend stopped may be answered again after the upgrade, sometimes in a new message, and a tool it had already run can run again, so check the room before resending that request.
 
 ## Upgrading to Nio 1.0
 

@@ -14,25 +14,22 @@ from mindroom.approval_failure import prepare_approval_failure
 from mindroom.cancellation import cancel_source_from_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_CANCELLED,
-    STREAM_STATUS_ERROR,
-    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
-from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
+from mindroom.delivery_gateway import DeliveryStage
+from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
-from mindroom.response_sources import ResponseAttempt
+from mindroom.reply_lifecycle import NoteKind, SpanOutcome
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
+from mindroom.tool_system.events import tool_markers_match_trace
 
 
 def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
@@ -41,10 +38,8 @@ def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
         raise RuntimeError(failure_reason)
 
 
-_USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
-
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from agno.models.response import ToolExecution
 
@@ -54,6 +49,11 @@ if TYPE_CHECKING:
     from mindroom.event_journal import MatrixDelivery, PrincipalStore
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_system.events import ToolTraceEntry
+
+
+# Records a chained pause's advance with the reply's pause row; returns the
+# advanced continuation and whether the row reached Matrix.
+type _ReplyPause = Callable[..., Awaitable[tuple[ApprovalContinuation | None, bool]]]
 
 
 @dataclass(frozen=True)
@@ -199,14 +199,10 @@ class ApprovalResponseCoordinator:
     store: PrincipalStore
     delivery_gateway: DeliveryGateway
     retry_sources: Callable[[str, tuple[str, ...]], None]
-
-    async def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
-        """Persist one born-bound paused run against its original sources."""
-        created = await self.store.create_approval_continuation(continuation)
-        if created is None:
-            msg = f"Could not create approval continuation {continuation.approval_id!r}"
-            raise RuntimeError(msg)
-        return created
+    # Finishes a paused run once its FINAL is terminal, settling its turn.
+    finish_approval: Callable[[str], Awaitable[bool]]
+    # Releases an interrupted run, with the generation it observed: replay continues its reply, or a Stop ends it.
+    release_approval: Callable[[str, int], Awaitable[bool]]
 
     async def plan_pause(
         self,
@@ -363,8 +359,13 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         pending_text: str,
+        reply_pause: _ReplyPause,
     ) -> _ApprovalPausePresentation:
-        """Replace one claim with Agno's next exact pause generation."""
+        """Replace one claim with Agno's next exact pause generation.
+
+        ``reply_pause`` records the advance with the reply's pause row and
+        returns the advanced continuation and whether its pause row reached Matrix.
+        """
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(
@@ -376,35 +377,31 @@ class ApprovalResponseCoordinator:
         visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
         visible_text = paused.response_text or plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-        publishing = await self.store.advance_approval_continuation(
-            current.approval_id,
+        advance = ApprovalAdvance(
+            approval_id=current.approval_id,
             claimant_generation=current.generation,
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
             runtime_model_name=paused.runtime_model_name,
             continuation_count=max(current.continuation_count, paused.continuation_count),
-            response_text=paused.response_text,
-            response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
-            response_presentation_state=paused.response_presentation_state,
             delegation_storage_bindings=paused.delegation_storage_bindings,
             cli_call=paused.cli_call,
+        )
+        publishing, shown_with_pause = await reply_pause(
+            advance,
+            paused,
+            visible_text=visible_text,
+            stream_status=stream_status,
+            tool_trace=visible_tool_trace,
+            waiting_text=plan.waiting_text,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
         failure_reason = "Chained approval publication failed"
         try:
-            edit_succeeded = await self.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=current.response_event_id,
-                    new_text=visible_text,
-                    extra_content={STREAM_STATUS_KEY: stream_status},
-                    tool_trace=list(visible_tool_trace) or None,
-                ),
-            )
-            _require_successful_edit(edit_succeeded, failure_reason)
+            _require_successful_edit(shown_with_pause, failure_reason)
             await self.publish_generation(
                 publishing,
                 plan,
@@ -447,49 +444,40 @@ class ApprovalResponseCoordinator:
         continuation: ApprovalContinuation,
         reason: str,
         *,
-        visible_text: str | None = None,
+        interruption: NoteKind | None = None,
     ) -> bool:
-        """Settle cards and the failure outcome from the owning source worker."""
+        """Settle cards and the failure outcome from the owning source worker.
+
+        ``interruption`` names the note the reply shows below its content.
+        """
         current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:
             return True
         if await self.successful_final_delivery(current) is not None:
             return False
-        manager = approval_manager.get_approval_store()
-        current = await prepare_approval_failure(
-            current,
-            reason,
-            request_failure=partial(self.request_failure, current),
-            expire_cards=None if manager is None else manager.expire_continuation_cards,
-        )
+        current = await self._prepare_failure(current, reason)
         if current is None:
             return False
-        await cancel_approval_delegations(
-            current,
-            config=self.config(),
-            runtime_paths=self.runtime_paths,
-            reason=reason,
-        )
-        if await self.store.finish_approval_continuation(current.approval_id):
+        if await self.finish_approval(current.approval_id):
             return True
         user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
-        visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if user_stop else redact_sensitive_text(reason))
-        target = continuation_target(current)
-        delivered = await self.delivery_gateway.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=current.response_event_id,
-                new_text=visible_reason,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED if user_stop else STREAM_STATUS_ERROR},
-                delivery_turn_id=current.source_event_ids[0],
-                response_attempt=ResponseAttempt(current.entity_name, current.sources),
-                defer_source_handoff=True,
-            ),
+        written = await self.delivery_gateway.write_approval_failure_note(
+            current.response_event_id,
+            approval_id=current.approval_id,
+            note=interruption or (NoteKind.CANCELLED if user_stop else NoteKind.ERROR),
+            text=redact_sensitive_text(reason),
+            target=continuation_target(current),
         )
-        return delivered and await self.store.finish_approval_continuation(current.approval_id)
+        # The reply's records show the note; the finish ends the reply.
+        return written and await self.finish_approval(current.approval_id)
 
     async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
-        """End an interrupted continuation's cards and hand its pending sources back to ordinary replay."""
+        """End an interrupted continuation's cards and release it: its sources go back to replay unless a Stop ends the reply."""
+        current = await self._prepare_failure(continuation, reason)
+        return current is not None and await self.release_approval(current.approval_id, current.generation)
+
+    async def _prepare_failure(self, continuation: ApprovalContinuation, reason: str) -> ApprovalContinuation | None:
+        """Fence a continuation for failure, expire its cards, and cancel its delegations; ``None`` when that failed."""
         manager = approval_manager.get_approval_store()
         current = await prepare_approval_failure(
             continuation,
@@ -498,17 +486,14 @@ class ApprovalResponseCoordinator:
             expire_cards=None if manager is None else manager.expire_continuation_cards,
         )
         if current is None:
-            return False
+            return None
         await cancel_approval_delegations(
             current,
             config=self.config(),
             runtime_paths=self.runtime_paths,
             reason=reason,
         )
-        return await self.store.release_approval_continuation(
-            current.approval_id,
-            expected_generation=current.generation,
-        )
+        return current
 
     async def successful_final_delivery(
         self,
@@ -518,9 +503,10 @@ class ApprovalResponseCoordinator:
     ) -> MatrixDelivery | None:
         """Return FINAL debt produced by a completed Agno continuation, not failure settlement."""
         delivery = await self.final_delivery(continuation, recover=recover)
-        if delivery is None:
+        if delivery is None or delivery.permanently_failed:
             return None
-        return delivery if delivery.result is not None and not delivery.permanently_failed else None
+        span = None if delivery.span_id is None else await self.store.replies.span(delivery.span_id)
+        return delivery if span is not None and span.outcome is SpanOutcome.COMPLETED else None
 
     async def final_delivery(
         self,

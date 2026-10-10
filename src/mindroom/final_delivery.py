@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 _StreamTerminalStatus = Literal["completed", "cancelled", "error"]
 _TerminalStatus = Literal[_StreamTerminalStatus, "suspended"]
-VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
+_VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 _VisibleDeliveryKind = Literal["sent", "edited"]
 
 
@@ -24,7 +24,7 @@ class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
     terminal_status: _StreamTerminalStatus
     rendered_body: str | None
-    visible_body_state: VisibleBodyState
+    visible_body_state: _VisibleBodyState
     terminal_update_committed: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None

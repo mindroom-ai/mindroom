@@ -460,8 +460,6 @@ class TestUserIdPassthrough:
         config = bind_runtime_paths(_config(), runtime_paths)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
-        bot.stop_manager = MagicMock()
-        bot.stop_manager.remove_stop_button = AsyncMock()
         bot.client = AsyncMock()
         bot.agent_name = "general"
         bot.storage_path = tmp_path
@@ -502,8 +500,6 @@ class TestUserIdPassthrough:
         config = bind_runtime_paths(_config(), runtime_paths)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
-        bot.stop_manager = MagicMock()
-        bot.stop_manager.remove_stop_button = AsyncMock()
         bot.client = AsyncMock()
         bot.agent_name = "general"
         bot.matrix_id = MagicMock()
@@ -556,8 +552,6 @@ class TestUserIdPassthrough:
         config = bind_runtime_paths(_config(), runtime_paths)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
-        bot.stop_manager = MagicMock()
-        bot.stop_manager.remove_stop_button = AsyncMock()
         bot.client = AsyncMock()
         bot.agent_name = "general"
         bot.storage_path = tmp_path
@@ -639,8 +633,6 @@ class TestUserIdPassthrough:
         config = bind_runtime_paths(_config(), runtime_paths)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
-        bot.stop_manager = MagicMock()
-        bot.stop_manager.remove_stop_button = AsyncMock()
         bot.client = AsyncMock()
         bot.agent_name = "general"
         bot.storage_path = tmp_path

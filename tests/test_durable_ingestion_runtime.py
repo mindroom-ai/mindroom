@@ -775,6 +775,7 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
         orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
         orchestrator.agent_bots[bot.agent_name] = bot
         monkeypatch.setattr(orchestrator._approval_recovery, "reconcile_unavailable_entities", AsyncMock())
+        monkeypatch.setattr(orchestrator, "_shared_journal_store", lambda: MagicMock(end_entity_replies=AsyncMock()))
         sync = asyncio.create_task(bot.sync_forever())
         orchestrator._sync_tasks[bot.agent_name] = sync
         try:

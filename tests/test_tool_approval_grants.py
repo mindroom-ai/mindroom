@@ -20,7 +20,6 @@ from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalCall,
-    ApprovalContinuation,
     ApprovalDecisionMetadata,
     DeliveryStage,
     EventClass,
@@ -34,8 +33,10 @@ from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -141,6 +142,8 @@ async def test_only_policy_pause_offers_timed_approval(
         store=responder,
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
+        finish_approval=AsyncMock(return_value=True),
+        release_approval=AsyncMock(return_value=True),
     )
     tool = ToolExecution(
         tool_call_id="call-authored",
@@ -166,22 +169,19 @@ async def test_only_policy_pause_offers_timed_approval(
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="authored",
         run_id="run",
         session_id="session",
-        entity_kind="agent",
         entity_name="code",
         room_id="!room:test",
-        thread_id="$thread",
         requester_id="@human:test",
-        response_event_id="$waiting",
         sources=ResponseSources(("$source-authored",), ("$source-authored",)),
         calls=plan.calls,
         state="waiting",
         runtime_generation="runtime",
     )
-    assert await responder.create_approval_continuation(continuation) is not None
+    assert await paused_for_approval(responder, continuation) is not None
     try:
         await coordinator.publish_generation(
             continuation,
@@ -230,6 +230,8 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
         store=responder,
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
+        finish_approval=AsyncMock(return_value=True),
+        release_approval=AsyncMock(return_value=True),
     )
     sent = []
 
@@ -265,15 +267,14 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                     source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run"}},
                 ),
             )
-            continuation = await coordinator.create(
-                ApprovalContinuation(
+            continuation = await paused_for_approval(
+                responder,
+                approval_continuation(
                     approval_id=name,
                     run_id="run-" + name,
                     session_id="session",
-                    entity_kind="agent",
                     entity_name="code",
                     room_id="!room:test",
-                    thread_id="$thread",
                     requester_id="@human:test",
                     response_event_id="$waiting-" + name,
                     sources=ResponseSources(("$source-" + name,), ("$source-" + name,)),
@@ -282,6 +283,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                     runtime_generation="runtime",
                 ),
             )
+            assert continuation is not None
             await coordinator.publish_generation(
                 continuation,
                 plan,
@@ -1242,11 +1244,10 @@ async def _card(
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run"}},
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id=name,
         run_id="run-" + name,
         session_id="session-" + name,
-        entity_kind="agent",
         entity_name=agent,
         room_id="!room:test",
         thread_id=thread,
@@ -1264,7 +1265,7 @@ async def _card(
         state="waiting",
         runtime_generation="runtime",
     )
-    assert await responder.create_approval_continuation(continuation) is not None
+    assert await paused_for_approval(responder, continuation) is not None
     card = await manager.prepare_detached_approval(
         approval_id="card-" + name,
         continuation_id=name,

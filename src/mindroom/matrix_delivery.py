@@ -21,12 +21,12 @@ from mindroom.event_journal.models import DeliveryStage, UnreadableMatrixDeliver
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
     from mindroom.event_journal.models import MatrixDelivery, TerminalTurnWrite
     from mindroom.event_journal.projection import ProjectedEvent
+    from mindroom.event_journal.replies import PostCommitEffect, PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
     from mindroom.event_journal.views import MatrixDeliveryView
-    from mindroom.response_sources import ResponseAttempt
 
 logger = get_logger(__name__)
 
@@ -36,6 +36,8 @@ class PermanentDeliveryError(RuntimeError):
 
 
 type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
+# Decides and records one reply row: the store's own enqueue, or one coupled to another durable step.
+type ReplyRowEnqueuer = Callable[["ReplyRowRequest", "PreparedReplyRow"], Awaitable["ReplyRowEnqueue | None"]]
 type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
 # Finding the Matrix event a previous attempt already produced, when the frozen
@@ -52,7 +54,7 @@ type _TerminalTurnFor = Callable[[MatrixDelivery, str], "TerminalTurnWrite | Non
 # transaction committed can be re-asserted through whatever ordering the ledger
 # uses for every other write. A caller that lost the row is never told, because
 # it committed nothing to settle.
-type _TerminalTurnCommitted = Callable[[str, str, "TerminalTurnWrite | None"], Awaitable[None]]
+type _TerminalTurnCommitted = Callable[["TerminalTurnWrite"], Coroutine[object, object, None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,15 +90,30 @@ class RecoveryOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyRowDelivery:
+    """What delivering one reply row did."""
+
+    # ``None`` when the outbox refused the row for an ended membership.
+    enqueue: ReplyRowEnqueue | None
+    # The event the row resolved to, when it was decided, sent, and acknowledged.
+    event_id: str | None = None
+
+
+def _reply_lock_key(reply_id: str) -> str:
+    """Return the sending-lock key that orders every row of one reply."""
+    return f"reply:{reply_id}"
+
+
+@dataclass(frozen=True, slots=True)
 class _FlushOutcome:
     """One locked send result and the callback it leaves for after unlock."""
 
     event_id: str | None
-    terminal_response_event_id: str | None = None
-    publish_committed_terminal: bool = False
+    # The terminal turn record a bound FINAL acknowledgement committed.
     committed_terminal: TerminalTurnWrite | None = None
     retry_required: bool = False
     propagate_cancellation: asyncio.CancelledError | None = field(default=None, repr=False, compare=False)
+    reply_effects: tuple[PostCommitEffect, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +148,11 @@ class MatrixDeliveryWorker:
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
     process_shutdown_requested: Callable[[], bool] = lambda: False
-    cleanup_deleted_initial: Callable[[MatrixDeliveryWorker, str], Awaitable[bool]] | None = None
+    # Told the reply whose row just stopped being unknown, so claims that
+    # waited for that reply's earlier writes run again.
+    reply_row_resolved: Callable[[str], None] | None = None
+    # Runs what a reply row's acknowledgement or failure left for after its commit.
+    run_reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
     delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
@@ -155,7 +176,6 @@ class MatrixDeliveryWorker:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
-        response_attempt: ResponseAttempt | None = None,
         edits_event_id: str | None = None,
         permanent_failure_reason: str | None = None,
     ) -> str | None:
@@ -193,11 +213,70 @@ class MatrixDeliveryWorker:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
-                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 permanent_failure_reason=permanent_failure_reason,
             )
-        return await self._finish_flush(delivery_id, outcome)
+        return await self._finish_flush(outcome)
+
+    async def deliver_reply_row(
+        self,
+        request: ReplyRowRequest,
+        *,
+        prepare: Callable[[], Awaitable[PreparedReplyRow]],
+        enqueue: ReplyRowEnqueuer | None = None,
+        on_enqueued: Callable[[ReplyRowEnqueue], None] | None = None,
+    ) -> ReplyRowDelivery:
+        """Decide and record one row of a reply, then send the reply's rows in write order.
+
+        The lifecycle rule decides the row inside its enqueue transaction, before
+        anything is sent, so a send that fails leaves the row owed to recovery
+        rather than lost. One sending lock per reply orders the rows of all of
+        its spans and delivery ids: earlier rows whose outcome is unknown are
+        sent first, because a later row must never overtake one; an edit whose
+        target the reply's create has not bound yet is aimed at it when claimed.
+        A rule that refuses (a Stop committed meanwhile) enqueues nothing and
+        the caller re-renders. ``on_enqueued`` hears what committed before any
+        send can fail.
+        """
+        async with self._delivery_lock(_reply_lock_key(request.reply_id)):
+            prepared = await prepare()
+            enqueue_row = self.store.enqueue_reply_row if enqueue is None else enqueue
+            enqueued = await enqueue_row(request, prepared)
+            if enqueued is not None and on_enqueued is not None:
+                on_enqueued(enqueued)
+            if enqueued is None or enqueued.delivery_id is None or enqueued.stage is None:
+                return ReplyRowDelivery(enqueue=enqueued)
+            if self.handoff is not None and enqueued.settled_event_ids:
+                self.handoff.released(enqueued.settled_event_ids)
+            if not await self._flush_reply_rows(request.reply_id, before_sequence=enqueued.sequence):
+                # An earlier row cannot be sent yet; recovery sends both in order.
+                return ReplyRowDelivery(enqueue=enqueued)
+            outcome = await run_coroutine_until_complete(
+                self._flush(delivery_id=enqueued.delivery_id, stage=enqueued.stage),
+            )
+        event_id = await self._finish_flush(outcome)
+        return ReplyRowDelivery(enqueue=enqueued, event_id=event_id)
+
+    async def send_reply_rows(self, reply_id: str) -> bool:
+        """Send a reply's owed rows in write order; return whether none is left unknown."""
+        async with self._delivery_lock(_reply_lock_key(reply_id)):
+            return await self._flush_reply_rows(reply_id)
+
+    async def _flush_reply_rows(self, reply_id: str, *, before_sequence: int | None = None) -> bool:
+        """Resolve a reply's earlier rows in write order; return whether none is left unknown.
+
+        Called with the reply's sending lock held. A row that still cannot be
+        sent stops the walk, because a later row must never overtake it.
+        """
+        for delivery_id, stage in await self.store.unresolved_reply_rows(
+            reply_id,
+            before_sequence=before_sequence,
+        ):
+            outcome = await self._flush(delivery_id=delivery_id, stage=stage)
+            await self._finish_flush(outcome)
+            if outcome.event_id is None and outcome.retry_required:
+                return False
+        return not await self.store.unresolved_reply_rows(reply_id, before_sequence=before_sequence)
 
     async def _complete_delivery_across_cancellation(
         self,
@@ -208,7 +287,6 @@ class MatrixDeliveryWorker:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None,
-        response_attempt: ResponseAttempt | None,
         edits_event_id: str | None,
         permanent_failure_reason: str | None,
     ) -> _FlushOutcome:
@@ -232,7 +310,6 @@ class MatrixDeliveryWorker:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
-                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=handed_over,
                 permanent_failure_reason=permanent_failure_reason,
@@ -357,7 +434,7 @@ class MatrixDeliveryWorker:
                 process_shutdown_requested=lambda: process_shutdown_requested,
                 on_cancelled=note_cancellation,
             )
-        return await self._finish_flush(delivery_id, outcome)
+        return await self._finish_flush(outcome)
 
     async def _flush(
         self,
@@ -368,12 +445,6 @@ class MatrixDeliveryWorker:
         on_cancelled: Callable[[], None] | None = None,
     ) -> _FlushOutcome:
         """Send one delivery while holding its visible-delivery lock."""
-        if (
-            stage is DeliveryStage.INITIAL
-            and self.cleanup_deleted_initial is not None
-            and await self.cleanup_deleted_initial(self, delivery_id)
-        ):
-            return _FlushOutcome(event_id=None)
         claimed = await self.store.claim_matrix_delivery(
             delivery_id=delivery_id,
             stage=stage,
@@ -397,6 +468,30 @@ class MatrixDeliveryWorker:
                 stage=stage.value,
             )
             return _FlushOutcome(event_id=None, retry_required=blocked_final)
+        outcome = await self._flush_claimed(
+            claimed,
+            process_shutdown_requested=process_shutdown_requested,
+            on_cancelled=on_cancelled,
+        )
+        if claimed.reply_id is not None and self.reply_row_resolved is not None:
+            stored = await self.store.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+            if (
+                stored is None
+                or stored.acknowledged_event_id is not None
+                or stored.permanently_failed
+                or stored.retired
+            ):
+                self.reply_row_resolved(claimed.reply_id)
+        return outcome
+
+    async def _flush_claimed(
+        self,
+        claimed: MatrixDelivery,
+        *,
+        process_shutdown_requested: Callable[[], bool] | None,
+        on_cancelled: Callable[[], None] | None,
+    ) -> _FlushOutcome:
+        """Send or reconcile one claimed delivery."""
         if claimed.acknowledged_event_id is not None:
             return _FlushOutcome(event_id=claimed.acknowledged_event_id)
         if process_shutdown_requested is not None and process_shutdown_requested():
@@ -509,12 +604,12 @@ class MatrixDeliveryWorker:
         try:
             event_id = await self.send(claimed)
         except PermanentDeliveryError as error:
-            acknowledged_event_id = await self.store.record_permanent_matrix_delivery_failure(
+            failure = await self.store.record_permanent_matrix_delivery_failure(
                 delivery_id=claimed.delivery_id,
                 stage=claimed.stage,
                 reason=str(error),
             )
-            return _FlushOutcome(event_id=acknowledged_event_id)
+            return _FlushOutcome(event_id=failure.acknowledged_event_id, reply_effects=failure.reply_effects)
         return await self._acknowledge(claimed, event_id)
 
     async def _acknowledge(self, claimed: MatrixDelivery, event_id: str) -> _FlushOutcome:
@@ -563,12 +658,10 @@ class MatrixDeliveryWorker:
         )
         if acknowledged.settled_event_id is None:
             return _FlushOutcome(event_id=event_id)
-        bound_terminal = acknowledged.bound and claimed.stage is DeliveryStage.FINAL
         return _FlushOutcome(
             event_id=acknowledged.settled_event_id,
-            terminal_response_event_id=terminal_response_event_id if bound_terminal else None,
-            publish_committed_terminal=bound_terminal,
             committed_terminal=acknowledged.terminal_turn,
+            reply_effects=acknowledged.reply_effects,
         )
 
     async def _delivered_projections(
@@ -586,27 +679,13 @@ class MatrixDeliveryWorker:
             return ()
         return await self.observe_delivered(claimed, event_id)
 
-    async def _finish_flush(self, delivery_id: str, outcome: _FlushOutcome) -> str | None:
+    async def _finish_flush(self, outcome: _FlushOutcome) -> str | None:
         """Run post-lock bookkeeping and return the visible event."""
         event_id = outcome.event_id
-        if (
-            outcome.publish_committed_terminal
-            and outcome.terminal_response_event_id is not None
-            and self.terminal_turn_committed is not None
-        ):
-
-            async def publish_committed_terminal() -> None:
-                assert self.terminal_turn_committed is not None
-                assert outcome.terminal_response_event_id is not None
-                await self.terminal_turn_committed(
-                    delivery_id,
-                    outcome.terminal_response_event_id,
-                    outcome.committed_terminal,
-                )
-
-            await run_coroutine_until_complete(
-                publish_committed_terminal(),
-            )
+        if outcome.reply_effects and self.run_reply_effects is not None:
+            await self.run_reply_effects(outcome.reply_effects)
+        if outcome.committed_terminal is not None and self.terminal_turn_committed is not None:
+            await run_coroutine_until_complete(self.terminal_turn_committed(outcome.committed_terminal))
         if outcome.propagate_cancellation is not None:
             raise outcome.propagate_cancellation
         return event_id
@@ -657,6 +736,29 @@ class MatrixDeliveryWorker:
             adopted_event_id=already_delivered,
         )
         return already_delivered
+
+    async def _recover_one(
+        self,
+        delivery: MatrixDelivery,
+        *,
+        process_shutdown_requested: Callable[[], bool],
+        on_cancelled: Callable[[], None],
+    ) -> _FlushOutcome | None:
+        """Flush one unacknowledged row under its sending lock; ``None`` when an earlier reply row still blocks it."""
+        reply_id = delivery.reply_id
+        lock_key = delivery.delivery_id if reply_id is None else _reply_lock_key(reply_id)
+        async with self._delivery_lock(lock_key):
+            if reply_id is not None and not await self._flush_reply_rows(
+                reply_id,
+                before_sequence=delivery.reply_sequence,
+            ):
+                return None
+            return await self._flush(
+                delivery_id=delivery.delivery_id,
+                stage=delivery.stage,
+                process_shutdown_requested=process_shutdown_requested,
+                on_cancelled=on_cancelled,
+            )
 
     async def recover(self) -> RecoveryOutcome:
         """Reconcile every delivery whose Matrix outcome is unknown.
@@ -709,14 +811,15 @@ class MatrixDeliveryWorker:
                     failed_deliveries.add((delivery.delivery_id, delivery.stage))
                     continue
                 try:
-                    async with self._delivery_lock(delivery.delivery_id):
-                        outcome = await self._flush(
-                            delivery_id=delivery.delivery_id,
-                            stage=delivery.stage,
-                            process_shutdown_requested=lambda: process_shutdown_requested,
-                            on_cancelled=note_cancellation,
-                        )
-                    sent = await self._finish_flush(delivery.delivery_id, outcome)
+                    outcome = await self._recover_one(
+                        delivery,
+                        process_shutdown_requested=lambda: process_shutdown_requested,
+                        on_cancelled=note_cancellation,
+                    )
+                    if outcome is None:
+                        failed_deliveries.add((delivery.delivery_id, delivery.stage))
+                        continue
+                    sent = await self._finish_flush(outcome)
                 except Exception:
                     logger.exception(
                         "matrix_delivery_recovery_failed",
@@ -743,6 +846,8 @@ __all__ = [
     "MatrixDeliveryWorker",
     "PermanentDeliveryError",
     "RecoveryOutcome",
+    "ReplyRowDelivery",
+    "ReplyRowEnqueuer",
     "ResolveDelivered",
     "SendDelivery",
     "TurnHandoff",

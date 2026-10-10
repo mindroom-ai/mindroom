@@ -11,7 +11,7 @@ from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -37,20 +37,27 @@ from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
+from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.config.agent import AgentConfig
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecision, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, apply_exact_approval_decisions
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAnswer,
+    ResponsePausedForApproval,
+    apply_exact_approval_decisions,
+)
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
-from mindroom.tool_system.events import CollectedStreamPresentation, serialize_tool_trace
+from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tools.shell import shell_tools
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
@@ -169,17 +176,14 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
             requires_confirmation=True,
         ),
     )
-    continuation = ApprovalContinuation(
-        approval_id="approval",
+    continuation = approval_continuation(
         correlation_id=runtime.correlation_id,
         run_id="saved-run",
         session_id=runtime.session_id,
-        entity_kind="agent",
         entity_name="helper",
         room_id=runtime.room_id,
         thread_id=runtime.thread_id,
         requester_id=runtime.requester_id,
-        response_event_id="$waiting",
         sources=ResponseSources((runtime.reply_to_event_id,), (runtime.reply_to_event_id,)),
         state="claimed",
         request_body="Load sleep and answer using knowledge",
@@ -221,6 +225,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
     run_ids = []
     result = await execution.continue_run(
         continuation,
+        paused_answer=PausedAnswer(),
         execution_identity=identity,
         tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
         decisions={"loader": True},
@@ -310,17 +315,13 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             requires_confirmation=True,
         ),
     )
-    continuation = ApprovalContinuation(
-        approval_id="approval",
+    continuation = approval_continuation(
         run_id="run",
         session_id="session",
-        entity_kind="agent",
         entity_name="helper",
         room_id="!room:test",
-        thread_id="$thread",
         requester_id="@alice:test",
         response_event_id="$response",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(
             ApprovalCall(
@@ -349,12 +350,6 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     presentation.start_tool(
         project_cli_execution(requirement.tool_execution, parent="bash-parent", toolkit_name="actions"),
     )
-
-    continuation = replace(
-        continuation,
-        response_text=presentation.final_text(),
-        response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
-    )
     published = []
 
     async def publish(chunk) -> None:
@@ -369,6 +364,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
         CliApprovalCall.from_dict(continuation.cli_call),
         catalog.run_response,
         catalog.session,
+        paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
         runtime_context=catalog.runtime_context,
         decisions={"hidden": approved},
         denial_reasons={"hidden": "Denied"},
@@ -433,17 +429,13 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     )
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
     presentation.start_tool(project_cli_execution(requirement.tool_execution, parent="bash", toolkit_name="shell"))
-    continuation = ApprovalContinuation(
-        approval_id="approval",
+    continuation = approval_continuation(
         run_id="run",
         session_id="session",
-        entity_kind="agent",
         entity_name="helper",
         room_id="!room:test",
-        thread_id="$thread",
         requester_id="@alice:test",
         response_event_id="$response",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(
             ApprovalCall(
@@ -465,8 +457,6 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
             requirements=(requirement,),
             delegation_depth=0,
         ).to_dict(),
-        response_text=presentation.final_text(),
-        response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
     )
     with tool_runtime_context(catalog.runtime_context):
         follow_up = await cli_approval_recovery.continue_cli_approval(
@@ -475,6 +465,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
             CliApprovalCall.from_dict(continuation.cli_call),
             catalog.run_response,
             catalog.session,
+            paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
             runtime_context=catalog.runtime_context,
             decisions={"bash": approved},
             denial_reasons={"bash": "Denied"},
@@ -642,11 +633,10 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         await checkpoint.persist_approval("old-bash")
     session = agent.db.get_session(runtime.session_id)
     persisted = session.runs[0]
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="approved",
         run_id="saved-run",
         session_id=runtime.session_id,
-        entity_kind="agent",
         entity_name="helper",
         room_id=runtime.room_id,
         thread_id=runtime.resolved_thread_id,
@@ -657,8 +647,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         state="claimed",
         show_tool_calls=True,
         request_body="recover actual request",
-        response_text=presentation.response_text,
-        response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
         calls=(
             ApprovalCall(
                 "hidden",
@@ -813,6 +801,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             CliApprovalCall.from_dict(continuation.cli_call),
             persisted,
             session,
+            paused_answer=PausedAnswer(text=presentation.response_text, tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"hidden": True},
             denial_reasons={"hidden": None},
@@ -956,17 +945,14 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             requires_confirmation=True,
         ),
     )
-    continuation = ApprovalContinuation(
+    continuation = approval_continuation(
         approval_id="generated-approval",
         run_id=persisted.run_id,
         session_id=runtime.session_id,
-        entity_kind="agent",
         entity_name="helper",
         room_id=runtime.room_id,
         thread_id=runtime.thread_id,
         requester_id=runtime.requester_id,
-        response_event_id="$waiting",
-        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         calls=(ApprovalCall("remember-id", "remember", "helper", 100, toolkit_name="agent"),),
         cli_call={
@@ -996,6 +982,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
     async def recover():
         return await execution.continue_run(
             continuation,
+            paused_answer=PausedAnswer(),
             execution_identity=identity,
             tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
             decisions={"remember-id": True},
@@ -1015,3 +1002,98 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             await recover()
         assert effects == []
         response.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("answered", "shutting_down"),
+    [(False, False), (False, True), (True, False)],
+    ids=["fenced", "fenced-during-shutdown", "answered-after-fence"],
+)
+@pytest.mark.asyncio
+async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_expire(
+    *,
+    answered: bool,
+    shutting_down: bool,
+) -> None:
+    """The cancelled note reached the room, but only failure settlement expires the approval's pending card.
+
+    A run that answered after its fence finishes as an answered one does, so its after-response work runs once.
+    """
+    continuation = SimpleNamespace(
+        approval_id="approval-1",
+        state="failing",
+        failure_reason="cancelled_by_user",
+        runtime_generation=None,
+        cli_call={"kind": "agent_cli"},
+        room_id="!room",
+        source_event_ids=("$source",),
+    )
+    final = SimpleNamespace(permanently_failed=False)
+    responses = SimpleNamespace(
+        final_delivery=AsyncMock(return_value=final),
+        successful_final_delivery=AsyncMock(return_value=final if answered else None),
+        finish_approval=AsyncMock(return_value=True),
+        request_failure=AsyncMock(return_value=None),
+        settle_failure=AsyncMock(return_value=True),
+    )
+    waits = CliApprovalWaits(
+        store=SimpleNamespace(approval_continuation_for_source=AsyncMock(return_value=continuation)),  # type: ignore[arg-type]
+        responses=responses,  # type: ignore[arg-type]
+        runtime_generation="runtime-a",
+        retry_sources=lambda _room_id, _sources: None,
+        claim=AsyncMock(),
+        advance=AsyncMock(),
+    )
+    progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
+
+    with patch("mindroom.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
+        await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
+
+    responses.request_failure.assert_not_awaited()
+    if answered:
+        responses.finish_approval.assert_awaited_once_with("approval-1")
+        responses.settle_failure.assert_not_awaited()
+        return
+    responses.finish_approval.assert_not_awaited()
+    if shutting_down:
+        # Approval recovery settles it at the next start.
+        responses.settle_failure.assert_not_awaited()
+    else:
+        responses.settle_failure.assert_awaited_once_with(continuation, "cancelled_by_user")
+
+
+@pytest.mark.parametrize("permanently_failed", [False, True])
+@pytest.mark.asyncio
+async def test_a_cli_wait_fails_an_approval_whose_final_matrix_refused(*, permanently_failed: bool) -> None:
+    """A FINAL Matrix refused for good is no answer: the wait fails the approval instead of finishing it."""
+    continuation = SimpleNamespace(
+        approval_id="approval-1",
+        state="claimed",
+        runtime_generation="runtime-a",
+        cli_call={"kind": "agent_cli"},
+        room_id="!room",
+        source_event_ids=("$source",),
+    )
+    responses = SimpleNamespace(
+        final_delivery=AsyncMock(return_value=SimpleNamespace(permanently_failed=permanently_failed)),
+        finish_approval=AsyncMock(return_value=True),
+        request_failure=AsyncMock(return_value=None),
+    )
+    waits = CliApprovalWaits(
+        store=SimpleNamespace(approval_continuation_for_source=AsyncMock(return_value=continuation)),  # type: ignore[arg-type]
+        responses=responses,  # type: ignore[arg-type]
+        runtime_generation="runtime-a",
+        retry_sources=lambda _room_id, _sources: None,
+        claim=AsyncMock(),
+        advance=AsyncMock(),
+    )
+    progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
+
+    await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
+
+    if permanently_failed:
+        responses.finish_approval.assert_not_awaited()
+        responses.request_failure.assert_awaited_once()
+    else:
+        responses.finish_approval.assert_awaited_once_with("approval-1")
+        responses.request_failure.assert_not_awaited()

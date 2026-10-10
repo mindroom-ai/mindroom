@@ -1,0 +1,323 @@
+"""What one agent or team reply shows, and how its terminal writes render.
+
+A reply is one Matrix event that several execution spans write over time: the
+turn that starts it, a restart's replay, an approval resume, an edit
+regeneration. Its presentation is therefore a sequence of segments rather than
+one string, so a later span can continue below an earlier one, a note can be
+placed between them, and the tool markers of every segment can be numbered
+across the whole reply.
+
+Rendering is pure. It decides the body text, the visible tool trace, and the
+terminal ``io.mindroom.stream_status`` value for one write; the delivery layer
+turns that into Matrix content with the same formatting helpers every other
+message uses.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal, cast
+
+from mindroom.reply_lifecycle import NoteKind
+from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
+    PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
+    clean_partial_reply_text,
+    format_stream_error_note,
+)
+from mindroom.tool_system.events import (
+    ToolTraceEntry,
+    deserialize_tool_trace,
+    remap_visible_tool_marker_indices,
+    serialize_tool_trace,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+_PRESENTATION_VERSION = 1
+AGENT_PLACEHOLDER = PROGRESS_PLACEHOLDER
+TEAM_PLACEHOLDER = TEAM_PROGRESS_PLACEHOLDER
+_DELIVERY_FAILED_NOTE = "Response delivery failed. Please retry."
+_APPROVAL_START_FAILED_NOTE = "Tool approval could not be started. Please try again."
+
+
+def format_error_note(error: object) -> str:
+    """Return the note a stream ended by an exception shows."""
+    return format_stream_error_note(str(error))
+
+
+_FIXED_NOTE_TEXTS = {
+    NoteKind.RESTART: RESTART_INTERRUPTED_RESPONSE_NOTE,
+    NoteKind.CANCELLED: CANCELLED_RESPONSE_NOTE,
+    NoteKind.INTERRUPTED: INTERRUPTED_RESPONSE_NOTE,
+    NoteKind.DELIVERY_FAILED: _DELIVERY_FAILED_NOTE,
+    NoteKind.APPROVAL_FAILED: _APPROVAL_START_FAILED_NOTE,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Segment:
+    """One contiguous part of a reply: an answer some span produced, or a note."""
+
+    kind: Literal["answer", "note"]
+    text: str
+    span_id: str | None = None
+    # Visible trace as collected; marker indices in ``text`` count from one within this segment.
+    tool_trace: tuple[ToolTraceEntry, ...] = ()
+    # A team document's restorable state; ``text`` is its rendered body.
+    team_state: Mapping[str, object] | None = None
+    note: NoteKind | None = None
+
+    def __post_init__(self) -> None:
+        """Reject segments that mix answer and note fields."""
+        if (self.kind == "note") != (self.note is not None):
+            msg = "A note segment carries a note kind and an answer segment carries none"
+            raise ValueError(msg)
+
+
+def note_segment(kind: NoteKind, text: str | None = None) -> Segment:
+    """Return one note segment, with the fixed text of its kind unless one is given."""
+    resolved = text if text is not None else _FIXED_NOTE_TEXTS.get(kind)
+    if resolved is None:
+        msg = f"Note kind {kind.value!r} needs explicit text"
+        raise ValueError(msg)
+    return Segment(kind="note", text=resolved, note=kind)
+
+
+@dataclass(frozen=True, slots=True)
+class Presentation:
+    """Everything a reply shows, as structured segments."""
+
+    segments: tuple[Segment, ...] = ()
+    trailing_note: Segment | None = None
+    placeholder: str = AGENT_PLACEHOLDER
+    show_tool_calls: bool = True
+
+    def __post_init__(self) -> None:
+        """Keep the trailing note a note."""
+        if self.trailing_note is not None and self.trailing_note.kind != "note":
+            msg = "A reply's trailing note must be a note segment"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedReply:
+    """The body, trace, and terminal status one write of a reply carries."""
+
+    body: str
+    tool_trace: tuple[ToolTraceEntry, ...]
+    stream_status: Literal["completed", "cancelled", "error"]
+
+
+def _combined(segments: Sequence[Segment], placeholder: str) -> tuple[str, tuple[ToolTraceEntry, ...]]:
+    """Join segments into one body, numbering each segment's tool markers after the earlier ones."""
+    parts: list[str] = []
+    trace: list[ToolTraceEntry] = []
+    for segment in segments:
+        text = segment.text
+        if segment.tool_trace:
+            offset = len(trace)
+            if offset:
+                text = remap_visible_tool_marker_indices(
+                    text,
+                    {index: index + offset for index in range(1, len(segment.tool_trace) + 1)},
+                )
+            trace.extend(segment.tool_trace)
+        stripped = text.rstrip()
+        if segment.kind == "answer" and stripped == placeholder:
+            continue
+        if stripped:
+            parts.append(stripped)
+    return "\n\n".join(parts), tuple(trace)
+
+
+def render_body(presentation: Presentation) -> tuple[str, tuple[ToolTraceEntry, ...]]:
+    """Return the full body and visible trace the reply shows, or its placeholder when empty."""
+    body, trace = _combined(presentation.segments, presentation.placeholder)
+    note = presentation.trailing_note
+    if note is not None and (note.note is not NoteKind.APPROVAL_WAIT or not body):
+        # A paused reply keeps showing its answer; the wait text appears only
+        # when there is nothing else to show.
+        body = f"{body}\n\n{note.text}" if body else note.text
+    return (body or presentation.placeholder), trace
+
+
+def _terminal_status(state: str) -> Literal["completed", "cancelled", "error"]:
+    if state == "completed":
+        return "completed"
+    if state == "cancelled":
+        return "cancelled"
+    if state == "failed":
+        return "error"
+    msg = f"No terminal wire status for reply state {state!r}"
+    raise ValueError(msg)
+
+
+def render(presentation: Presentation, *, state: str) -> RenderedReply:
+    """Render a terminal write of a reply, or a note it owes, for the reply's state."""
+    body, trace = render_body(presentation)
+    return RenderedReply(
+        body=body,
+        tool_trace=trace if presentation.show_tool_calls else (),
+        stream_status=_terminal_status(state),
+    )
+
+
+def with_trailing_note(presentation: Presentation, note: Segment | None) -> Presentation:
+    """Return the presentation with its trailing note replaced."""
+    return replace(presentation, trailing_note=note)
+
+
+def _shown_work(possibly_shown: Presentation) -> Segment | None:
+    """Return the work a stopped reply may have shown, without its notes.
+
+    Trailing cancel, interruption, restart, and error notes are dropped, so a
+    reply interrupted twice before its continuation showed anything carries
+    one restart note, not two. ``None`` means only a placeholder or notes.
+    """
+    body, trace = _combined(possibly_shown.segments, possibly_shown.placeholder)
+    note = possibly_shown.trailing_note
+    if note is not None and note.note is not NoteKind.APPROVAL_WAIT:
+        body = f"{body}\n\n{note.text}" if body else note.text
+    body = body.rstrip()
+    text = clean_partial_reply_text("" if body == possibly_shown.placeholder else body)
+    if not text and not trace:
+        return None
+    return Segment(kind="answer", text=text, tool_trace=trace)
+
+
+def after_restart(possibly_shown: Presentation) -> Presentation:
+    """Return what a replay continues below: the shown work and the restart note, or nothing.
+
+    A reply that showed only its placeholder is replaced rather than
+    annotated, as a continued stream is.
+    """
+    work = _shown_work(possibly_shown)
+    if work is None:
+        return replace(possibly_shown, segments=(), trailing_note=None)
+    return replace(possibly_shown, segments=(work, note_segment(NoteKind.RESTART)), trailing_note=None)
+
+
+def with_answer(presentation: Presentation, answer: Segment) -> Presentation:
+    """Return the presentation with this span's answer segment set, appended after older ones."""
+    if answer.kind != "answer":
+        msg = "Only an answer segment can be a span's answer"
+        raise ValueError(msg)
+    segments = list(presentation.segments)
+    if segments and segments[-1].kind == "answer" and segments[-1].span_id == answer.span_id:
+        segments[-1] = answer
+    else:
+        segments.append(answer)
+    return replace(presentation, segments=tuple(segments))
+
+
+def current_answer(presentation: Presentation, span_id: str | None) -> Segment | None:
+    """Return the answer segment a span is still writing, if the reply ends with one."""
+    if presentation.segments and presentation.segments[-1].kind == "answer":
+        last = presentation.segments[-1]
+        if span_id is None or last.span_id == span_id:
+            return last
+    return None
+
+
+def continued_by(presentation: Presentation, span_id: str) -> Presentation:
+    """Hand the reply's last answer segment to a span that continues it, as an approval resume does."""
+    last = current_answer(presentation, None)
+    if last is None:
+        return replace(presentation, trailing_note=None)
+    return replace(
+        presentation,
+        segments=(*presentation.segments[:-1], replace(last, span_id=span_id)),
+        trailing_note=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codec
+
+
+def _encode_segment(segment: Segment) -> dict[str, object]:
+    encoded: dict[str, object] = {"kind": segment.kind, "text": segment.text}
+    if segment.span_id is not None:
+        encoded["span_id"] = segment.span_id
+    if segment.tool_trace:
+        encoded["tool_trace"] = list(serialize_tool_trace(segment.tool_trace, include_internal=True))
+    if segment.team_state is not None:
+        encoded["team_state"] = dict(segment.team_state)
+    if segment.note is not None:
+        encoded["note"] = segment.note.value
+    return encoded
+
+
+def _decode_segment(raw: object) -> Segment:
+    if not isinstance(raw, dict):
+        msg = "Stored reply segment is not an object"
+        raise TypeError(msg)
+    item = cast("dict[str, object]", raw)
+    kind = item.get("kind")
+    text = item.get("text")
+    span_id = item.get("span_id")
+    trace = item.get("tool_trace", [])
+    team_state = item.get("team_state")
+    note = item.get("note")
+    if (
+        kind not in {"answer", "note"}
+        or not isinstance(text, str)
+        or (span_id is not None and not isinstance(span_id, str))
+        or not isinstance(trace, list)
+        or (team_state is not None and not isinstance(team_state, dict))
+        or (note is not None and not isinstance(note, str))
+    ):
+        msg = "Stored reply segment is malformed"
+        raise TypeError(msg)
+    return Segment(
+        kind=cast("Literal['answer', 'note']", kind),
+        text=text,
+        span_id=span_id,
+        tool_trace=tuple(deserialize_tool_trace(cast("list[Mapping[str, object]]", trace))),
+        team_state=cast("dict[str, object] | None", team_state),
+        note=NoteKind(note) if note is not None else None,
+    )
+
+
+def encode_presentation(presentation: Presentation) -> str:
+    """Serialize one presentation for the reply store."""
+    encoded: dict[str, object] = {
+        "version": _PRESENTATION_VERSION,
+        "segments": [_encode_segment(segment) for segment in presentation.segments],
+        "placeholder": presentation.placeholder,
+        "show_tool_calls": presentation.show_tool_calls,
+    }
+    if presentation.trailing_note is not None:
+        encoded["trailing_note"] = _encode_segment(presentation.trailing_note)
+    return json.dumps(encoded, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def decode_presentation(stored: str) -> Presentation:
+    """Restore one stored presentation, rejecting unknown versions."""
+    raw = json.loads(stored)
+    if not isinstance(raw, dict):
+        msg = "Stored reply presentation is not an object"
+        raise TypeError(msg)
+    data = cast("dict[str, object]", raw)
+    if data.get("version") != _PRESENTATION_VERSION:
+        msg = f"Unsupported reply presentation version {data.get('version')!r}"
+        raise ValueError(msg)
+    segments = data.get("segments")
+    placeholder = data.get("placeholder")
+    show_tool_calls = data.get("show_tool_calls")
+    trailing = data.get("trailing_note")
+    if not isinstance(segments, list) or not isinstance(placeholder, str) or not isinstance(show_tool_calls, bool):
+        msg = "Stored reply presentation is malformed"
+        raise TypeError(msg)
+    return Presentation(
+        segments=tuple(_decode_segment(segment) for segment in segments),
+        trailing_note=_decode_segment(trailing) if trailing is not None else None,
+        placeholder=placeholder,
+        show_tool_calls=show_tool_calls,
+    )

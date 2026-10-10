@@ -42,6 +42,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -71,7 +72,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -687,6 +688,80 @@ async def test_sync_tool_function_call_aexecute_runs_tool_hooks(tmp_path: Path) 
         ("tool", "hi"),
         ("after", "HI", False, "$resolved-thread"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
+    """The recorder learns of a call before the tool runs and of its result after; a cancelled call stays started."""
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+    assert bridge is not None
+    events: list[tuple[str, object]] = []
+    hanging = asyncio.Event()
+
+    class _Recorder:
+        async def started(self, tool_name: str, args: Mapping[str, object]) -> str:
+            events.append(("started", (tool_name, dict(args))))
+            return tool_name
+
+        async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+            del tool_name, args
+            events.append(("finished", (call_id, result)))
+
+    async def add(a: int) -> int:
+        events.append(("ran", "add"))
+        return a + 1
+
+    async def fail() -> None:
+        msg = "boom"
+        raise ValueError(msg)
+
+    async def hang() -> None:
+        events.append(("ran", "hang"))
+        hanging.set()
+        await asyncio.Event().wait()
+
+    with recording_tool_calls(_Recorder()):
+        assert await bridge("add", add, {"a": 1}) == 2
+        with pytest.raises(ValueError, match="boom"):
+            await bridge("fail", fail, {})
+        call = asyncio.create_task(bridge("hang", hang, {}))
+        await asyncio.wait_for(hanging.wait(), timeout=5)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    assert events[:3] == [("started", ("add", {"a": 1})), ("ran", "add"), ("finished", ("add", 2))]
+    assert events[3] == ("started", ("fail", {}))
+    assert events[4][0] == "finished"
+    assert isinstance(events[4][1][1], ValueError)
+    # A call cut short may have taken effect, so it stays recorded as started.
+    assert events[5:] == [("started", ("hang", {})), ("ran", "hang")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
+    """A Stop that commits while the start record is written stops a synchronous tool the cancellation cannot reach."""
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+    assert bridge is not None
+    ran: list[str] = []
+
+    class _StoppedRecorder:
+        async def started(self, tool_name: str, args: Mapping[str, object]) -> str:
+            del tool_name, args
+            raise asyncio.CancelledError
+
+        async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+            del call_id, tool_name, args, result
+            ran.append("finished")
+
+    def sync_tool() -> str:
+        ran.append("body")
+        return "done"
+
+    with recording_tool_calls(_StoppedRecorder()), pytest.raises(asyncio.CancelledError):
+        await bridge("sync_tool", sync_tool, {})
+
+    assert ran == []
 
 
 @pytest.mark.asyncio

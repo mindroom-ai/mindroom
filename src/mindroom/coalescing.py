@@ -8,7 +8,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import islice
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .cancellation import request_task_cancel
 from .coalescing_batch import (
@@ -20,6 +20,7 @@ from .coalescing_batch import (
     build_prepared_turn,
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
+    pending_event_addressing,
     pending_event_run_identity,
 )
 from .coalescing_cleanup import (
@@ -50,7 +51,7 @@ from .runtime_shutdown import (
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from .ingress_lanes import LaneDelivery
 
@@ -255,6 +256,45 @@ class CoalescingGate:
         """Return whether a lane or coalescing gate still owns one exact source."""
         return self._lanes.has_pending_source_event(source_event_id) or self._gate_owns_source_event(source_event_id)
 
+    def apply_pending_edit(
+        self,
+        *,
+        room_id: str,
+        source_event_id: str,
+        sender: str,
+        body: str,
+        new_content: Mapping[str, Any],
+        for_another_participant: bool | None,
+    ) -> bool:
+        """Give a text message still waiting in a queue the text its sender edited it to; return whether one did.
+
+        A message a flush already claimed answers the text it had then.
+        """
+        for gate in self._gates.values():
+            for queued in gate.queue:
+                pending_event = queued.pending_event
+                event = pending_event.event
+                if (
+                    queued.source_event_id != source_event_id
+                    or pending_event.room.room_id != room_id
+                    or event.sender != sender
+                    or event.raw_event is not None
+                ):
+                    continue
+                content = dict(new_content)
+                # The edit's new content carries no relation; the message stays where it was posted.
+                relation = event.source.get("content", {}).get("m.relates_to")
+                if relation is not None:
+                    content["m.relates_to"] = relation
+                pending_event.event = replace(
+                    event,
+                    body=body,
+                    source={**event.source, "content": content},
+                    for_another_participant=for_another_participant,
+                )
+                return True
+        return False
+
     def queued_pending_events(self, key: CoalescingKey) -> tuple[PendingEvent, ...]:
         """Return the unclaimed events still queued under one coalescing key."""
         gate = self._gates.get(key)
@@ -264,10 +304,11 @@ class CoalescingGate:
         """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
         return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
 
-    def follow_up_backlog_queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
-        """Return whether an active follow-up backlog still queues a run other than this requester's own messages."""
-        return is_active_follow_up_coalescing_key(key) and any(
+    def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
+        """Return whether a queue still holds a run other than this requester's own messages for this agent."""
+        return any(
             pending_event_run_identity(key, pending_event) != (requester_user_id, None)
+            or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
 
@@ -1182,11 +1223,24 @@ class CoalescingGate:
 
     @staticmethod
     def _front_same_run_identity_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
-        """Cap a front run at its first run-identity change so each turn runs as its own sender."""
+        """Cap a front run at its first change of run identity or addressing, so each turn runs as its own sender.
+
+        Uploads that mention nobody just before an addressing change stay with the message after them, their caption.
+        """
         front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
+        addressing: bool | None = None
+        uploads_start: int | None = None
         for index, queued in enumerate(islice(gate.queue, count)):
             if pending_event_run_identity(key, queued.pending_event) != front_identity:
                 return index
+            event_addressing = pending_event_addressing(queued.pending_event)
+            if event_addressing is None:
+                uploads_start = index if uploads_start is None else uploads_start
+                continue
+            if addressing is not None and event_addressing != addressing:
+                return index if uploads_start is None else uploads_start
+            addressing = event_addressing
+            uploads_start = None
         return count
 
     async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:

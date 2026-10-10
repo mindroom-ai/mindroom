@@ -531,4 +531,4 @@ async def test_cleanup_gate_reconciles_only_its_recorded_physical_tombstones(
         source_event_ids=("$later",),
         terminal_source_event_ids=(),
     )
-    assert store.is_revision_redacted(deleted_id) is (scope == "exact")
+    assert store._is_revision_redacted(deleted_id) is (scope == "exact")

@@ -1764,13 +1764,11 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     )
 
     async def run_response(
-        target: MessageTarget,
+        _target: MessageTarget,
         _early_placeholder: object,
     ) -> str | None:
-        return await runner._run_cancellable_response(
-            target=target,
-            response_function=response_function,
-        )
+        await response_function(None)
+        return None
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = config
@@ -1814,9 +1812,6 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     finally:
         release_response.set()
         await asyncio.gather(response_task, return_exceptions=True)
-        for cleanup_task in bot.stop_manager.cleanup_tasks:
-            cleanup_task.cancel()
-        await asyncio.gather(*bot.stop_manager.cleanup_tasks, return_exceptions=True)
         await orchestrator.config_reload.cancel()
 
 
@@ -3460,15 +3455,10 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         target: MessageTarget,
         _early_placeholder: object,
     ) -> str | None:
-        async def response_function(_message_id: str | None) -> None:
-            await bot._delivery_gateway.send_text(
-                SendTextRequest(target=target, response_text="the answer"),
-            )
-
-        return await runner._run_cancellable_response(
-            target=target,
-            response_function=response_function,
+        await bot._delivery_gateway.send_text(
+            SendTextRequest(target=target, response_text="the answer"),
         )
+        return None
 
     task = asyncio.create_task(
         runner._run_locked_response_lifecycle(
@@ -3484,9 +3474,6 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     finally:
         release_send.set()
         await asyncio.gather(task, return_exceptions=True)
-        for cleanup_task in bot.stop_manager.cleanup_tasks:
-            cleanup_task.cancel()
-        await asyncio.gather(*bot.stop_manager.cleanup_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -138,7 +138,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Research Sources](research-sources.md) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](matrix-message.md) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](chat-ui.md) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](../canvases.md) in MindRoom Chat.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
