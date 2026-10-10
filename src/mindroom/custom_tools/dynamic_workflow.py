@@ -77,6 +77,8 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
         "memory",
         "self_config",
         "skill_manage",
+        # Switching the thread model would escape the participant's frozen, permitted model.
+        "thread_model",
     },
 )
 

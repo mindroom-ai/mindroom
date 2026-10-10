@@ -796,6 +796,7 @@ def test_validate_workflow_tool_policy_rejects_unknown_tool(tmp_path: Path) -> N
         "memory",
         "self_config",
         "skill_manage",
+        "thread_model",
     ],
 )
 def test_validate_workflow_tool_policy_rejects_each_restricted_tool(tmp_path: Path, restricted_tool: str) -> None:

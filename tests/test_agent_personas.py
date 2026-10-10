@@ -148,6 +148,25 @@ def test_persona_refuses_tools_its_caller_filter_hides(tmp_path: Path, tools: li
         )
 
 
+def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> None:
+    """A minimal persona's mindroom-agent catalog offers neither unnamed deferred toolkits nor the deferred-tool manager."""
+    runtime = _runtime(tmp_path, tools=["shell", {"file": {"defer": True}}])
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        session_id="session-1",
+        persist_runtime_state=False,
+        agent_mode="minimal",
+        persona=inline_persona("P", ["shell"]),
+    )
+
+    assert isinstance(agent, MinimalAgent)
+    assert [deferred.name for deferred in agent.deferred_toolkits] == []
+
+
 def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
     """An explicit tool list loads every toolkit it names, so the deferred-tool manager is not a caller tool to name."""
     runtime = _runtime(tmp_path, tools=[{"file": {"defer": True}}])

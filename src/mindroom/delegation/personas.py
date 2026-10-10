@@ -429,8 +429,11 @@ def _has_toolkit_owner(function: Function) -> bool:
 
 
 def persona_disabled_toolkits(persona: SubagentPersona | None, available_toolkits: Sequence[str]) -> frozenset[str]:
-    """Return the caller toolkits a persona never uses, so they are not constructed."""
+    """Return the caller toolkits a persona never uses, so they are not constructed.
+
+    The deferred-tool manager is always among them, since a persona loads every toolkit it names.
+    """
     if persona is None or persona.tools is None:
         return frozenset()
     named = {entry.partition(".")[0] for entry in persona.tools}
-    return frozenset(toolkit for toolkit in available_toolkits if toolkit not in named)
+    return frozenset({*(toolkit for toolkit in available_toolkits if toolkit not in named), "dynamic_tools"})

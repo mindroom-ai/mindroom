@@ -99,7 +99,7 @@ def test_empty_tool_list_means_no_tools() -> None:
     persona = inline_persona("P", [])
     assert persona.tools == ()
     assert not persona_allows((), "file", "read_file")
-    assert persona_disabled_toolkits(persona, ["file", "shell"]) == frozenset({"file", "shell"})
+    assert persona_disabled_toolkits(persona, ["file", "shell"]) == frozenset({"file", "shell", "dynamic_tools"})
 
 
 def test_parse_profile_reads_frontmatter_and_body() -> None:
@@ -285,9 +285,11 @@ def test_persona_function_filter_hides_generated_functions() -> None:
 
 
 def test_persona_disabled_toolkits_skips_unnamed_toolkits() -> None:
-    """Toolkits no entry names are not constructed; a function entry keeps its toolkit."""
+    """Toolkits no entry names, and the deferred-tool manager, are not constructed; a function entry keeps its toolkit."""
     persona = inline_persona("P", ["gmail.search_emails"])
-    assert persona_disabled_toolkits(persona, ["file", "gmail", "shell"]) == frozenset({"file", "shell"})
+    assert persona_disabled_toolkits(persona, ["file", "gmail", "shell"]) == frozenset(
+        {"file", "shell", "dynamic_tools"},
+    )
     assert persona_disabled_toolkits(inline_persona("P", None), ["file"]) == frozenset()
     assert persona_disabled_toolkits(None, ["file"]) == frozenset()
 
