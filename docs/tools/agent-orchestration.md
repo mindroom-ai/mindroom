@@ -156,7 +156,7 @@ Find the three most serious risks in the proposal you are given, each with evide
 `description` is required, `tools`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
 An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt` or `tools`.
 Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters, and each file is limited to 64 KiB.
-On the agent's next run, its `run_subagent` tool lists every profile with its description and every invalid profile with the reason, or only how many profiles exist when that list would exceed 2,000 characters, in which case the agent lists `subagents/` itself.
+On the agent's next run, its `run_subagent` tool lists every profile with its description and every invalid profile with the reason, or, when that list would exceed 2,000 characters, only a note to list `subagents/` itself.
 A subagent keeps the persona it started with, so editing or deleting a profile affects only subagents started afterwards.
 
 Authoring errors:
