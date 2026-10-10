@@ -272,6 +272,14 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Concrete Matrix user IDs allowed to manage this agent's credentials",
     )
+    mcp_gateway_shared_credentials: bool = Field(
+        default=False,
+        description=(
+            "Let users who may use this agent call its tools through the MCP gateway even though its worker scope "
+            "is shared or unset, so every caller runs them with the agent's shared credentials and worker, "
+            "without the agent's instructions; agents with per-user scopes are available without it"
+        ),
+    )
     accept_invites: InviteAcceptancePolicy = Field(
         default=True,
         description=(

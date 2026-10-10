@@ -85,6 +85,15 @@ const columns: ColumnDef<AgentTableRow>[] = [
             Credential management only
           </span>
         );
+      if (!row.original.mcp_available)
+        return (
+          <span
+            className="text-xs text-muted-foreground"
+            title="Runs tools with shared credentials, so it is not exposed through MCP"
+          >
+            MindRoom only
+          </span>
+        );
       if (!mcp.selection?.enabled)
         return <span className="text-muted-foreground">—</span>;
       const choice = mcp.selectedTools(row.original.agent_name);

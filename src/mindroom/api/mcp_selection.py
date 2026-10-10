@@ -11,7 +11,11 @@ from starlette.routing import Route
 
 from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot
-from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
+from mindroom.api.connection_agents import (
+    CONNECTIONS_HEADERS,
+    SHARED_CREDENTIALS_GATEWAY_MESSAGE,
+    resolve_connection_user,
+)
 from mindroom.api.mcp_identity import resolve_gateway_connections_owner
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
 from mindroom.mcp_gateway.server import read_gateway_body
@@ -74,7 +78,7 @@ def _available_choices(
     )
     result: AgentSelections = {}
     for name, tools in choices.items():
-        if name not in context.agent_names:
+        if name not in context.gateway_agent_names:
             continue
         if tools is None:
             result[name] = None
@@ -127,6 +131,8 @@ async def _handle_selection(
     else:
         if any(name not in context.agent_names for name in choices):
             raise HTTPException(404, "Agent is not available")
+        if any(name not in context.gateway_agent_names for name in choices):
+            raise HTTPException(403, SHARED_CREDENTIALS_GATEWAY_MESSAGE)
         selected = _available_choices(choices, context, previous=saved)
         try:
             selected = await runtime.selections.set(context.owner, selected)

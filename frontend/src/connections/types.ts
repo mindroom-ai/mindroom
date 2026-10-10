@@ -13,6 +13,7 @@ export interface AgentConnections {
   agent_display_name: string;
   is_shared: boolean;
   can_use: boolean;
+  mcp_available: boolean;
   services: ConnectionService[];
   tools: ConnectionTool[];
 }
