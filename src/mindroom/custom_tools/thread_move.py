@@ -11,11 +11,11 @@ import nio
 from agno.tools import Toolkit
 
 from mindroom.constants import (
-    NONTERMINAL_STREAM_STATUSES,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     TOOL_TRACE_CONTENT_KEY,
+    UNFINISHED_REPLY_STATUSES,
 )
 from mindroom.custom_tools.attachment_helpers import (
     resolve_current_room_thread_root,
@@ -90,7 +90,7 @@ def _plan_thread_copy(
     """
     plan: list[_PlannedCopy] = []
     for message in messages:
-        if message.content.get("msgtype") == "m.notice" or message.stream_status in NONTERMINAL_STREAM_STATUSES:
+        if message.content.get("msgtype") == "m.notice" or message.stream_status in UNFINISHED_REPLY_STATUSES:
             continue
         content = {key: message.content[key] for key in _COPIED_CONTENT_KEYS if key in message.content}
         # Copies are history, never requests: no mention in them may wake an agent.
@@ -288,7 +288,7 @@ async def _target_poster_clients(
     if members is None or router_client.user_id not in members:
         return router_error
     if context.client.user_id not in members:
-        return f"Invite {context.agent_name} to the target room before moving a thread there."
+        return f"Invite {context.transport_agent_name or context.agent_name} to the target room before moving a thread there."
     clients: dict[str, nio.AsyncClient] = {}
     for entity_name, matrix_id in registry.current_ids.items():
         client = orchestrator.running_entity_client(entity_name)

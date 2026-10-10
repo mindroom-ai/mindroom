@@ -22,11 +22,11 @@ from mindroom.coalescing_batch import (
 )
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
-    NONTERMINAL_STREAM_STATUSES,
     ROUTER_AGENT_NAME,
     SCHEDULED_MODEL_KEY,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
+    UNFINISHED_REPLY_STATUSES,
     RuntimePaths,
 )
 from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
@@ -2307,7 +2307,7 @@ class TurnController:
         event_info = EventInfo.from_event(event.source)
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
         is_nonterminal_stream = (
-            isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in NONTERMINAL_STREAM_STATUSES
+            isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in UNFINISHED_REPLY_STATUSES
         )
         if not isinstance(event.body, str) or (is_nonterminal_stream and event_info.is_edit):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -303,6 +303,8 @@ def _move(
     runtime_paths = runtime_paths_for(config)
     ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items()}
     clients = {name: make_matrix_client_mock(user_id=ids[name]) for name in running}
+    room = nio.MatrixRoom(SOURCE_ROOM_ID, ids["general"])
+    room.add_member(REQUESTER_ID, "Dominic", None)
     context = make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(room_id=SOURCE_ROOM_ID, thread_id=thread_id, reply_to_event_id=None),
@@ -313,6 +315,7 @@ def _move(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         orchestrator=_Orchestrator(clients),
+        room=room,
     )
     return _Move(context=context, ids=ids, clients=clients)
 
@@ -581,6 +584,7 @@ async def test_move_thread_copies_messages_in_order(tmp_path: Path) -> None:
     root, code_reply, research_reply = (call.args[2] for call in copies)
     assert "m.relates_to" not in root
     assert root[ORIGINAL_SENDER_KEY] == REQUESTER_ID
+    assert root["body"] == "Dominic: can you two look at this"
     assert code_reply["body"] == "@research found it?"
     assert code_reply[SKIP_MENTIONS_KEY] is True
     assert code_reply["m.relates_to"] == {
@@ -790,3 +794,15 @@ async def test_move_thread_links_a_root_that_arrived_cut_short(tmp_path: Path) -
     assert payload["message"] == "Copied 0 of 3 messages before a send failed."
     assert payload["link"] == "https://matrix.to/#/%21target%3Alocalhost/%24copy0%3Alocalhost?via=localhost"
     assert mocks.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_move_thread_names_the_sending_account_of_a_delegated_agent(tmp_path: Path) -> None:
+    """A delegated agent posts through another entity's account, so that account is the one to invite."""
+    move = _move(tmp_path)
+    move.context = replace(move.context, agent_name="child", transport_agent_name="general")
+    members = {REQUESTER_ID, move.ids["code"], move.ids[ROUTER_AGENT_NAME]}
+    with _matrix(move, _thread(move), members=members):
+        payload = await _run()
+
+    assert payload["message"] == "Invite general to the target room before moving a thread there."

@@ -38,7 +38,6 @@ from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
-    NONTERMINAL_STREAM_STATUSES,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -46,6 +45,7 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    UNFINISHED_REPLY_STATUSES,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -3639,7 +3639,7 @@ class ResponseRunner:
                 interrupted_tools=interrupted_tools,
             )
             instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
-        elif message is None or message.stream_status is None or message.stream_status in NONTERMINAL_STREAM_STATUSES:
+        elif message is None or message.stream_status is None or message.stream_status in UNFINISHED_REPLY_STATUSES:
             # Unreadable, or stopped before showing anything (an acknowledgement,
             # hidden or non-streamed tool calls): unknown work, not absent work.
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION

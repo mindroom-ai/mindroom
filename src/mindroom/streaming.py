@@ -16,7 +16,6 @@ from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
-    NONTERMINAL_STREAM_STATUSES,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -25,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    UNFINISHED_REPLY_STATUSES,
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
@@ -348,7 +348,7 @@ def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> Unfinish
     turn did, so only a tool trace beside it is carried forward.
     """
     # An approved run a restart stopped before its first edit still shows its approval pause.
-    if content.get(STREAM_STATUS_KEY) not in NONTERMINAL_STREAM_STATUSES:
+    if content.get(STREAM_STATUS_KEY) not in UNFINISHED_REPLY_STATUSES:
         return None
     visible_text = clean_partial_reply_text(body)
     tool_trace = tuple(tool_trace_from_content(content))
