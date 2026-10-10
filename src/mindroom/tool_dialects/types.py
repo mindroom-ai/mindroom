@@ -54,6 +54,14 @@ class ToolDialect:
 _KIND_NAMES: dict[type, str] = {str: "a string", bool: "a boolean", int: "an integer", float: "a number"}
 
 
+def _is_finite(value: float) -> bool:
+    """Return whether a JSON number fits a float and is finite; JSON allows integers no float can hold."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def wire_argument(
     arguments: dict[str, Any],
     tool: str,
@@ -74,7 +82,7 @@ def wire_argument(
         if not isinstance(value, accepted) or (kind is not bool and isinstance(value, bool)):
             msg = f"{tool} {name} must be {_KIND_NAMES[kind]}"
             raise DialectArgumentError(msg)
-        if kind is float and not math.isfinite(value):
+        if kind is float and not _is_finite(value):
             msg = f"{tool} {name} must be a finite number"
             raise DialectArgumentError(msg)
         return value

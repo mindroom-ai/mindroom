@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -698,6 +699,7 @@ async def _aexecute_ephemeral_agent_participant(
     install_model_call_cap(model, entity_name=agent_id)
     install_tool_dialect(model, resolve_tool_dialect(context.config.models.get(model_name)))
     run_config = _participant_run_config(context, toolkits_by_name)
+    toolkits_by_name = _approval_consistent_toolkits(toolkits_by_name, run_config)
     _reject_nonresumable_toolkits(toolkits_by_name, run_config)
     bridge = build_tool_hook_bridge(
         context.hook_registry,
@@ -727,6 +729,28 @@ async def _aexecute_ephemeral_agent_participant(
         ),
     )
     return await _arun_agent(participant_context, agent, prompt)
+
+
+def _approval_consistent_toolkits(toolkits: dict[str, Toolkit], config: Config) -> dict[str, Toolkit]:
+    """Hide functions such as apply_patch that the participant's run config may gate, as agent assembly does.
+
+    The shared builder applies this rule under the agent's config; a participant runs under its own run config,
+    which can gate apply_patch alone, and would otherwise refuse the whole workflow.
+    """
+    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
+    from mindroom.agents import without_implied_exclusions  # noqa: PLC0415
+
+    consistent: dict[str, Toolkit] = {}
+    for name, toolkit in toolkits.items():
+        kept = without_implied_exclusions(
+            toolkit,
+            removed=set(),
+            may_require_approval=partial(tool_may_require_approval, config),
+            registered_tool_name=name,
+        )
+        if kept is not None:
+            consistent[name] = kept
+    return consistent
 
 
 def _reject_nonresumable_toolkits(toolkits: dict[str, Toolkit], config: Config) -> None:

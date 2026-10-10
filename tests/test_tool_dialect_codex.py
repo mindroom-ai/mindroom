@@ -82,6 +82,8 @@ def test_non_finite_durations_are_tool_errors() -> None:
         _wire("write_stdin").to_canonical({"session_id": "shell:1", "yield_time_ms": float("inf")})
     with pytest.raises(DialectArgumentError, match="exec_command yield_time_ms must be a finite number"):
         _wire("exec_command").to_canonical({"cmd": "ls", "yield_time_ms": float("inf")})
+    with pytest.raises(DialectArgumentError, match="write_stdin yield_time_ms must be a finite number"):
+        _wire("write_stdin").to_canonical({"session_id": "shell:1", "yield_time_ms": 10**400})
 
 
 def test_write_stdin_with_chars_is_a_tool_error() -> None:
