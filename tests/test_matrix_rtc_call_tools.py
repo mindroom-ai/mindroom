@@ -55,6 +55,7 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
+from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -1639,13 +1640,8 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
         budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=10),
     )
     runtime_paths = test_runtime_paths(tmp_path)
-    spend = {"usd": 0.0}
-
-    class _Monitor:
-        def _spend_usd(self, _user_id: str) -> float:
-            return spend["usd"]
-
-    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=None, budgets=_Monitor())
+    monitor = budget_monitor_with_spend(runtime_paths, {})
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=None, budgets=monitor)
     turn_models: list[str | None] = []
 
     class ToolSupport:
@@ -1701,7 +1697,7 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
     first = await tooling.responder("first", None)
     assert tooling.finalize_spoken_response is not None
     assert tooling.finalize_spoken_response(first.turn_id, first.text, False) is None
-    spend["usd"] = 12.0
+    set_month_spend(monitor, {REQUESTER: 12.0})
     await tooling.responder("second", None)
 
     assert ai_models == ["large", "cheap"]

@@ -20,7 +20,6 @@ from fastapi.testclient import TestClient
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
@@ -35,6 +34,7 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import TeamMode, TeamTurnModelSelection
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -44,6 +44,9 @@ from tests.test_dynamic_workflows import _fake_stream_agent, _make_context, _mak
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
+
+    from mindroom.budgets.monitor import BudgetMonitor
+    from mindroom.constants import RuntimePaths
 
 
 def _budget(config: Config, *, monthly_limit_usd: float | None = 0) -> None:
@@ -109,14 +112,9 @@ async def test_completed_response_asks_budgets_to_count_the_new_spend(tmp_path: 
     orchestrator.budgets.response_finished.assert_called_once_with()
 
 
-class _Spent:
-    """Monitor stand-in that reports one month-to-date spend for every requester."""
-
-    def __init__(self, spend_usd: float) -> None:
-        self._amount = spend_usd
-
-    def _spend_usd(self, _user_id: str) -> float:
-        return self._amount
+def _spent(runtime_paths: RuntimePaths, spend_usd: float) -> BudgetMonitor:
+    """Return a monitor reporting ``spend_usd`` for the delegating owner this month."""
+    return budget_monitor_with_spend(runtime_paths, {"@alice:example.org": spend_usd})
 
 
 def _delegation_config() -> Config:
@@ -150,15 +148,16 @@ def _owner() -> ToolExecutionIdentity:
 
 @pytest.mark.parametrize(("spend", "expected"), [(12.0, "luna"), (3.0, "default")])
 def test_delegated_child_model_follows_the_owners_budget(tmp_path: Path, spend: float, expected: str) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
     child = prepare_child_turn(
         "leader",
         "child",
         "Do the work",
         owner=_owner(),
         config=_delegation_config(),
-        runtime_paths=_runtime_paths(tmp_path),
+        runtime_paths=runtime_paths,
         depth=0,
-        budget_monitor=_Spent(spend),  # type: ignore[arg-type]
+        budget_monitor=_spent(runtime_paths, spend),
     )
 
     assert child.model_name == expected
@@ -176,7 +175,7 @@ def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_pat
         config=config,
         runtime_paths=runtime_paths,
         depth=0,
-        budget_monitor=_Spent(12.0),  # type: ignore[arg-type]
+        budget_monitor=_spent(runtime_paths, 12.0),
     )
 
     follow_up = prepare_child_turn(
@@ -187,7 +186,7 @@ def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_pat
         config=config,
         runtime_paths=runtime_paths,
         depth=0,
-        budget_monitor=_Spent(3.0),  # type: ignore[arg-type]
+        budget_monitor=_spent(runtime_paths, 3.0),
         previous=first,
     )
 
@@ -208,7 +207,7 @@ def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: 
         config=config,
         runtime_paths=runtime_paths,
         depth=0,
-        budget_monitor=_Spent(0.0),  # type: ignore[arg-type]
+        budget_monitor=_spent(runtime_paths, 0.0),
     )
 
     note_child_run_id(child, "after-switch", runtime_paths, model_name="alternate")
@@ -220,7 +219,7 @@ def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: 
         config=config,
         runtime_paths=runtime_paths,
         depth=0,
-        budget_monitor=_Spent(0.0),  # type: ignore[arg-type]
+        budget_monitor=_spent(runtime_paths, 0.0),
         previous=child,
     )
 
@@ -240,7 +239,7 @@ def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path
             config=config,
             runtime_paths=runtime_paths,
             depth=0,
-            budget_monitor=_Spent(0.0),  # type: ignore[arg-type]
+            budget_monitor=_spent(runtime_paths, 0.0),
         ),
         requested_model_name=None,
     )
@@ -253,7 +252,7 @@ def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path
         config=config,
         runtime_paths=runtime_paths,
         depth=0,
-        budget_monitor=_Spent(12.0),  # type: ignore[arg-type]
+        budget_monitor=_spent(runtime_paths, 12.0),
         previous=saved,
     )
 
@@ -267,7 +266,7 @@ async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path
     tools = DelegateTools("leader", ["child"], runtime_paths, config, execution_identity=_owner())
     context = replace(
         _delegate_runtime_context(config, runtime_paths, execution_identity=_owner()),
-        orchestrator=MagicMock(budgets=_Spent(12.0)),
+        orchestrator=MagicMock(budgets=_spent(runtime_paths, 12.0)),
     )
 
     with (
@@ -432,10 +431,10 @@ async def test_dynamic_workflow_ephemeral_participant_uses_fallback(tmp_path: Pa
 def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: Path, model: str) -> None:
     team = AgnoTeam(name="Super Team", id="super-team", model=SyntheticModel(id="synthetic"), members=[], tools=[])
     team.arun = AsyncMock(return_value=TeamRunOutput(content="Team answer"))
-    monitor = MagicMock(spec=BudgetMonitor)
-    monitor._spend_usd.return_value = 0.0
+    monitor = budget_monitor_with_spend(_runtime_paths(tmp_path), {})
     with (
         _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
+        patch.object(monitor, "response_finished") as response_finished,
         patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi"),
         patch("mindroom.api.openai_compat._build_team", return_value=([], team, TeamMode.COORDINATE)),
         patch(
@@ -451,7 +450,7 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
         )
 
     assert reply.status_code == 200
-    monitor.response_finished.assert_called_once_with()
+    response_finished.assert_called_once_with()
 
 
 def test_over_budget_caller_runs_saved_workflows_on_the_fallback(tmp_path: Path) -> None:

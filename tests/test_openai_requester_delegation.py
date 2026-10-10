@@ -24,6 +24,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
+from tests.budget_helpers import budget_monitor_with_spend
 from tests.identity_helpers import persist_entity_accounts
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -148,25 +149,15 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     assert not config_lifecycle.app_state(api.client.app).openai_responses
 
 
-class _Spent:
-    """Budget monitor stand-in reporting one month-to-date spend for every requester."""
-
-    def __init__(self, spend_usd: float) -> None:
-        self._amount = spend_usd
-
-    def _spend_usd(self, _user_id: str) -> float:
-        return self._amount
-
-    def response_finished(self) -> None:
-        """Accept the completion's rescan request."""
-
-
 def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarness) -> None:
     """A delegated child must not keep an over-budget API requester on a priced model."""
     api.config.models["default"].pricing = ModelPricing(input=5, output=30)
     api.config.models["luna"] = ModelConfig(provider="ollama", id="cheap", pricing=ModelPricing(input=0.2, output=1.25))
     api.config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
-    config_lifecycle.app_state(api.client.app).budget_monitor = _Spent(12.0)  # type: ignore[assignment]
+    config_lifecycle.app_state(api.client.app).budget_monitor = budget_monitor_with_spend(
+        api.runtime_paths,
+        {"@alice:example.org": 12.0},
+    )
     child_models: list[str | None] = []
 
     async def child(ctx: ResponseTurnContext, **_kwargs: object) -> str:
