@@ -12,11 +12,14 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from mindroom.api import oauth
+from mindroom.api import egress_status, oauth
+from mindroom.config.egress_broker import EgressService
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker import secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
+from mindroom.egress_broker.user_services import save_user_service
 from mindroom.oauth import registry as oauth_registry
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.test_oauth_api import _fake_provider
 
 if TYPE_CHECKING:
@@ -371,6 +374,94 @@ def test_credentials_list_omits_egress_secrets(broker_test_client: TestClient, a
     for service in services:
         status = broker_test_client.get(f"/api/credentials/{service}/status", params=params)
         assert status.status_code == 200, service
+
+
+def _save_own_service(name: str, agent_name: str | None = None) -> None:
+    """Store a service in a scope's own store, the way the personal services route does."""
+    from mindroom.api import main  # noqa: PLC0415
+
+    config = main._app_context(main.app).runtime_config
+    manager = get_runtime_credentials_manager(main._app_runtime_paths(main.app))
+    target = None
+    if agent_name is not None:
+        identity = ToolExecutionIdentity(
+            channel="mcp",
+            agent_name=agent_name,
+            requester_id="@owner:example.org",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id=None,
+            account_id=None,
+        )
+        target = resolve_worker_target("shared", agent_name, identity, private_agent_names=frozenset())
+    service = EgressService.model_validate({"rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}]})
+    save_user_service(manager, target, name, service, config_services=config.egress_broker.services)
+
+
+def _listed(client: TestClient, agent_name: str | None = None) -> list[tuple[str, str, bool]]:
+    params = {} if agent_name is None else {"agent_name": agent_name}
+    response = client.get("/api/egress-broker/services", params=params)
+    assert response.status_code == 200, response.text
+    return [(s["name"], s["source"], s["configured"]) for s in response.json()["services"]]
+
+
+def test_dashboard_lists_a_scopes_own_services_and_accepts_their_keys(broker_test_client: TestClient) -> None:
+    """The panel shows each scope's own services after the config's, read-only, and takes keys for them."""
+    client = broker_test_client
+    assert _listed(client) == [("github", "config", False)]
+    _save_own_service("everyone")
+    _save_own_service("team", "test_agent")
+    assert _listed(client) == [("github", "config", False), ("everyone", "user", False)]
+    assert _listed(client, "test_agent") == [("github", "config", False), ("team", "user", False)]
+
+    put = client.put("/api/egress-broker/services/everyone/secret", json={"secret": "k"})
+    assert put.status_code == 204, put.text
+    put = client.put("/api/egress-broker/services/team/secret?agent_name=test_agent", json={"secret": "k"})
+    assert put.status_code == 204, put.text
+    assert _listed(client) == [("github", "config", False), ("everyone", "user", True)]
+    assert _listed(client, "test_agent") == [("github", "config", False), ("team", "user", True)]
+
+    # A name another scope owns is unknown here, for writes and deletes alike.
+    assert client.put("/api/egress-broker/services/team/secret", json={"secret": "k"}).status_code == 404
+    assert client.delete("/api/egress-broker/services/team/secret").status_code == 404
+    assert (
+        client.put(
+            "/api/egress-broker/services/everyone/secret?agent_name=test_agent",
+            json={"secret": "k"},
+        ).status_code
+        == 404
+    )
+
+    assert client.delete("/api/egress-broker/services/everyone/secret").status_code == 204
+    assert client.delete("/api/egress-broker/services/team/secret?agent_name=test_agent").status_code == 204
+    assert _listed(client) == [("github", "config", False), ("everyone", "user", False)]
+    assert _listed(client, "test_agent") == [("github", "config", False), ("team", "user", False)]
+
+
+def test_dashboard_reads_a_scopes_own_services_off_the_event_loop(
+    broker_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The async listing reads a scope's own services from the credential store in a thread."""
+    _save_own_service("everyone")
+    real = egress_status.effective_config
+    on_loop: list[bool] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(egress_status, "effective_config", recorded)
+    assert _listed(broker_test_client) == [("github", "config", False), ("everyone", "user", False)]
+    assert on_loop
+    assert not any(on_loop)
 
 
 @pytest.fixture

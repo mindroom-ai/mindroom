@@ -71,6 +71,10 @@ def _save(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name
     save_user_service(manager, target, name, service, config_services=_CONFIG.services)
 
 
+def _delete(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name: str) -> bool:
+    return delete_user_service(manager, target, name, config_services=_CONFIG.services)
+
+
 def test_saved_service_is_stored_in_authored_form_in_the_primary_only_scope_store(manager: CredentialsManager) -> None:
     """A preset service keeps its preset form, in the requester's primary-only store under the reserved name."""
     _save(manager, _target(), "work-github", EgressService.model_validate({"preset": "github", "display_name": "Work"}))
@@ -207,10 +211,10 @@ def test_delete_removes_one_service_and_the_document_with_the_last(manager: Cred
     _save(manager, _target(), "one", _service())
     _save(manager, _target(), "two", _service())
 
-    assert delete_user_service(manager, _target(), "one") is True
-    assert delete_user_service(manager, _target(), "one") is False
+    assert _delete(manager, _target(), "one") is True
+    assert _delete(manager, _target(), "one") is False
     assert list(load_user_services(manager, _target())) == ["two"]
-    assert delete_user_service(manager, _target(), "two") is True
+    assert _delete(manager, _target(), "two") is True
     store = manager.for_primary_runtime_scope(_ALICE, "code")
     assert store.load_credentials(USER_SERVICES_CREDENTIAL_SERVICE) is None
 
@@ -251,7 +255,7 @@ def test_effective_config_is_cached_and_invalidated_by_save_and_delete(manager: 
     replaced = effective_config(_CONFIG, manager, _target())
     assert replaced.services["mine"].rules[0].host == "other.example.com"
 
-    delete_user_service(manager, _target(), "mine")
+    _delete(manager, _target(), "mine")
     assert effective_config(_CONFIG, manager, _target()) is _CONFIG
 
 
@@ -349,7 +353,26 @@ def test_a_new_service_never_inherits_a_stored_key(manager: CredentialsManager) 
         _save(manager, target, "mine", _service("other.example.com"))
         assert load_secret(manager, target, "mine") == "own-key"
 
-        assert delete_user_service(manager, target, "mine")
+        assert _delete(manager, target, "mine")
+        assert load_secret(manager, target, "mine") is None
+
+
+def test_deleting_a_shadowed_entry_keeps_the_key_its_config_service_uses(manager: CredentialsManager) -> None:
+    """A config service of the same name shadows the entry and uses the key in this scope, so only the entry goes."""
+    shadowing = {**_CONFIG.services, "mine": _service("config.example.com")}
+    for target in (_target(), _target(scope="shared")):
+        _save(manager, target, "mine", _service())
+        save_secret(manager, target, "mine", "key")
+
+        assert delete_user_service(manager, target, "mine", config_services=shadowing) is True
+        assert load_user_services(manager, target) == {}
+        assert load_secret(manager, target, "mine") == "key"
+        assert delete_user_service(manager, target, "mine", config_services=shadowing) is False
+
+        # Without a config service of that name the key goes with the entry.
+        _save(manager, target, "mine", _service())
+        save_secret(manager, target, "mine", "own-key")
+        assert _delete(manager, target, "mine") is True
         assert load_secret(manager, target, "mine") is None
 
 

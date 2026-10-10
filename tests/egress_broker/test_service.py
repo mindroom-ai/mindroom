@@ -1137,7 +1137,7 @@ async def test_user_service_edits_apply_to_the_running_broker(
         # A new service starts without a key, so the key is set after it.
         save_secret(manager, target, "mine", "alice-key")
         saved = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
-        assert delete_user_service(manager, target, "mine")
+        assert delete_user_service(manager, target, "mine", config_services=config.egress_broker.services)
         deleted = await _get_through(env, tls_upstream.url("/echo"), tmp_path / "runner")
     assert "authorization" not in before.json()["headers"]
     assert saved.json()["headers"]["authorization"] == ["Bearer alice-key"]

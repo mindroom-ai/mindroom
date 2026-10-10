@@ -132,10 +132,17 @@ def save_user_service(
             _cache.invalidate()
 
 
-def delete_user_service(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name: str) -> bool:
+def delete_user_service(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    *,
+    config_services: Mapping[str, EgressService],
+) -> bool:
     """Delete one of the scope's services and its stored key; return whether the service existed.
 
-    The last service takes the document with it.
+    The last service takes the document with it. The key stays when `config_services` has the name: that config
+    service shadows the entry and uses the key in this scope.
     """
     with _write_lock:
         stored = _stored_services(manager, target)
@@ -147,7 +154,8 @@ def delete_user_service(manager: CredentialsManager, target: ResolvedWorkerTarge
                 save_egress_document(manager, target, USER_SERVICES_CREDENTIAL_SERVICE, {"services": stored})
             else:
                 delete_egress_document(manager, target, USER_SERVICES_CREDENTIAL_SERVICE)
-            delete_secret(manager, target, name)
+            if name not in config_services:
+                delete_secret(manager, target, name)
         finally:
             _cache.invalidate()
     return True

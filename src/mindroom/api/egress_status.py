@@ -1,4 +1,4 @@
-"""Egress service status shared by the personal and the admin egress APIs."""
+"""Egress service status and request-log responses shared by the personal and the admin egress APIs."""
 
 from __future__ import annotations
 
@@ -11,19 +11,91 @@ from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
+from mindroom.egress_broker.user_services import effective_config
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from fastapi import Request
 
     from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.config.egress_broker import EgressService
+    from mindroom.config.main import Config
     from mindroom.credentials import CredentialsManager
+    from mindroom.egress_broker.audit import AuditRecord
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+
+type EgressServiceSource = Literal["config", "user"]
+
+
+def effective_services(
+    config: Config,
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+) -> dict[str, EgressService]:
+    """Return the services one scope uses, by name: the config's first, then the scope's own.
+
+    Both egress APIs look services up here, so what they list and accept is what the broker matches. A cache miss
+    reads the credential store, so async callers run this in a thread.
+    """
+    return effective_config(config.egress_broker, manager, target).services
+
+
+def service_source(config: Config, name: str) -> EgressServiceSource:
+    """Say whether a service of an effective config is the administrator's (`config`) or the scope's own (`user`)."""
+    return "config" if name in config.egress_broker.services else "user"
+
+
+class AuditRecordResponse(BaseModel):
+    """One audit log record for API responses."""
+
+    at: str
+    kind: str
+    scope: str
+    agent_name: str | None
+    requester_id: str | None
+    method: str
+    host: str
+    path: str
+    service: str | None
+    status: int
+    bytes_up: int
+    bytes_down: int
+    duration_ms: int
+
+
+class AuditLogsResponse(BaseModel):
+    """Audit log query response."""
+
+    records: list[AuditRecordResponse]
+
+
+def audit_logs_response(records: Iterable[AuditRecord]) -> AuditLogsResponse:
+    """Describe audit records, already in the order the log returned them, for an API response."""
+    return AuditLogsResponse(
+        records=[
+            AuditRecordResponse(
+                at=rec.at.isoformat(),
+                kind=rec.kind,
+                scope=rec.scope,
+                agent_name=rec.agent_name,
+                requester_id=rec.requester_id,
+                method=rec.method,
+                host=rec.host,
+                path=rec.path,
+                service=rec.service,
+                status=rec.status,
+                bytes_up=rec.bytes_up,
+                bytes_down=rec.bytes_down,
+                duration_ms=rec.duration_ms,
+            )
+            for rec in records
+        ],
+    )
 
 
 class EgressOAuthStatus(BaseModel):
@@ -143,10 +215,8 @@ async def egress_service_status(
     return EgressSourceStatus.from_status(status)
 
 
-def service_oauth_provider(snapshot: ApiSnapshot, service_name: str) -> OAuthProvider | None:
-    """Return the registry's provider for a configured egress service, or None without a known one."""
-    config = snapshot.runtime_config
-    service = config.egress_broker.services.get(service_name) if config is not None else None
+def service_oauth_provider(snapshot: ApiSnapshot, service: EgressService | None) -> OAuthProvider | None:
+    """Return the registry's provider for an egress service, or None without a service or a known provider."""
     if service is None or service.oauth_provider is None:
         return None
     return load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
@@ -159,17 +229,32 @@ def egress_oauth_provider(
     connecting: bool,
     headers: Mapping[str, str] | None = None,
 ) -> OAuthProvider:
-    """Return the OAuth provider of a configured egress service for the connect and disconnect routes.
+    """Return the OAuth provider of a configured egress service for the admin connect and disconnect routes.
+
+    A service the config does not define is a 404; see `oauth_provider_of_service` for the rest.
+    """
+    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    service = config.egress_broker.services.get(service_name) if config is not None else None
+    if service is None:
+        raise HTTPException(404, "Service is not configured", headers=headers)
+    return oauth_provider_of_service(request, service, connecting=connecting, headers=headers)
+
+
+def oauth_provider_of_service(
+    request: Request,
+    service: EgressService,
+    *,
+    connecting: bool,
+    headers: Mapping[str, str] | None = None,
+) -> OAuthProvider:
+    """Return the OAuth provider of an egress service for the connect and disconnect routes.
 
     A service without a provider, or whose provider the registry does not know, is a 404. Connecting is a 409 while
     a shared service account is configured for the provider, since personal accounts are not managed then.
     Disconnecting stays possible, so a personal connection stored earlier can still be revoked.
     """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    config = snapshot.runtime_config
-    if config is None or service_name not in config.egress_broker.services:
-        raise HTTPException(404, "Service is not configured", headers=headers)
-    provider = service_oauth_provider(snapshot, service_name)
+    provider = service_oauth_provider(snapshot, service)
     if provider is None:
         raise HTTPException(404, "Service has no account connection", headers=headers)
     if connecting and oauth_provider_service_account_configured(provider, snapshot.runtime_paths):

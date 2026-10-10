@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Annotated
@@ -16,10 +17,15 @@ from mindroom.api.credentials_target import (
     worker_target_for_credentials_target,
 )
 from mindroom.api.egress_status import (
+    AuditLogsResponse,
+    EgressServiceSource,
     EgressSourceStatus,
+    audit_logs_response,
+    effective_services,
     egress_oauth_provider,
     egress_oauth_status,
     egress_service_status,
+    service_source,
     unavailable_egress_oauth_status,
 )
 from mindroom.egress_broker.oauth_source import oauth_status, shared_worker_oauth, shared_worker_unavailable_status
@@ -33,17 +39,23 @@ if TYPE_CHECKING:
     from mindroom.config.egress_broker import EgressService
     from mindroom.config.main import Config
     from mindroom.egress_broker.secrets import OAuthStatus
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/egress-broker", tags=["egress-broker"])
 logger = get_logger(__name__)
 
 
 class _ServiceStatus(EgressSourceStatus):
-    """Status of one egress service."""
+    """Status of one egress service.
+
+    `source` is `config` for the administrator's services and `user` for services the selected scope defines for
+    itself, which the panel shows read-only: they are edited on the personal egress page.
+    """
 
     name: str
     display_name: str | None
     description: str
+    source: EgressServiceSource
 
 
 class ServicesResponse(BaseModel):
@@ -56,30 +68,6 @@ class PutSecretRequest(BaseModel):
     """Request body for setting a secret."""
 
     secret: str
-
-
-class AuditRecordResponse(BaseModel):
-    """One audit log record for API responses."""
-
-    at: str
-    kind: str
-    scope: str
-    agent_name: str | None
-    requester_id: str | None
-    method: str
-    host: str
-    path: str
-    service: str | None
-    status: int
-    bytes_up: int
-    bytes_down: int
-    duration_ms: int
-
-
-class AuditLogsResponse(BaseModel):
-    """Audit log query response."""
-
-    records: list[AuditRecordResponse]
 
 
 async def _admin_oauth_status(
@@ -159,7 +147,9 @@ async def _load_service_statuses_for_target(
     worker_target = worker_target_for_credentials_target(target)
 
     services: list[_ServiceStatus] = []
-    for name, service_config in config.egress_broker.services.items():
+    # Reading the scope's own services touches the credential store, so it stays off the event loop.
+    scope_services = await asyncio.to_thread(effective_services, config, target.base_manager, worker_target)
+    for name, service_config in scope_services.items():
         oauth_part = await _admin_oauth_status(request, config, target, name, service_config)
         sources = await egress_service_status(target.base_manager, worker_target, service_config, name, oauth_part)
         services.append(
@@ -167,11 +157,34 @@ async def _load_service_statuses_for_target(
                 name=name,
                 display_name=service_config.display_name,
                 description=service_config.description,
+                source=service_source(config, name),
                 **sources.model_dump(),
             ),
         )
 
     return services
+
+
+def _resolve_scope_and_service(
+    request: Request,
+    name: str,
+    agent_name: str | None,
+) -> tuple[RequestCredentialsTarget, ResolvedWorkerTarget | None]:
+    """Resolve the selected scope and check that the service is one it uses, a config service or its own."""
+    from mindroom.api import config_lifecycle  # noqa: PLC0415
+
+    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"Service '{name}' is not configured")
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(),
+    )
+    worker_target = worker_target_for_credentials_target(target)
+    if name not in effective_services(config, target.base_manager, worker_target):
+        raise HTTPException(status_code=404, detail=f"Service '{name}' is not configured")
+    return target, worker_target
 
 
 @router.get("/services", response_model=ServicesResponse)
@@ -202,21 +215,10 @@ def put_service_secret(
 ) -> None:
     """Set an egress service secret.
 
-    Raises 404 if the service is not configured, 422 if the secret is invalid.
+    Raises 404 if the service is neither configured nor one of the selected scope's own services, 422 if the
+    secret is invalid.
     """
-    from mindroom.api import config_lifecycle  # noqa: PLC0415
-
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
-    if config is None or name not in config.egress_broker.services:
-        raise HTTPException(status_code=404, detail=f"Service '{name}' is not configured")
-
-    target = resolve_request_credentials_target(
-        request,
-        agent_name=agent_name,
-        service_names=(),
-    )
-
-    worker_target = worker_target_for_credentials_target(target)
+    target, worker_target = _resolve_scope_and_service(request, name, agent_name)
 
     try:
         save_secret(target.base_manager, worker_target, name, body.secret)
@@ -231,19 +233,7 @@ def delete_service_secret(
     agent_name: Annotated[str | None, Query()] = None,
 ) -> None:
     """Delete an egress service secret."""
-    from mindroom.api import config_lifecycle  # noqa: PLC0415
-
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
-    if config is None or name not in config.egress_broker.services:
-        raise HTTPException(status_code=404, detail=f"Service '{name}' is not configured")
-
-    target = resolve_request_credentials_target(
-        request,
-        agent_name=agent_name,
-        service_names=(),
-    )
-
-    worker_target = worker_target_for_credentials_target(target)
+    target, worker_target = _resolve_scope_and_service(request, name, agent_name)
     delete_secret(target.base_manager, worker_target, name)
 
 
@@ -295,26 +285,7 @@ def get_logs(
         limit=limit,
     )
 
-    return AuditLogsResponse(
-        records=[
-            AuditRecordResponse(
-                at=rec.at.isoformat(),
-                kind=rec.kind,
-                scope=rec.scope,
-                agent_name=rec.agent_name,
-                requester_id=rec.requester_id,
-                method=rec.method,
-                host=rec.host,
-                path=rec.path,
-                service=rec.service,
-                status=rec.status,
-                bytes_up=rec.bytes_up,
-                bytes_down=rec.bytes_down,
-                duration_ms=rec.duration_ms,
-            )
-            for rec in records
-        ],
-    )
+    return audit_logs_response(records)
 
 
 @router.get("/ca.pem", response_class=PlainTextResponse)

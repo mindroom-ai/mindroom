@@ -214,6 +214,42 @@ def test_filters_and_limit_clamp(tmp_path: Path) -> None:
     log.close()
 
 
+def test_requester_filter_matches_only_that_requester(tmp_path: Path) -> None:
+    """The requester filter is an exact match, combines with the other filters, and skips rows without a requester."""
+    log = AuditLog(tmp_path / "audit.db")
+    now = datetime.now(UTC)
+    for i, requester in enumerate(["@alice:example.org", "@bob:example.org", None, "@alice:example.org.evil"]):
+        for agent in ("agent_1", "agent_2"):
+            log.record(
+                AuditRecord(
+                    at=now + timedelta(seconds=i),
+                    kind="request",
+                    scope="shared",
+                    agent_name=agent,
+                    requester_id=requester,
+                    method="GET",
+                    host="api.example.com",
+                    path=f"/{requester}/{agent}",
+                    service=None,
+                    status=200,
+                    bytes_up=0,
+                    bytes_down=0,
+                    duration_ms=1,
+                ),
+            )
+
+    alice = log.query(requester_id="@alice:example.org")
+    assert {(r.requester_id, r.agent_name) for r in alice} == {
+        ("@alice:example.org", "agent_1"),
+        ("@alice:example.org", "agent_2"),
+    }
+    assert log.query(requester_id="@alice:example.org", agent_name="agent_2")[0].path == "/@alice:example.org/agent_2"
+    assert len(log.query(requester_id="@alice:example.org", agent_name="agent_2")) == 1
+    assert log.query(requester_id="@nobody:example.org") == []
+    assert len(log.query()) == 8
+    log.close()
+
+
 def test_prune_by_age_and_max_rows(tmp_path: Path) -> None:
     """Prune deletes rows older than retention_days, then trims to max_rows."""
     db_path = tmp_path / "audit.db"

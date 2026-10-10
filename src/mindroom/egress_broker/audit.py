@@ -94,6 +94,7 @@ class AuditLog:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_name ON audit(agent_name)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_host ON audit(host)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_service ON audit(service)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_requester_at ON audit(requester_id, at DESC)")
 
         self._conn.commit()
 
@@ -146,6 +147,7 @@ class AuditLog:
         self,
         *,
         agent_name: str | None = None,
+        requester_id: str | None = None,
         host: str | None = None,
         service: str | None = None,
         limit: int = 200,
@@ -156,6 +158,7 @@ class AuditLog:
 
         Args:
             agent_name: Filter by agent name
+            requester_id: Filter by the requester the worker token carried, an exact match
             host: Filter by host
             service: Filter by service
             limit: Maximum records to return (clamped to 1..1000)
@@ -174,6 +177,10 @@ class AuditLog:
         if agent_name is not None:
             conditions.append("agent_name = ?")
             params.append(agent_name)
+
+        if requester_id is not None:
+            conditions.append("requester_id = ?")
+            params.append(requester_id)
 
         if host is not None:
             conditions.append("host = ?")
