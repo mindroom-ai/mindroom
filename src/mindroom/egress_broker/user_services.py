@@ -21,7 +21,7 @@ import json
 import re
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.config.egress_broker import EgressService, validate_egress_service_name
 from mindroom.egress_broker.rules import config_covers_rule
@@ -47,11 +47,13 @@ __all__ = [
     "MAX_SERVICE_BYTES",
     "MAX_USER_SERVICES",
     "USER_SERVICES_CREDENTIAL_SERVICE",
+    "ServiceSource",
     "UserServiceConflictError",
     "delete_user_service",
     "effective_config",
     "load_user_services",
     "save_user_service",
+    "service_source",
     "user_service_hosts_not_allowed",
 ]
 
@@ -77,6 +79,7 @@ _PLACEHOLDER_REFUSED_PREFIX = "SSH_"
 _PLACEHOLDER_VALUE = re.compile(r"[A-Za-z0-9._:-]{1,256}")
 
 type _ScopeKey = tuple[object, ...]
+type ServiceSource = Literal["config", "user"]
 
 
 class UserServiceConflictError(Exception):
@@ -223,6 +226,14 @@ def effective_config(
     merged = config.model_copy(update={"services": {**config.services, **own}}) if own else config
     _cache.store(key, generation, config, merged)
     return merged
+
+
+def service_source(config: EgressBrokerConfig, name: str) -> ServiceSource:
+    """Say whether a service of an effective config is the operator's (`config`) or the scope's own (`user`).
+
+    `config` is the operator's config, without the scope's services; a user service never takes a config name.
+    """
+    return "config" if name in config.services else "user"
 
 
 def user_service_hosts_not_allowed(config: EgressBrokerConfig, service: EgressService) -> list[str]:

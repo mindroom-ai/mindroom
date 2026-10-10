@@ -14,6 +14,7 @@ from mindroom.config.egress_broker import EgressService
 from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
 from mindroom.egress_broker.user_services import effective_config
+from mindroom.egress_broker.user_services import service_source as config_service_source
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
 
@@ -48,7 +49,7 @@ def effective_services(
 
 def service_source(config: Config, name: str) -> EgressServiceSource:
     """Say whether a service of an effective config is the administrator's (`config`) or the scope's own (`user`)."""
-    return "config" if name in config.egress_broker.services else "user"
+    return config_service_source(config.egress_broker, name)
 
 
 class EgressRuleSummary(BaseModel):

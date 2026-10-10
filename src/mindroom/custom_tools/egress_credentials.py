@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import functools
 import json
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
@@ -21,7 +21,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import service_status
 from mindroom.egress_broker.service import manage_url
-from mindroom.egress_broker.user_services import effective_config
+from mindroom.egress_broker.user_services import effective_config, service_source
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
+    from mindroom.egress_broker.user_services import ServiceSource
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -43,7 +44,6 @@ _NO_SERVICES_NOTE = (
     "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml, "
     "and users can add services of their own on the egress page where it is available."
 )
-type _Source = Literal["config", "user"]
 
 
 class EgressCredentialsTools(Toolkit):
@@ -89,7 +89,7 @@ class EgressCredentialsTools(Toolkit):
                 config,
                 name,
                 service,
-                "config" if name in config.egress_broker.services else "user",
+                service_source(config.egress_broker, name),
             )
             for name, service in services.items()
         ]
@@ -101,7 +101,7 @@ class EgressCredentialsTools(Toolkit):
         config: Config,
         name: str,
         service: EgressService,
-        source: _Source,
+        source: ServiceSource,
     ) -> dict[str, str | bool | None]:
         """Describe one service's credential sources in this agent's scope, as the broker would use them.
 

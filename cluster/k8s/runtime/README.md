@@ -897,6 +897,7 @@ With the broker on, each of them still gets the personal Connections page at `/c
 - Their own keys, and **Connect** and **Disconnect** for their Google, GitHub, and Atlassian accounts.
 - Their own request log, a **Recent requests** table per agent.
 
+The Connections portal's egress rows link to the agent's section on this page with **Manage services**.
 Services from `config.yaml` appear read-only as "Added by your administrator".
 Users' services can narrow what the administrator allows but never widen it; see [User services](../../../docs/deployment/egress-broker.md#user-services).
 
@@ -904,8 +905,7 @@ The page needs these settings, which the chart does not render for you:
 
 - **Trusted upstream auth with JWT.** The Connections routes accept only a signed Matrix identity, so the gateway in front of the runtime must authenticate users and sign a JWT. This chart has no values for it; set the `MINDROOM_TRUSTED_UPSTREAM_*` variables through `env.extra`, as below (the instance chart's `trustedUpstreamAuth` values are the equivalent there). Header-only mode is not enough, and `MINDROOM_PUBLIC_URL` must be an HTTPS origin because every change checks the browser's `Origin` against it.
 - **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service. The chart creates no ingress.
-- **A private agent for the portal, `MINDROOM_CONNECTIONS_AGENT`.** It must use `private.per: user` or `user_agent`. Setting it keeps ordinary dashboard routes limited to `administrators`; without it, every user the gateway admits can read and change dashboard configuration.
-- **Dedicated workers for personal GitHub and Atlassian accounts.** The broker already needs `workers.backend: kubernetes`. Personal GitHub and Atlassian accounts work for agents with `worker_scope: user` or `user_agent`; on shared and unscoped agents they need `oauth_on_shared_workers: true` on the service. Google accounts follow the agent's worker scope.
+- **Dedicated workers for personal GitHub and Atlassian accounts.** The broker already needs `workers.backend: kubernetes`. Personal GitHub and Atlassian accounts work for agents with worker scope `user` or `user_agent` (`worker_scope`, or `private.per` for private agents); on shared and unscoped agents they need `oauth_on_shared_workers: true` on the service. Google accounts follow the agent's worker scope.
 - **OAuth clients.** The administrator configures the providers' OAuth clients once; see [Built-In Providers](../../../docs/oauth-framework.md#built-in-providers).
 
 ```yaml
@@ -920,11 +920,16 @@ env:
     MINDROOM_TRUSTED_UPSTREAM_JWKS_URL: https://gateway.example.com/.well-known/jwks.json
     MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE: mindroom-dashboard
     MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER: https://gateway.example.com
+    MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM: email
     MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM: sub
     MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: matrix_user_id
 ```
 
+The JWT must carry the email claim, and the Matrix identity comes from a signed claim as above or from an email-to-Matrix template.
 See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every variable, the Matrix identity options, and the Connections portal.
+
+Recommended: also set `MINDROOM_CONNECTIONS_AGENT` to a private agent (`private.per: user` or `user_agent`), as in the example.
+The egress page does not need it, only the portal's catalog does, but it keeps ordinary dashboard routes limited to `administrators`; without it, every user the gateway admits can read and change dashboard configuration.
 Without trusted upstream auth with JWT, only administrators can manage keys and accounts, on the dashboard Credentials tab, and users cannot add services or see their requests.
 
 ## Matrix Managed Account Authentication
