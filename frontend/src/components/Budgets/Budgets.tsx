@@ -1,35 +1,29 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Save, Wallet } from "lucide-react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { useToast } from "@/components/ui/use-toast";
-import { NativeSelect } from "@/components/SchemaForm";
-import { showSaveFailureToastIfNeeded } from "@/components/shared";
-import type { ConfigPath } from "@/lib/configSchema";
-import { isConcreteMatrixUserId } from "@/lib/matrixIds";
-import { fetchBudgets } from "@/services/budgetService";
-import { useConfigStore } from "@/store/configStore";
-import type { EnabledBudgetStatus } from "@/types/budgets";
-import type { BudgetsConfig, Config, ModelPricing } from "@/types/config";
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { AlertTriangle, Save, Wallet } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { useToast } from '@/components/ui/use-toast';
+import { NativeSelect } from '@/components/SchemaForm';
+import { showSaveFailureToastIfNeeded } from '@/components/shared';
+import type { ConfigPath } from '@/lib/configSchema';
+import { isConcreteMatrixUserId } from '@/lib/matrixIds';
+import { fetchBudgets } from '@/services/budgetService';
+import { useConfigStore } from '@/store/configStore';
+import type { EnabledBudgetStatus } from '@/types/budgets';
+import type { BudgetsConfig, Config, ModelPricing } from '@/types/config';
 
-const USD = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
+const USD = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
 });
 // Small caps and spend, common while testing, would round to a misleading cent.
-const SMALL_USD = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
+const SMALL_USD = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
   minimumFractionDigits: 2,
   maximumFractionDigits: 4,
 });
@@ -37,16 +31,16 @@ const SMALL_USD = new Intl.NumberFormat("en-US", {
 function formatUsd(value: number): string {
   return value > 0 && value < 1 ? SMALL_USD.format(value) : USD.format(value);
 }
-const TOKENS = new Intl.NumberFormat("en-US");
+const TOKENS = new Intl.NumberFormat('en-US');
 const PRICE_FIELDS = [
-  ["input", "Input"],
-  ["output", "Output"],
-  ["cache_read", "Cache read"],
-  ["cache_write", "Cache write"],
+  ['input', 'Input'],
+  ['output', 'Output'],
+  ['cache_read', 'Cache read'],
+  ['cache_write', 'Cache write'],
 ] as const satisfies readonly (readonly [keyof ModelPricing, string])[];
 
 function parseUsd(text: string): number | undefined | null {
-  if (text.trim() === "") return undefined;
+  if (text.trim() === '') return undefined;
   const value = Number(text);
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
@@ -65,11 +59,11 @@ function UsdInput({
   onCommit: (value: number | undefined) => void;
   className?: string;
 }) {
-  const [text, setText] = useState(value == null ? "" : String(value));
+  const [text, setText] = useState(value == null ? '' : String(value));
   useEffect(() => {
     const parsed = parseUsd(text);
     if ((parsed ?? undefined) !== (value ?? undefined)) {
-      setText(value == null ? "" : String(value));
+      setText(value == null ? '' : String(value));
     }
     // Only an outside change of the committed value resets the typed text.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -84,7 +78,7 @@ function UsdInput({
       value={text}
       placeholder={placeholder}
       className={className}
-      onChange={(event) => {
+      onChange={event => {
         setText(event.target.value);
         const parsed = parseUsd(event.target.value);
         if (parsed !== null) onCommit(parsed);
@@ -93,14 +87,14 @@ function UsdInput({
   );
 }
 
-function cheapestPricedModel(models: Config["models"]): string | undefined {
+function cheapestPricedModel(models: Config['models']): string | undefined {
   const priced = Object.entries(models)
     .filter(([, model]) => model.pricing != null)
     .sort(
       ([, a], [, b]) =>
         (a.pricing?.input ?? 0) +
         (a.pricing?.output ?? 0) -
-        ((b.pricing?.input ?? 0) + (b.pricing?.output ?? 0)),
+        ((b.pricing?.input ?? 0) + (b.pricing?.output ?? 0))
     );
   return priced[0]?.[0] ?? Object.keys(models).sort()[0];
 }
@@ -116,15 +110,14 @@ function SettingsCard({
 }) {
   const modelOptions = Object.keys(config.models)
     .sort()
-    .map((name) => ({ value: name, label: name }));
+    .map(name => ({ value: name, label: name }));
   return (
     <Card>
       <CardHeader>
         <CardTitle>Monthly caps</CardTitle>
         <CardDescription>
-          Caps apply per Matrix user to spend in the current UTC month. A user
-          at their cap keeps chatting, but replies that would use a priced model
-          use the fallback model instead.
+          Caps apply per Matrix user to spend in the current UTC month. A user at their cap keeps
+          chatting, but replies that would use a priced model use the fallback model instead.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -136,7 +129,7 @@ function SettingsCard({
             <Button
               type="button"
               onClick={() =>
-                updateConfigValue(["budgets"], {
+                updateConfigValue(['budgets'], {
                   fallback_model: cheapestPricedModel(config.models),
                 })
               }
@@ -154,9 +147,7 @@ function SettingsCard({
                   label="Default monthly cap"
                   value={budgets.monthly_limit_usd}
                   placeholder="Uncapped"
-                  onCommit={(value) =>
-                    updateConfigValue(["budgets", "monthly_limit_usd"], value)
-                  }
+                  onCommit={value => updateConfigValue(['budgets', 'monthly_limit_usd'], value)}
                 />
                 <span className="block text-xs font-normal text-muted-foreground">
                   Leave blank to cap only the users listed below.
@@ -168,9 +159,7 @@ function SettingsCard({
                   label="Fallback model"
                   value={budgets.fallback_model}
                   options={modelOptions}
-                  onChange={(value) =>
-                    updateConfigValue(["budgets", "fallback_model"], value)
-                  }
+                  onChange={value => updateConfigValue(['budgets', 'fallback_model'], value)}
                 />
                 <span className="block text-xs font-normal text-muted-foreground">
                   Pick the cheapest model that is good enough to keep working.
@@ -180,7 +169,7 @@ function SettingsCard({
             <Button
               type="button"
               variant="outline"
-              onClick={() => updateConfigValue(["budgets"], undefined)}
+              onClick={() => updateConfigValue(['budgets'], undefined)}
             >
               Turn off budgets
             </Button>
@@ -193,57 +182,65 @@ function SettingsCard({
 
 function UsersCard({
   budgets,
+  aliases,
   status,
   statusError,
   updateConfigValue,
 }: {
   budgets: BudgetsConfig;
+  aliases: Record<string, string[]>;
   status: EnabledBudgetStatus | undefined;
   statusError: string | undefined;
   updateConfigValue: (path: ConfigPath, value: unknown) => void;
 }) {
   const { toast } = useToast();
-  const [newUserId, setNewUserId] = useState("");
+  const [newUserId, setNewUserId] = useState('');
   const [newUserCap, setNewUserCap] = useState<number | undefined>();
   // Users edited on this page stay listed, so clearing a cap to retype it keeps the row.
-  const [editedUserIds, setEditedUserIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  const [editedUserIds, setEditedUserIds] = useState<ReadonlySet<string>>(() => new Set());
   const overrides = budgets.users ?? {};
-  const spend = new Map(
-    (status?.users ?? []).map((user) => [user.user_id, user.spend_usd]),
+  const canonicalUserIds = new Map(
+    Object.entries(aliases).flatMap(([canonical, aliasIds]) =>
+      aliasIds.map(aliasId => [aliasId, canonical] as const)
+    )
   );
-  const userIds = [
-    ...new Set([...spend.keys(), ...Object.keys(overrides), ...editedUserIds]),
-  ].sort(
-    (a, b) => (spend.get(b) ?? 0) - (spend.get(a) ?? 0) || a.localeCompare(b),
+  const canonicalOf = (userId: string) => canonicalUserIds.get(userId) ?? userId;
+  // Spend is reported per canonical user, so a cap keyed by a bridge alias belongs to that user's row.
+  const capKeys = new Map<string, string>();
+  for (const key of Object.keys(overrides)) {
+    if (!capKeys.has(canonicalOf(key))) capKeys.set(canonicalOf(key), key);
+  }
+  const capKeyOf = (userId: string) => capKeys.get(userId) ?? userId;
+  const spend = new Map((status?.users ?? []).map(user => [user.user_id, user.spend_usd]));
+  const userIds = [...new Set([...spend.keys(), ...capKeys.keys(), ...editedUserIds])].sort(
+    (a, b) => (spend.get(b) ?? 0) - (spend.get(a) ?? 0) || a.localeCompare(b)
   );
   const defaultLabel =
     budgets.monthly_limit_usd == null
-      ? "Uncapped"
+      ? 'Uncapped'
       : `Default (${formatUsd(budgets.monthly_limit_usd)})`;
 
   const handleAdd = () => {
     const userId = newUserId.trim();
     if (!isConcreteMatrixUserId(userId)) {
       toast({
-        title: "Invalid Matrix user ID",
-        description: "Use a full Matrix user ID like @alice:example.com.",
-        variant: "destructive",
+        title: 'Invalid Matrix user ID',
+        description: 'Use a full Matrix user ID like @alice:example.com.',
+        variant: 'destructive',
       });
       return;
     }
     if (newUserCap === undefined) {
       toast({
-        title: "Enter a cap",
+        title: 'Enter a cap',
         description: `Set a monthly cap in USD for ${userId}.`,
-        variant: "destructive",
+        variant: 'destructive',
       });
       return;
     }
-    updateConfigValue(["budgets", "users", userId], newUserCap);
-    setEditedUserIds((previous) => new Set(previous).add(userId));
-    setNewUserId("");
+    updateConfigValue(['budgets', 'users', userId], newUserCap);
+    setEditedUserIds(previous => new Set(previous).add(userId));
+    setNewUserId('');
     setNewUserCap(undefined);
   };
 
@@ -256,9 +253,9 @@ function UsersCard({
             ? `Spend from ${status.period_start} until ${status.period_end}${
                 status.generated_at
                   ? `, updated ${new Date(status.generated_at).toLocaleString()}`
-                  : ", updating"
+                  : ', updating'
               }.`
-            : "Month-to-date spend for users with spend or their own cap."}
+            : 'Month-to-date spend for users with spend or their own cap.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -285,16 +282,13 @@ function UsersCard({
                   </td>
                 </tr>
               )}
-              {userIds.map((userId) => {
+              {userIds.map(userId => {
                 const userSpend = spend.get(userId) ?? 0;
-                const limit = overrides[userId] ?? budgets.monthly_limit_usd;
+                const override = overrides[capKeyOf(userId)];
+                const limit = override ?? budgets.monthly_limit_usd;
                 const over = limit != null && userSpend >= limit;
                 const fraction =
-                  limit == null
-                    ? 0
-                    : limit === 0
-                      ? 1
-                      : Math.min(userSpend / limit, 1);
+                  limit == null ? 0 : limit === 0 ? 1 : Math.min(userSpend / limit, 1);
                 return (
                   <tr
                     key={userId}
@@ -311,11 +305,7 @@ function UsersCard({
                           className="mt-1 h-1.5 w-24 overflow-hidden rounded-full bg-muted"
                         >
                           <div
-                            className={
-                              over
-                                ? "h-full bg-destructive"
-                                : "h-full bg-primary"
-                            }
+                            className={over ? 'h-full bg-destructive' : 'h-full bg-primary'}
                             style={{ width: `${fraction * 100}%` }}
                           />
                         </div>
@@ -324,17 +314,12 @@ function UsersCard({
                     <td className="sm:py-2 sm:pr-3">
                       <UsdInput
                         label={`Monthly cap for ${userId}`}
-                        value={overrides[userId]}
+                        value={override}
                         placeholder={defaultLabel}
                         className="w-40"
-                        onCommit={(value) => {
-                          setEditedUserIds((previous) =>
-                            new Set(previous).add(userId),
-                          );
-                          updateConfigValue(
-                            ["budgets", "users", userId],
-                            value,
-                          );
+                        onCommit={value => {
+                          setEditedUserIds(previous => new Set(previous).add(userId));
+                          updateConfigValue(['budgets', 'users', capKeyOf(userId)], value);
                         }}
                       />
                     </td>
@@ -345,7 +330,7 @@ function UsersCard({
                         </Badge>
                       ) : (
                         <Badge variant="secondary">
-                          {limit == null ? "Uncapped" : "Within budget"}
+                          {limit == null ? 'Uncapped' : 'Within budget'}
                         </Badge>
                       )}
                     </td>
@@ -358,7 +343,7 @@ function UsersCard({
         <div className="flex flex-col gap-2 sm:flex-row">
           <Input
             value={newUserId}
-            onChange={(event) => setNewUserId(event.target.value)}
+            onChange={event => setNewUserId(event.target.value)}
             placeholder="@user:example.com"
             aria-label="New user Matrix ID"
             className="font-mono sm:max-w-xs"
@@ -386,31 +371,24 @@ function ModelPricesCard({
   config: Config;
   updateConfigValue: (path: ConfigPath, value: unknown) => void;
 }) {
-  const setPrice = (
-    modelName: string,
-    field: keyof ModelPricing,
-    value: number | undefined,
-  ) => {
+  const setPrice = (modelName: string, field: keyof ModelPricing, value: number | undefined) => {
     const next: ModelPricing = { ...(config.models[modelName].pricing ?? {}) };
     if (value === undefined) {
       delete next[field];
     } else {
       next[field] = value;
     }
-    const empty = Object.values(next).every((price) => price == null);
-    updateConfigValue(
-      ["models", modelName, "pricing"],
-      empty ? undefined : next,
-    );
+    const empty = Object.values(next).every(price => price == null);
+    updateConfigValue(['models', modelName, 'pricing'], empty ? undefined : next);
   };
   return (
     <Card>
       <CardHeader>
         <CardTitle>Model prices</CardTitle>
         <CardDescription>
-          USD per million tokens. Input and output prices are required for a
-          priced model; cache prices default to the input price. Models without
-          prices are free for budgets and are never swapped for the fallback.
+          USD per million tokens. Input and output prices are required for a priced model; cache
+          prices default to the input price. Models without prices are free for budgets and are
+          never swapped for the fallback.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -428,7 +406,7 @@ function ModelPricesCard({
           <tbody>
             {Object.keys(config.models)
               .sort()
-              .map((modelName) => {
+              .map(modelName => {
                 const model = config.models[modelName];
                 return (
                   <tr
@@ -452,13 +430,9 @@ function ModelPricesCard({
                         <UsdInput
                           label={`${modelName} ${label.toLowerCase()} price`}
                           value={model.pricing?.[field]}
-                          placeholder={
-                            field.startsWith("cache") ? "= input" : "-"
-                          }
+                          placeholder={field.startsWith('cache') ? '= input' : '-'}
                           className="w-full sm:w-24"
-                          onCommit={(value) =>
-                            setPrice(modelName, field, value)
-                          }
+                          onCommit={value => setPrice(modelName, field, value)}
                         />
                       </td>
                     ))}
@@ -473,11 +447,10 @@ function ModelPricesCard({
 }
 
 export function Budgets() {
-  const { config, isDirty, isLoading, saveConfig, updateConfigValue } =
-    useConfigStore();
+  const { config, isDirty, isLoading, saveConfig, updateConfigValue } = useConfigStore();
   const { toast } = useToast();
   const query = useQuery({
-    queryKey: ["budgets"],
+    queryKey: ['budgets'],
     queryFn: ({ signal }) => fetchBudgets(signal),
     retry: false,
     refetchInterval: 60_000,
@@ -490,15 +463,15 @@ export function Budgets() {
     const result = await saveConfig();
     if (
       showSaveFailureToastIfNeeded(result, {
-        staleMessage: "Save was superseded by newer budget edits.",
-        fallbackMessage: "Failed to save budgets.",
+        staleMessage: 'Save was superseded by newer budget edits.',
+        fallbackMessage: 'Failed to save budgets.',
       })
     ) {
       return;
     }
     toast({
-      title: "Budgets Saved",
-      description: "New caps and prices apply from the next spend refresh.",
+      title: 'Budgets Saved',
+      description: 'New caps and prices apply from the next spend refresh.',
     });
   };
 
@@ -509,33 +482,23 @@ export function Budgets() {
           <Wallet className="h-5 w-5 text-primary" aria-hidden="true" />
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Budgets</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Monthly spending caps per user
-            </p>
+            <p className="mt-1 text-sm text-muted-foreground">Monthly spending caps per user</p>
           </div>
         </div>
-        <Button
-          onClick={handleSave}
-          disabled={!isDirty || isLoading || !config}
-        >
+        <Button onClick={handleSave} disabled={!isDirty || isLoading || !config}>
           <Save className="mr-2 h-4 w-4" aria-hidden="true" />
           Save
         </Button>
       </div>
       {config == null ? (
-        <p className="text-sm text-muted-foreground">
-          Loading configuration...
-        </p>
+        <p className="text-sm text-muted-foreground">Loading configuration...</p>
       ) : (
         <>
-          <SettingsCard
-            config={config}
-            budgets={budgets}
-            updateConfigValue={updateConfigValue}
-          />
+          <SettingsCard config={config} budgets={budgets} updateConfigValue={updateConfigValue} />
           {budgets != null && (
             <UsersCard
               budgets={budgets}
+              aliases={config.authorization?.aliases ?? {}}
               status={status}
               statusError={query.isError ? query.error.message : undefined}
               updateConfigValue={updateConfigValue}
@@ -547,24 +510,20 @@ export function Budgets() {
               <AlertTitle>Usage without prices</AlertTitle>
               <AlertDescription>
                 <p>
-                  These models were used this month but have no prices, so their
-                  usage counts as free:
+                  These models were used this month but have no prices, so their usage counts as
+                  free:
                 </p>
                 <ul className="mt-2 list-disc pl-5">
-                  {status.unpriced_models.map((row) => (
+                  {status.unpriced_models.map(row => (
                     <li key={`${row.provider}:${row.model}`}>
-                      {row.provider} {row.model}:{" "}
-                      {TOKENS.format(row.total_tokens)} tokens
+                      {row.provider} {row.model}: {TOKENS.format(row.total_tokens)} tokens
                     </li>
                   ))}
                 </ul>
               </AlertDescription>
             </Alert>
           )}
-          <ModelPricesCard
-            config={config}
-            updateConfigValue={updateConfigValue}
-          />
+          <ModelPricesCard config={config} updateConfigValue={updateConfigValue} />
         </>
       )}
     </div>
