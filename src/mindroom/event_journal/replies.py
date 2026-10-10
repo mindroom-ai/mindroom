@@ -206,7 +206,8 @@ def _run(
 def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) -> bool:
     """Record which background work a Stop cancels, as the reply is now, so a later regeneration cannot change it.
 
-    Nothing is recorded while no background job exists: a stopped reply starts none afterwards.
+    Nothing is recorded while no background job exists: a stopped reply starts none afterwards, and a call whose job
+    was being admitted when the Stop committed stops that job itself.
     """
     if transaction.fetchone("SELECT 1 AS present FROM tool_jobs LIMIT 1") is None:
         return False

@@ -30,6 +30,7 @@ from mindroom.background_tasks import (
     run_coroutine_until_complete,
     wait_for_future_until_complete,
 )
+from mindroom.cancellation import classify_cancel_source
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
 from mindroom.tool_approval import JOB_APPROVAL_TYPE
@@ -473,6 +474,16 @@ def _unaskable(call: FunctionCall) -> ToolCallResult:
     return _failed_call(call, ValueError("This call needs approval, which it cannot ask for here, so it did not run."))
 
 
+async def _stop_admitted(runtime: ToolJobRuntime, job_id: str) -> None:
+    """Stop the job a stopped reply's call admitted, as a Stop the reply recorded would; a recorded one wins."""
+
+    async def admitted(job: BackgroundJob) -> bool:
+        return job.job_id == job_id
+
+    # The lowest receipt order, so the recorded Stop that also names this job still sets its own.
+    await runtime.stop_jobs(receipt_order=0, matches=admitted)
+
+
 def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
     """Expose invalid framework arguments through Agno's ordinary tool failure contract."""
     with Timer() as timer:
@@ -590,11 +601,16 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 retained = True
             # A released wait's call returned its job handle, which names the job a restart's account points to.
             await record_return(call.result if call.error is None else call.error)
-            return response
+        except asyncio.CancelledError as cancelled:
+            if classify_cancel_source(cancelled) == "user_stop":
+                # A Stop that committed while this job was admitted can find no job to record; this job is its work.
+                await run_coroutine_until_complete(_stop_admitted(runtime, job_id))
+            raise
         finally:
             if not retained:
                 await runtime.release_wait(job_id, claim)
             if not runtime.owns_execution(job_id, adapter):
                 await reference.release()
+        return response
 
     return execute

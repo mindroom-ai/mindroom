@@ -24,6 +24,7 @@ from agno.tools.function import FunctionCall, ToolResult
 from pydantic import BaseModel
 
 from mindroom.agent_storage import create_session_storage
+from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
@@ -1188,5 +1189,55 @@ async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path
         else:
             assert result == "noted hello"
         assert ran == ["hello"]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_admission_stops_the_job_it_admits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Stop that cancels the reply while its call's job is admitted, with no job recorded yet, still stops that job."""
+    ran: list[str] = []
+
+    async def write_note(text: str) -> str:
+        ran.append(text)
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    admitting, admit = asyncio.Event(), asyncio.Event()
+    real_admit = runtime._admit
+
+    async def slow_admit(*args: object) -> None:
+        admitting.set()
+        await admit.wait()
+        await real_admit(*args)
+
+    monkeypatch.setattr(runtime, "_admit", slow_admit)
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("write_note", "note-call", text="hello")]),
+            ModelResponse(content="x"),
+        ],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[assembled_function(write_note)])
+    owner = build_execution_identity_from_runtime_context(context)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                reply = asyncio.create_task(agent.arun("Note", session_id=context.session_id))
+                await asyncio.wait_for(admitting.wait(), JOB_TEST_TIMEOUT)
+                request_task_cancel(reply, cancel_source="user_stop")
+                admit.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await reply
+        [job] = await runtime.list_jobs(owner=owner, depth=0)
+        assert job.user_stop_receipt_order == 0
+        await wait_for_status(runtime, job.job_id, "cancelled")
     finally:
         await runtime.shutdown()
