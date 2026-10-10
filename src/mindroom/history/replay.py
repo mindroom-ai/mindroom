@@ -101,6 +101,24 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
     return message.model_copy(update=updates) if updates else message
 
 
+def _session_summary_block(summary: str) -> str:
+    """Render a stored session summary the way Agno's system-message builder adds it."""
+    return (
+        "Here is a brief summary of your previous interactions:\n\n"
+        "<summary_of_previous_interactions>\n"
+        f"{summary}\n"
+        "</summary_of_previous_interactions>\n\n"
+        "Note: this information is from previous interactions and may be outdated. "
+        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
+    )
+
+
+def with_session_summary(system_prompt: str, session: AgentSession | TeamSession | None) -> str:
+    """Append a session's stored summary to a verbatim system prompt, which Agno's builder never sees."""
+    summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
+    return f"{system_prompt}\n\n{_session_summary_block(summary)}" if summary else system_prompt
+
+
 def _estimate_session_summary_tokens(summary_text: str | None) -> int:
     """Estimate prompt-visible tokens contributed by one stored session summary."""
     if summary_text is None:
@@ -108,15 +126,7 @@ def _estimate_session_summary_tokens(summary_text: str | None) -> int:
     normalized_summary = summary_text.strip()
     if not normalized_summary:
         return 0
-    wrapper = (
-        "Here is a brief summary of your previous interactions:\n\n"
-        "<summary_of_previous_interactions>\n"
-        f"{normalized_summary}\n"
-        "</summary_of_previous_interactions>\n\n"
-        "Note: this information is from previous interactions and may be outdated. "
-        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
-    )
-    return estimate_text_tokens(wrapper)
+    return estimate_text_tokens(_session_summary_block(normalized_summary))
 
 
 def _estimate_history_messages_tokens(messages: list[Message]) -> int:

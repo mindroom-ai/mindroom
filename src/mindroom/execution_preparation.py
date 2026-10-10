@@ -31,7 +31,7 @@ from mindroom.constants import (
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
 from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
-from mindroom.history.replay import apply_replay_plan
+from mindroom.history.replay import apply_replay_plan, with_session_summary
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
@@ -1020,7 +1020,7 @@ async def prepare_agent_execution_context(
             active_context_window=runtime_model.context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
         )
-        return await prepare_scope_history(
+        prepared = await prepare_scope_history(
             agent=agent,
             agent_name=agent_name,
             resolved_inputs=resolved_inputs,
@@ -1031,6 +1031,10 @@ async def prepare_agent_execution_context(
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,
         )
+        if ctx.persona is not None and ctx.agent_mode == "standard" and agent.add_session_summary_to_context:
+            # The replay plan counts a compacted session's summary, which a verbatim prompt would otherwise drop.
+            agent.system_message = with_session_summary(ctx.persona.system_prompt, prepared.session)
+        return prepared
 
     def _estimate_agent_static_tokens(
         prepared_prompt: str,

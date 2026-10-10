@@ -6,19 +6,26 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session import AgentSession
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
+from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
+from mindroom.history.archive import archive_runs
+from mindroom.history.session_context import open_resolved_scope_session_context
+from mindroom.history.types import HistoryScope
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from tests.conftest import seed_session
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_dynamic_toolkits import _base_config_data, _validated_config
 from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
@@ -99,6 +106,59 @@ async def test_persona_system_message_is_verbatim(tmp_path: Path) -> None:
 
     assert message is not None
     assert message.content == prompt
+
+
+@pytest.mark.asyncio
+async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> None:
+    """A compacted session's summary still reaches an authored child, after its verbatim prompt."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    old_run = RunOutput(
+        run_id="old-run",
+        agent_id="helper",
+        session_id="session-1",
+        status=RunStatus.completed,
+        messages=[Message(role="user", content="Earlier task"), Message(role="assistant", content="Earlier answer")],
+    )
+    storage = create_session_storage("helper", runtime.config, runtime.runtime_paths, identity)
+    try:
+        seed_session(storage, AgentSession(session_id="session-1", agent_id="helper", runs=[old_run]))
+        archive_runs(
+            storage,
+            session_id="session-1",
+            scope_key=HistoryScope(kind="agent", scope_id="helper").key,
+            summary="EARLIER-WORK",
+            summary_model="summary-model",
+            runs=[old_run],
+            event_ids={},
+            seen_event_ids={},
+        )
+    finally:
+        storage.close()
+
+    with open_resolved_scope_session_context(
+        agent_name="helper",
+        scope=HistoryScope(kind="agent", scope_id="helper"),
+        session_id="session-1",
+        config=runtime.config,
+        runtime_paths=runtime.runtime_paths,
+        execution_identity=identity,
+    ) as scope_context:
+        prepared = await ai._prepare_agent_and_prompt(
+            replace(_turn_context(), persona=inline_persona("P", None)),
+            prompt="task",
+            runtime_paths=runtime.runtime_paths,
+            config=runtime.config,
+            execution_identity=identity,
+            scope_context=scope_context,
+        )
+
+    message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
+    assert message is not None
+    assert str(message.content).startswith("P\n\n")
+    assert "<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>" in str(
+        message.content,
+    )
 
 
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
