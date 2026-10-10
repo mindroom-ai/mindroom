@@ -1,8 +1,9 @@
 # Brokered Worker Egress
 
 The **egress broker** runs inside the primary runtime and intercepts outbound HTTP(S) requests from worker code, injecting secrets the worker never sees.
-Use it when workers need to call APIs with credentials (GitHub, OpenAI, cloud providers) while keeping those secrets out of worker code, environment variables, and container memory.
-This page covers how the broker works, configuration, deployment, secret management, error codes, migration from Agent Vault, and current limitations.
+Use it when workers need to call APIs with credentials (GitHub, Google, Atlassian, OpenAI, cloud providers) while keeping those secrets out of worker code, environment variables, and container memory.
+Each service gets its credential from an API key you store or from an account you connect with a few clicks, and built-in presets define the common services in one line.
+This page covers how the broker works, configuration and presets, secret sources and connected accounts, deployment, secret management, error codes, migration from Agent Vault, and current limitations.
 
 ## How it works
 
@@ -11,7 +12,7 @@ If the request matches a service rule, the broker terminates TLS with its own ce
 Unmatched hosts are either tunneled through (passthrough mode) or blocked (deny mode), controlled by `egress_broker.unmatched_hosts` in `config.yaml`.
 
 Workers receive a signed token in their environment (`HTTP_PROXY`, `HTTPS_PROXY`) that authenticates them to the broker; it is valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days).
-The broker validates the token, resolves the worker's scope (user, user-agent, shared, or global for agents without a worker scope), and loads the service secret from that scope's primary-only credential store.
+The broker validates the token, resolves the worker's scope (user, user-agent, shared, or global for agents without a worker scope), and loads the service secret from that scope's primary-only credential store, or a fresh access token from the account connected for that scope (see [Secret sources](#secret-sources)).
 The secret never reaches the worker process, its environment, or the filesystem it can read.
 
 Each worker call gets a fresh token valid for the configured TTL (default 7 days), so long-running commands keep working while a leaked token expires on its own.
@@ -38,15 +39,76 @@ Running MindRoom with `--no-api` disables the broker along with the API.
 
 ### Service rules
 
-Add `egress_broker` to `config.yaml` with the services workers may reach:
+Add `egress_broker` to `config.yaml` with the services workers may reach.
+Most services need only a preset; define a custom service when no preset fits.
+
+#### Presets
+
+A preset is a built-in service definition.
+Name it with `preset` and the service is complete:
 
 ```yaml
 egress_broker:
   unmatched_hosts: passthrough  # or deny
   services:
     github:
+      preset: github
+    gmail:
+      preset: google_gmail
+    openai:
+      preset: openai
+```
+
+A preset fills `display_name`, `description`, `rules`, `placeholder_env`, and `oauth_provider`.
+The service name is yours to choose; it names the stored `egress_<name>` credential and the dashboard row.
+
+| Preset | Connected account (`oauth_provider`) | Rules | Placeholder env |
+|--------|--------------------------------------|-------|-----------------|
+| `github` | `github` | `api.github.com` bearer; `uploads.github.com` bearer; `github.com` basic with username `x-access-token` | `GH_TOKEN`, `GITHUB_TOKEN` |
+| `google_drive` | `google_drive` | `www.googleapis.com` paths `/drive/` and `/upload/drive/`, bearer | None |
+| `google_gmail` | `google_gmail` | `gmail.googleapis.com` bearer; `www.googleapis.com` path `/gmail/`, bearer | None |
+| `google_calendar` | `google_calendar` | `www.googleapis.com` path `/calendar/`, bearer | None |
+| `google_sheets` | `google_sheets` | `sheets.googleapis.com` bearer | None |
+| `google_docs` | `google_docs` | `docs.googleapis.com` bearer | None |
+| `google_tasks` | `google_tasks` | `tasks.googleapis.com` bearer; `www.googleapis.com` path `/tasks/`, bearer | None |
+| `atlassian` | `atlassian` | `api.atlassian.com` bearer | None |
+| `openai` | None | `api.openai.com` bearer | `OPENAI_API_KEY` |
+| `anthropic` | None | `api.anthropic.com` header `x-api-key` | `ANTHROPIC_API_KEY` |
+
+Placeholder values are `mindroom-brokered`.
+Presets without a connected account take an API key only.
+
+Several Google presets share `www.googleapis.com`.
+Longest path prefix matching picks the right service, and a request to another path on that host is forwarded without injection, because the host has rules and so does not count as unmatched.
+
+Any field you set next to `preset` replaces the preset's value for that field, as a whole:
+
+```yaml
+egress_broker:
+  services:
+    github:
+      preset: github
+      display_name: Work GitHub
+      placeholder_env: {}  # replaces the preset's GH_TOKEN and GITHUB_TOKEN
+```
+
+Fields you leave out keep coming from the preset, so MindRoom updates to a preset reach your service.
+`rules` and `placeholder_env` are not merged with the preset's lists, so an authored `rules` list replaces all of its rules.
+Saving the config from the dashboard keeps the preset form you wrote and does not write the expanded values back.
+An unknown preset name is rejected when the config loads, and the error lists the known presets.
+A service must end up with at least one rule, from `rules` or from its preset.
+
+#### Custom services
+
+Define the rules yourself when no preset fits:
+
+```yaml
+egress_broker:
+  services:
+    github:
       display_name: GitHub
       description: GitHub API, gh CLI, and git over HTTPS
+      oauth_provider: github  # optional: lets users connect an account instead of storing a key
       rules:
         - host: api.github.com
           auth: { type: bearer }
@@ -66,6 +128,17 @@ egress_broker:
       placeholder_env:
         OPENAI_API_KEY: mindroom-brokered
 ```
+
+**Service fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `preset` | No | Built-in preset that supplies the fields below; see [Presets](#presets) |
+| `display_name` | No | Name shown in the UI and the agent tool; defaults to the service name |
+| `description` | No | Short description shown in the UI |
+| `rules` | Yes, unless a preset supplies them | Routing rules for the service |
+| `placeholder_env` | No | Placeholder environment variables for workers |
+| `oauth_provider` | No | MindRoom OAuth provider id (such as `github`, `google_drive`, `atlassian`) whose connected account supplies the secret when no API key is stored; see [Secret sources](#secret-sources) |
 
 **Rule fields:**
 
@@ -98,13 +171,54 @@ Service names use up to 63 lowercase letters, digits, `_`, and `-`, start with a
 
 **Placeholder environment:**
 
-Services with `placeholder_env` set inject those variables into worker environments when a secret is configured for that service in the worker's scope.
+Services with `placeholder_env` set inject those variables into worker environments when a secret is available for that service in the worker's scope, either a stored API key or a connected account.
 Use this so CLIs that refuse to run without a token (such as `gh`) work without modification.
 The value can be any placeholder string; `mindroom-brokered` is the conventional choice.
 
+## Secret sources
+
+A service can take its secret from two sources in a worker's scope:
+
+- **API key**: a key stored for the scope, set by hand.
+- **Connected account**: an OAuth login that the user connected through MindRoom's OAuth providers (the GitHub App user login, the Google providers, Atlassian). A service uses this source when it has an `oauth_provider`, which every preset except `openai` and `anthropic` sets.
+
+For each request the broker picks the secret in this order:
+
+1. The API key stored for the scope, if there is one. An explicit key always wins over a connected account, and removing the key falls back to the account.
+2. Otherwise, the connected account's access token. The primary refreshes it only when it is near expiry, through the same serialized refresh the tools that share the connection use, so there is no second refresh path.
+3. Otherwise, a 403 `credential_not_configured` that also carries a connect link when the account can be connected (see [Error responses](#error-responses)).
+
+The matched rule's auth type then formats the token like any other secret, so a connected GitHub account goes out as `Authorization: Bearer <token>` to `api.github.com` and as basic auth with username `x-access-token` to `github.com`.
+Placeholder environment variables are added when either source is available.
+
+OAuth access tokens are fetched and refreshed in the primary and injected by the broker.
+They never reach a worker, its environment, or its filesystem; the worker holds only its proxy token and the placeholder values.
+
+**Which account a request uses:**
+
+- The account follows the provider's own credential policy. GitHub is requester-scoped: the broker uses the requester named in the worker's verified token, even on a `shared` agent, so each user's requests use that user's own GitHub account and never another user's.
+- Other providers, such as Google and Atlassian, follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
+- A call without a requester has no GitHub account to use.
+
+**Service accounts are never injected.**
+A deployment that sets `GOOGLE_SERVICE_ACCOUNT_FILE` serves the Google providers through a shared Google service account instead of personal logins.
+The broker does not inject a service account's credentials, so the egress pages show such a service as "Uses a shared service account" with the account part as not connected, and personal accounts cannot be connected for that provider.
+A personal connection stored before the service account was configured keeps working until it is disconnected.
+Give the service an API key if workers need to call it in that deployment.
+
+**Unknown `oauth_provider` ids** are not a config error.
+When the id is not in MindRoom's OAuth registry (for example a plugin provider that is not loaded), the broker logs one warning that names the service and uses no account source for it, so the service works with an API key only.
+
+**Connected account problems** do not reach the worker as plain missing credentials:
+
+- A revoked or rejected grant, or a stored credential that cannot be read, returns 403 `oauth_connection_required`. The user reconnects (an unreadable credential must first be reset from the dashboard Tools tab, and then the response has `reset_required` and no link).
+- A provider outage, timeout, or network failure while refreshing returns 503 `oauth_refresh_failed`. The grant is fine, so the worker retries later and the user does not reconnect. After such a failure the broker answers the same credential store with 503 immediately for 30 seconds instead of asking the provider again.
+- Logs carry the service, the provider id, and the error type, never tokens or connect links.
+
 ## Secret management
 
-Secrets are stored per worker scope in the primary-only credential store (the same encrypted store that holds other credentials), never in worker-writable locations.
+API keys are stored per worker scope in the primary-only credential store (the same encrypted store that holds other credentials), never in worker-writable locations.
+Connected accounts live in MindRoom's OAuth credential stores under the same primary-only rule and the scope policy above.
 
 **Scopes:**
 
@@ -118,9 +232,47 @@ Secrets are stored per worker scope in the primary-only credential store (the sa
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 The dashboard edits it as **Global (unscoped agents)**.
 
-Set secrets through the dashboard Credentials tab or the personal egress page at `/connections/egress`.
+Set secrets and connect accounts through the dashboard Credentials tab or the personal egress page at `/connections/egress`.
 The dashboard offers agents that can run commands and have no worker scope or `shared` scope; keys for `user` and `user_agent` agents belong to each requester and are set on the personal egress page.
-The status API returns whether a secret is configured and when it was last updated; it never returns the secret value.
+The status API returns, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account; it never returns a secret or token.
+`configured` is true when either source is available, and `active_source` is `key`, `oauth`, or `null`:
+
+```json
+{
+  "name": "github",
+  "configured": true,
+  "active_source": "oauth",
+  "key_configured": false,
+  "key_updated_at": null,
+  "oauth": {
+    "provider": "github",
+    "display_name": "GitHub",
+    "connected": true,
+    "account_label": "alice@example.org",
+    "can_connect": true,
+    "reset_required": false,
+    "service_account": false
+  }
+}
+```
+
+`oauth` is `null` for a service without an account provider.
+The OAuth part comes from the same helper as the Connections portal's per-provider status, so the egress pages and the portal agree.
+
+### Connecting an account
+
+On the personal egress page, the dashboard panel, and the Connections portal cards, a service with an account provider shows **Connect <Provider>** as its primary action.
+It opens the provider's login in a popup; a connected row then reads "Connected as <account>" with a **Disconnect** button.
+**Use an API key instead** keeps the Set, Replace, and Remove actions, and a row with a key set says the key is in use.
+
+An agent can also send a user straight to the login: the 403 `credential_not_configured` and `oauth_connection_required` responses and the [`egress_credentials` tool](#agent-tool) point at where to connect, and the broker's responses carry a `connect_url`, a short-lived single-use link that works without a dashboard login.
+The broker reuses one link per caller for 60 seconds, so a worker that retries in a loop does not mint a new one each time.
+
+Who may connect an account follows who may set a key, with one exception:
+
+- For `user` and `user_agent` agents, each user connects their own account on the personal page.
+- For `shared` and unscoped agents, administrators and the agent's `credential_managers` connect and disconnect accounts, and set keys.
+- GitHub is the exception. Its connection belongs to the requester, so any user who may use the agent can connect their own GitHub account on a shared agent too. API keys on shared agents stay with the managers.
 
 The personal egress page and its API, `/api/connections/egress`, authenticate with `require_connections_user`: they need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
 Without that signed identity gate, such as on a lab host that has no upstream proxy, only the dashboard can manage secrets.
@@ -133,14 +285,19 @@ On the personal page, users manage their own secrets for `user` and `user_agent`
 | `/api/egress-broker/services?agent_name=<name>` | GET | List services with configured status; omit `agent_name` for global scope |
 | `/api/egress-broker/services/<name>/secret?agent_name=<name>` | PUT | Set a secret; body `{"secret": "<value>"}` |
 | `/api/egress-broker/services/<name>/secret?agent_name=<name>` | DELETE | Delete a secret |
+| `/api/egress-broker/services/<name>/connect?agent_name=<name>` | POST | Start the OAuth login of the service's provider for that scope; returns the authorization URL. 404 when the service has no known provider, 409 while a shared service account replaces personal accounts |
+| `/api/egress-broker/services/<name>/disconnect?agent_name=<name>` | POST | Reset the connected account for that scope |
 | `/api/egress-broker/logs?agent_name=&host=&service=&limit=` | GET | Query request audit logs; returns 409 when the broker is not running |
 | `/api/egress-broker/ca.pem` | GET | Download the broker's root CA certificate; returns 409 when the broker is not running |
 
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
 
+The personal egress API has matching routes under `/api/connections/egress/agents/<agent>/<service>`: `PUT` and `DELETE` for the key, and `POST .../connect` and `POST .../disconnect` for the account.
+The connect and disconnect routes run the same eligibility, same-origin, and permission checks as the key routes, with the GitHub exception above, and then delegate to the OAuth connect and disconnect flows of the service's provider.
+
 ## Agent tool
 
-Add the `egress_credentials` tool to an agent so it can tell a user which keys are missing when a brokered request fails with `credential_not_configured`.
+Add the `egress_credentials` tool to an agent so it can tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 It replaces `agent_vault_access` for the native broker.
 
 ```yaml
@@ -157,18 +314,34 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 {
   "tool": "egress_credentials",
   "services": [
-    {"name": "github", "display_name": "GitHub", "configured": true},
-    {"name": "openai", "display_name": "openai", "configured": false}
+    {"name": "github", "display_name": "GitHub", "configured": true, "active_source": "oauth"},
+    {
+      "name": "gmail",
+      "display_name": "Gmail",
+      "configured": false,
+      "active_source": null,
+      "can_connect_account": true,
+      "provider": "google_gmail"
+    },
+    {
+      "name": "openai",
+      "display_name": "OpenAI",
+      "configured": false,
+      "active_source": null,
+      "can_connect_account": false,
+      "provider": null
+    }
   ],
   "manage_url": "https://mindroom.example/connections/egress",
   "note": "..."
 }
 ```
 
-- `configured` reflects the calling agent's own secret scope, so each requester sees only their own keys when the agent uses `user` or `user_agent` scope. An agent with no worker scope reads the global store.
+- `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`. An explicit key wins over a connected account. The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub, their own account, and an agent with no worker scope reads the global store.
+- A service with nothing configured also reports `can_connect_account`. When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id. It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, or a stored connection is unreadable and needs a reset first; `provider` is then `null`.
 - `display_name` falls back to the service name when the service sets none.
 - `manage_url` is the personal egress page when trusted upstream auth is enabled and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
-- The tool never returns secret values or update timestamps, and its note tells the agent not to ask users to paste a key into the chat.
+- The tool never returns secret values, access tokens, connect links, or update timestamps, and its note tells the agent not to ask users to paste a key into the chat. Users connect accounts and add keys at `manage_url`; the one-time `connect_url` only appears in the broker's HTTP responses to worker code.
 - The tool always runs in the primary runtime. When it is built without a worker target, it returns an empty `services` list and a note saying a worker-scoped agent is required.
 
 ## Deployment
@@ -303,14 +476,19 @@ The broker returns these errors to worker code:
 | Non-origin-form request target (absolute, authority, or asterisk form) inside an intercepted tunnel | 400 JSON `{"error": "bad_request"}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked"}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed"}` with service list hint |
-| Matched service, no secret in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>"}` |
+| Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>"}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the service has an account provider that the user can connect |
+| Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>"}`; an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
+| Provider outage, timeout, or network failure while refreshing the account's token | 503 JSON `{"error": "oauth_refresh_failed", "service": "<name>", "provider": "<id>"}`; retry later, do not reconnect |
 | Unresolvable destination | 502 |
 | Upstream connect or TLS failure | 502 |
 | Broker internal error or secret resolution failure | 502 JSON `{"error": "broker_error"}` |
 | Request body over 1 GiB | 413 |
 | Upstream timeout | 504 (connect timeout 10s, idle read timeout 30 minutes for long streams) |
 
-The broker never logs header values, request bodies, query strings, tokens, or secrets.
+A 503 `oauth_refresh_failed` backs off per credential store: for 30 seconds after a failed refresh, further requests for that store get the same 503 without calling the provider again.
+The `connect_url` values are short-lived, single-use connect links, so treat the response bodies as sensitive and do not log them.
+
+The broker never logs header values, request bodies, query strings, tokens, connect links, or secrets.
 Audit records include timestamps, worker scope, agent name, requester ID, method, host, path (without query string), service name, status code, bytes transferred, and duration.
 
 ## Verified behaviors
@@ -323,6 +501,8 @@ The following are tested and intentional:
 - Routing uses the CONNECT target host and port only, never the `Host` header, so a replaced `Host` header cannot redirect the secret.
 - Redirects are returned to the client without following them; a redirect to a new host requires a new CONNECT and a new match.
 - The client's value for the slot the broker injects into (such as `Authorization`) is always removed before injection.
+- An explicit API key wins over a connected account, and removing the key falls back to the account.
+- Connected-account tokens are refreshed only through MindRoom's OAuth credential lifecycle, formatted by the matched rule's auth type, and never leave the primary. Shared service accounts are never injected.
 - Expired or invalid tokens get 407 on new requests and on requests inside an already-open tunnel, but websocket splices and raw tunnels that started before the token expired keep running until the connection closes.
 - Dedicated Docker and Kubernetes workers and the static runner get the broker environment; background-script workers do not yet.
 
@@ -335,8 +515,8 @@ If you are currently using Agent Vault (the Go-based proxy fork) on the LXC host
 1. Add the egress broker environment variables to the MindRoom service configuration (such as `optional/mindroom-runtime-services.nix`), set `MINDROOM_EGRESS_BROKER_PORT=8768`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, `MINDROOM_EGRESS_BROKER_URL=http://host.docker.internal:8768`.
 2. Open port 8768 on `docker0` in the host firewall configuration (such as `hosts/mindroom/networking.nix`).
 3. Rebuild the worker image from the updated checkout so workers install the broker's CA: `cd /srv/mindroom && docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .`
-4. Add the `github` service (or other services you use) to `~/.mindroom-chat/config.yaml` under `egress_broker.services`.
-5. Set the secrets in the dashboard Credentials tab. The personal egress page needs trusted upstream auth with JWT, which a lab host without an upstream proxy does not have.
+4. Add the `github` service (or other services you use) to `~/.mindroom-chat/config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
+5. Set the secrets or connect accounts in the dashboard Credentials tab. The personal egress page needs trusted upstream auth with JWT, which a lab host without an upstream proxy does not have.
 6. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the audit log records it, and the worker environment and workspace contain no trace of the token.
 7. Remove the `agent-vault-bridge` plugin from config.
 8. Remove the Agent Vault CA pin from the NixOS configuration.
@@ -360,7 +540,7 @@ What replaces each Agent Vault piece:
 | Init container minting a per-worker proxy token | Per-call token from the primary in the call's environment |
 | Vault per worker key | Primary-only credential store per worker scope, with the same granularity |
 | CA ConfigMap mounted at `/etc/agent-vault/ca.pem` | CA certificate in the call's environment; the runner writes the trust bundle to `/tmp` |
-| `agent_vault_access` tool and Agent Vault accounts | Personal egress page and the `egress_credentials` tool |
+| `agent_vault_access` tool and Agent Vault accounts | Personal egress page (API keys and connected accounts) and the `egress_credentials` tool |
 | `accessGrants` Job | `administrators` and `agents.<name>.credential_managers` in config |
 | `approvedEgress.parentProxy.host: agent-vault`, port 14322 | Rendered automatically as the broker Service and port |
 
@@ -371,6 +551,7 @@ Hosted instances never had Agent Vault, so they have nothing to migrate and only
 The broker has these known limits in the initial release:
 
 - **HTTP/1.1 only:** the broker speaks HTTP/1.1 to clients and upstreams; HTTP/2 and HTTP/3 are not supported. Most agent workloads (curl, git, Python requests, Go http) use HTTP/1.1 by default or fall back to it.
+- **Service accounts are not injected:** a Google provider served by `GOOGLE_SERVICE_ACCOUNT_FILE` cannot supply the broker's secret, so such a service needs an API key.
 - **No body or websocket frame substitutions:** the broker injects into headers and query parameters only; path, body, and websocket frame substitutions planned for a later release.
 - **Background-script workers not yet covered:** the broker environment reaches dedicated Docker and Kubernetes workers and the static runner; background-script workers are not yet wired.
 - **Shared static runner is not an isolation boundary:** a scoped call's token lives in a process shared with other users' calls, valid for the token TTL, so keep the TTL short where that matters and use dedicated workers for isolation.
@@ -386,9 +567,28 @@ A shell opened with `docker exec` does not have that per-call environment.
 
 **403 `credential_not_configured` errors:**
 
-The service is matched but no secret is set for that worker's scope.
-Set the secret through the dashboard or, where trusted upstream auth is enabled, the personal egress page; the error response includes a `manage_url` field pointing to the right UI.
-Agents with the [`egress_credentials` tool](#agent-tool) can look up which services are set and relay the link to the user.
+The service is matched but the worker's scope has neither an API key nor a connected account for it.
+Connect an account (when the response has `provider` and `connect_url`) or set a key through the dashboard or, where trusted upstream auth is enabled, the personal egress page; the error response includes a `manage_url` field pointing to the right UI.
+Agents with the [`egress_credentials` tool](#agent-tool) can look up which services are set, whether an account can be connected, and relay the link to the user.
+
+**403 `oauth_connection_required` errors:**
+
+The account for that scope was revoked at the provider or its credential cannot be read.
+Reconnect through `connect_url` or the egress page.
+When the response has `reset_required`, reset the provider connection from the dashboard Tools tab first, because MindRoom cannot read the stored credential.
+Alternatively set an API key for the service, which takes priority over the account.
+
+**503 `oauth_refresh_failed` errors:**
+
+The provider's token endpoint failed or timed out while the broker refreshed the account's token, so the account itself is still connected.
+Retry the request later; reconnecting does not help.
+The broker answers further requests for the same credential store with 503 for 30 seconds before trying the provider again, and logs only the service, the provider id, and the error type.
+
+**A connected account does not take effect:**
+
+Check that the service has an `oauth_provider` (presets set it) and that the id exists in the OAuth registry; an unknown id logs a warning naming the service and leaves the service on API keys only.
+An API key stored for the scope wins over the account, so remove the key to use the account.
+A provider served by a shared service account shows "Uses a shared service account" and is never injected.
 
 **407 authentication errors:**
 
