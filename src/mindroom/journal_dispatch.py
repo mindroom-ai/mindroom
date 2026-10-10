@@ -60,8 +60,10 @@ _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_ev
 
 def _needs_turn_replay(event: JournalEvent) -> bool:
     """Return whether replay needs responders and turn recovery semantics."""
-    return event.kind in TURN_BACKED_KINDS or (
-        event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
+    return (
+        event.kind in TURN_BACKED_KINDS
+        or event.kind is EventKind.JOB_WAKE
+        or (event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION)
     )
 
 
@@ -90,6 +92,8 @@ class JournalCallbacks:
     turn_has_live_claim: Callable[[str], bool]
     # Delivers what replies left waiting to replay a settled source owe Matrix.
     replies_ended: Callable[[tuple[str, ...]], None]
+    # Continues a waiting reply; False while a response owner holds the wake, which settles it.
+    on_job_wake: Callable[[JournalEvent], Awaitable[bool]]
     on_rtc: _RtcCallback | None = None
     event_is_parked: Callable[[JournalEvent], bool] = lambda _event: False
 
@@ -241,6 +245,13 @@ class JournalDispatcher:
             # routing policy, either duplicating side effects or settling the
             # source before the continuation can resume.
             return approval_settled
+        if event.kind is EventKind.JOB_WAKE:
+            # A runtime source, not a Matrix event: nothing for ingress to parse.
+            return await self.callbacks.on_job_wake(event)
+        return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
+
+    async def _parse_and_invoke(self, event: JournalEvent, *, needs_turn_replay: bool) -> bool:
+        """Rebuild the admitted Matrix event and run its callback; an unreplayable one settles."""
         try:
             matrix_event = parse_journal_event(event)
         except JournalCorruptionError:

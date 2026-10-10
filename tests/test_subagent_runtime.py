@@ -675,6 +675,8 @@ async def test_initialize_reads_the_journal_only_once_configured(tmp_path: Path)
     config: Config | None = None
     paths = test_runtime_paths(tmp_path)
     journal = MagicMock()
+    # With the feature off, a configured sync ends the waits of replies that waited for background work.
+    journal.waiting_replies = AsyncMock(return_value=())
     journal_provider = MagicMock(return_value=journal)
     coordinator = ToolJobRuntimeCoordinator(
         paths,

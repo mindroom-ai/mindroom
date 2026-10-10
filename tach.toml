@@ -509,6 +509,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.disabled",
+    "mindroom.tool_jobs.wakes",
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
     "mindroom.cli_approval_waits",
@@ -2795,6 +2796,9 @@ depends_on = [
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
+    "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.tool_jobs.wakes",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.reply_scope",
@@ -4230,6 +4234,7 @@ depends_on = [
 path = "mindroom.bot"
 depends_on = [
     "mindroom.model_catalog_receiver",
+    "mindroom.tool_jobs.wakes",
     "mindroom.reply_scope",
     "mindroom.knowledge.utils",
     "mindroom.matrix.relation_lookup",
@@ -7836,10 +7841,12 @@ depends_on = [
     "mindroom.delegation.recovery",
     "mindroom.delegation.storage",
     "mindroom.tool_jobs.authorization",
+    "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.instances",
     "mindroom.tool_jobs.provenance",
     "mindroom.tool_jobs.runtime",
+    "mindroom.tool_jobs.wakes",
 ]
 visibility = [
     "mindroom.orchestrator",
@@ -8116,9 +8123,25 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.tool_jobs.wakes"
+depends_on = [
+    "mindroom.dispatch_source",
+    "mindroom.event_journal",
+    "mindroom.hooks.context",
+    "mindroom.message_target",
+    "mindroom.turn_origin",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.orchestration.tool_job_runtime",
+    "mindroom.response_runner",
+]
+
+[[modules]]
 path = "mindroom.tool_jobs.completion"
 depends_on = [
     "mindroom.dispatch_source",
+    "mindroom.reply_scope",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
@@ -8127,6 +8150,7 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.bot",
+    "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
     "mindroom.response_turn",
     "mindroom.teams",

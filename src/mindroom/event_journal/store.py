@@ -2338,6 +2338,14 @@ class EventJournalStore:
         """Return whether this runtime's claim on the journal still holds."""
         return await self.backend.still_held()
 
+    async def waiting_replies(self) -> tuple[tuple[str, rl.Reply], ...]:
+        """Return every principal's replies that wait for background work, with their journal principals."""
+        return await self.backend.read(reply_messages.waiting_replies)
+
+    async def reply_job_stops(self) -> tuple[tuple[str, str], ...]:
+        """Return every principal's replies whose background work a Stop cancelled and no job runtime applied yet."""
+        return await self.backend.read(reply_messages.job_stops)
+
     async def end_entity_replies(self, ends: Callable[[str], bool], *, now_ns: int) -> int:
         """End the open replies of the entities ``ends`` names; return how many ended."""
         return await self.backend.write(

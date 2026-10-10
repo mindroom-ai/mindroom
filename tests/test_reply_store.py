@@ -1910,7 +1910,11 @@ async def test_a_newer_waiting_reply_takes_the_work_over(journal_store: EventJou
     taken = await principal.replies.load("reply-3")
     assert taken is not None
     assert taken.state is ReplyState.WAITING
-    assert [reply.reply_id for reply in await principal.replies.waiting()] == ["reply-2", "reply-3"]
+    waiting = await journal_store.waiting_replies()
+    assert [(principal_id, reply.reply_id) for principal_id, reply in waiting] == [
+        (PRINCIPAL, "reply-2"),
+        (PRINCIPAL, "reply-3"),
+    ]
 
 
 async def test_taking_work_over_owes_the_older_replys_end(journal_store: EventJournalStore) -> None:
@@ -1952,9 +1956,9 @@ async def test_a_stop_records_its_job_cancellation_until_a_runtime_applies_it(jo
     )
     assert stopped.transition.reply is not None
     assert stopped.transition.reply.state is ReplyState.CANCELLED
-    assert await principal.replies.job_stops() == ("reply-1",)
+    assert await journal_store.reply_job_stops() == ((PRINCIPAL, "reply-1"),)
     await principal.replies.forget_job_stop("reply-1")
-    assert await principal.replies.job_stops() == ()
+    assert await journal_store.reply_job_stops() == ()
 
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=stopped.transition.reply))
     await journal_store.backend.write(
@@ -1963,4 +1967,4 @@ async def test_a_stop_records_its_job_cancellation_until_a_runtime_applies_it(jo
     flushed = replace(stopped.transition.reply, owed_write=None)
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=flushed))
     assert await principal.replies.forget_finished(before_ns=10**18, limit=10) == 1
-    assert await principal.replies.job_stops() == ()
+    assert await journal_store.reply_job_stops() == ()

@@ -40,6 +40,7 @@ from mindroom.delivery_gateway import (
     _reply_body,
     _segment_transaction_id,
     _take_published,
+    _waiting_content,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -3831,3 +3832,94 @@ async def test_a_late_bound_reply_edit_is_found_by_what_it_sent(tmp_path: Path, 
     sent = find.await_args.kwargs["delivery_content"]
     assert sent["m.new_content"]["body"] == "answer"
     assert sent["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$reply"}
+
+
+_HOLD_KEY = '{"recipient":"agent"}'
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_leaves_background_work_waits_for_it(tmp_path: Path, alice: PrincipalStore) -> None:
+    """An answer whose boundary left work outstanding shows the waiting note, stays open, and keeps its sources answered."""
+    gateway = _gateway(tmp_path, alice)
+    gateway.deps.response_hooks._apply_before_response = (
+        TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+    )
+    edited = DeliveredMatrixEvent("$placeholder", {"body": "edited"})
+    request = replace(
+        TestTurnDeliveryGoesThroughTheOutbox._final_request("the answer"),
+        existing_event_id="$placeholder",
+    )
+    with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)) as send:
+        async with reply_span(
+            alice,
+            source_event_id="$cause",
+            room_id=_ROOM_ID,
+            placeholder_event_id="$placeholder",
+        ) as handle:
+            handle.leaves_work = _HOLD_KEY
+            outcome = await gateway.deliver_final(request)
+
+    assert outcome.terminal_status == "completed"
+    content = send.await_args.args[2]["m.new_content"]
+    assert content["body"] == "the answer\n\n⏳ Waiting for background work…"
+    assert content["io.mindroom.stream_status"] == "streaming"
+    reply = await alice.replies.load(handle.reply_id)
+    assert reply is not None
+    assert reply.state is rl.ReplyState.WAITING
+    assert reply.hold_key == _HOLD_KEY
+    assert not await alice.is_pending("$cause")
+    assert await alice.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL) is None
+
+
+@pytest.mark.asyncio
+async def test_a_wait_that_is_the_first_message_is_shown_by_the_replys_create(
+    tmp_path: Path,
+    alice: PrincipalStore,
+) -> None:
+    """A reply with no message yet creates it showing the wait, and writes no terminal row."""
+    gateway = _gateway(tmp_path, alice)
+    gateway.deps.response_hooks._apply_before_response = (
+        TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+    )
+    created = DeliveredMatrixEvent("$reply", {"body": "created"})
+    with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=created)) as send:
+        async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+            handle.leaves_work = _HOLD_KEY
+            outcome = await gateway.deliver_final(TestTurnDeliveryGoesThroughTheOutbox._final_request("the answer"))
+
+    assert outcome.terminal_status == "completed"
+    content = send.await_args.args[2]
+    assert content["body"] == "the answer\n\n⏳ Waiting for background work…"
+    assert content["io.mindroom.stream_status"] == "streaming"
+    reply = await alice.replies.load(handle.reply_id)
+    assert reply is not None
+    assert reply.state is rl.ReplyState.WAITING
+    assert reply.event_id == "$reply"
+    assert await alice.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL) is None
+
+
+@pytest.mark.asyncio
+async def test_a_span_that_runs_for_an_approval_never_waits(alice: PrincipalStore) -> None:
+    """An approval's run finishes at its boundary; the key's next reply takes the work it leaves."""
+    async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+        handle.leaves_work = _HOLD_KEY
+        assert handle.waits_for == _HOLD_KEY
+        handle.reply = replace(handle.reply, approval_id="approval-1")
+        assert handle.waits_for is None
+
+
+def test_a_streamed_answer_that_waits_shows_the_note_below_it() -> None:
+    """The waiting note follows a streamed answer, or replaces a placeholder that showed nothing else."""
+    content = {
+        "msgtype": "m.text",
+        "body": "answer",
+        "formatted_body": "<p>answer</p>",
+        "io.mindroom.stream_status": "completed",
+    }
+    waiting = _waiting_content(content, placeholder_only=False)
+    assert waiting["body"] == "answer\n\n⏳ Waiting for background work…"
+    assert waiting["formatted_body"] == "<p>answer</p><p>⏳ Waiting for background work…</p>"
+    assert waiting["io.mindroom.stream_status"] == "streaming"
+    assert waiting["msgtype"] == "m.text"
+    empty = _waiting_content({**content, "body": "Thinking…"}, placeholder_only=True)
+    assert empty["body"] == "⏳ Waiting for background work…"

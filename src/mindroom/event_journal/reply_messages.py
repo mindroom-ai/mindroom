@@ -403,13 +403,24 @@ def record_job_stop(transaction: Transaction, principal_id: str, reply_id: str, 
     )
 
 
-def job_stops(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
-    """Return the replies whose background work a Stop cancelled and no job runtime applied yet, oldest first."""
+def job_stops(transaction: Transaction) -> tuple[tuple[str, str], ...]:
+    """Return every principal's replies whose background work a Stop cancelled and no job runtime applied yet."""
     rows = transaction.fetchall(
-        "SELECT reply_id FROM reply_job_stops WHERE principal_id = ? ORDER BY created_at_ns, reply_id",
-        (principal_id,),
+        "SELECT principal_id, reply_id FROM reply_job_stops ORDER BY created_at_ns, principal_id, reply_id",
     )
-    return tuple(str(row["reply_id"]) for row in rows)
+    return tuple((str(row["principal_id"]), str(row["reply_id"])) for row in rows)
+
+
+def waiting_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
+    """Return every principal's replies that wait for background work, with their principal, oldest first."""
+    rows = transaction.fetchall(
+        f"""
+        SELECT principal_id, {_REPLY_COLUMNS} FROM reply_messages
+        WHERE state = 'waiting'
+        ORDER BY created_at_ns, principal_id, reply_id
+        """,  # noqa: S608 - a fixed column list
+    )
+    return tuple((str(row["principal_id"]), _reply(row)) for row in rows)
 
 
 def forget_job_stop(transaction: Transaction, principal_id: str, reply_id: str) -> None:

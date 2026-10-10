@@ -155,6 +155,9 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.tool_jobs.completion import HoldKey, completion_prompt, conversation_work
+from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.wakes import WAKE_RETRY_PROMPT, wake_envelope, woken_reply_id
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -167,7 +170,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -218,7 +221,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import JournalEvent, PrincipalStore
     from mindroom.history.types import HistoryScope
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -229,6 +232,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.tool_jobs.completion import ConversationWork
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -639,6 +643,8 @@ class ResponseRequest:
     edit_regeneration: bool = False
     # The span an interactive selection's acknowledgement created, which this answer adopts.
     interactive_span_id: str | None = None
+    # Set for a wake: the waiting reply it continues with background work results.
+    wake_reply_id: str | None = None
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -1642,7 +1648,11 @@ class ResponseRunner:
                 team_member_model_names=paused.team_member_model_names,
                 team_mode=team_mode,
                 request_body=request.response_envelope.body,
-                requires_background_tool_jobs=self._approval_responses.requires_background_jobs(paused, plan.calls),
+                requires_background_tool_jobs=(
+                    self._approval_responses.requires_background_jobs(paused, plan.calls)
+                    # Only a background job runtime can continue a wake's reply.
+                    or request.response_envelope.origin.intent is TurnIntent.JOB_WAKE
+                ),
                 attachment_ids=tuple(request.attachment_ids or ()),
                 mentioned_agents=request.response_envelope.mentioned_agents,
                 hook_source=request.response_envelope.hook_source,
@@ -3307,6 +3317,11 @@ class ResponseRunner:
         slot = current_slot()
         if slot is None:
             return request
+        if request.wake_reply_id is not None:
+            woken = await self._wake_under_lock(request)
+            if woken is None:
+                return None
+            request = woken
         handle = await self.deps.replies.claim(
             delivery_id=request.response_envelope.source_event_id,
             sources=request.sources,
@@ -3317,6 +3332,7 @@ class ResponseRunner:
             driving_edit_id=request.response_envelope.source_event_id if request.edit_regeneration else None,
             existing_event_id=request.existing_event_id,
             interactive_span_id=request.interactive_span_id,
+            wake_reply_id=request.wake_reply_id,
         )
         if handle is ClaimRefused.NOTHING_TO_RUN:
             self.deps.logger.info(
@@ -3467,6 +3483,115 @@ class ResponseRunner:
             resume.close()
             raise
         return False
+
+    async def handoff_job_wake(self, event: JournalEvent) -> bool:
+        """Hand a waiting reply's wake to a detached response owner; the wake's span, or that owner, settles it."""
+        if not self.has_live_inbox_response(event.event_id):
+            self.track_inbox_response(
+                self._run_job_wake(event),
+                name=f"job_wake:{event.event_id}",
+                room_id=event.room_id,
+                source_event_ids=(event.event_id,),
+                recovery_proof_ready=lambda: True,
+            )
+        return False
+
+    async def _run_job_wake(self, event: JournalEvent) -> None:
+        """Continue the waiting reply a wake names, then end a wake no span took, and a wait no work is left for."""
+        reply_id = woken_reply_id(event)
+        reply = None if reply_id is None else await self.deps.replies.store.replies.load(reply_id)
+        claimed = asyncio.Event()
+        handoff = asyncio.Event()
+        if reply is not None and reply.hold_key is not None and not reply.terminal:
+            key = HoldKey.decode(reply.hold_key)
+            request = await self._job_wake_request(reply, key, event.event_id, claimed=claimed, handoff=handoff)
+            await self._generate_job_wake(request, key)
+        if claimed.is_set() or handoff.is_set():
+            # The wake's span settles its source, or keeps it pending for its retry.
+            return
+        if reply_id is not None:
+            await self._release_unheld_wait(reply_id)
+        await self.deps.approval_store.settle(event.event_id)
+
+    async def _release_unheld_wait(self, reply_id: str) -> None:
+        """End a waiting reply whose key has no outstanding work left, keeping its answer."""
+        reply = await self.deps.replies.store.replies.load(reply_id)
+        if reply is None or reply.state is not rl.ReplyState.WAITING or reply.hold_key is None:
+            return
+        work = await self._held_work(HoldKey.decode(reply.hold_key))
+        if work is None or not work.jobs:
+            await self.deps.delivery_gateway.end_wait(reply_id)
+
+    async def _held_work(self, key: HoldKey) -> ConversationWork | None:
+        """Return the outstanding work of a key, or ``None`` when background jobs do not run."""
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        return None if runtime is None else await conversation_work(runtime, key)
+
+    async def _wake_under_lock(self, request: ResponseRequest) -> ResponseRequest | None:
+        """Decide under the conversation lock what a wake retrieves; ``None`` when nothing is ready for it.
+
+        A newer reply in the conversation may have retrieved what was ready since the wake was admitted.
+        """
+        assert request.wake_reply_id is not None
+        reply = await self.deps.replies.store.replies.load(request.wake_reply_id)
+        if reply is None or reply.hold_key is None:
+            return None
+        work = await self._held_work(HoldKey.decode(reply.hold_key))
+        ready = () if work is None else work.ready
+        if reply.state is rl.ReplyState.WAITING and not ready:
+            return None
+        # A wake a restart cut short retries even when what it retrieved is no longer ready to retrieve again.
+        prompt = completion_prompt(ready) if ready else WAKE_RETRY_PROMPT
+        return replace(request, prompt=prompt, response_envelope=replace(request.response_envelope, body=prompt))
+
+    async def _job_wake_request(
+        self,
+        reply: rl.Reply,
+        key: HoldKey,
+        wake_id: str,
+        *,
+        claimed: asyncio.Event,
+        handoff: asyncio.Event,
+    ) -> ResponseRequest:
+        """Build the turn that continues a waiting reply; its lock decides what that turn retrieves."""
+        envelope = wake_envelope(key, wake_id=wake_id, sender_id=self.deps.matrix_full_id, prompt=WAKE_RETRY_PROMPT)
+        last = await self.deps.replies.store.replies.span(reply.last_span_id)
+        assert last is not None, "a reply's last span exists"
+
+        async def mark_claimed() -> None:
+            claimed.set()
+
+        return ResponseRequest(
+            thread_history=(),
+            prompt=envelope.body,
+            response_envelope=envelope,
+            # The wake answers the messages its reply answers, so deleting them reaches it.
+            sources=ResponseSources((wake_id,), last.sources.logical_source_event_ids),
+            existing_event_id=reply.event_id,
+            wake_reply_id=reply.reply_id,
+            user_id=key.requester_id,
+            on_reply_claimed=mark_claimed,
+            source_handoff=handoff,
+        )
+
+    async def _generate_job_wake(self, request: ResponseRequest, key: HoldKey) -> None:
+        """Continue as this agent, or as the team whose members hold the work."""
+        config = self.deps.runtime.config
+        team = config.teams.get(self.deps.agent_name)
+        if team is None and key.participants == (self.deps.agent_name,):
+            await self.generate_response(request)
+            return
+        # An ad hoc team has no configured roster; the participants the key names are its members.
+        member_names, team_mode = (team.agents, team.mode) if team is not None else (key.participants, "coordinate")
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
+        if any(name not in registry.current_ids for name in member_names):
+            # A member left the configuration, so no team continues the reply; its wait ends once no work is left.
+            return
+        await self.generate_team_response_helper(
+            request,
+            team_agents=[registry.current_ids[name] for name in member_names],
+            team_mode=team_mode,
+        )
 
     def wake_cli_approval_sources(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Wake response-local CLI owners and return sources still owned by the journal."""
@@ -3911,7 +4036,7 @@ class ResponseRunner:
         account goes into the new attempt's prompt, where later turns keep it.
         """
         handle = current_span()
-        if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
+        if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION, rl.SpanKind.WAKE}:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
         return self._with_recorded_interrupted_attempt(request, handle, recorded)
@@ -3923,7 +4048,9 @@ class ResponseRunner:
         recorded: tuple[ToolTraceEntry, ...],
     ) -> ResponseRequest:
         """Tell a new attempt what its stopped attempts showed and which tool calls they made, from the reply's records."""
-        unfinished = handle.resumed if handle.span.kind is rl.SpanKind.REPLAY else None
+        # A wake continues a waiting reply's finished answer, which is no stopped attempt, unless a restart cut it short.
+        resumed = handle.resumed
+        unfinished = resumed if resumed is not None and resumed.interrupted else None
         tools = recorded or (() if unfinished is None else unfinished.tool_trace)
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tools)
         if unfinished is not None:

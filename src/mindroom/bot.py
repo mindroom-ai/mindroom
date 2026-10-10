@@ -155,6 +155,7 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .tool_jobs.disabled import event_is_parked
+from .tool_jobs.wakes import wake_event
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -720,6 +721,7 @@ class AgentBot:
                 ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
                 replies_ended=self._replies_ended,
+                on_job_wake=lambda event: self._response_runner.handoff_job_wake(event),
             ),
             room_for_id=self._room_for_journal_event,
             schedule_trigger_sender_is_managed=lambda sender: (
@@ -1128,6 +1130,13 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    async def admit_job_wake(self, reply: Reply, wake_id: str) -> None:
+        """Admit a wake for one of this bot's waiting replies, and wake the journal worker that runs it."""
+        await self.journal_principal().admit(
+            wake_event(reply, wake_id, sender_id=self.matrix_id.full_id, now_ms=int(time.time() * 1000)),
+        )
+        self._journal_dispatcher.wake()
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
         """Wake response-local CLI waits, then release unowned sources to the journal."""

@@ -19,6 +19,7 @@ from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
+from mindroom.tool_jobs.completion import HoldKey, conversation_work
 from mindroom.tool_jobs.disabled import index_parked_work
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
@@ -30,9 +31,10 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     register_background_runtime,
 )
+from mindroom.tool_jobs.wakes import wake_event_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Iterable, Mapping
 
     from agno.tools.function import Function
 
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal.replies import ReplyStore
+    from mindroom.reply_lifecycle import Reply
     from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -248,6 +252,8 @@ class ToolJobRuntimeCoordinator:
             return
         runtime = self._runtime
         if runtime is None:
+            # With the feature off, a reply that waited for background work ends its wait, keeping its answer.
+            await self._admit_wakes(None)
             return
         if self._task is None or self._task.done():
             if self._task is not None and not self._task.cancelled():
@@ -297,10 +303,63 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked work and deny interrupted jobs' cards; retry failures."""
+        """Stop revoked and stopped work, deny interrupted jobs' cards, and wake waiting replies; retry failures."""
         await self.runtime.cancel_revoked(denied=self._denied)
         for job_id in tuple(self.runtime.unsettled_approvals):
             await settle_child_approvals(self.runtime, job_id)
+        await self._apply_job_stops()
+        await self._admit_wakes(self.runtime)
+
+    async def _apply_job_stops(self) -> None:
+        """Cancel the work each recorded Stop names, then forget the Stop; one that fails is retried next pass."""
+        journal = self._journal
+        if journal is None:
+            return
+        for principal_id, reply_id in await journal.reply_job_stops():
+            principal = journal.principal(principal_id)
+            reply = await principal.replies.load(reply_id)
+            if reply is not None:
+                matches = await self._stopped_work(principal.replies, reply)
+                await self.runtime.stop_jobs(receipt_order=reply.stop_receipt_order or 0, matches=matches)
+            await principal.replies.forget_job_stop(reply_id)
+
+    async def _stopped_work(self, replies: ReplyStore, reply: Reply) -> Callable[[BackgroundJob], Awaitable[bool]]:
+        """Match the work a stopped reply started, and the work it waited for when it ever waited."""
+        sources = {source for span in await replies.spans(reply.reply_id) for source in span.sources.pending_event_ids}
+        held = (
+            frozenset()
+            if reply.hold_key is None
+            else frozenset(
+                job.job_id for job in (await conversation_work(self.runtime, HoldKey.decode(reply.hold_key))).jobs
+            )
+        )
+
+        async def matches(job: BackgroundJob) -> bool:
+            return (
+                job.owner.recipient == reply.entity_name
+                and job.owner.room_id == reply.room_id
+                and (job.source_event_id in sources or job.job_id in held)
+            )
+
+        return matches
+
+    async def _admit_wakes(self, runtime: ToolJobRuntime | None) -> None:
+        """Wake each waiting reply whose work is ready, and end the wait of one no work is left for.
+
+        Without a runtime no work is left for any of them.
+        """
+        journal = self._journal
+        if journal is None:
+            return
+        for _principal_id, reply in await journal.waiting_replies():
+            bot = self.bot_provider(reply.entity_name)
+            if bot is None or reply.hold_key is None:
+                # A removed entity's waiting reply ends without its bot.
+                continue
+            work = None if runtime is None else await conversation_work(runtime, HoldKey.decode(reply.hold_key))
+            if work is None or work.ready or not work.jobs:
+                ready = () if work is None else work.ready
+                await bot.admit_job_wake(reply, wake_event_id(reply.reply_id, ready))
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""

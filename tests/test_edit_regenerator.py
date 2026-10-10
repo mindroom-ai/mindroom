@@ -574,6 +574,23 @@ async def test_an_edit_of_a_reply_an_approval_holds_cancels_the_approval_and_reg
 
 
 @pytest.mark.asyncio
+async def test_an_edit_of_a_reply_that_waits_for_background_work_stops_it_and_regenerates_in_place(
+    tmp_path: Path,
+) -> None:
+    """The edit stops the waiting reply, which cancels the work it waits for; the regeneration takes its place."""
+    harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
+    waiting = _reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.WAITING)
+    harness.regenerator.deps.reply_for_sources.return_value = waiting  # type: ignore[attr-defined]
+    event, event_info = _edit_event(new_body="what is 4+4?")
+
+    assert await _handle_edit(harness, event, event_info) is True
+
+    harness.stop_reply.assert_awaited_once_with(waiting, 9)
+    request = harness.generate_response.await_args.args[0]
+    assert request.existing_event_id == RESPONSE_EVENT_ID
+
+
+@pytest.mark.asyncio
 async def test_an_edit_of_a_reply_that_still_streams_stops_it_and_regenerates_in_place(tmp_path: Path) -> None:
     """The edit interrupts the running answer; the regeneration takes its place and owns the edit."""
     harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)

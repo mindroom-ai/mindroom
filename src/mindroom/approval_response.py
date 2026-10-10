@@ -31,6 +31,7 @@ from mindroom.tool_approval import (
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.events import tool_markers_match_trace
+from mindroom.turn_origin import TurnIntent
 
 
 def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
@@ -182,6 +183,9 @@ def continuation_target(
     reply_to_event_id: str | None = None,
 ) -> MessageTarget:
     """Return the canonical Matrix conversation target for one continuation."""
+    if continuation.origin.intent is TurnIntent.JOB_WAKE and reply_to_event_id in continuation.source_event_ids:
+        # A wake is a runtime source, not a Matrix event to reply to.
+        reply_to_event_id = None
     return MessageTarget(
         room_id=continuation.room_id,
         source_thread_id=continuation.thread_id,

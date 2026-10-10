@@ -83,11 +83,23 @@ class SpanHandle:
     # The span's last direct progress edit that Matrix accepted and no durable
     # write has recorded yet.
     unconfirmed_progress: rl.ProgressConfirmation | None = None
+    # The hold key of the background work the span's response boundary left outstanding, with nothing ready.
+    leaves_work: str | None = None
 
     @property
     def exited(self) -> bool:
         """Return whether a committed transition ended the span, as this task knows it."""
         return self.span.ended
+
+    @property
+    def waits_for(self) -> str | None:
+        """Return the hold key the span's answer waits for, or ``None`` when its answer ends the reply.
+
+        A span that runs for an approval never waits: its approval's settlement ends the reply.
+        """
+        if self.reply.approval_id is not None or self.span.kind is rl.SpanKind.APPROVAL_RESUME:
+            return None
+        return self.leaves_work
 
     @property
     def span_id(self) -> str:
@@ -683,7 +695,9 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
     ):
         # The reply's latest write is its wait: the wake answers below what it showed, without the waiting note.
         base = replace(shown, trailing_note=None, placeholder=empty.placeholder, show_tool_calls=empty.show_tool_calls)
-        return SpanHandle(runtime=runtime, span=span, reply=reply, base=base)
+        body, trace = render_body(base)
+        answered = UnfinishedStreamedReply(visible_text=body, tool_trace=trace, interrupted=False)
+        return SpanHandle(runtime=runtime, span=span, reply=reply, base=base, resumed=answered)
     # A replay, or a wake an interruption cut short, continues below what the stopped attempt may have shown: its
     # work, then the restart note.
     restarted = after_restart(shown)
@@ -773,6 +787,24 @@ def pause_decision(
         span,
         write,
         in_place=in_place,
+        now_ns=time.time_ns(),
+    )
+
+
+def wait_decision(handle: SpanHandle, shown: Presentation, *, hold_key: str) -> Decide:
+    """Return the rule that ends a span whose create already showed its wait, as the reply's first message."""
+    write = rl.TerminalWrite(
+        shown=encode_presentation(shown),
+        prepared_revision=handle.reply.revision,
+        state=rl.ReplyState.WAITING,
+        confirms=handle.unconfirmed_progress,
+    )
+    return lambda reply, span: rl.wait(
+        reply,
+        span,
+        write,
+        hold_key=hold_key,
+        shown_by_create=True,
         now_ns=time.time_ns(),
     )
 

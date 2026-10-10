@@ -1015,16 +1015,6 @@ class ReplyStore:
             lambda transaction: reply_messages.with_pending_work(transaction, self._principal_id),
         )
 
-    async def waiting(self) -> tuple[Reply, ...]:
-        """Return the replies that wait for background work, oldest first."""
-        return await self._backend.read(
-            lambda transaction: reply_messages.in_states(transaction, self._principal_id, (rl.ReplyState.WAITING,)),
-        )
-
-    async def job_stops(self) -> tuple[str, ...]:
-        """Return the replies whose background work a Stop cancelled and no job runtime applied yet."""
-        return await self._backend.read(lambda transaction: reply_messages.job_stops(transaction, self._principal_id))
-
     async def forget_job_stop(self, reply_id: str) -> None:
         """Delete a reply's job cancellation once a job runtime applied it."""
         await self._backend.write(

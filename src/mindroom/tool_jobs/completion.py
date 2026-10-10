@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, cast
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.reply_scope import current_span
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -56,9 +58,26 @@ class HoldKey:
     # The entities whose work the reply retrieves: the agent, or a team's members.
     participants: tuple[str, ...]
 
+    def encode(self) -> str:
+        """Return the key as the opaque JSON a waiting reply records."""
+        return json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
+
+    @classmethod
+    def decode(cls, stored: str) -> HoldKey:
+        """Restore a key a waiting reply recorded."""
+        data = cast("dict[str, object]", json.loads(stored))
+        return cls(
+            recipient=str(data["recipient"]),
+            room_id=str(data["room_id"]),
+            thread_id=cast("str | None", data["thread_id"]),
+            requester_id=str(data["requester_id"]),
+            silent=data["silent"] is True,
+            participants=tuple(cast("list[str]", data["participants"])),
+        )
+
 
 @dataclass(frozen=True)
-class _ConversationWork:
+class ConversationWork:
     """The outstanding work of one key, and the ready outcomes of it a turn may retrieve now."""
 
     jobs: tuple[BackgroundJob, ...]
@@ -70,7 +89,7 @@ async def conversation_work(
     key: HoldKey,
     *,
     attempted: Collection[str] = (),
-) -> _ConversationWork:
+) -> ConversationWork:
     """Return the outstanding work of ``key``, apart from outcomes a reply already asked for."""
     held = [
         (job, readable)
@@ -83,7 +102,7 @@ async def conversation_work(
         )
         if job.owner.agent_name in key.participants and job.job_id not in attempted
     ]
-    return _ConversationWork(
+    return ConversationWork(
         jobs=tuple(job for job, _readable in held),
         ready=tuple(job for job, readable in held if readable and job.status in TERMINAL_STATUSES),
     )
@@ -119,8 +138,8 @@ async def join_conversation_jobs(
     """Continue this reply with ready results, or report what it leaves outstanding.
 
     The reply retrieves its conversation's work, including work earlier replies started. Work it already asked to
-    retrieve is not asked for again. With nothing ready, the reply ends, and outstanding work waits for the
-    conversation's next reply.
+    retrieve is not asked for again. With nothing ready and work outstanding, the span's answer waits for that work,
+    unless the span runs for an approval or reached the join limit; the conversation's next reply then takes it.
     """
     context = get_tool_runtime_context()
     if context is None or job_owns_execution() or _DELEGATED_CHILD.get():
@@ -137,11 +156,15 @@ async def join_conversation_jobs(
         participants=tuple(sorted({context.agent_name, *(agent_names or ())})),
     )
     work = await conversation_work(runtime, key, attempted=attempted)
-    if work.ready and joins < _JOB_JOIN_LIMIT:
+    ready = bool(work.ready) and joins < _JOB_JOIN_LIMIT
+    # At the join limit the message stops holding, and the next reply in the conversation takes the work.
+    holds = not ready and bool(work.jobs) and joins < _JOB_JOIN_LIMIT
+    if (handle := current_span()) is not None:
+        handle.leaves_work = key.encode() if holds else None
+    if ready:
         attempted.update(job.job_id for job in work.ready)
         return _JobJoin(prompt=completion_prompt(work.ready))
-    # At the join limit the message stops holding, and the next reply in the conversation takes the work.
-    return _JobJoin(holds=bool(work.jobs) and joins < _JOB_JOIN_LIMIT, key=key)
+    return _JobJoin(holds=holds, key=key)
 
 
 async def join_approval_jobs[RunT](
