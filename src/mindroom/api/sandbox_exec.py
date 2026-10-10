@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import secrets
 import selectors
@@ -23,6 +22,7 @@ from mindroom import constants
 from mindroom.egress_broker.env import (
     apply_runner_ca_bundle,
 )
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -35,7 +35,7 @@ from mindroom.runtime_env_policy import (
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
