@@ -30,7 +30,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
-from mindroom.delegation.lifecycle import prepare_child_turn
+from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import TeamMode, TeamTurnModelSelection
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -193,6 +193,38 @@ def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_pat
 
     assert (first.model_name, first.requested_model_name) == ("luna", "default")
     assert (follow_up.model_name, follow_up.requested_model_name) == ("default", "default")
+
+
+def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: Path) -> None:
+    """A model the child switched to mid-run is what its follow-ups ask for, with or without budgets."""
+    config = _delegation_config()
+    config.models["alternate"] = ModelConfig(provider="openai", id="gpt-6-astra")
+    runtime_paths = _runtime_paths(tmp_path)
+    child = prepare_child_turn(
+        "leader",
+        "child",
+        "Do the work",
+        owner=_owner(),
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_Spent(0.0),  # type: ignore[arg-type]
+    )
+
+    note_child_run_id(child, "after-switch", runtime_paths, model_name="alternate")
+    follow_up = prepare_child_turn(
+        "leader",
+        "child",
+        "Continue",
+        owner=_owner(),
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_Spent(0.0),  # type: ignore[arg-type]
+        previous=child,
+    )
+
+    assert (follow_up.model_name, follow_up.requested_model_name) == ("alternate", "alternate")
 
 
 def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path: Path) -> None:

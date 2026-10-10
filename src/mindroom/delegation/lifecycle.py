@@ -89,10 +89,12 @@ def note_child_run_id(
     """Publish the exact attempt and bound model before it can execute tools."""
     child.run_id = run_id
     context = get_tool_runtime_context()
-    if model_name is not None:
+    if model_name is None and context is not None:
+        model_name = context.active_model_name
+    if model_name is not None and model_name != child.model_name:
+        # A model switch during the run is what the child's follow-ups ask for next.
+        child.requested_model_name = model_name
         child.model_name = model_name
-    elif context is not None and context.active_model_name is not None:
-        child.model_name = context.active_model_name
     update_subagent_turn_sync(child, runtime_paths)
 
 
