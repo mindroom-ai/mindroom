@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
+import egressPresets from "@/test/fixtures/egressPresets.json";
 import {
   type EditorOptions,
   type EgressServiceForm,
@@ -13,13 +13,14 @@ import {
 } from "./egressServiceModel";
 import type {
   AuthoredEgressService,
+  EgressPreset,
   EgressRule,
   EgressRuleSummary,
 } from "./types";
 
 type Options = EditorOptions;
 
-const presets = EGRESS_PRESETS_FIXTURE;
+const presets = egressPresets.presets as EgressPreset[];
 const personal: Options = { context: "personal", sharedTarget: false, presets };
 const sharedPersonal: Options = {
   context: "personal",
@@ -351,6 +352,145 @@ describe("validating a service", () => {
         operator,
       ),
     ).toEqual([]);
+  });
+
+  describe("placeholder names the server refuses", () => {
+    const placeholder = (name: string, value = "mindroom-brokered") => ({
+      placeholders: [{ name, value }],
+    });
+    const personalErrors = (name: string) =>
+      errorsFor({ preset: "github" }, placeholder(name));
+    const operatorErrors = (name: string) =>
+      errorsFor({ preset: "github" }, placeholder(name), operator);
+
+    it.each([
+      "PATH",
+      "HOME",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "ALL_PROXY",
+      "NODE_USE_ENV_PROXY",
+      "SSL_CERT_FILE",
+      "REQUESTS_CA_BUNDLE",
+      "CURL_CA_BUNDLE",
+      "GIT_SSL_CAINFO",
+      "NODE_EXTRA_CA_CERTS",
+    ])("reserves %s for the broker in every context", (name) => {
+      expect(operatorErrors(name)).toEqual([
+        `Placeholder name ${name} is reserved`,
+      ]);
+      // One reason is enough: a personal service is not also told about its words.
+      expect(personalErrors(name)).toEqual([
+        `Placeholder name ${name} is reserved`,
+      ]);
+    });
+
+    it.each([
+      ["MINDROOM_API_KEY", "MINDROOM_"],
+      ["GIT_CONFIG_KEY_0", "GIT_CONFIG_"],
+    ])("reserves the prefix of %s in every context", (name, prefix) => {
+      const message = `Placeholder name ${name} starts with reserved prefix ${prefix}`;
+      expect(operatorErrors(name)).toEqual([message]);
+      expect(personalErrors(name)).toEqual([message]);
+    });
+
+    it.each([
+      "SSH_AUTH_SOCK",
+      "SSH_TOKEN",
+      "RESTIC_PASSWORD_COMMAND",
+      "SOPS_AGE_KEY_CMD",
+      "MY_KEY_FILE",
+      "TOOL_TOKEN_DIR",
+      "GIT_CREDENTIAL_HELPER",
+      "MY_API_KEY_PROVIDER",
+      "MY_KEY_OPTS",
+      "MY_KEY_OPTIONS",
+      "MY_KEY_EXTENSIONS",
+    ])("refuses %s on a personal service only", (name) => {
+      const errors = personalErrors(name);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBe(
+        `placeholder name ${name} may not start with SSH_ or have any of these words between underscores, which tools read as programs or paths: CMD, COMMAND, DIR, EXTENSIONS, FILE, HELPER, OPTIONS, OPTS, PROVIDER`,
+      );
+      expect(operatorErrors(name)).toEqual([]);
+    });
+
+    it("refuses whole words only, and SSH_ only at the start", () => {
+      for (const name of [
+        "MY_FILES_KEY",
+        "COMMANDER_TOKEN",
+        "MY_SSH_KEY",
+        "SSHKEY_TOKEN",
+        "MY_DIRECTORY_KEY",
+        "OPTIONAL_TOKEN",
+      ])
+        expect(personalErrors(name)).toEqual([]);
+    });
+
+    it("keeps the credential word rule ahead of the refused words", () => {
+      // LD_PRELOAD has no credential word, so that is what the user hears.
+      expect(personalErrors("LD_PRELOAD")[0]).toContain("have one of AUTH");
+      expect(personalErrors("SSH_AGENT_PID")[0]).toContain("have one of AUTH");
+    });
+  });
+
+  it("measures a personal service the way the server does, in ASCII escapes", () => {
+    // Python's json.dumps writes each character outside printable ASCII as a
+    // 6 byte \uXXXX escape, and an emoji as two of them.
+    const serverSize = (service: AuthoredEgressService) =>
+      JSON.stringify(service).replace(
+        /[^\x20-\x7e]/g,
+        (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      ).length;
+    const limit = 16 * 1024;
+    const form = (description: string) => ({
+      ...formFromService("svc", null),
+      rules: [validRule()],
+      description,
+    });
+    const sizeWith = (description: string) =>
+      serverSize(serializeService(form(description), personal));
+    const fits = (description: string) =>
+      validateService(form(description), personal, newService);
+    // How many of `char`, each costing `cost` bytes, make the service exactly 16 KiB or just over.
+    const largest = (char: string, cost: number) =>
+      Math.floor((limit - (sizeWith(char) - cost)) / cost);
+
+    // The sizes the server's `_json_size` reports for the same service.
+    expect(sizeWith("a")).toBe(81);
+    expect(sizeWith("\u00e9")).toBe(86);
+    expect(sizeWith("\u{1F600}")).toBe(92);
+    expect(sizeWith("\u007f")).toBe(86);
+
+    const plain = largest("a", 1);
+    expect(sizeWith("a".repeat(plain))).toBe(limit);
+    expect(fits("a".repeat(plain))).toEqual([]);
+    expect(fits("a".repeat(plain + 1))).toEqual([
+      "A service can take at most 16 KiB",
+    ]);
+
+    // 2 bytes in UTF-8 but 6 in the server's count: UTF-8 would let this through.
+    const accented = largest("\u00e9", 6);
+    expect(fits("\u00e9".repeat(accented))).toEqual([]);
+    expect(fits("\u00e9".repeat(accented + 1))).toEqual([
+      "A service can take at most 16 KiB",
+    ]);
+    expect(
+      new TextEncoder().encode(
+        JSON.stringify(
+          serializeService(form("\u00e9".repeat(accented + 1)), personal),
+        ),
+      ).length,
+    ).toBeLessThan(limit);
+
+    // An emoji is a surrogate pair: 12 bytes. DEL is not escaped by JSON.stringify but is by the server: 6.
+    const emoji = largest("\u{1F600}", 12);
+    expect(fits("\u{1F600}".repeat(emoji))).toEqual([]);
+    expect(fits("\u{1F600}".repeat(emoji + 1))).toHaveLength(1);
+    const del = largest("\u007f", 6);
+    expect(fits("\u007f".repeat(del))).toEqual([]);
+    expect(fits("\u007f".repeat(del + 1))).toHaveLength(1);
   });
 
   it("rejects badly shaped and repeated placeholder names, and skips blank rows", () => {

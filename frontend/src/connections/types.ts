@@ -15,7 +15,11 @@ export interface AgentConnections {
   can_use: boolean;
   services: ConnectionService[];
   tools: ConnectionTool[];
-  egress_services?: EgressCredentialService[];
+  /**
+   * The agent's egress services: an array, empty when it has none, for an agent
+   * the viewer may use egress credentials with. Absent or `null` for any other.
+   */
+  egress_services?: EgressCredentialService[] | null;
 }
 
 export interface ConnectionTool {
@@ -92,6 +96,15 @@ export interface EgressCredentialService {
   oauth: EgressOAuthStatus | null;
 }
 
+/** Why one of the caller's own stored services is not in use. */
+export type EgressInactiveReason = "shadowed" | "invalid";
+
+/** An entry in the agent's own store that the broker ignores: an administrator's service has its name, or it no longer validates. */
+export interface EgressInactiveService {
+  name: string;
+  reason: EgressInactiveReason;
+}
+
 export interface EgressCredentialAgent {
   agent_name: string;
   agent_display_name: string;
@@ -100,6 +113,8 @@ export interface EgressCredentialAgent {
   /** The caller may add, change, and delete services of this agent, even when it has none yet. */
   can_manage: boolean;
   services: EgressCredentialService[];
+  /** Absent in responses from before the server listed them. */
+  inactive_services?: EgressInactiveService[];
 }
 
 export interface EgressCredentialList {

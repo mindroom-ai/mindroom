@@ -22,6 +22,7 @@ import {
   type RuleForm,
   type ServiceCoverage,
   MAX_RULES,
+  NOT_EXPLICITLY_EMPTY,
   emptyRule,
   findBroaderServices,
   formFromService,
@@ -54,6 +55,12 @@ function ruleCoverage(rule: EgressRuleSummary): string {
   const path = rule.path_prefix === "/" ? "" : rule.path_prefix;
   return `${rule.host}${rule.port === null ? "" : `:${rule.port}`}${path}`;
 }
+
+const GITHUB_PLACEHOLDER_NAMES = ["GH_TOKEN", "GITHUB_TOKEN"];
+const brokered = (name: string): PlaceholderForm => ({
+  name,
+  value: BROKERED_PLACEHOLDER,
+});
 
 const selectClass =
   "h-9 w-full rounded-md border border-input bg-background px-3 text-sm";
@@ -420,11 +427,14 @@ export function EgressServiceEditor({
       )
     : [];
 
+  // Another preset has its own defaults, so what the loaded service emptied on
+  // purpose no longer applies to it.
   const choosePreset = (value: string) =>
     set({
       preset: value,
       replacePresetRules: false,
       rules: form.rules.length > 0 ? form.rules : [emptyRule()],
+      explicitlyEmpty: NOT_EXPLICITLY_EMPTY,
     });
 
   const submit = async (event: FormEvent) => {
@@ -476,6 +486,12 @@ export function EgressServiceEditor({
       onSubmit={(event) => void submit(event)}
     >
       <h3 className="font-semibold">{title}</h3>
+      {isPersonal && !sharedTarget && (
+        <p className="text-xs text-muted-foreground">
+          This service applies to all of your personal agents that share this
+          scope.
+        </p>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2">
         <Field
@@ -604,13 +620,21 @@ export function EgressServiceEditor({
         )}
         {showGithubHelper && (
           <GithubHelper
-            onApply={(rules) =>
+            onApply={(rules) => {
+              // The GitHub preset sets these for the tools that read them; a
+              // custom service has to name them itself, unless it already sets some.
+              const addPlaceholders =
+                form.preset === "" && form.placeholders.length === 0;
+              if (addPlaceholders) setAdvancedOpen(true);
               set({
                 rules: rules.map(ruleFormFrom),
                 replacePresetRules: form.preset !== "",
                 restrictToRules: true,
-              })
-            }
+                ...(addPlaceholders
+                  ? { placeholders: GITHUB_PLACEHOLDER_NAMES.map(brokered) }
+                  : {}),
+              });
+            }}
           />
         )}
       </section>
@@ -701,7 +725,7 @@ export function EgressServiceEditor({
               </p>
               <p className="text-xs text-muted-foreground">
                 {isPersonal
-                  ? "Names use capital letters, digits, and underscores, and one word between underscores must be TOKEN, KEY, SECRET, PASSWORD, PAT, AUTH, or CREDENTIAL (for example MY_API_KEY). Values are 1 to 256 letters, digits, or . _ : -"
+                  ? "Names use capital letters, digits, and underscores, and one word between underscores must be TOKEN, KEY, SECRET, PASSWORD, PAT, AUTH, or CREDENTIAL (for example MY_API_KEY). No word may be COMMAND, CMD, FILE, DIR, PROVIDER, HELPER, OPTS, OPTIONS, or EXTENSIONS, and names cannot start with SSH_, MINDROOM_, or GIT_CONFIG_. PATH, HOME, and proxy and CA variables are reserved. Values are 1 to 256 letters, digits, or . _ : -"
                   : "Names use capital letters, digits, and underscores. PATH, HOME, proxy and CA variables, and names starting with MINDROOM_ or GIT_CONFIG_ are reserved."}
               </p>
             </div>

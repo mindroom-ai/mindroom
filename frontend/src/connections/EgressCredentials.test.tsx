@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
+import egressPresets from "@/test/fixtures/egressPresets.json";
 import { EgressCredentials } from "./EgressCredentials";
 import type {
   AuthoredEgressService,
@@ -274,7 +274,7 @@ describe("egress services on the personal page", () => {
   let presets: () => Response;
 
   beforeEach(() => {
-    presets = () => json({ presets: EGRESS_PRESETS_FIXTURE });
+    presets = () => json(egressPresets);
     listing = [
       {
         agent_name: "personal",
@@ -819,7 +819,7 @@ describe("presets and unsaved edits on the personal page", () => {
       const method = options?.method ?? "GET";
       calls.push({ method, path });
       if (path === "/api/connections/egress") return json({ agents: listing });
-      if (path === PRESETS) return json({ presets: EGRESS_PRESETS_FIXTURE });
+      if (path === PRESETS) return json(egressPresets);
       if (method === "GET") return json({ preset: "openai" });
       return writeResponse();
     });
@@ -846,7 +846,7 @@ describe("presets and unsaved edits on the personal page", () => {
       within(screen.getByLabelText("Preset"))
         .getAllByRole("option")
         .map((option) => option.textContent),
-    ).toEqual(["Custom", ...EGRESS_PRESETS_FIXTURE.map((p) => p.display_name)]);
+    ).toEqual(["Custom", ...egressPresets.presets.map((p) => p.display_name)]);
   });
 
   it("keeps Edit and Delete off while a save is running", async () => {
@@ -911,6 +911,56 @@ describe("presets and unsaved edits on the personal page", () => {
     expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
   });
 
+  it("keeps Edit off for the service whose editor is open", async () => {
+    render(<EgressCredentials />);
+    await edit("One");
+    // Opening it again would only offer to throw away what is typed.
+    expect(
+      screen.getByRole("button", { name: "Edit One service" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Edit Two service" }),
+    ).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.getByRole("button", { name: "Edit One service" }),
+    ).toBeEnabled();
+  });
+
+  it("drops the question about another service when the editor is cancelled", async () => {
+    render(<EgressCredentials />);
+    await edit("One");
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "typed but not saved" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit Two service" }));
+    expect(
+      screen.getByText(/unsaved changes in the open editor/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("form")).toBeNull();
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+
+    // A later editor starts with no question waiting.
+    await edit("Two");
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
+  it("drops the question about another service when the editor's service is deleted", async () => {
+    render(<EgressCredentials />);
+    await edit("One");
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "typed but not saved" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit Two service" }));
+    listing[0].services = [listing[0].services[1]];
+    fireEvent.click(screen.getByRole("button", { name: "Delete service" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+    await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
   it("opens another service straight away when nothing was changed", async () => {
     render(<EgressCredentials />);
     await edit("One");
@@ -931,6 +981,289 @@ describe("presets and unsaved edits on the personal page", () => {
     expect(
       await screen.findByRole("form", { name: "Edit two" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("what deleting a service says about its scope", () => {
+  const open = async (agent: Partial<EgressCredentialAgent>) => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (String(input) === "/api/connections/egress")
+        return json({
+          agents: [
+            {
+              agent_name: "personal",
+              agent_display_name: "Personal Mind",
+              shared: false,
+              can_manage: true,
+              services: [userService],
+              ...agent,
+            },
+          ],
+        });
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    render(<EgressCredentials />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete My API service" }),
+    );
+    return (await screen.findByRole("dialog")).textContent;
+  };
+
+  it("names the other personal agents that share the scope", async () => {
+    expect(await open({})).toContain(
+      "along with any other personal agent of yours that shares this scope",
+    );
+  });
+
+  it("does not on a shared agent, where everyone shares the service", async () => {
+    const text = await open({
+      shared: true,
+      services: [{ ...userService, is_shared: true }],
+    });
+    expect(text).toContain("Everyone who relies on it loses access");
+    expect(text).not.toContain("personal agent");
+  });
+});
+
+describe("inactive services on the personal page", () => {
+  const inactive = [
+    { name: "taken", reason: "shadowed" as const },
+    { name: "broken", reason: "invalid" as const },
+  ];
+  let listing: EgressCredentialAgent[];
+  let remove: () => Response | Promise<Response>;
+  let save: () => Response | Promise<Response>;
+  let calls: { method: string; path: string }[];
+
+  beforeEach(() => {
+    listing = [
+      {
+        agent_name: "personal",
+        agent_display_name: "Personal Mind",
+        shared: false,
+        can_manage: true,
+        services: [configService, userService],
+        inactive_services: inactive,
+      },
+    ];
+    remove = () => new Response(null, { status: 204 });
+    save = () => new Response(null, { status: 204 });
+    calls = [];
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      const path = String(input);
+      const method = options?.method ?? "GET";
+      calls.push({ method, path });
+      if (path === "/api/connections/egress") return json({ agents: listing });
+      if (method === "DELETE") return remove();
+      if (method === "PUT") return save();
+      if (path === PRESETS) return json(egressPresets);
+      if (path.includes("/services/")) return json({ preset: "openai" });
+      throw new Error(`Unexpected request: ${method} ${path}`);
+    });
+  });
+
+  const section = async () =>
+    within(await screen.findByRole("region", { name: "Inactive services" }));
+  const deletes = () => calls.filter((call) => call.method === "DELETE");
+
+  it("lists each entry with its reason under the agent's services", async () => {
+    render(<EgressCredentials />);
+    const inactiveServices = await section();
+    expect(inactiveServices.getByRole("heading")).toHaveTextContent("Inactive");
+    const taken = inactiveServices.getByLabelText("Inactive service taken");
+    expect(taken).toHaveTextContent(
+      "your administrator provides a service with this name",
+    );
+    expect(taken).toHaveTextContent("Inactive");
+    expect(
+      inactiveServices.getByLabelText("Inactive service broken"),
+    ).toHaveTextContent("no longer valid");
+    // They are the agent's own entries: they sit inside its section, after its services.
+    const agent = screen.getByRole("region", { name: "Personal Mind" });
+    expect(agent).toContainElement(
+      screen.getByRole("region", { name: "Inactive services" }),
+    );
+    expect(
+      screen
+        .getByRole("region", { name: "Inactive services" })
+        .compareDocumentPosition(screen.getByLabelText("My API")) &
+        Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy();
+  });
+
+  it("shows nothing for an agent without inactive entries, or from an older server", async () => {
+    listing[0].inactive_services = [];
+    listing.push({
+      agent_name: "other",
+      agent_display_name: "Other Mind",
+      shared: false,
+      can_manage: true,
+      services: [],
+    });
+    render(<EgressCredentials />);
+    await screen.findByRole("region", { name: "Other Mind" });
+    expect(
+      screen.queryByRole("region", { name: "Inactive services" }),
+    ).toBeNull();
+    expect(screen.queryByText("Inactive")).toBeNull();
+  });
+
+  it("deletes a shadowed entry after confirmation, saying the key stays", async () => {
+    render(<EgressCredentials />);
+    fireEvent.click(
+      (await section()).getByRole("button", {
+        name: "Delete inactive service taken",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Delete inactive taken?");
+    expect(dialog).toHaveTextContent(
+      "The administrator's service with this name stays, and so does the key saved for it.",
+    );
+    expect(deletes()).toEqual([]);
+
+    listing[0].inactive_services = [inactive[1]];
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Inactive service taken")).toBeNull(),
+    );
+    expect(deletes()).toEqual([
+      {
+        method: "DELETE",
+        path: "/api/connections/egress/agents/personal/services/taken",
+      },
+    ]);
+    // The list is read again, and the other entry is still there.
+    expect(
+      calls.filter((call) => call.path === "/api/connections/egress"),
+    ).toHaveLength(2);
+    expect(
+      screen.getByLabelText("Inactive service broken"),
+    ).toBeInTheDocument();
+  });
+
+  it("deletes an invalid entry, saying its key goes too", async () => {
+    render(<EgressCredentials />);
+    fireEvent.click(
+      (await section()).getByRole("button", {
+        name: "Delete inactive service broken",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "removes the invalid entry and any key saved under its name",
+    );
+    listing[0].inactive_services = [inactive[0]];
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Inactive service broken")).toBeNull(),
+    );
+    expect(deletes().map((call) => call.path)).toEqual([
+      "/api/connections/egress/agents/personal/services/broken",
+    ]);
+  });
+
+  it("does not delete when the confirmation is cancelled", async () => {
+    render(<EgressCredentials />);
+    fireEvent.click(
+      (await section()).getByRole("button", {
+        name: "Delete inactive service taken",
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    expect(deletes()).toEqual([]);
+    expect(screen.getByLabelText("Inactive service taken")).toBeInTheDocument();
+  });
+
+  it("shows why a delete failed and keeps the entry", async () => {
+    remove = () =>
+      json({ detail: "Service is not a service of your own" }, 404);
+    render(<EgressCredentials />);
+    fireEvent.click(
+      (await section()).getByRole("button", {
+        name: "Delete inactive service taken",
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Delete",
+      }),
+    );
+    expect(
+      await within(screen.getByLabelText("Inactive service taken")).findByRole(
+        "alert",
+      ),
+    ).toHaveTextContent("no longer available");
+    expect(
+      screen.getByRole("button", { name: "Delete inactive service taken" }),
+    ).toBeEnabled();
+  });
+
+  it("lists the entries without Delete when the caller cannot manage the agent", async () => {
+    listing = [
+      {
+        agent_name: "personal",
+        agent_display_name: "Personal Mind",
+        shared: true,
+        can_manage: false,
+        services: [{ ...configService, is_shared: true, can_manage: false }],
+        inactive_services: inactive,
+      },
+    ];
+    render(<EgressCredentials />);
+    const inactiveServices = await section();
+    expect(
+      inactiveServices.getByLabelText("Inactive service taken"),
+    ).toBeInTheDocument();
+    expect(inactiveServices.queryByRole("button")).toBeNull();
+  });
+
+  it("keeps Delete off while a service is being saved", async () => {
+    let finish: (response: Response) => void = () => {};
+    save = () =>
+      new Promise<Response>((done) => {
+        finish = done;
+      });
+    render(<EgressCredentials />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit My API service" }),
+    );
+    await screen.findByRole("form", { name: "Edit mine" });
+    await presetsReady();
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Delete inactive service taken" }),
+      ).toBeDisabled(),
+    );
+    finish(new Response(null, { status: 204 }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Delete inactive service taken" }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it("reads a reason it does not know in general terms", async () => {
+    listing[0].inactive_services = [
+      { name: "future", reason: "retired" as "invalid" },
+    ];
+    render(<EgressCredentials />);
+    const row = (await section()).getByLabelText("Inactive service future");
+    expect(row).toHaveTextContent("Not in use: the broker ignores this entry.");
+    fireEvent.click(
+      within(row).getByRole("button", {
+        name: "Delete inactive service future",
+      }),
+    );
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "This removes the entry.",
+    );
   });
 });
 

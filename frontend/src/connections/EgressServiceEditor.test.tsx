@@ -7,13 +7,16 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
+import egressPresets from "@/test/fixtures/egressPresets.json";
 import {
   DiscardEditsNotice,
   EgressServiceEditor,
   type EgressServiceEditorProps,
 } from "./EgressServiceEditor";
-import type { EgressRule } from "./types";
+import type { EgressPreset, EgressRule } from "./types";
+
+// The JSON fixture types each placeholder_env by its own keys.
+const presets = egressPresets.presets as EgressPreset[];
 
 const bearerRule: EgressRule = {
   host: "api.example.com",
@@ -23,7 +26,7 @@ const bearerRule: EgressRule = {
 const baseProps = () => ({
   service: null,
   context: "personal" as const,
-  loadPresets: vi.fn(async () => EGRESS_PRESETS_FIXTURE),
+  loadPresets: vi.fn(async () => presets),
   onSave: vi.fn(async () => undefined),
   onCancel: vi.fn(),
 });
@@ -225,6 +228,40 @@ describe("the editor form", () => {
     ).toBeInTheDocument();
   });
 
+  it("lists the words and prefixes a personal placeholder name cannot use", async () => {
+    await renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    const hint = screen.getByText(/one word between underscores must be/);
+    expect(hint).toHaveTextContent(
+      "No word may be COMMAND, CMD, FILE, DIR, PROVIDER, HELPER, OPTS, OPTIONS, or EXTENSIONS",
+    );
+    expect(hint).toHaveTextContent(
+      "names cannot start with SSH_, MINDROOM_, or GIT_CONFIG_",
+    );
+    expect(hint).toHaveTextContent(
+      "PATH, HOME, and proxy and CA variables are reserved",
+    );
+  });
+
+  it("refuses a placeholder the server would, and says why", async () => {
+    const { onSave } = await renderEditor();
+    type("Name", "svc");
+    type("Rule 1 host", "a.example.com");
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add placeholder" }));
+    type("Placeholder 1 name", "SSH_AUTH_SOCK");
+    save();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "placeholder name SSH_AUTH_SOCK may not start with SSH_",
+    );
+    type("Placeholder 1 name", "MINDROOM_API_KEY");
+    save();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Placeholder name MINDROOM_API_KEY starts with reserved prefix MINDROOM_",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("shows the operator's placeholder rules instead on the dashboard", async () => {
     await renderEditor({ context: "operator" });
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
@@ -258,6 +295,18 @@ describe("the editor form", () => {
       service: { preset: "github", placeholder_env: { GH_TOKEN: "x" } },
     });
     expect(screen.getByLabelText("Placeholder 1 name")).toHaveValue("GH_TOKEN");
+  });
+
+  it("says a personal service applies to all personal agents of the same scope", async () => {
+    const { rerender } = render(<EgressServiceEditor {...baseProps()} />);
+    const note =
+      "This service applies to all of your personal agents that share this scope.";
+    expect(screen.getByText(note)).toBeInTheDocument();
+    // A shared agent's service is everyone's, and the dashboard edits config.yaml.
+    rerender(<EgressServiceEditor {...baseProps()} sharedTarget />);
+    expect(screen.queryByText(note)).toBeNull();
+    rerender(<EgressServiceEditor {...baseProps()} context="operator" />);
+    expect(screen.queryByText(note)).toBeNull();
   });
 
   it("disables the account login on a shared agent", async () => {
@@ -640,17 +689,17 @@ describe("loading the presets", () => {
   });
 
   it("waits for the presets before the form can be saved", async () => {
-    let resolve: (presets: typeof EGRESS_PRESETS_FIXTURE) => void = () => {};
+    let resolve: (presets: EgressPreset[]) => void = () => {};
     const loadPresets = vi.fn(
       () =>
-        new Promise<typeof EGRESS_PRESETS_FIXTURE>((done) => {
+        new Promise<EgressPreset[]>((done) => {
           resolve = done;
         }),
     );
     render(<EgressServiceEditor {...baseProps()} loadPresets={loadPresets} />);
     expect(screen.getByLabelText("Preset")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save service" })).toBeDisabled();
-    resolve(EGRESS_PRESETS_FIXTURE);
+    resolve(presets);
     await waitFor(() => expect(screen.getByLabelText("Preset")).toBeEnabled());
     expect(screen.getByRole("button", { name: "Save service" })).toBeEnabled();
     expect(loadPresets).toHaveBeenCalledTimes(1);
@@ -823,6 +872,143 @@ describe("a service with values emptied on purpose", () => {
         /Leave the list empty to use the placeholders of the GitHub preset/,
       ),
     ).toBeInTheDocument();
+  });
+});
+
+describe("choosing another preset", () => {
+  it("forgets what the loaded service emptied on purpose", async () => {
+    const { onSave } = await renderEditor({
+      name: "mine",
+      service: {
+        preset: "openai",
+        display_name: null,
+        description: "",
+        placeholder_env: {},
+      },
+    });
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "github" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    // The GitHub preset has placeholders of its own, so the list is not "none".
+    expect(
+      screen.getByText(
+        /Leave the list empty to use the placeholders of the GitHub preset/,
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("mine", { preset: "github" });
+  });
+});
+
+describe("the GitHub helper on a custom service", () => {
+  const enter = (value: string) =>
+    fireEvent.change(screen.getByLabelText("GitHub repositories"), {
+      target: { value },
+    });
+  const apply = () =>
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use these repositories" }),
+    );
+  const rulesFor = (repository: string) => [
+    {
+      host: "api.github.com",
+      path_prefix: `/repos/${repository}`,
+      auth: { type: "bearer" },
+    },
+    {
+      host: "github.com",
+      path_prefix: `/${repository}`,
+      auth: { type: "basic", username: "x-access-token" },
+    },
+    {
+      host: "github.com",
+      path_prefix: `/${repository}.git`,
+      auth: { type: "basic", username: "x-access-token" },
+    },
+  ];
+
+  it("adds the GH_TOKEN and GITHUB_TOKEN placeholders and shows them", async () => {
+    const { onSave } = await renderEditor();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "code" },
+    });
+    expect(screen.queryByLabelText("Placeholder 1 name")).toBeNull();
+    enter("o/r");
+    apply();
+
+    // The advanced section opens so the user sees what was added.
+    expect(screen.getByLabelText("Placeholder 1 name")).toHaveValue("GH_TOKEN");
+    expect(screen.getByLabelText("Placeholder 1 value")).toHaveValue(
+      "mindroom-brokered",
+    );
+    expect(screen.getByLabelText("Placeholder 2 name")).toHaveValue(
+      "GITHUB_TOKEN",
+    );
+    expect(screen.getByLabelText("Placeholder 2 value")).toHaveValue(
+      "mindroom-brokered",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("code", {
+      rules: rulesFor("o/r"),
+      restrict_to_rules: true,
+      placeholder_env: {
+        GH_TOKEN: "mindroom-brokered",
+        GITHUB_TOKEN: "mindroom-brokered",
+      },
+    });
+  });
+
+  it("leaves the placeholders a service already has alone", async () => {
+    const { onSave } = await renderEditor({
+      name: "code",
+      service: {
+        rules: [{ host: "api.github.com", auth: { type: "bearer" } }],
+        placeholder_env: { MY_GITHUB_TOKEN: "mindroom-brokered" },
+      },
+    });
+    enter("o/r");
+    apply();
+    expect(screen.getByLabelText("Placeholder 1 name")).toHaveValue(
+      "MY_GITHUB_TOKEN",
+    );
+    expect(screen.queryByLabelText("Placeholder 2 name")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("code", {
+      rules: rulesFor("o/r"),
+      restrict_to_rules: true,
+      placeholder_env: { MY_GITHUB_TOKEN: "mindroom-brokered" },
+    });
+  });
+
+  it("adds them only once when the repositories are applied again", async () => {
+    await renderEditor();
+    enter("o/r");
+    apply();
+    enter("o/other");
+    apply();
+    expect(screen.getByLabelText("Placeholder 2 name")).toHaveValue(
+      "GITHUB_TOKEN",
+    );
+    expect(screen.queryByLabelText("Placeholder 3 name")).toBeNull();
+  });
+
+  it("adds none to a preset service, which brings its own", async () => {
+    const { onSave } = await renderEditor({
+      name: "github",
+      service: { preset: "github" },
+    });
+    enter("o/r");
+    apply();
+    expect(screen.queryByLabelText("Placeholder 1 name")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(vi.mocked(onSave).mock.calls[0][1]).not.toHaveProperty(
+      "placeholder_env",
+    );
   });
 });
 

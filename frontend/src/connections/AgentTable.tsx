@@ -263,7 +263,8 @@ export function AgentTable({
                           refreshVersion={refreshVersion}
                           onConnectionChange={onConnectionChange}
                         />
-                        {row.original.egress_services?.length ? (
+                        {/* An array, even an empty one, marks an agent that can use egress credentials. */}
+                        {Array.isArray(row.original.egress_services) ? (
                           <div className="border-t border-border/60">
                             <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-4">
                               <h3 className="text-xs font-medium text-muted-foreground">
@@ -276,11 +277,17 @@ export function AgentTable({
                                 Manage services
                               </a>
                             </div>
-                            <EgressServiceRows
-                              agentName={row.original.agent_name}
-                              services={row.original.egress_services}
-                              onChanged={onEgressChange}
-                            />
+                            {row.original.egress_services.length ? (
+                              <EgressServiceRows
+                                agentName={row.original.agent_name}
+                                services={row.original.egress_services}
+                                onChanged={onEgressChange}
+                              />
+                            ) : (
+                              <p className="px-5 py-4 text-sm text-muted-foreground">
+                                No services are set up for this agent yet.
+                              </p>
+                            )}
                           </div>
                         ) : null}
                       </section>

@@ -4,6 +4,7 @@ import mindroomLogo from "../../../assets/logo/logo-mark-animated.svgz?url";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { InactiveServices } from "./EgressInactiveServices";
 import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
 import { EgressServiceRows, type ServiceEditing } from "./EgressServiceRows";
 import { type RequestErrorMessages, requestConnection } from "./request";
@@ -25,9 +26,16 @@ const SERVICE_ERROR_MESSAGES: RequestErrorMessages = {
     "This agent or service is no longer available. Reload the page to update the list.",
 };
 
-type EditorState =
+type EditorState = (
   | { kind: "add" }
-  | { kind: "edit"; name: string; service: AuthoredEgressService };
+  | { kind: "edit"; name: string; service: AuthoredEgressService }
+) & {
+  /**
+   * Another service's Edit, pressed while this editor had unsaved changes. It
+   * lives here so that closing the editor drops it.
+   */
+  pendingEdit?: EgressCredentialService;
+};
 
 type LogState =
   | { kind: "loading" }
@@ -49,7 +57,7 @@ function servicePath(agentName: string, serviceName: string): string {
 function deleteWarning(service: EgressCredentialService): string {
   return service.is_shared
     ? "This deletes the service and its shared key. Everyone who relies on it loses access to it until it is added again."
-    : "This deletes the service and its saved key. Your agent loses access to it until you add it again.";
+    : "This deletes the service and its saved key. Your agent loses access to it until you add it again, along with any other personal agent of yours that shares this scope.";
 }
 
 /** The caller's own recent brokered requests for one agent, loaded when the table is opened. */
@@ -223,8 +231,6 @@ function AgentSection({
 }) {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
-  const [pendingEdit, setPendingEdit] =
-    useState<EgressCredentialService | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const operation = useRef<AbortController | null>(null);
@@ -238,8 +244,11 @@ function AgentSection({
     return controller;
   };
 
+  const setPendingEdit = (pendingEdit?: EgressCredentialService) =>
+    setEditor((current) => current && { ...current, pendingEdit });
+
   const edit = async (service: EgressCredentialService) => {
-    setPendingEdit(null);
+    setPendingEdit(undefined);
     const controller = newOperation();
     setError(null);
     try {
@@ -309,9 +318,11 @@ function AgentSection({
     else void edit(service);
   };
 
+  const pendingEdit = editor?.pendingEdit;
   const serviceEditing: ServiceEditing = {
     editableSource: "user",
     disabled: saving,
+    editingName: editor?.kind === "edit" ? editor.name : null,
     onEdit: requestEdit,
     onDelete: (service) => remove(service.name),
     deleteWarning,
@@ -356,7 +367,7 @@ function AgentSection({
       {pendingEdit && (
         <DiscardEditsNotice
           onDiscard={() => void edit(pendingEdit)}
-          onKeep={() => setPendingEdit(null)}
+          onKeep={() => setPendingEdit(undefined)}
         />
       )}
       {editor && (
@@ -391,6 +402,11 @@ function AgentSection({
           No services are configured yet.
         </p>
       )}
+      <InactiveServices
+        services={agent.inactive_services ?? []}
+        disabled={saving}
+        onDelete={agent.can_manage ? remove : undefined}
+      />
       <RecentRequests agentName={agent.agent_name} />
     </section>
   );

@@ -16,7 +16,7 @@ import {
   type Mock,
   vi,
 } from "vitest";
-import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
+import egressPresets from "@/test/fixtures/egressPresets.json";
 import { EgressBroker } from "./EgressBroker";
 
 const NOT_RUNNING =
@@ -27,18 +27,22 @@ let storeState: {
   config: unknown;
   isDirty?: boolean;
   dirtyRoots?: string[];
+  draftVersion?: number;
   updateConfigValue?: (path: string[], value: unknown) => void;
   restoreConfigValue?: (
     path: string[],
     value: unknown,
-    before: { isDirty: boolean; dirtyRoots: string[] },
+    before: { isDirty: boolean; dirtyRoots: string[]; draftVersion: number },
   ) => void;
   saveConfig?: () => Promise<unknown>;
 };
 
 vi.mock("@/store/configStore", () => ({
-  useConfigStore: (selector: (state: typeof storeState) => unknown) =>
-    selector(storeState),
+  // The panel reads what the draft is when a write starts straight from the store.
+  useConfigStore: Object.assign(
+    (selector: (state: typeof storeState) => unknown) => selector(storeState),
+    { getState: () => storeState },
+  ),
 }));
 
 const agent = (id: string, tools: string[], extra = {}) => ({
@@ -132,7 +136,7 @@ function mockApi() {
       return json({ services });
     if (url.pathname === "/api/egress-broker/logs") return logsResponse();
     if (url.pathname === "/api/egress-broker/presets")
-      return json({ presets: EGRESS_PRESETS_FIXTURE });
+      return json(egressPresets);
     return mutationResponse();
   });
 }
@@ -850,13 +854,13 @@ describe("egress broker service editor", () => {
     { host: "uploads.github.com", port: null, path_prefix: "/" },
     { host: "github.com", port: null, path_prefix: "/" },
   ];
-  const clean = { isDirty: false, dirtyRoots: [] as string[] };
+  const clean = { isDirty: false, dirtyRoots: [] as string[], draftVersion: 0 };
   let updateConfigValue: Mock<(path: string[], value: unknown) => void>;
   let restoreConfigValue: Mock<
     (
       path: string[],
       value: unknown,
-      before: { isDirty: boolean; dirtyRoots: string[] },
+      before: { isDirty: boolean; dirtyRoots: string[]; draftVersion: number },
     ) => void
   >;
   let saveConfig: Mock<() => Promise<unknown>>;
@@ -960,7 +964,7 @@ describe("egress broker service editor", () => {
       within(screen.getByLabelText("Preset"))
         .getAllByRole("option")
         .map((option) => option.textContent),
-    ).toEqual(["Custom", ...EGRESS_PRESETS_FIXTURE.map((p) => p.display_name)]);
+    ).toEqual(["Custom", ...egressPresets.presets.map((p) => p.display_name)]);
   });
 
   it("edits a preset service without expanding it", async () => {
@@ -1169,7 +1173,7 @@ describe("egress broker service editor", () => {
       [
         ["egress_broker", "services", "myapi"],
         undefined,
-        { isDirty: true, dirtyRoots: ["models"] },
+        { isDirty: true, dirtyRoots: ["models"], draftVersion: 0 },
       ],
     ]);
   });
@@ -1358,6 +1362,65 @@ describe("egress broker service editor", () => {
     expect(
       await screen.findByRole("form", { name: "Edit openai" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps Edit off for the service whose editor is open", async () => {
+    await openEdit("GitHub");
+    expect(
+      screen.getByRole("button", { name: "Edit GitHub service" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Edit OpenAI service" }),
+    ).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.getByRole("button", { name: "Edit GitHub service" }),
+    ).toBeEnabled();
+  });
+
+  it("drops the question about another service when the editor is cancelled", async () => {
+    await openEdit("GitHub");
+    fill("Description", "typed but not saved");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit OpenAI service" }),
+    );
+    expect(
+      screen.getByText(/unsaved changes in the open editor/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("form")).toBeNull();
+    expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
+  it("reads the draft's state from the store when the write starts, not from the last render", async () => {
+    saveConfig.mockResolvedValue({
+      status: "error",
+      message: "Failed to save configuration (Error 500)",
+      diagnostics: [],
+    });
+    await openAdd();
+    fill("Name", "myapi");
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "openai" },
+    });
+    // Another edit lands in the store without this panel rendering again.
+    storeState = {
+      ...storeState,
+      isDirty: true,
+      dirtyRoots: ["models"],
+      draftVersion: 4,
+    };
+    save();
+
+    await screen.findByText("Failed to save configuration (Error 500)");
+    expect(restoreConfigValue.mock.calls).toEqual([
+      [
+        ["egress_broker", "services", "myapi"],
+        undefined,
+        { isDirty: true, dirtyRoots: ["models"], draftVersion: 4 },
+      ],
+    ]);
   });
 
   it("lists a scope's own services read-only with a badge", async () => {

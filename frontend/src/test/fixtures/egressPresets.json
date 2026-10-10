@@ -1,0 +1,176 @@
+{
+  "presets": [
+    {
+      "description": "GitHub API, gh CLI, and git over HTTPS",
+      "display_name": "GitHub",
+      "id": "github",
+      "oauth_provider": "github",
+      "placeholder_env": {
+        "GH_TOKEN": "mindroom-brokered",
+        "GITHUB_TOKEN": "mindroom-brokered"
+      },
+      "rules": [
+        {
+          "host": "api.github.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "uploads.github.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "github.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Drive API",
+      "display_name": "Google Drive",
+      "id": "google_drive",
+      "oauth_provider": "google_drive",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/drive/",
+          "port": null
+        },
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/upload/drive/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Gmail API",
+      "display_name": "Gmail",
+      "id": "google_gmail",
+      "oauth_provider": "google_gmail",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "gmail.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/gmail/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Calendar API",
+      "display_name": "Google Calendar",
+      "id": "google_calendar",
+      "oauth_provider": "google_calendar",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/calendar/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Sheets API",
+      "display_name": "Google Sheets",
+      "id": "google_sheets",
+      "oauth_provider": "google_sheets",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "sheets.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Docs API",
+      "display_name": "Google Docs",
+      "id": "google_docs",
+      "oauth_provider": "google_docs",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "docs.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Tasks API",
+      "display_name": "Google Tasks",
+      "id": "google_tasks",
+      "oauth_provider": "google_tasks",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "tasks.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/tasks/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Atlassian Cloud APIs (Jira and Confluence)",
+      "display_name": "Atlassian",
+      "id": "atlassian",
+      "oauth_provider": "atlassian",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "api.atlassian.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "OpenAI API",
+      "display_name": "OpenAI",
+      "id": "openai",
+      "oauth_provider": null,
+      "placeholder_env": {
+        "OPENAI_API_KEY": "mindroom-brokered"
+      },
+      "rules": [
+        {
+          "host": "api.openai.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Anthropic API",
+      "display_name": "Anthropic",
+      "id": "anthropic",
+      "oauth_provider": null,
+      "placeholder_env": {
+        "ANTHROPIC_API_KEY": "mindroom-brokered"
+      },
+      "rules": [
+        {
+          "host": "api.anthropic.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    }
+  ]
+}

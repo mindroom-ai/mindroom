@@ -131,7 +131,13 @@ const DELETE_WARNING =
 const OTHER_CHANGES_WARNING =
   "This also saves your other unsaved settings changes.";
 
-type EditorState = { kind: "add" } | { kind: "edit"; name: string };
+type EditorState = ({ kind: "add" } | { kind: "edit"; name: string }) & {
+  /**
+   * The name of another service whose Edit was pressed while this editor had
+   * unsaved changes. It lives here so that closing the editor drops it.
+   */
+  pendingEdit?: string;
+};
 
 // The store holds the config as authored, so a preset service reads
 // `{preset: "github"}` and goes back the same way.
@@ -193,7 +199,6 @@ function isRequesterScoped(
 
 function ServiceSection({ agentName }: { agentName: string | null }) {
   const config = useConfigStore((state) => state.config);
-  const isDirty = useConfigStore((state) => state.isDirty);
   const dirtyRoots = useConfigStore((state) => state.dirtyRoots);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const restoreConfigValue = useConfigStore(
@@ -206,7 +211,6 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
   const [error, setError] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
-  const [pendingEdit, setPendingEdit] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const latest = useRef(0);
@@ -252,15 +256,26 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
   }, [load]);
 
   // Writes one config service through the store, as Settings does. When the
-  // save fails the draft goes back to what it was before this write, dirty
-  // state included, so the editor never leaves an unsaved change behind.
+  // save fails the value goes back to what it was before this write. So does
+  // the draft's dirty state, unless something else changed the draft meanwhile:
+  // the store then keeps that dirty state, since it holds those other edits.
   const writeService = async (
     name: string,
     next: AuthoredEgressService | undefined,
   ) => {
     const path: ConfigPath = ["egress_broker", "services", name];
     const previous = authoredServices[name];
-    const before: ConfigDraftMark = { isDirty, dirtyRoots: dirtyRoots ?? [] };
+    // Read now, not from the last render: other edits may have landed since.
+    const {
+      isDirty,
+      dirtyRoots: rootsBefore,
+      draftVersion,
+    } = useConfigStore.getState();
+    const before: ConfigDraftMark = {
+      isDirty,
+      dirtyRoots: rootsBefore ?? [],
+      draftVersion,
+    };
     setSaving(true);
     try {
       updateConfigValue(path, next);
@@ -289,8 +304,11 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
     );
   };
 
+  const setPendingEdit = (pendingEdit?: string) =>
+    setEditor((current) => current && { ...current, pendingEdit });
+
   const startEdit = (name: string) => {
-    setPendingEdit(null);
+    setPendingEdit(undefined);
     if (authoredServices[name] === undefined) {
       setActionError(
         "This service is not in the loaded configuration. Reload the page and try again.",
@@ -307,9 +325,11 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
     else startEdit(name);
   };
 
+  const pendingEdit = editor?.pendingEdit;
   const serviceEditing: ServiceEditing = {
     editableSource: "config",
     disabled: saving,
+    editingName: editor?.kind === "edit" ? editor.name : null,
     onEdit: (service) => requestEdit(service.name),
     onDelete: (service) => deleteService(service.name),
     deleteWarning: () =>
@@ -346,10 +366,10 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
           <AlertDescription>{actionError}</AlertDescription>
         </Alert>
       )}
-      {pendingEdit !== null && (
+      {pendingEdit !== undefined && (
         <DiscardEditsNotice
           onDiscard={() => startEdit(pendingEdit)}
-          onKeep={() => setPendingEdit(null)}
+          onKeep={() => setPendingEdit(undefined)}
         />
       )}
       {editor && (

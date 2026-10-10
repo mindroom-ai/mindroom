@@ -34,6 +34,8 @@ export interface ServiceEditing {
   editableSource: EgressServiceSource;
   /** Turns Edit and Delete off while something else is being written. */
   disabled?: boolean;
+  /** The service whose editor is open: opening it again would only offer to discard what is typed there. */
+  editingName?: string | null;
   onEdit: (service: EgressCredentialService) => void;
   /** Rejects with an Error whose message the row shows. */
   onDelete: (service: EgressCredentialService) => Promise<void>;
@@ -395,7 +397,11 @@ function EgressServiceRow({
               <Button
                 size="sm"
                 variant="outline"
-                disabled={busy !== null || serviceEditing.disabled}
+                disabled={
+                  busy !== null ||
+                  serviceEditing.disabled ||
+                  serviceEditing.editingName === service.name
+                }
                 aria-label={`Edit ${service.display_name} service`}
                 onClick={() => serviceEditing.onEdit(service)}
               >

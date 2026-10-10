@@ -6299,8 +6299,8 @@ describe("configStore", () => {
     }
 
     function mark() {
-      const { isDirty, dirtyRoots } = useConfigStore.getState();
-      return { isDirty, dirtyRoots };
+      const { isDirty, dirtyRoots, draftVersion } = useConfigStore.getState();
+      return { isDirty, dirtyRoots, draftVersion };
     }
 
     it("puts the value back and leaves a clean draft clean", async () => {
@@ -6345,7 +6345,7 @@ describe("configStore", () => {
         .getState()
         .updateConfigValue(["router"], { model: "fast" });
       const before = mark();
-      expect(before).toEqual({ isDirty: true, dirtyRoots: ["router"] });
+      expect(before).toMatchObject({ isDirty: true, dirtyRoots: ["router"] });
       useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
       expect(useConfigStore.getState().dirtyRoots).toEqual([
         "router",
@@ -6359,6 +6359,42 @@ describe("configStore", () => {
       expect(state.dirtyRoots).toEqual(["router"]);
       expect(state.config?.router).toEqual({ model: "fast" });
       expect(state.syncStatus).toBe("error");
+    });
+
+    it("leaves edits made after the write dirty and in the draft", async () => {
+      await loadAuthored();
+      const before = mark();
+      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
+      // The user edits something else while the write is being saved.
+      useConfigStore
+        .getState()
+        .updateConfigValue(["router"], { model: "fast" });
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toEqual(["egress_broker", "router"]);
+      expect(state.config?.router).toEqual({ model: "fast" });
+      expect(readConfigRoot(state.config!, "egress_broker")).toEqual(
+        authored.egress_broker,
+      );
+      expect(state.syncStatus).toBe("error");
+    });
+
+    it("does not reset the dirty state when a later edit made a clean draft dirty", async () => {
+      await loadAuthored();
+      const before = mark();
+      expect(before.isDirty).toBe(false);
+      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
+      useConfigStore.getState().updateConfigValue(["models"], {
+        default: { provider: "ollama", id: "other-model" },
+      });
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      expect(useConfigStore.getState().dirtyRoots).toContain("models");
+      expect(useConfigStore.getState().isDirty).toBe(true);
     });
 
     it("drops the validation errors that were about the restored path only", async () => {
@@ -6441,6 +6477,7 @@ describe("configStore", () => {
       useConfigStore.getState().restoreConfigValue(path, undefined, {
         isDirty: false,
         dirtyRoots: [],
+        draftVersion: 0,
       });
       expect(useConfigStore.getState().config).toBeNull();
     });

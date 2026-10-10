@@ -46,7 +46,26 @@ const RESERVED_HEADERS = new Set([
   "keep-alive",
 ]);
 const PLACEHOLDER_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
-// Services of a personal scope may only set credential-like placeholders with plain values.
+// The names the broker sets itself, which no service may use as a placeholder
+// (the lowercase proxy variables cannot match the name pattern anyway).
+const RESERVED_PLACEHOLDER_NAMES = new Set([
+  "PATH",
+  "HOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "NODE_USE_ENV_PROXY",
+  "SSL_CERT_FILE",
+  "REQUESTS_CA_BUNDLE",
+  "CURL_CA_BUNDLE",
+  "GIT_SSL_CAINFO",
+  "NODE_EXTRA_CA_CERTS",
+]);
+const RESERVED_PLACEHOLDER_PREFIXES = ["MINDROOM_", "GIT_CONFIG_"];
+// Services of a personal scope may only set credential-like placeholders with
+// plain values. These mirror `_placeholder_error` in
+// src/mindroom/egress_broker/user_services.py, in the server's sorted order.
 const PERSONAL_PLACEHOLDER_NAME = /^[A-Z][A-Z0-9_]*$/;
 const PERSONAL_PLACEHOLDER_VALUE = /^[A-Za-z0-9._:-]{1,256}$/;
 const PERSONAL_PLACEHOLDER_WORDS = [
@@ -58,6 +77,20 @@ const PERSONAL_PLACEHOLDER_WORDS = [
   "SECRET",
   "TOKEN",
 ];
+// Tools read variables with these words, or starting with SSH_, as programs or
+// paths to run or load, so a service of one's own cannot set them.
+const PERSONAL_PLACEHOLDER_REFUSED_WORDS = [
+  "CMD",
+  "COMMAND",
+  "DIR",
+  "EXTENSIONS",
+  "FILE",
+  "HELPER",
+  "OPTIONS",
+  "OPTS",
+  "PROVIDER",
+];
+const PERSONAL_PLACEHOLDER_REFUSED_PREFIX = "SSH_";
 
 const GITHUB_API_HOST = "api.github.com";
 const GITHUB_WEB_HOST = "github.com";
@@ -93,6 +126,13 @@ interface ExplicitlyEmpty {
   description: boolean;
   placeholders: boolean;
 }
+
+/** No field emptied on purpose: what a new service, or one that picked another preset, starts with. */
+export const NOT_EXPLICITLY_EMPTY: ExplicitlyEmpty = {
+  displayName: undefined,
+  description: false,
+  placeholders: false,
+};
 
 /** What the editor shows; `serializeService` turns it into the authored service. */
 export interface EgressServiceForm {
@@ -317,6 +357,18 @@ function ruleErrors(rule: RuleForm): string[] {
   return errors;
 }
 
+/** Why no service may use this valid placeholder name, or null; the server refuses these in every scope. */
+function reservedPlaceholderError(name: string): string | null {
+  if (RESERVED_PLACEHOLDER_NAMES.has(name))
+    return `Placeholder name ${name} is reserved`;
+  const prefix = RESERVED_PLACEHOLDER_PREFIXES.find((reserved) =>
+    name.startsWith(reserved),
+  );
+  return prefix
+    ? `Placeholder name ${name} starts with reserved prefix ${prefix}`
+    : null;
+}
+
 function personalPlaceholderError(name: string, value: string): string | null {
   const words = name.split("_");
   if (
@@ -324,9 +376,24 @@ function personalPlaceholderError(name: string, value: string): string | null {
     !PERSONAL_PLACEHOLDER_WORDS.some((word) => words.includes(word))
   )
     return `placeholder name ${name} must match ^[A-Z][A-Z0-9_]*$ and have one of ${PERSONAL_PLACEHOLDER_WORDS.join(", ")} between underscores`;
+  if (
+    name.startsWith(PERSONAL_PLACEHOLDER_REFUSED_PREFIX) ||
+    PERSONAL_PLACEHOLDER_REFUSED_WORDS.some((word) => words.includes(word))
+  )
+    return `placeholder name ${name} may not start with ${PERSONAL_PLACEHOLDER_REFUSED_PREFIX} or have any of these words between underscores, which tools read as programs or paths: ${PERSONAL_PLACEHOLDER_REFUSED_WORDS.join(", ")}`;
   if (!PERSONAL_PLACEHOLDER_VALUE.test(value))
     return `placeholder value of ${name} must be 1 to 256 characters from A-Z, a-z, 0-9, and . _ : -`;
   return null;
+}
+
+/**
+ * The size the server counts for a service: its JSON with every character
+ * outside printable ASCII written as a 6 byte `\uXXXX` escape, which is how
+ * Python's `json.dumps` writes it. The server measures its own dump of the
+ * validated service, so a few bytes of difference remain possible at the edge.
+ */
+function serverJsonSize(value: unknown): number {
+  return JSON.stringify(value).replace(/[\u007f-\uffff]/g, "\\u0000").length;
 }
 
 /** Return what stops the form from being saved, in reading order; empty when it can be. */
@@ -374,6 +441,11 @@ export function validateService(
       errors.push(`Placeholder name ${name} must match ^[A-Z_][A-Z0-9_]*$`);
       continue;
     }
+    const reservedProblem = reservedPlaceholderError(name);
+    if (reservedProblem) {
+      errors.push(reservedProblem);
+      continue;
+    }
     if (seen.has(name)) errors.push(`Placeholder ${name} is listed twice`);
     seen.add(name);
     const personalProblem =
@@ -385,8 +457,7 @@ export function validateService(
   if (
     options.context === "personal" &&
     errors.length === 0 &&
-    new TextEncoder().encode(JSON.stringify(serializeService(form, options)))
-      .length > MAX_SERVICE_BYTES
+    serverJsonSize(serializeService(form, options)) > MAX_SERVICE_BYTES
   )
     errors.push(`A service can take at most ${MAX_SERVICE_BYTES / 1024} KiB`);
   return errors;

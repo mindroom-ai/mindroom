@@ -185,6 +185,46 @@ describe("brokered API keys on agent cards", () => {
     expect(screen.queryByRole("link", { name: "Manage services" })).toBeNull();
   });
 
+  it("shows no API key section when the catalog sends null for the agent", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [{ ...catalog([service]).agents[0], egress_services: null }],
+        }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Connect Mail" });
+    expect(screen.queryByText("API keys and accounts")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Manage services" })).toBeNull();
+  });
+
+  it("links an eligible agent without services to the page where one can be added", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [{ ...catalog([service]).agents[0], egress_services: [] }],
+        }),
+    });
+    render(<Connections />);
+    await expandAgent();
+
+    expect(
+      await screen.findByText("API keys and accounts"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Manage services" }),
+    ).toHaveAttribute(
+      "href",
+      `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
+    );
+    expect(
+      screen.getByText("No services are set up for this agent yet."),
+    ).toBeInTheDocument();
+    // There is nothing to set a key on yet.
+    expect(screen.queryByRole("button", { name: /API key/ })).toBeNull();
+  });
+
   it("links the API key section to the agent's services on the personal page", async () => {
     installApi({
       "/api/connections": async () =>

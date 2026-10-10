@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -7,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EGRESS_PRESETS_FIXTURE } from "@/test/fixtures/egressPresets";
+import egressPresets from "@/test/fixtures/egressPresets.json";
 import { readConfigRoot, useConfigStore } from "@/store/configStore";
 import { EgressBroker } from "./EgressBroker";
 
@@ -57,7 +58,7 @@ const row = (name: string, display_name: string) => ({
   oauth: null,
 });
 
-let saveResponse: () => Response;
+let saveResponse: () => Response | Promise<Response>;
 
 // The Config type does not model egress_broker, so read it like Settings does.
 function storedBroker() {
@@ -91,8 +92,7 @@ beforeEach(async () => {
         services: [row("github", "GitHub"), row("openai", "OpenAI")],
       });
     if (path === "/api/egress-broker/logs") return json({ records: [] });
-    if (path === "/api/egress-broker/presets")
-      return json({ presets: EGRESS_PRESETS_FIXTURE });
+    if (path === "/api/egress-broker/presets") return json(egressPresets);
     throw new Error(`Unexpected request: ${String(input)}`);
   });
   useConfigStore.setState({ ...useConfigStore.getInitialState() });
@@ -271,6 +271,33 @@ describe("egress broker panel with the real config store", () => {
       expect(storedBroker()?.services).toEqual(
         authoredConfig.egress_broker.services,
       );
+    });
+
+    it("keeps an edit made elsewhere while the refused save was running", async () => {
+      let refuse: (response: Response) => void = () => {};
+      saveResponse = () =>
+        new Promise<Response>((done) => {
+          refuse = done;
+        });
+      await addBadService();
+      await waitFor(() => expect(saveBodies()).toHaveLength(1));
+      // Settings is edited in the meantime, then the server turns the save down.
+      act(() => {
+        useConfigStore
+          .getState()
+          .updateConfigValue(["router"], { model: "other" });
+      });
+      refuse(json({ detail: "Configuration changed elsewhere." }, 409));
+      await screen.findByText(/Configuration changed/);
+
+      const state = useConfigStore.getState();
+      // The editor's own value is gone, the other edit is not.
+      expect(storedBroker()?.services).toEqual(
+        authoredConfig.egress_broker.services,
+      );
+      expect(state.config?.router).toEqual({ model: "other" });
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toContain("router");
     });
 
     it("saves again without the earlier attempt left in the draft", async () => {

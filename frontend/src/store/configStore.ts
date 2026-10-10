@@ -584,10 +584,14 @@ function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
   };
 }
 
-/** Whether the draft had unsaved changes, and in which roots, at some moment. */
+/**
+ * Whether the draft had unsaved changes, and in which roots, at some moment,
+ * and which draft version that was.
+ */
 export interface ConfigDraftMark {
   isDirty: boolean;
   dirtyRoots: string[];
+  draftVersion: number;
 }
 
 interface ConfigState {
@@ -659,7 +663,9 @@ interface ConfigState {
   /**
    * Put a value written with `updateConfigValue` back, together with the dirty
    * state read before that write, so a write that failed to save leaves the
-   * draft as it was and not dirty only because of it.
+   * draft as it was and not dirty only because of it. `before` is read from
+   * the store just before the write. When the draft changed again since that
+   * write, its dirty state holds those other edits, so only the value goes back.
    */
   restoreConfigValue: (
     path: ConfigPath,
@@ -2156,11 +2162,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const diagnostics = retainedDraftDiagnostics(state.diagnostics, [
         [...path],
       ]);
+      // The write moved the draft version on by one. Any other version means
+      // the draft changed after it, and those edits stay dirty.
+      const writeIsLatest =
+        state.draftVersion === nextDraftVersion(before.draftVersion);
+      const isDirty = writeIsLatest ? before.isDirty : state.isDirty;
       return {
         config: nextConfig,
         rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        isDirty: before.isDirty,
-        dirtyRoots: before.dirtyRoots,
+        isDirty,
+        dirtyRoots: writeIsLatest ? before.dirtyRoots : state.dirtyRoots,
         diagnostics,
         draftVersion: nextDraftVersion(state.draftVersion),
         // A conflict keeps its error status; otherwise the draft is as in sync as it was.
@@ -2168,7 +2179,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           ? state.syncStatus
           : draftSyncStatus({
               loadedConfig: state.loadedConfig,
-              isDirty: before.isDirty,
+              isDirty,
             }),
       };
     });
