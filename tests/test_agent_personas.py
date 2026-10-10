@@ -105,7 +105,12 @@ def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
     """Only the named toolkit is built; unnamed caller toolkits are never constructed."""
     runtime = _runtime(tmp_path, tools=["file", "shell"])
     agent = _child(runtime, ["file"])
-    toolkit_functions = {name for tool in agent.tools or [] if isinstance(tool, Toolkit) for name in tool.functions}
+    toolkit_functions = {
+        name
+        for tool in agent.tools or []
+        if isinstance(tool, Toolkit)
+        for name in (*tool.functions, *tool.get_async_functions())
+    }
     assert "read_file" in toolkit_functions
     assert "run_shell_command" not in toolkit_functions
 
