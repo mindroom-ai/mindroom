@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.model_loading import canonical_provider, get_model_instance
+from mindroom.model_usage import provider_reports_cache_tokens_outside_input
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -20,8 +21,6 @@ logger = get_logger(__name__)
 
 # Provider names that select the same model class and so record the same usage identity.
 _PROVIDER_ALIASES = {"gemini": "google", "openai_codex": "codex", "kimi_code": "kimi"}
-# These providers report cache reads and writes beside input_tokens; the others count cache reads inside it.
-_CACHE_EXCLUDED_PROVIDERS = frozenset({"anthropic", "bedrock_claude", "vertexai_claude"})
 # Gemini reports thinking tokens beside output_tokens and bills them as output; the others count them inside it.
 _REASONING_EXCLUDED_PROVIDERS = frozenset({"google"})
 
@@ -89,7 +88,11 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
         provider = provider_identity(model_config.provider)
         priced = PricedModel(
             pricing=model_config.pricing,
-            input_includes_cache=provider not in _CACHE_EXCLUDED_PROVIDERS,
+            input_includes_cache=not provider_reports_cache_tokens_outside_input(
+                provider=key[0],
+                configured_provider=model_config.provider,
+                model_id=model.id,
+            ),
             output_includes_reasoning=provider not in _REASONING_EXCLUDED_PROVIDERS,
         )
         existing = table.get(key)
