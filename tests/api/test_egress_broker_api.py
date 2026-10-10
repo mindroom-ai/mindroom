@@ -632,6 +632,18 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
     assert _service(oauth_broker_client, "github")["oauth"] is None
 
 
+def test_listing_never_refreshes_tokens(oauth_broker_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The panel reads stored state, so a stalled provider token endpoint cannot stall it."""
+    _connect(oauth_broker_client, "drive", "google_drive")
+
+    def refresh_must_not_run(*_args: object, **_kwargs: object) -> None:
+        msg = "A listing must not refresh tokens"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(oauth, "refresh_oauth_credentials", refresh_must_not_run)
+    assert _service(oauth_broker_client, "drive")["oauth"]["connected"] is True
+
+
 def test_listing_authenticates_once_not_per_service(
     oauth_broker_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

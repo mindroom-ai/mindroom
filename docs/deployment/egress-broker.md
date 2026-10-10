@@ -308,6 +308,9 @@ Who may connect an account follows who may set a key, with one exception:
 - For `shared` and unscoped agents, administrators and the agent's `credential_managers` connect and disconnect accounts, and set keys.
 - GitHub and Atlassian are the exception where the service sets `oauth_on_shared_workers`. Their connections belong to the requester, so any user who may use the agent can then connect their own account on a shared agent too. Without that setting a shared agent does not use these accounts, so its rows offer no connection. API keys on shared agents stay with the managers.
 
+On the dashboard panel, a GitHub or Atlassian account is likewise the signed-in administrator's own account, for an agent and for **Global (unscoped agents)** alike, never one shared by the agent.
+The panel's scopes are shared and unscoped agents, so it offers such a connection only where the service sets `oauth_on_shared_workers`.
+
 The personal egress page and its API, `/api/connections/egress`, authenticate with `require_connections_user`: they need [trusted upstream auth](trusted-upstream-auth.md) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
 Without that signed identity gate, such as on a lab host that has no upstream proxy, only the dashboard can manage secrets.
 On the personal page, users manage their own secrets for `user` and `user_agent` agents, while secrets for shared and unscoped agents are managed only by administrators and the agent's `credential_managers`.

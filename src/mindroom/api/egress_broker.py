@@ -91,8 +91,9 @@ async def _admin_oauth_status(
 ) -> OAuthStatus | None:
     """Load a provider's connection state for the selected scope with the dashboard's OAuth status helper.
 
-    The router's dependency has authenticated the request. Any failure to read one provider's state shows that
-    service as not connectable instead of failing the panel.
+    The router's dependency has authenticated the request. The token refresh is skipped, as on the personal page,
+    so a stalled provider never stalls the panel. Any failure to read one provider's state shows that service as not
+    connectable instead of failing the panel.
     """
     from mindroom.api import config_lifecycle  # noqa: PLC0415
 
@@ -109,7 +110,12 @@ async def _admin_oauth_status(
     if access == "refused":
         return shared_worker_unavailable_status(provider, target.runtime_paths)
     try:
-        result = await oauth.authenticated_connection_status(provider_id, request, agent_name=target.agent_name)
+        result = await oauth.authenticated_connection_status(
+            provider_id,
+            request,
+            agent_name=target.agent_name,
+            refresh=False,
+        )
         status = await egress_oauth_status(
             result,
             can_manage=True,

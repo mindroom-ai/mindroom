@@ -935,10 +935,12 @@ async def authenticated_connection_status(
     request: Request,
     *,
     agent_name: str | None,
+    refresh: bool = True,
 ) -> OAuthStatusResponse:
     """Return scoped connection status for a request the caller has already authenticated.
 
     Callers that load several providers for one request authenticate once and call this per provider.
+    `refresh=False` skips the token refresh, as in `connection_status`.
     """
     provider, runtime_paths = _load_provider(request, provider_id)
     target = _resolve_oauth_credentials_target(
@@ -947,7 +949,7 @@ async def authenticated_connection_status(
         agent_name=agent_name,
     )
     context = _credential_context(provider, runtime_paths, target)
-    return await connection_status(request, context)
+    return await connection_status(request, context, refresh=refresh)
 
 
 @dataclass(frozen=True)
