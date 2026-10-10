@@ -12,6 +12,7 @@ from mindroom.hooks import EVENT_MESSAGE_AFTER_RESPONSE, AfterResponseContext, h
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.events import is_visible_tool_marker_line
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -20,8 +21,8 @@ if TYPE_CHECKING:
 
 # MindRoom already caps tool result previews at 500 characters; keep all of it so the judge sees every hit.
 _MAX_PREVIEW_CHARS = 500
-# Leaves room in the judgment request for the person's message and a long reply.
-_MAX_TOOL_CHARS = 6_000
+# Bytes, like the judgment request limit; leaves room for the person's message and a long reply.
+_MAX_TOOL_BYTES = 6_000
 
 _RESEARCH_CHECK_QUESTION = JudgmentQuestion(
     id="research_check",
@@ -41,10 +42,13 @@ _RESEARCH_CHECK_QUESTION = JudgmentQuestion(
 )
 
 _FOLLOW_UP = (
-    "Research check: your previous reply recommends or states specific things that no lookup for that reply verified. "
-    "Check each one now with your search or browsing tools, correct or withdraw anything that does not hold up, "
-    "and name the sources you checked. If you cannot look them up, say which ones remain unverified."
+    'Research check on your reply that starts "{opening}": it recommends or states specific things that no lookup '
+    "for that reply verified. Check each one now with your search or browsing tools, correct or withdraw anything "
+    "that does not hold up, and name the sources you checked. If you cannot look them up, say which ones remain "
+    "unverified."
 )
+# Enough of the reply to name it when newer replies follow it in the conversation.
+_OPENING_CHARS = 80
 
 
 class ResearchCheckSettings(BaseModel):
@@ -57,9 +61,9 @@ class ResearchCheckSettings(BaseModel):
     agents: tuple[str, ...] | None = None
 
 
-def _clip(text: str) -> str:
+def _clip(text: str, limit: int = _MAX_PREVIEW_CHARS) -> str:
     text = " ".join(text.split())
-    return text if len(text) <= _MAX_PREVIEW_CHARS else f"{text[:_MAX_PREVIEW_CHARS]}…"
+    return text if len(text) <= limit else f"{text[:limit]}…"
 
 
 def _tool_line(entry: ToolTraceEntry) -> str:
@@ -79,10 +83,10 @@ def _research_check_messages(
 ) -> tuple[JudgmentMessage, ...]:
     """Show the judge the request, every lookup made for the reply, and the reply itself."""
     lines: list[str] = []
-    budget = _MAX_TOOL_CHARS
+    budget = _MAX_TOOL_BYTES
     for index, entry in enumerate(tool_trace):
         line = _tool_line(entry)
-        budget -= len(line) + 1
+        budget -= len(line.encode()) + 1
         if budget < 0:
             lines.append(f"- and {len(tool_trace) - index} more")
             break
@@ -93,6 +97,10 @@ def _research_check_messages(
         JudgmentMessage("assistant", tools),
         JudgmentMessage("assistant", reply),
     )
+
+
+def _reply_opening(reply: str) -> str:
+    return _clip(" ".join(line for line in reply.splitlines() if not is_visible_tool_marker_line(line)), _OPENING_CHARS)
 
 
 @hook(EVENT_MESSAGE_AFTER_RESPONSE, timeout_ms=35_000)
@@ -133,7 +141,7 @@ async def check_research(ctx: AfterResponseContext) -> None:
         return
     await ctx.send_message(
         envelope.room_id,
-        f"@{envelope.agent_name} {_FOLLOW_UP}",
+        f"@{envelope.agent_name} {_FOLLOW_UP.format(opening=_reply_opening(result.response_text))}",
         thread_id=envelope.target.resolved_thread_id,
         trigger_dispatch=True,
     )

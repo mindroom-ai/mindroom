@@ -7915,7 +7915,7 @@ visibility = ["mindroom.routing"]
 # The bundled research_check plugin is loaded from its directory by the plugin loader, never imported.
 [[modules]]
 path = "mindroom.research_check.hooks"
-depends_on = ["mindroom.agents", "mindroom.config.judgment", "mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.redaction"]
+depends_on = ["mindroom.agents", "mindroom.config.judgment", "mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.redaction", "mindroom.tool_system.events"]
 visibility = []
 
 [[interfaces]]

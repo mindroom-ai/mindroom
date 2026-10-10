@@ -21,7 +21,7 @@ from mindroom.judgment.execution import JudgmentCapacity, run_judgment
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.research_check import hooks as research_check
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import ToolTraceEntry, format_tool_combined
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 from tests.conftest import bind_runtime_paths, message_origin, runtime_paths_for, test_runtime_paths
 
@@ -189,7 +189,7 @@ async def test_true_decision_sends_follow_up_in_thread(harness: _Harness) -> Non
     sent = harness.sent[0]
     assert sent.room_id == "!room:localhost"
     assert sent.thread_id == "$thread"
-    assert sent.body.startswith("@code Research check:")
+    assert sent.body.startswith('@code Research check on your reply that starts "Go to Café Noir on Oudegracht 12')
     assert sent.trigger_dispatch is True
     assert sent.source_hook == "research_check:message:after_response"
     assert sent.extra_content is not None
@@ -373,6 +373,40 @@ async def test_many_long_tool_calls_still_fit_one_request(harness: _Harness) -> 
     tools = _conversation(request)[1]["text"]
     assert "example.com/0/" in tools
     assert tools.endswith("more")
+
+
+@pytest.mark.asyncio
+async def test_multibyte_tool_calls_still_fit_one_request(harness: _Harness) -> None:
+    """The tool list is budgeted in bytes, so non-Latin search results do not push the request over its limit."""
+    trace = tuple(
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="web_search",
+            args_preview="query=ラーメン",
+            result_preview="東京" * 250,
+        )
+        for _ in range(12)
+    )
+
+    await research_check.check_research(
+        harness.context(tool_trace=trace, response_text="ラーメン一蘭に行ってください。" * 50),
+    )
+
+    [request] = harness.requests
+    assert _conversation(request)[1]["text"].endswith("more")
+
+
+@pytest.mark.asyncio
+async def test_follow_up_quotes_the_reply_text_not_its_tool_markers(harness: _Harness) -> None:
+    """The quote names the checked reply even if newer replies follow it, and skips the inline tool-call markers."""
+    marker, entry = format_tool_combined("web_search", {"query": "coffee"}, "no results", tool_index=1)
+    reply = f"{marker}\n\n{_REPLY}"
+
+    await research_check.check_research(harness.context(response_text=reply, tool_trace=(entry,)))
+
+    [sent] = harness.sent
+    assert 'starts "Go to Café Noir on Oudegracht 12' in sent.body
+    assert "web_search" not in sent.body
 
 
 @pytest.mark.asyncio
