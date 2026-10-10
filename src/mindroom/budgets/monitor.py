@@ -268,6 +268,10 @@ class BudgetMonitor:
         self._snapshot = snapshot
 
     def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
-        if self._prices is None or self._prices[0] is not config:
-            self._prices = (config, price_table(config, self.runtime_paths))
-        return collect_monthly_spend(config, self.runtime_paths, now, self._prices[1])
+        prices = self._prices[1] if self._prices is not None and self._prices[0] is config else None
+        if prices is None:
+            table = price_table(config, self.runtime_paths)
+            prices = table.prices
+            # A priced model that failed to build is retried on the next scan instead of staying unpriced.
+            self._prices = (config, prices) if table.complete else None
+        return collect_monthly_spend(config, self.runtime_paths, now, prices)

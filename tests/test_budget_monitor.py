@@ -14,6 +14,7 @@ import pytest
 
 from mindroom.budgets import monitor as monitor_module
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model
+from mindroom.budgets.pricing import PriceTable
 from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -81,7 +82,7 @@ class _Scans:
         self.release.set()
         self.error: Exception | None = None
         self.unavailable = 0
-        monkeypatch.setattr(monitor_module, "price_table", lambda _config, _paths: {})
+        monkeypatch.setattr(monitor_module, "price_table", lambda _config, _paths: PriceTable(prices={}, complete=True))
         monkeypatch.setattr(monitor_module, "collect_monthly_spend", self._collect)
 
     def _collect(self, _config: Config, _paths: RuntimePaths, now: datetime, _prices: object) -> SpendSnapshot:
@@ -435,3 +436,29 @@ def test_provider_aliases_of_a_priced_model_are_swapped_too(tmp_path: Path, pric
     config.models["alias"] = ModelConfig(provider=unpriced, id="shared-model")
 
     assert budget_model(config, _paths(tmp_path), None, ALICE, "alias") == "luna"
+
+
+@pytest.mark.asyncio
+async def test_an_incomplete_price_table_is_rebuilt_on_the_next_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A priced model that failed to build once must not stay unpriced until the next reload."""
+    scans = _Scans(monkeypatch, {})
+    builds: list[bool] = []
+
+    def table(_config: Config, _paths: RuntimePaths) -> PriceTable:
+        complete = len(builds) > 0
+        builds.append(complete)
+        return PriceTable(prices={}, complete=complete)
+
+    monkeypatch.setattr(monitor_module, "price_table", table)
+    monitor, _current = _monitor(tmp_path, _config())
+    monitor.sync()
+    await _until(lambda: scans.calls == 1)
+    for expected_scans in (2, 3):
+        monitor.response_finished()
+        await _until(lambda expected=expected_scans: scans.calls == expected)
+
+    assert builds == [False, True]
+    await monitor.stop()

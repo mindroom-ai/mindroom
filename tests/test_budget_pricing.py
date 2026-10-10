@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
-from mindroom.budgets.pricing import PricedModel, cost_usd, price_table
+from mindroom.budgets.pricing import PricedModel, PriceTable, cost_usd, price_table
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -74,7 +75,7 @@ def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: P
     )
     paths = _paths(tmp_path)
 
-    table = price_table(config, paths)
+    table = price_table(config, paths).prices
 
     sol = get_model_instance(config, paths, "sol")
     opus = get_model_instance(config, paths, "opus")
@@ -102,7 +103,7 @@ def test_anthropic_family_providers_report_cache_outside_input(tmp_path: Path, p
         },
     )
 
-    (priced,) = price_table(config, _paths(tmp_path)).values()
+    (priced,) = price_table(config, _paths(tmp_path)).prices.values()
 
     assert priced.input_includes_cache is False
 
@@ -125,7 +126,7 @@ def test_conflicting_prices_for_one_model_keep_the_higher_price(tmp_path: Path) 
         },
     )
 
-    (priced,) = price_table(config, _paths(tmp_path)).values()
+    (priced,) = price_table(config, _paths(tmp_path)).prices.values()
 
     assert priced.pricing == ModelPricing(input=0.2, output=2)
 
@@ -158,7 +159,7 @@ def test_price_table_marks_providers_that_report_thinking_outside_output(
         },
     )
 
-    (priced,) = price_table(config, _paths(tmp_path)).values()
+    (priced,) = price_table(config, _paths(tmp_path)).prices.values()
 
     assert priced.output_includes_reasoning is includes
 
@@ -181,6 +182,24 @@ def test_conflicting_cache_prices_keep_the_higher_cache_price(tmp_path: Path) ->
         },
     )
 
-    (priced,) = price_table(config, _paths(tmp_path)).values()
+    (priced,) = price_table(config, _paths(tmp_path)).prices.values()
 
     assert priced.pricing.cache_read_price == 0.5
+
+
+def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -> None:
+    config = Config(
+        models={
+            "m": ModelConfig(
+                provider="openai",
+                id="gpt-6-luna",
+                api_key="key",
+                pricing=ModelPricing(input=1, output=2),
+            ),
+        },
+    )
+
+    with patch("mindroom.budgets.pricing.get_model_instance", side_effect=RuntimeError("missing SDK")):
+        table = price_table(config, _paths(tmp_path))
+
+    assert table == PriceTable(prices={}, complete=False)

@@ -611,10 +611,12 @@ class TestAgentBot(AgentBotTestBase):
                 agent_reply_memberships=memberships,
                 config_reload_status=reload_status,
                 shutdown_requested=shutdown_requested,
+                budget_monitor=MagicMock(),
             )
 
         assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is not memberships
         assert api_config_lifecycle.app_state(api_main.app).config_reload_status is None
+        assert api_config_lifecycle.app_state(api_main.app).budget_monitor is None
 
     @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:

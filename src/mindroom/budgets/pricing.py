@@ -58,13 +58,22 @@ def cost_usd(totals: TokenTotals, priced: PricedModel) -> float:
     ) / 1_000_000
 
 
-def price_table(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[str, str], PricedModel]:
+@dataclass(frozen=True, slots=True)
+class PriceTable:
+    """Prices by recorded (provider, model ID) usage identity, and whether every priced model could be built."""
+
+    prices: Mapping[tuple[str, str], PricedModel]
+    complete: bool
+
+
+def price_table(config: Config, runtime_paths: RuntimePaths) -> PriceTable:
     """Map each priced model's recorded (provider, model ID) usage identity to its prices.
 
     Usage records the provider name of the live model object, which can differ from the
     configured provider (for example per API transport), so priced models are instantiated.
     """
     table: dict[tuple[str, str], PricedModel] = {}
+    complete = True
     for model_name in sorted(config.models):
         model_config = config.models[model_name]
         if model_config.pricing is None:
@@ -74,6 +83,7 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[st
         except Exception as error:
             # Provider SDKs raise arbitrary construction errors; an unusable model stays unpriced.
             logger.warning("budget_pricing_model_unavailable", model=model_name, error=str(error))
+            complete = False
             continue
         key = (model.get_provider(), model.id)
         provider = provider_identity(model_config.provider)
@@ -88,7 +98,7 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[st
             if _price_weight(existing.pricing) >= _price_weight(priced.pricing):
                 continue
         table[key] = priced
-    return table
+    return PriceTable(prices=table, complete=complete)
 
 
 def _price_weight(pricing: ModelPricing) -> tuple[float, float, float]:

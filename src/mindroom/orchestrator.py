@@ -2741,6 +2741,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
         api_state.active_calls = None
         api_state.active_script_runs = None
         api_state.config_reload_status = None
+        api_state.budget_monitor = None
         api_state.agent_reply_memberships = AgentReplyMembershipIndex()
         if script_runtime is not None:
             await script_runtime.unbind_api()
