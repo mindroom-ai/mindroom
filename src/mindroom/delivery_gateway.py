@@ -1167,9 +1167,10 @@ class DeliveryGateway:
     ) -> MatrixSendOutcome | None:
         """Send one durable write of a reply as its next row, after the reply's earlier rows.
 
-        The payload is prepared under the reply's sending lock, once earlier
-        rows have resolved, so an edit can name the event the reply's create
-        bound. The lifecycle rule decides the row inside its enqueue
+        The payload is prepared and enqueued under the reply's sending lock,
+        and earlier rows whose outcome is unknown are flushed before it; an
+        edit whose target the reply's create has not bound yet is aimed at it
+        when claimed. The lifecycle rule decides the row inside its enqueue
         transaction; a rule that refuses raises ``ReplyWriteRefusedError``
         and nothing is written.
         """

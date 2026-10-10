@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, cast
 
-from mindroom.reply_lifecycle import ReplyState, Rollback, Span, SpanKind, SpanOutcome, SpanSources
+from mindroom.reply_lifecycle import ReplyState, Rollback, Span, SpanKind, SpanOutcome
+from mindroom.response_sources import ResponseSources
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
@@ -52,7 +53,7 @@ def _rollback(stored: str | None) -> Rollback | None:
     )
 
 
-def _sources(transaction: Transaction, principal_id: str, span_id: str) -> SpanSources:
+def _sources(transaction: Transaction, principal_id: str, span_id: str) -> ResponseSources:
     rows = transaction.fetchall(
         """
         SELECT role, event_id FROM reply_span_sources
@@ -64,11 +65,7 @@ def _sources(transaction: Transaction, principal_id: str, span_id: str) -> SpanS
     by_role: dict[str, list[str]] = {role: [] for role in _ROLES}
     for row in rows:
         by_role[str(row["role"])].append(str(row["event_id"]))
-    return SpanSources(
-        pending=tuple(by_role["pending"]),
-        logical=tuple(by_role["logical"]),
-        discovery=tuple(by_role["discovery"]),
-    )
+    return ResponseSources(tuple(by_role["pending"]), tuple(by_role["logical"]), tuple(by_role["discovery"]))
 
 
 def _span(transaction: Transaction, principal_id: str, row: Row) -> Span:
@@ -182,9 +179,9 @@ def save(transaction: Transaction, principal_id: str, span: Span) -> None:
             ),
         )
         roles = (
-            ("pending", span.sources.pending),
-            ("logical", span.sources.logical),
-            ("discovery", span.sources.discovery),
+            ("pending", span.sources.pending_event_ids),
+            ("logical", span.sources.logical_source_event_ids),
+            ("discovery", span.sources.discovery_event_ids),
         )
         for role, event_ids in roles:
             for ordinal, event_id in enumerate(event_ids):

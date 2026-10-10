@@ -333,7 +333,7 @@ async def _paused_case(  # noqa: PLR0915
     await seed_finished_reply(
         principal,
         answer_id,
-        sources=rl.SpanSources(pending=(), logical=(source_id,)),
+        sources=ResponseSources(pending_event_ids=(source_id,), logical_source_event_ids=(source_id,)),
         room_id=room_id,
         thread_id=None,
         entity_name="general",

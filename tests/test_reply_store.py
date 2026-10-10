@@ -40,9 +40,9 @@ from mindroom.reply_lifecycle import (
     Rollback,
     SpanKind,
     SpanOutcome,
-    SpanSources,
 )
 from mindroom.reply_presentation import Presentation, encode_presentation
+from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord
@@ -64,7 +64,11 @@ def _request(span_id: str = "span-1", *, reply_id: str = "reply-1", source: str 
     return ClaimRequest(
         span_id=span_id,
         delivery_id=source,
-        sources=SpanSources(pending=(source,), logical=(source,), discovery=("$alias",)),
+        sources=ResponseSources(
+            pending_event_ids=(source,),
+            logical_source_event_ids=(source,),
+            discovery_event_ids=("$alias",),
+        ),
         bot_generation="gen-1",
         now_ns=10,
         new_reply_id=reply_id,
@@ -125,7 +129,11 @@ async def test_reply_and_span_round_trip_every_field(journal_store: EventJournal
     span = await principal.replies.span("span-1")
     assert span == transition.claimed
     assert span is not None
-    assert span.sources == SpanSources(pending=("$source",), logical=("$source",), discovery=("$alias",))
+    assert span.sources == ResponseSources(
+        pending_event_ids=("$source",),
+        logical_source_event_ids=("$source",),
+        discovery_event_ids=("$alias",),
+    )
 
 
 async def test_span_outcome_is_write_once_and_rollback_round_trips(journal_store: EventJournalStore) -> None:
@@ -817,7 +825,10 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     await principal.replies.write_generation("gen-1")
     request = replace(
         _request(source="$first"),
-        sources=SpanSources(pending=("$first", "$second"), logical=("$first", "$second")),
+        sources=ResponseSources(
+            pending_event_ids=("$first", "$second"),
+            logical_source_event_ids=("$first", "$second"),
+        ),
     )
     span = (await principal.replies.claim(request)).transition.claimed
     assert span is not None
@@ -869,7 +880,7 @@ async def _answered_and_regenerating(principal: PrincipalStore) -> rl.Span:
     await admit(principal, "$edit")
     regeneration = replace(
         _request("span-2", source="$edit"),
-        sources=SpanSources(pending=("$edit",), logical=("$source",)),
+        sources=ResponseSources(pending_event_ids=("$edit",), logical_source_event_ids=("$source",)),
         driving_edit_id="$edit",
     )
     claimed = (await principal.replies.claim(regeneration, existing_event_id="$answer")).transition
@@ -905,7 +916,7 @@ async def test_a_regeneration_keeps_the_membership_its_edit_was_admitted_in(jour
     await admit(principal, "$edit")
     regeneration = replace(
         _request("span-2", reply_id="reply-new", source="$edit"),
-        sources=SpanSources(pending=("$edit",), logical=("$source",)),
+        sources=ResponseSources(pending_event_ids=("$edit",), logical_source_event_ids=("$source",)),
         driving_edit_id="$edit",
     )
     claimed = (await principal.replies.claim(regeneration, existing_event_id="$answer")).transition
@@ -1432,7 +1443,10 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
     claim = rl.claim(
         replace(
             _request(source="$source-1"),
-            sources=SpanSources(pending=continuation.source_event_ids, logical=continuation.source_event_ids),
+            sources=ResponseSources(
+                pending_event_ids=continuation.source_event_ids,
+                logical_source_event_ids=continuation.source_event_ids,
+            ),
         ),
         ClaimContext(
             reply=None,

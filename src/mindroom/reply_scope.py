@@ -45,6 +45,7 @@ from mindroom.reply_presentation import (
     render_body,
     with_answer,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.streaming import ProgressPermission, UnfinishedStreamedReply
 from mindroom.tool_system.call_record import recording_tool_calls
@@ -63,7 +64,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.replies import PostCommitEffect
     from mindroom.matrix_delivery import ReplyRowEnqueuer
-    from mindroom.response_sources import ResponseSources
     from mindroom.turn_record import TurnRecord
 
 
@@ -456,7 +456,7 @@ class ReplyRuntime:
         self,
         *,
         delivery_id: str,
-        sources: rl.SpanSources,
+        sources: ResponseSources,
         room_id: str,
         thread_id: str | None,
         placeholder: str = AGENT_PLACEHOLDER,
@@ -482,7 +482,13 @@ class ReplyRuntime:
             applied = await self.committed(
                 await self.store.replies.claim(request, existing_event_id=existing_event_id),
             )
-        return await self._opened(applied.transition, candidates, room_id=room_id, pending=sources.pending, empty=empty)
+        return await self._opened(
+            applied.transition,
+            candidates,
+            room_id=room_id,
+            pending=sources.pending_event_ids,
+            empty=empty,
+        )
 
     @contextmanager
     def _expecting(self, span_ids: tuple[str, ...]) -> Iterator[None]:
@@ -527,7 +533,7 @@ class ReplyRuntime:
         self,
         *,
         delivery_id: str,
-        sources: rl.SpanSources,
+        sources: ResponseSources,
         room_id: str,
         thread_id: str | None,
         empty: Presentation,
@@ -564,7 +570,7 @@ class ReplyRuntime:
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
         claim = await self._new_request(
             delivery_id=continuation.source_event_ids[0],
-            sources=span_sources(continuation.sources),
+            sources=continuation.sources,
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,
             empty=empty,
@@ -607,7 +613,7 @@ class ReplyRuntime:
         """
         claim = await self._new_request(
             delivery_id=delivery_id,
-            sources=rl.SpanSources(pending=pending, logical=logical, discovery=discovery),
+            sources=ResponseSources(pending, logical, discovery),
             room_id=room_id,
             thread_id=thread_id,
             empty=Presentation(),
@@ -748,15 +754,6 @@ def pause_decision(
         write,
         in_place=in_place,
         now_ns=time.time_ns(),
-    )
-
-
-def span_sources(sources: ResponseSources) -> rl.SpanSources:
-    """Return the sources one response answers, as its span records them."""
-    return rl.SpanSources(
-        pending=sources.pending_event_ids,
-        logical=sources.logical_source_event_ids,
-        discovery=sources.discovery_event_ids,
     )
 
 

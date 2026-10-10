@@ -11,7 +11,6 @@ from mindroom import reply_lifecycle as rl
 from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from mindroom.reply_scope import span_sources
 from mindroom.response_sources import ResponseSources
 from tests.conftest import message_origin, unwrap_extracted_collaborator
 
@@ -57,7 +56,7 @@ async def continuation_claim(
     return rl.ClaimRequest(
         span_id=uuid4().hex,
         delivery_id=continuation.source_event_ids[0],
-        sources=span_sources(continuation.sources),
+        sources=continuation.sources,
         bot_generation=generation,
         now_ns=time.time_ns(),
         new_reply_id=uuid4().hex,

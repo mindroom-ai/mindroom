@@ -20,7 +20,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import SpanSources
+from mindroom.response_sources import ResponseSources
 from tests.conftest import (
     journal_edit_regenerator_deps,
     patch_response_runner_module,
@@ -128,7 +128,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
     await seed_finished_reply(
         principal,
         answer_id,
-        sources=SpanSources(pending=(), logical=(source_id,)),
+        sources=ResponseSources(pending_event_ids=(source_id,), logical_source_event_ids=(source_id,)),
         room_id=room_id,
         thread_id=None,
         entity_name="general",

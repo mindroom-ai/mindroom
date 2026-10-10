@@ -20,7 +20,6 @@ from mindroom.reply_lifecycle import (
     Span,
     SpanKind,
     SpanOutcome,
-    SpanSources,
     StopFacts,
     TerminalWrite,
     WriteFacts,
@@ -28,6 +27,7 @@ from mindroom.reply_lifecycle import (
 )
 from mindroom.reply_presentation import NoteKind, note_segment
 from mindroom.reply_scope import interrupted_end
+from mindroom.response_sources import ResponseSources
 
 if TYPE_CHECKING:
     from mindroom.cancellation import CancelSource
@@ -41,7 +41,7 @@ def _request(span_id: str = "span-1", **changes: object) -> ClaimRequest:
     request = ClaimRequest(
         span_id=span_id,
         delivery_id="$source",
-        sources=SpanSources(pending=("$source",), logical=("$source",)),
+        sources=ResponseSources(pending_event_ids=("$source",), logical_source_event_ids=("$source",)),
         bot_generation=GEN,
         now_ns=NOW,
         new_reply_id="reply-1",
@@ -226,7 +226,7 @@ def test_an_edit_of_a_reply_waiting_for_its_replay_regenerates_without_a_rollbac
     released = rl.release(replace(reply, event_id="$reply", placeholder_only=False), span, now_ns=NOW)
     assert released.reply is not None
     waiting = _span_after(released, span.span_id)
-    edit_sources = SpanSources(pending=("$edit",), logical=("$source",))
+    edit_sources = ResponseSources(pending_event_ids=("$edit",), logical_source_event_ids=("$source",))
     edit = rl.claim(
         _request("span-2", delivery_id="$edit", driving_edit_id="$edit", sources=edit_sources),
         _context(released.reply, waiting),
@@ -234,7 +234,7 @@ def test_an_edit_of_a_reply_waiting_for_its_replay_regenerates_without_a_rollbac
     assert edit.claimed is not None
     assert edit.claimed.kind is SpanKind.REGENERATION
     assert edit.claimed.rollback is None
-    assert edit.claimed.sources.pending == ("$edit",)
+    assert edit.claimed.sources.pending_event_ids == ("$edit",)
 
 
 def test_regeneration_rerun_keeps_its_rollback() -> None:

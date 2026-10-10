@@ -47,7 +47,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-from mindroom.reply_lifecycle import SpanSources
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
@@ -467,7 +466,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     await seed_finished_reply(
         bot.journal_principal(),
         "$response",
-        sources=SpanSources(pending=(), logical=("$original",)),
+        sources=ResponseSources(pending_event_ids=("$original",), logical_source_event_ids=("$original",)),
         room_id="!room:localhost",
         thread_id=None,
         entity_name="team_bot",

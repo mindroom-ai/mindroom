@@ -39,6 +39,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import (
     _PROGRESS_PLACEHOLDER,
     CANCELLED_RESPONSE_NOTE,
@@ -1228,7 +1229,7 @@ async def test_a_resumed_team_pause_keeps_its_pending_tool_in_the_reply(config: 
         rl.ClaimRequest(
             span_id="span-1",
             delivery_id="$source",
-            sources=rl.SpanSources(pending=("$source",), logical=("$source",)),
+            sources=ResponseSources(pending_event_ids=("$source",), logical_source_event_ids=("$source",)),
             bot_generation="gen",
             now_ns=1,
             new_reply_id="reply-1",

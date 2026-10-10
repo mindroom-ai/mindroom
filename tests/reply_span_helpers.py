@@ -49,7 +49,7 @@ async def seed_finished_reply(
     principal: PrincipalStore,
     event_id: str,
     *,
-    sources: rl.SpanSources,
+    sources: ResponseSources,
     room_id: str,
     thread_id: str | None,
     entity_name: str = "agent",
@@ -118,7 +118,10 @@ async def reply_span(
         await seed_finished_reply(
             principal,
             regenerated_event_id,
-            sources=rl.SpanSources(pending=(), logical=logical_source_event_ids or (source_event_id,)),
+            sources=ResponseSources(
+                pending_event_ids=(source_event_id,),
+                logical_source_event_ids=logical_source_event_ids or (source_event_id,),
+            ),
             room_id=room_id,
             thread_id=thread_id,
             entity_name=entity_name,
@@ -126,9 +129,9 @@ async def reply_span(
     async with runtime.span_scope() as slot:
         handle = await runtime.claim(
             delivery_id=source_event_id,
-            sources=rl.SpanSources(
-                pending=(source_event_id,),
-                logical=logical_source_event_ids or (source_event_id,),
+            sources=ResponseSources(
+                pending_event_ids=(source_event_id,),
+                logical_source_event_ids=logical_source_event_ids or (source_event_id,),
             ),
             room_id=room_id,
             thread_id=thread_id,

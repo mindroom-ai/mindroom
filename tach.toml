@@ -526,6 +526,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
+    "mindroom.response_sources",
     "mindroom.stop",
     "mindroom.streaming",
     "mindroom.tool_system.call_record",
@@ -2803,6 +2804,7 @@ visibility = [
     "mindroom.approval_response",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
+    "mindroom.reply_scope",
     "mindroom.response_runner",
     "mindroom.turn_controller",
 ]

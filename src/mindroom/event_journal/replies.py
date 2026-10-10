@@ -97,7 +97,7 @@ def settled_event_ids(transaction: Transaction, principal_id: str, transition: T
     settled: list[str] = []
     for effect in transition.effects:
         if isinstance(effect, SettleSources):
-            settled.extend(_span_for(transaction, principal_id, transition, effect.span_id).sources.pending)
+            settled.extend(_span_for(transaction, principal_id, transition, effect.span_id).sources.pending_event_ids)
     return tuple(dict.fromkeys(settled))
 
 
@@ -140,16 +140,17 @@ def _run(
             assert reply is not None, "a settlement belongs to a reply's transition"
             # Nothing answers a turn whose every message the user deleted, whichever rule settles it.
             if not answered or all(
-                is_tombstoned(transaction, principal_id, reply.room_id, source) for source in span.sources.logical
+                is_tombstoned(transaction, principal_id, reply.room_id, source)
+                for source in span.sources.logical_source_event_ids
             ):
-                journal.settle_many(transaction, principal_id, span.sources.pending)
+                journal.settle_many(transaction, principal_id, span.sources.pending_event_ids)
                 return
             completed = turn_records.settle_turn(
                 transaction,
                 principal_id,
                 reply.entity_name,
-                pending=span.sources.pending,
-                logical=span.sources.logical,
+                pending=span.sources.pending_event_ids,
+                logical=span.sources.logical_source_event_ids,
             )
             if completed is not None:
                 # The ledger's write ordering and cache learn it after the commit.
@@ -254,9 +255,12 @@ def end_replies_of_deleted_source(
         if reply is None or reply.terminal or reply.room_id != room_id:
             continue
         span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
-        if span is None or event_id not in span.sources.logical:
+        if span is None or event_id not in span.sources.logical_source_event_ids:
             continue
-        if not all(is_tombstoned(transaction, principal_id, room_id, source) for source in span.sources.logical):
+        if not all(
+            is_tombstoned(transaction, principal_id, room_id, source)
+            for source in span.sources.logical_source_event_ids
+        ):
             continue
         transition = rl.sources_deleted(reply, span, now_ns=time.time_ns())
         if transition.applied:
@@ -360,7 +364,7 @@ def claim(
         found = reply_messages.for_sources(
             transaction,
             principal_id,
-            (*request.sources.pending, *request.sources.logical),
+            (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
         )
         reply = None if found is None else reply_messages.lock(transaction, principal_id, found.reply_id)
     if reply is not None and reply.state is rl.ReplyState.GONE and request.driving_edit_id is None:
@@ -496,7 +500,9 @@ def drop_replays(
         assert reply is not None
         last = reply_spans.load(transaction, principal_id, reply.last_span_id)
         assert last is not None
-        sources_pending = any(journal.is_pending(transaction, principal_id, source) for source in last.sources.pending)
+        sources_pending = any(
+            journal.is_pending(transaction, principal_id, source) for source in last.sources.pending_event_ids
+        )
         applied = apply(
             transaction,
             principal_id,
@@ -543,7 +549,7 @@ def _owner_lost(
         facts = rl.OwnerLostFacts(
             active_generation=active_generation,
             sources_pending=any(
-                journal.is_pending(transaction, principal_id, event_id) for event_id in last.sources.pending
+                journal.is_pending(transaction, principal_id, event_id) for event_id in last.sources.pending_event_ids
             ),
         )
         transition = rl.owner_lost(reply, last, facts, now_ns=now_ns)

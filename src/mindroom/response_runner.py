@@ -112,7 +112,6 @@ from mindroom.reply_scope import (
     pause_decision,
     pause_write,
     release_decision,
-    span_sources,
     suppress_decision,
     terminal_source_decision,
 )
@@ -3305,7 +3304,7 @@ class ResponseRunner:
             return request
         handle = await self.deps.replies.claim(
             delivery_id=request.response_envelope.source_event_id,
-            sources=span_sources(request.sources),
+            sources=request.sources,
             room_id=request.room_id,
             thread_id=request.thread_id,
             placeholder=TEAM_PLACEHOLDER if history_scope.kind == "team" else AGENT_PLACEHOLDER,

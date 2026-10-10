@@ -17,9 +17,10 @@ from mindroom.matrix.client_delivery import (
     MatrixSendOutcome,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.reply_lifecycle import ReplyState, SpanOutcome, SpanSources
+from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.reply_presentation import decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
+from mindroom.response_sources import ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config_with_team,
@@ -260,7 +261,7 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
     await seed_finished_reply(
         bot.journal_principal(),
         "$prior_answer",
-        sources=SpanSources(pending=(), logical=("$event",)),
+        sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
         room_id=regen_request.room_id,
         thread_id=regen_request.thread_id,
         entity_name=bot.agent_name,

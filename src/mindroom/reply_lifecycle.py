@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.response_sources import ResponseSources
+
 # ---------------------------------------------------------------------------
 # Vocabulary
 
@@ -117,15 +119,6 @@ FailureDisposition = Literal["cancelled_by_user", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
-class SpanSources:
-    """The immutable sources a span answers (``ResponseSources``)."""
-
-    pending: tuple[str, ...]
-    logical: tuple[str, ...]
-    discovery: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class Rollback:
     """What a regeneration restores when it ends before it recorded any write Matrix may show.
 
@@ -149,7 +142,7 @@ class Span:
     reply_id: str
     kind: SpanKind
     delivery_id: str
-    sources: SpanSources
+    sources: ResponseSources
     bot_generation: str
     claimed_at_ns: int
     # The reply's write sequence at claim; any acknowledged write above it is this span's or later.
@@ -540,7 +533,7 @@ class ClaimRequest:
 
     span_id: str
     delivery_id: str
-    sources: SpanSources
+    sources: ResponseSources
     bot_generation: str
     now_ns: int
     # The membership the claim's delivery was admitted in, which a new or regenerated reply writes in.

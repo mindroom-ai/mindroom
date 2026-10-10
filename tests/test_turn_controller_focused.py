@@ -333,7 +333,7 @@ class _RecordingDeliveryGateway:
         self.failed_dispatches.append((event_id, error_text))
         sent = next(request for index, request in enumerate(self.sent, 1) if event_id == f"$sent-{index}:localhost")
         if self.answered is not None and sent.reply_write is not None:
-            await self.answered(sent.reply_write.span.sources.logical)
+            await self.answered(sent.reply_write.span.sources.logical_source_event_ids)
         return True
 
 

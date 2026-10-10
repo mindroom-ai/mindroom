@@ -20,7 +20,6 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import interactive
-from mindroom import reply_lifecycle as rl
 from mindroom.agent_storage import get_agent_session
 from mindroom.coalescing_batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
@@ -224,7 +223,10 @@ async def _record_handled_turn(
         await seed_finished_reply(
             bot._reply_runtime.store,
             response_event_id,
-            sources=rl.SpanSources(pending=(), logical=tuple(source_event_ids)),
+            sources=ResponseSources(
+                pending_event_ids=tuple(source_event_ids),
+                logical_source_event_ids=tuple(source_event_ids),
+            ),
             room_id=conversation_target.room_id,
             thread_id=conversation_target.resolved_thread_id,
             entity_name=response_owner,

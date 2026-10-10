@@ -26,7 +26,7 @@ class _DirectResponseOutbox:
         span = await self.principal.replies.span(request.span_id)
         reply = None if span is None else await self.principal.replies.load(span.reply_id)
         if span is not None and reply is not None:
-            for event_id in span.sources.pending:
+            for event_id in span.sources.pending_event_ids:
                 if await self.principal.load_event(event_id) is None:
                     await self.principal.admit(
                         InboundEvent(

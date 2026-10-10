@@ -33,13 +33,13 @@ from mindroom.reply_lifecycle import (
     Span,
     SpanKind,
     SpanOutcome,
-    SpanSources,
     StopFacts,
     TerminalWrite,
     WriteFacts,
     WriteStage,
     _RowIntent,
 )
+from mindroom.response_sources import ResponseSources
 
 _SETTLING_OUTCOMES = frozenset(
     {
@@ -139,10 +139,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         return not self.model.removed
 
     def _settle(self, span_id: str) -> None:
-        self.model.settled.update(self.model.spans[span_id].sources.pending)
+        self.model.settled.update(self.model.spans[span_id].sources.pending_event_ids)
 
     def _is_settled(self, span_id: str) -> bool:
-        return set(self.model.spans[span_id].sources.pending) <= self.model.settled
+        return set(self.model.spans[span_id].sources.pending_event_ids) <= self.model.settled
 
     def _current(self) -> Span | None:
         reply = self.model.reply
@@ -222,10 +222,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             case SettleSources(span_id=span_id, answered=answered):
                 settled = self.model.spans[span_id]
                 # As the store does: nothing answers a turn whose every message the user deleted.
-                answered = answered and not set(settled.sources.logical) <= self.model.deleted
+                answered = answered and not set(settled.sources.logical_source_event_ids) <= self.model.deleted
                 if answered:
                     self.model.turn_answered = True
-                    for source in settled.sources.pending:
+                    for source in settled.sources.pending_event_ids:
                         if source in self.model.settled:
                             continue
                         # I17: no source is answered twice.
@@ -261,11 +261,17 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             paused = self.model.spans[approval.paused_span_id]
             delivery_id, sources = paused.delivery_id, paused.sources
         elif edit is not None:
-            delivery_id, sources = edit, SpanSources(pending=(edit,), logical=("$source",))
+            delivery_id, sources = (
+                edit,
+                ResponseSources(pending_event_ids=(edit,), logical_source_event_ids=("$source",)),
+            )
         elif replay_of is not None:
             delivery_id, sources = replay_of.delivery_id, replay_of.sources
         else:
-            delivery_id, sources = "$source", SpanSources(pending=("$source",), logical=("$source",))
+            delivery_id, sources = (
+                "$source",
+                ResponseSources(pending_event_ids=("$source",), logical_source_event_ids=("$source",)),
+            )
         request = ClaimRequest(
             span_id=self._next("span"),
             delivery_id=delivery_id,
@@ -1143,7 +1149,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert last is not None
         if (
             last.outcome in rl._SOURCES_PENDING_OUTCOMES
-            and "$source" in last.sources.pending
+            and "$source" in last.sources.pending_event_ids
             and not self._is_settled(last.span_id)
         ):
             assert not self.model.turn_answered, (reply, last)

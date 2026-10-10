@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
 from mindroom.reply_lifecycle import ReplyState
-from mindroom.response_sources import ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import membership_state, outbox, reply_messages, reply_spans
@@ -19,6 +18,8 @@ from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from mindroom.response_sources import ResponseSources
 
     from .backend import Row, Transaction
 
@@ -356,7 +357,7 @@ def _from_rows(
         thread_id=reply.thread_id,
         requester_id=cast("str", stored["requester_id"]),
         response_event_id=reply.event_id,
-        sources=ResponseSources(span.sources.pending, span.sources.logical, span.sources.discovery),
+        sources=span.sources,
         calls=calls,
         state="claimed" if claimed else cast("ApprovalContinuationState", row["state"]),
         delegation_storage_bindings=cast(
@@ -449,7 +450,9 @@ def create(
     assert continuation.span_id is not None, "every continuation pauses a reply span"
     span = reply_spans.load(transaction, principal_id, continuation.span_id)
     assert span is not None
-    assert span.sources.pending == continuation.source_event_ids, "a continuation holds its paused span's sources"
+    assert span.sources.pending_event_ids == continuation.source_event_ids, (
+        "a continuation holds its paused span's sources"
+    )
     # Admission and approval creation must agree which owner receives a
     # concurrent source redaction, on PostgreSQL as well as SQLite.
     membership_epoch = membership_state.claim_active_membership_epoch(
