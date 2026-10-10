@@ -1397,7 +1397,7 @@ async def run_delegated_child_response(
     so no adapter ever has to resume it natively.
     """
     identity = child_execution_identity(child)
-    active_config = authorize_delegation(
+    authorized_config = authorize_delegation(
         child.caller_agent_name,
         child.child_agent_name,
         prompt,
@@ -1406,10 +1406,11 @@ async def run_delegated_child_response(
         execution_identity=replace(identity, agent_name=child.caller_agent_name),
         depth=child.depth - 1,
         grant=delegation_grant(child),
-        approval_config=approval_config,
     )
-    if isinstance(active_config, str):
-        return active_config
+    if isinstance(authorized_config, str):
+        return authorized_config
+    # A caller's pre-approval overlay replaces the live config for the child's run.
+    active_config = approval_config if approval_config is not None else authorized_config
     knowledge = await resolve_agent_knowledge_access_async(
         child.child_agent_name,
         active_config,

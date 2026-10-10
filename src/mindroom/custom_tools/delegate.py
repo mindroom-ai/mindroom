@@ -15,7 +15,7 @@ from agno.tools.function import Function
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.delegation.direct import run_direct_child_turn
-from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn
+from mindroom.delegation.lifecycle import authorize_delegation, live_delegation_config, prepare_child_turn
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     follow_up_refusal,
@@ -26,10 +26,7 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.minimal_mode_preflight import minimal_subagent_candidates
-from mindroom.tool_system.runtime_context import (
-    get_detached_requester_context,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
 )
@@ -239,7 +236,7 @@ class DelegateTools(Toolkit):
             workspace_root=self._workspace_root,
             available_toolkits=lambda: caller_toolkit_names(
                 self._agent_name,
-                self._live_config(),
+                live_delegation_config(self._config),
                 delegation_depth=self._delegation_depth,
             ),
             cap=self._persona_tools,
@@ -253,15 +250,6 @@ class DelegateTools(Toolkit):
             agent_mode=request.agent_mode,
             persona=request.persona,
         )
-
-    def _live_config(self) -> Config:
-        """Return the config authorization and execution will use, not the one this toolkit was built with."""
-        context = get_tool_runtime_context()
-        if context is not None:
-            return context.current_config
-        detached = get_detached_requester_context()
-        live = detached.config_provider() if detached is not None else None
-        return live if live is not None else self._config
 
     def _caller_identity(self) -> ToolExecutionIdentity:
         """Resolve one concrete caller identity for execution, ownership, and audit."""

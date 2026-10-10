@@ -303,6 +303,16 @@ def _target_refusal(
     return f"Cannot delegate to '{agent_name}'. Allowed subagents: {', '.join(allowed_targets)}."
 
 
+def live_delegation_config(config: Config) -> Config:
+    """Return the live config that authorization and execution use, not a toolkit's or response's snapshot."""
+    context = get_tool_runtime_context()
+    if context is not None:
+        return context.current_config
+    detached = get_detached_requester_context()
+    live = detached.config_provider() if detached is not None else None
+    return live if live is not None else config
+
+
 def authorize_delegation(  # noqa: PLR0911
     caller_name: str,
     agent_name: str,
@@ -315,13 +325,8 @@ def authorize_delegation(  # noqa: PLR0911
     allowed_targets: Sequence[str] | None = None,
     model: str | None = None,
     grant: _DelegationGrant = "delegate",
-    approval_config: Config | None = None,
 ) -> Config | str:
-    """Recheck the caller's current grant and requester authority.
-
-    ``approval_config``, when given, is returned in place of the active config
-    so a caller can run the child under its own pre-approval overlay.
-    """
+    """Recheck the caller's current grant and requester authority, returning the live config."""
     refusal = _target_refusal(
         caller_name,
         agent_name,
@@ -381,7 +386,7 @@ def authorize_delegation(  # noqa: PLR0911
     if model is not None and (not isinstance(model, str) or model not in active_config.models):
         available_models = ", ".join(sorted(active_config.models))
         return f"Cannot delegate: Unknown model '{model}'. Available models: {available_models}."
-    return approval_config if approval_config is not None else active_config
+    return active_config
 
 
 def prepare_child_turn(

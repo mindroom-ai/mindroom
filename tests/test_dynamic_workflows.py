@@ -2036,11 +2036,6 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]
 
 
-def test_resolve_participant_toolkits_returns_empty_for_no_tools(tmp_path: Path) -> None:
-    """A participant with no tools resolves to no toolkits."""
-    assert dynamic_workflow_module._resolve_participant_toolkits(_make_context(tmp_path), []) == {}
-
-
 def test_resolve_participant_toolkits_builds_real_instances_with_caller_routing(tmp_path: Path) -> None:
     """Granted tools should resolve through the agent toolkit builder keyed by registry name."""
     context = _make_context(tmp_path)

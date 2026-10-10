@@ -980,7 +980,6 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
         agents={"leader": AgentConfig(display_name="Leader")},
         defaults=DefaultsConfig(tools=[]),
     )
-    override = Config(agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"])})
     identity = _identity()
     options = {"runtime_paths": paths, "execution_identity": identity, "depth": 0}
 
@@ -991,15 +990,6 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
             "task",
             config=with_workflow,
             grant="dynamic_workflow",
-            **options,
-        )
-        overridden = authorize_delegation(
-            "leader",
-            "leader",
-            "task",
-            config=with_workflow,
-            grant="dynamic_workflow",
-            approval_config=override,
             **options,
         )
         other_agent = authorize_delegation(
@@ -1022,7 +1012,6 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
         )
 
     assert isinstance(granted, Config)
-    assert overridden is override
     assert isinstance(other_agent, str)
     assert isinstance(delegate_rule, str)
     assert isinstance(revoked, str)

@@ -122,7 +122,7 @@ Calls past the budget fail with a tool error, and this event is logged once when
 
 | Field | Meaning |
 |-------|---------|
-| `entity` | Agent or team name; dynamic workflow participants appear as `dynamic_workflow_<participant id>` |
+| `entity` | Agent or team name; dynamic workflow participants appear under the calling agent's name |
 | `budget` | The run's tool-call budget |
 | `model_requests` | Model requests the run made before it was stopped |
 

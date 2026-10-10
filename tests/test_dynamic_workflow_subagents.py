@@ -31,7 +31,12 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _config(*, tools: list[object] | None = None, rules: dict[str, str] | None = None) -> Config:
+def _config(
+    *,
+    tools: list[object] | None = None,
+    rules: dict[str, str] | None = None,
+    approval_default: str = "auto_approve",
+) -> Config:
     return Config(
         agents={
             "leader": AgentConfig(
@@ -46,7 +51,10 @@ def _config(*, tools: list[object] | None = None, rules: dict[str, str] | None =
             "default": ModelConfig(provider="test", id="default-model"),
             "haiku": ModelConfig(provider="test", id="haiku-model"),
         },
-        tool_approval={"rules": [{"match": match, "action": action} for match, action in (rules or {}).items()]},
+        tool_approval={
+            "default": approval_default,
+            "rules": [{"match": match, "action": action} for match, action in (rules or {}).items()],
+        },
     )
 
 
@@ -200,8 +208,11 @@ async def test_profile_participant_runs_workspace_profile(tmp_path: Path, monkey
 
 @pytest.mark.asyncio
 async def test_preapproved_participant_tool_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tool listed in the caller's dynamic_workflow allowed_tools runs without approval."""
-    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["calculator"]}}, "calculator"])
+    """A tool listed in the caller's dynamic_workflow allowed_tools runs without approval, even under a gated default."""
+    config = _config(
+        tools=[{"dynamic_workflow": {"allowed_tools": ["calculator"]}}, "calculator"],
+        approval_default="require_approval",
+    )
     workflow = _Workflow(
         tmp_path,
         monkeypatch,

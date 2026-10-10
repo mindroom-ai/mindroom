@@ -38,6 +38,7 @@ from mindroom.delegation.lifecycle import (
     child_run_context,
     child_tool_runtime_context,
     finish_child_turn,
+    live_delegation_config,
     note_child_run_id,
     observe_child_event,
     prepare_child_turn,
@@ -681,7 +682,7 @@ async def _resolve_follow_up_target(
     refusal = retained is None and follow_up_refusal(
         previous_child.persona,
         caller_identity.agent_name,
-        _current_config(config),
+        live_delegation_config(config),
         delegation_depth=depth,
     )
     if refusal:
@@ -731,7 +732,7 @@ def _resolve_fresh_target(
         workspace_root=workspace.root if workspace is not None else None,
         available_toolkits=lambda: caller_toolkit_names(
             caller_identity.agent_name,
-            _current_config(config),
+            live_delegation_config(config),
             delegation_depth=depth,
         ),
         cap=context.persona_tools if (context := get_tool_runtime_context()) is not None else None,
@@ -739,12 +740,6 @@ def _resolve_fresh_target(
     if isinstance(request, str):
         return request
     return _DelegationTarget(child_name, task, None, request.agent_mode, request.persona, request.model)
-
-
-def _current_config(config: Config) -> Config:
-    """Use the live config that authorization and execution use, not the response's snapshot."""
-    context = get_tool_runtime_context()
-    return context.current_config if context is not None else config
 
 
 def _validate_child_scope(
