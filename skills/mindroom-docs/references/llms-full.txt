@@ -12253,7 +12253,8 @@ Find the three most serious risks in the proposal you are given, each with evide
 `description` is required, `tools`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
 An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt` or `tools`.
 Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters; each file is limited to 64 KiB, and at most 256 profiles are read.
-On the agent's next run, its `delegate` instructions list every profile with its description and every invalid profile with the reason, or only how many profiles exist when that list would exceed 2,000 characters, in which case the agent lists `subagents/` itself.
+On the agent's next run, its `run_subagent` tool lists every profile with its description and every invalid profile with the reason, or only how many profiles exist when that list would exceed 2,000 characters, in which case the agent lists `subagents/` itself.
+The list covers at most 256 profiles and 1 MiB of profile files; a profile left out still runs by name.
 A subagent keeps the persona it started with, so editing or deleting a profile affects only subagents started afterwards.
 
 Authoring errors:
@@ -13868,7 +13869,7 @@ Reads of worker-controlled files are capped per surface.
 | `dreaming` memory files, staging copies, reports, and verdicts | 1 MiB per file | A memory file is left out of the run, a staged file stops the run, and a report or verdict counts as missing, so the run stops or the proposal is rejected |
 | `dreaming` thread-export `index.json` | 8 MiB per room | Ignored, so that room's conversations are aged by file modification time |
 | Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined |
-| Workspace subagent profiles (`subagents/*.md`) | 64 KiB per file; names 64 characters; descriptions 1024 characters; 256 profiles; 1,024 examined entries in `subagents/` | An oversized or unreadable file is listed as invalid and cannot run, and profiles beyond 256 are not read |
+| Workspace subagent profiles (`subagents/*.md`) | 64 KiB per file; names 64 characters; descriptions 1024 characters; the listing reads at most 256 profiles and 1 MiB; 1,024 examined entries in `subagents/` | An oversized or unreadable file is listed as invalid and cannot run, and profiles past the listing limits are left out of it but still load by name |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |

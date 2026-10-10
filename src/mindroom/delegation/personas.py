@@ -34,6 +34,7 @@ _PROFILE_DIRNAME = "subagents"
 _PROFILE_SUFFIX = ".md"
 _MAX_PROFILE_FILE_BYTES = 64 << 10
 _MAX_PROFILES = 256
+_MAX_LISTED_PROFILE_BYTES = 1 << 20
 _MAX_DESCRIPTION_CHARS = 1024
 _MAX_LISTING_CHARS = 2000
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
@@ -166,20 +167,29 @@ def _profile_text(directory_fd: int, name: str) -> str:
         raise PersonaError(msg) from exc
 
 
-def _read_profile(directory_fd: int, name: str) -> _PersonaProfile | _InvalidPersonaProfile | None:
-    """Read one profile below its pinned directory; None when the file is absent."""
+def _read_profile(directory_fd: int, name: str) -> tuple[_PersonaProfile | _InvalidPersonaProfile | None, int]:
+    """Read one profile below its pinned directory with its size; None when the file is absent."""
     if not _PROFILE_NAME.fullmatch(name):
-        return _InvalidPersonaProfile(name=name, reason=_NAME_RULE)
+        return _InvalidPersonaProfile(name=name, reason=_NAME_RULE), 0
     try:
-        return _parse_profile(name, _profile_text(directory_fd, name))
+        text = _profile_text(directory_fd, name)
     except FileNotFoundError:
-        return None
+        return None, 0
     except PersonaError as exc:
-        return _InvalidPersonaProfile(name=name, reason=str(exc))
+        return _InvalidPersonaProfile(name=name, reason=str(exc)), 0
+    try:
+        return _parse_profile(name, text), len(text.encode())
+    except PersonaError as exc:
+        return _InvalidPersonaProfile(name=name, reason=str(exc)), len(text.encode())
 
 
 def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPersonaProfile]:
-    """Read up to 256 profiles from ``subagents/``, sorted by name, never following links."""
+    """Read up to 256 profiles and 1 MiB from ``subagents/``, sorted by name, never following links.
+
+    Profiles past either limit are left out of the listing but still load by name.
+    """
+    entries: list[_PersonaProfile | _InvalidPersonaProfile] = []
+    remaining = _MAX_LISTED_PROFILE_BYTES
     try:
         with open_directory_within_root(workspace_root, _PROFILE_DIRNAME) as directory_fd:
             names = [
@@ -187,10 +197,16 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
                 for entry in workspace_entry_names(directory_fd, directories=False).names
                 if entry.endswith(_PROFILE_SUFFIX)
             ]
-            entries = [_read_profile(directory_fd, name) for name in names[:_MAX_PROFILES]]
-            return [entry for entry in entries if entry is not None]
+            for name in names[:_MAX_PROFILES]:
+                entry, size = _read_profile(directory_fd, name)
+                remaining -= size
+                if remaining < 0:
+                    break
+                if entry is not None:
+                    entries.append(entry)
     except OSError:
         return []
+    return entries
 
 
 def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
@@ -201,7 +217,7 @@ def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
     not_found = f"Cannot delegate: subagent profile '{name}' was not found in {_PROFILE_DIRNAME}/."
     try:
         with open_directory_within_root(workspace_root, _PROFILE_DIRNAME) as directory_fd:
-            entry = _read_profile(directory_fd, name)
+            entry, _size = _read_profile(directory_fd, name)
     except OSError:
         entry = None
     if entry is None:

@@ -142,19 +142,9 @@ class DelegateTools(Toolkit):
         for target_name in self._delegate_to:
             description = describe_agent(target_name, self._config)
             lines.append(description)
-        instructions = self._config.render_prompt(
+        return self._config.render_prompt(
             "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
-        )
-        listing = (
-            render_profile_listing(list_profiles(self._workspace_root))
-            if self._authoring and self._workspace_root is not None
-            else ""
-        )
-        if not listing:
-            return instructions
-        return (
-            f"{instructions}\n\nSaved subagent profiles in subagents/, run with run_subagent(profile=...):\n{listing}"
         )
 
     def _build_run_subagent_description(self) -> str:
@@ -202,7 +192,12 @@ class DelegateTools(Toolkit):
             "description and optional tools, model, and mode, then the system prompt as the body. "
             "An explicit model or minimal=true overrides the profile. "
             "Follow-ups keep the subagent's prompt even if its profile later changes.\n"
+            f"{self._profile_listing()}"
         )
+
+    def _profile_listing(self) -> str:
+        listing = render_profile_listing(list_profiles(self._workspace_root)) if self._workspace_root else ""
+        return f"Saved profiles:\n{listing}\n" if listing else ""
 
     async def run_subagent(
         self,

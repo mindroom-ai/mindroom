@@ -221,17 +221,17 @@ def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monke
     assert "system_prompt" in self_allowed.async_functions["run_subagent"].description
 
 
-def test_instructions_list_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The caller sees each saved profile and each one it must fix."""
+def test_run_subagent_description_lists_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caller's run_subagent tool, which every model request carries, lists each saved profile and each one to fix."""
     _write_profile(tmp_path, "critic", _CRITIC)
     _write_profile(tmp_path, "broken", "---\ndescription: D\n---\n\n")
     harness = _Harness(tmp_path, monkeypatch, _config())
 
-    instructions = harness.tools(["leader"]).instructions or ""
+    description = harness.tools(["leader"]).async_functions["run_subagent"].description or ""
 
-    assert "critic: Finds the biggest risk." in instructions
-    assert "broken (invalid: " in instructions
-    assert "critic" not in (harness.tools(["child"]).instructions or "")
+    assert "critic: Finds the biggest risk." in description
+    assert "broken (invalid: " in description
+    assert "critic" not in (harness.tools(["child"]).async_functions["run_subagent"].description or "")
 
 
 @pytest.mark.asyncio

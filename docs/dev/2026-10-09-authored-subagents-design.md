@@ -80,9 +80,9 @@ The persona's `system_prompt` is the body after the closing `---` line with surr
 ### Discovery and limits
 
 The agent creates and edits profiles with its own file or shell tools; MindRoom adds no write function.
-When the caller may author subagents and has a workspace, the `delegate` toolkit instructions list each profile as `name: description`, and each invalid profile as `name (invalid: <reason>)` so the agent can fix it.
-When that list exceeds 2,000 characters, the instructions give the profile count and tell the agent to list `subagents/` instead.
-MindRoom reads at most 256 profiles per workspace, refuses a profile file larger than 64 KiB, and reads every file through the no-follow `path_confinement` walk, the same way it reads workspace skills.
+When the caller may author subagents and has a workspace, its `run_subagent` description, which every model request carries, lists each profile as `name: description`, and each invalid profile as `name (invalid: <reason>)` so the agent can fix it.
+When that list exceeds 2,000 characters, the description gives the profile count and tells the agent to list `subagents/` instead.
+The listing reads at most 256 profiles and 1 MiB of profile files per workspace, leaving later profiles out though they still run by name; MindRoom refuses a profile file larger than 64 KiB, and reads every file through the no-follow `path_confinement` walk, the same way it reads workspace skills.
 A new or edited profile appears in the list on the agent's next run, and `run_subagent(profile=...)` reads the current file when the subagent starts.
 
 ### Snapshot semantics

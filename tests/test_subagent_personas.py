@@ -194,6 +194,19 @@ def test_list_profiles_caps_count_and_size(tmp_path: Path) -> None:
     assert entry.name == "big"
 
 
+def test_list_profiles_stops_at_its_total_budget(tmp_path: Path) -> None:
+    """The listing stops reading once the profiles it read reach 1 MiB, while each profile still loads by name."""
+    body = "x" * (60 * 1024)
+    for index in range(20):
+        _profile_file(tmp_path, f"p{index:02d}.md", f"---\ndescription: D\n---\n{body}\n")
+
+    entries = list_profiles(tmp_path)
+
+    assert 0 < len(entries) < 20
+    assert sum(len(entry.persona.system_prompt) for entry in entries if isinstance(entry, _PersonaProfile)) <= 1 << 20
+    assert load_profile(tmp_path, "p19").name == "p19"
+
+
 def test_load_profile_reads_one_file(tmp_path: Path) -> None:
     """A named profile loads from subagents/<name>.md."""
     _profile_file(tmp_path, "critic.md", _CRITIC)

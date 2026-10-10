@@ -245,7 +245,11 @@ def _write_legacy_revision(tmp_path: Path) -> DynamicWorkflowStore:
         created_by="leader",
         reason=None,
     )
-    revision = tmp_path / "dynamic_workflows" / "agent" / "leader" / "review" / "revisions" / "000001.yaml"
+    _rewrite_as_legacy(tmp_path / "dynamic_workflows" / "agent" / "leader" / "review" / "revisions" / "000001.yaml")
+    return store
+
+
+def _rewrite_as_legacy(revision: Path) -> None:
     data = yaml.safe_load(revision.read_text())
     data["participants"] = [
         {
@@ -259,7 +263,6 @@ def _write_legacy_revision(tmp_path: Path) -> DynamicWorkflowStore:
         },
     ]
     revision.write_text(yaml.safe_dump(data))
-    return store
 
 
 def test_legacy_revision_loads_as_subagent(tmp_path: Path) -> None:
@@ -278,6 +281,23 @@ def test_legacy_revision_loads_as_subagent(tmp_path: Path) -> None:
             "tools": [],
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_revision_runs_as_subagent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A saved ephemeral participant runs with its rendered prompt and saved model."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    created = await workflow.create(_spec([{"id": "writer", "system_prompt": "placeholder", "tools": []}]))
+    assert created["status"] == "ok", created
+    [revision] = workflow.paths.storage_root.glob("**/review/revisions/000001.yaml")
+    _rewrite_as_legacy(revision)
+
+    with workflow.context():
+        run = json.loads(await workflow.tools.arun_workflow(workflow_id="review", input={}))
+
+    assert run["status"] == "completed", run
+    assert workflow.model.system_prompts == ["You are Writer.\n\nWrites\n\n- Cite sources"]
+    assert workflow.models_loaded == ["haiku"]
 
 
 def test_update_of_legacy_revision_writes_current_format(tmp_path: Path) -> None:
