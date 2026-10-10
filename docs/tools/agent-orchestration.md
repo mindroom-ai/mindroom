@@ -123,16 +123,13 @@ Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports t
 Turning the option off parks unfinished jobs and their approvals without replaying their tools, and later messages in their conversations are answered as usual; re-enable it and restart to recover them.
 When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function, and shell tools keep their own background commands.
 
-Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
-Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
+Tools that can run as background jobs accept an optional `wait_timeout` argument, which the tool itself never receives.
 This waiting budget is separate from a tool's own execution or network timeout.
 The name `wait_timeout` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
-Only functions of toolkits that MindRoom assembles for an agent can become jobs.
-Functions the SDK generates itself, including knowledge search, skill access, learning, and team delegation, always run inline without `wait_timeout`.
-Toolkits whose SDK connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, also run inline without `wait_timeout`.
+Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `wait_timeout`.
 Waiting policy is decided when a call executes, so an approved call that resumes after a restart follows the exclusions configured at that point.
 If its toolkit became excluded meanwhile and the call carried a wait budget, it fails instead of running without the budget it asked for.
 
@@ -168,7 +165,7 @@ The same execution continues across subsequent parent turns, and its result rema
 Pressing **Stop** cancels the reply and requests cancellation of the managed jobs it started; on a message that waits for background work, it also cancels the work it waits for, including jobs from earlier follow-ups it took over.
 Their outcomes are no longer offered to later replies, and a restart does not resume them.
 Jobs belonging to other requesters, conversations, agents, or newer messages remain unaffected.
-Deleting the message a reply answers cancels that reply's jobs the same way.
+Deleting the message a reply answers cancels that reply's jobs the same way, and editing your message stops its reply the same way and answers the edit in its place.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
 Saved results remain available for explicit retrieval.
 Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
@@ -214,20 +211,19 @@ A managed child that needs approval also stays inside its job: the job posts one
 A job's cards show that it waits for approval; pressing **Stop** on the waiting message or cancelling the job denies its open cards.
 A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job; the waiting message then continues with that interrupted outcome.
 Cards a job posts offer no automatic approval option, and automatic approvals granted on other cards do not apply to them.
-Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
+A message never counts as an approval, and current permissions are rechecked before a job's call runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
 Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
-Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
+Tools the model provider runs itself never become jobs.
 Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
 
 After its own work, a reply continues with every ready outcome of this agent and requester in the conversation, including outcomes of jobs that earlier replies started, without repeated model polling.
 When work is still running, the reply finishes its answer and its message waits for that work: it shows "⏳ Waiting for background work…" below the answer and keeps its **Stop** button, while the conversation's other messages are answered as usual.
 When the work finishes, the same message continues below its answer: the agent retrieves the results with the native result-retrieval tool and answers with them.
-Pressing **Stop** on a waiting message cancels the work it waits for and marks the message as stopped; editing your message stops it the same way and answers the edit in its place.
 When a newer reply of the agent, with the same participants, ends with that work still running, it takes the work over, and the older message drops its waiting notice.
 A reply that resumes an approved tool does not wait; a waiting message of the agent, or its next reply, takes the work it leaves.
 A message continues with ready results at most 20 times; the requester's next answered message then takes the remaining work.
-A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
+A result that finishes while the reply is still streaming is picked up when the reply's current step ends; it does not start a competing response.
 No job completion starts a new reply by itself.
 Waiting messages survive a restart, and an interruption the restart causes reaches the waiting message as that job's outcome.
 A message waits only for work its reply may retrieve: jobs of its requester, and of its own agent or its team's members, so another requester's or an absent member's results wait for a later reply that can retrieve them.
