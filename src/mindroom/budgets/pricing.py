@@ -91,5 +91,5 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[st
     return table
 
 
-def _price_weight(pricing: ModelPricing) -> float:
-    return pricing.input + pricing.output
+def _price_weight(pricing: ModelPricing) -> tuple[float, float, float]:
+    return (pricing.input + pricing.output, pricing.cache_read_price, pricing.cache_write_price)

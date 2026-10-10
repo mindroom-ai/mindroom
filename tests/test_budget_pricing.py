@@ -161,3 +161,26 @@ def test_price_table_marks_providers_that_report_thinking_outside_output(
     (priced,) = price_table(config, _paths(tmp_path)).values()
 
     assert priced.output_includes_reasoning is includes
+
+
+def test_conflicting_cache_prices_keep_the_higher_cache_price(tmp_path: Path) -> None:
+    config = Config(
+        models={
+            "a": ModelConfig(
+                provider="openai",
+                id="gpt-6-luna",
+                api_key="key",
+                pricing=ModelPricing(input=1, output=2, cache_read=0.1),
+            ),
+            "b": ModelConfig(
+                provider="openai",
+                id="gpt-6-luna",
+                api_key="key",
+                pricing=ModelPricing(input=1, output=2, cache_read=0.5),
+            ),
+        },
+    )
+
+    (priced,) = price_table(config, _paths(tmp_path)).values()
+
+    assert priced.pricing.cache_read_price == 0.5
