@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+_STOPPED_REASON = "Stopped before the approved call ran."
+
 
 async def request_child_approvals(
     child: DelegationChild,
@@ -62,6 +64,9 @@ async def request_child_approvals(
         config=config,
         runtime_paths=runtime_paths,
     )
+    if any(approved for approved, _reason in decided) and await runtime.stop_recorded(child.delegation_id):
+        # A Stop recorded for the reply while the cards were open wins over their approvals.
+        decided = tuple((False, _STOPPED_REASON) for _ in decided)
     decisions = {call.tool_call_id: approved for call, (approved, _reason) in zip(plan.calls, decided, strict=True)}
     reasons = {
         call.tool_call_id: None if approved else reason

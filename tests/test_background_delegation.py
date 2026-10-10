@@ -293,14 +293,14 @@ class _JobApprovalCards:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("detach", "human"), [(False, False), (True, False), (True, True)])
-@pytest.mark.parametrize("approval", [None, "approved", "denied", "cancelled"])
+@pytest.mark.parametrize("approval", [None, "approved", "denied", "cancelled", "stopped"])
 @pytest.mark.parametrize("exclude_after_acceptance", [False, True])
 async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     detach: bool,
     human: bool,
-    approval: Literal["approved", "denied", "cancelled"] | None,
+    approval: Literal["approved", "denied", "cancelled", "stopped"] | None,
     exclude_after_acceptance: bool,
 ) -> None:
     """A released parent cannot cancel the child, the job owns its approval cards, and later waits read its result."""
@@ -326,7 +326,11 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         None,
         "parent",
     )
-    runtime = await tool_job_runtime(tmp_path)
+
+    async def stop_recorded(_job: object) -> bool:
+        return approval == "stopped"
+
+    runtime = await tool_job_runtime(tmp_path, stopped=stop_recorded)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
@@ -442,8 +446,9 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             assert cancelled.status == RunStatus.cancelled
             assert cards.settled == [_approval_run_id(job_id)]
             return
-        reason = None if approval == "approved" else "Not now"
-        cards.decision.set_result(BackgroundApprovalDecision(approval or "approved", reason))
+        # A Stop recorded for the reply before its job applied it wins over an approval that lands meanwhile.
+        status = "denied" if approval == "denied" else "approved"
+        cards.decision.set_result(BackgroundApprovalDecision(status, "Not now" if status == "denied" else None))
 
     try:
         with (
