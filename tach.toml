@@ -2801,6 +2801,7 @@ path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
     "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.wakes",
     "mindroom.reply_lifecycle",
@@ -8583,4 +8584,5 @@ visibility = [
     "mindroom.bot",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.orchestrator",
+    "mindroom.response_runner",
 ]

@@ -156,6 +156,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.completion import HoldKey, completion_prompt, conversation_work
+from mindroom.tool_jobs.disabled import approval_is_parked
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.wakes import WAKE_RETRY_PROMPT, wake_envelope, woken_reply_id
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -2988,8 +2989,12 @@ class ResponseRunner:
             return
 
     async def _release_ended_approval_holds(self, room_id: str, thread_id: str | None) -> None:
-        """Release the holds of a conversation whose approvals no longer exist."""
+        """Release the holds of a conversation whose approvals no longer exist, or cannot end while jobs are off."""
         for approval_id in self._lifecycle_coordinator.approval_holds(room_id, thread_id):
+            if approval_is_parked(self.deps.runtime_paths, approval_id):
+                # Parked until background jobs are on again, it neither resumes nor expires meanwhile.
+                self._lifecycle_coordinator.release_approval_hold(approval_id)
+                continue
             try:
                 ended = await self.deps.approval_store.approval_continuation(approval_id) is None
             except Exception:

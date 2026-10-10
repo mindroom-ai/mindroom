@@ -120,7 +120,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-Turning the option off parks unfinished jobs and their approvals without replaying their tools; re-enable it and restart to recover them.
+Turning the option off parks unfinished jobs and their approvals without replaying their tools, and later messages in their conversations are answered as usual; re-enable it and restart to recover them.
 When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function, and shell tools keep their own background commands.
 
 Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
