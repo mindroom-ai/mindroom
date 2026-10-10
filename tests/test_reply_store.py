@@ -1946,25 +1946,39 @@ async def test_a_wake_claims_the_waiting_reply_it_names(journal_store: EventJour
     assert woken.current_span_id == "span-wake"
 
 
-async def test_a_stop_records_its_job_cancellation_until_a_runtime_applies_it(journal_store: EventJournalStore) -> None:
-    """A Stop of an unfinished reply records that its work must be cancelled; retention drops what was never applied."""
+async def test_a_stop_records_the_work_it_cancels_as_the_reply_was(journal_store: EventJournalStore) -> None:
+    """A Stop snapshots the reply's sources, key, and cutoff, kept until a runtime applies it."""
     principal = journal_store.principal(PRINCIPAL)
     reply = await _waiting(principal)
+    await journal_store.backend.write(
+        lambda tx: tx.execute("INSERT INTO tool_jobs (job_id, job_json) VALUES (?, ?)", ("job", "{}")),
+    )
     stopped = await _apply(
         journal_store,
         rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=60),
     )
     assert stopped.transition.reply is not None
     assert stopped.transition.reply.state is ReplyState.CANCELLED
-    assert await journal_store.reply_job_stops() == ((PRINCIPAL, "reply-1"),)
-    await principal.replies.forget_job_stop("reply-1")
-    assert await journal_store.reply_job_stops() == ()
-
-    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=stopped.transition.reply))
-    await journal_store.backend.write(
-        lambda tx: reply_messages.record_job_stop(tx, PRINCIPAL, "reply-1", now_ns=60),
-    )
+    [stop] = await journal_store.reply_job_stops()
+    assert stop.principal_id == PRINCIPAL
+    assert stop.sources == ("$source",)
+    assert stop.hold_key == _KEY
+    source = await principal.load_event("$source")
+    assert source is not None
+    assert stop.cutoff_receipt_order == source.receipt_order
+    assert stop.stop_receipt_order == 5
+    # The snapshot outlives its reply, so retention cannot drop a cancellation no runtime applied yet.
     flushed = replace(stopped.transition.reply, owed_write=None)
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=flushed))
     assert await principal.replies.forget_finished(before_ns=10**18, limit=10) == 1
+    assert await journal_store.reply_job_stops() == (stop,)
+    await principal.replies.forget_job_stop(stop.stop_id)
+    assert await journal_store.reply_job_stops() == ()
+
+
+async def test_a_stop_records_nothing_while_no_background_job_exists(journal_store: EventJournalStore) -> None:
+    """A stopped reply starts nothing afterwards, so with no job saved there is no work to cancel."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply = await _waiting(principal)
+    await _apply(journal_store, rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=60))
     assert await journal_store.reply_job_stops() == ()

@@ -562,11 +562,20 @@ _TABLES = (
     """
     CREATE TABLE IF NOT EXISTS reply_job_stops (
         -- A Stop's cancellation of the background work a reply started or
-        -- waits for, until a job runtime applied it.
+        -- waits for, as the Stop saw it, until a job runtime applied it.
         principal_id TEXT NOT NULL,
-        reply_id TEXT NOT NULL,
+        stop_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        -- The journal sources the reply's spans answered, which jobs name as theirs.
+        sources_json TEXT NOT NULL,
+        -- The key of the work the reply waited for, if it waited.
+        hold_key TEXT,
+        -- The newest receipt order of the reply's own messages: later messages' work is theirs.
+        cutoff_receipt_order BIGINT,
+        stop_receipt_order BIGINT NOT NULL,
         created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, reply_id)
+        PRIMARY KEY (principal_id, stop_id)
     )
     """,
     """

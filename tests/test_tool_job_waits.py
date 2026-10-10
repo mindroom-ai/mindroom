@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent, PrincipalStore
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, encode_presentation, note_segment
@@ -123,7 +124,8 @@ def _coordinator(tmp_path: Path, runtime: ToolJobRuntime, bot: MagicMock) -> Too
         journal_provider=lambda: tool_job_journal(paths.storage_root),
     )
     coordinator._runtime = runtime
-    coordinator._journal = tool_job_journal(paths.storage_root)
+    # The journal the runtime keeps its jobs in, which the replies share.
+    coordinator._journal = tool_job_journal(tmp_path)
     return coordinator
 
 
@@ -227,7 +229,8 @@ async def test_a_stop_cancels_the_work_its_reply_started_and_waits_for(tmp_path:
         await start_job(runtime, "other", tool_name="tool", depth=0, adapter={}, owner=elsewhere, operation=forever)
         stop = rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=30)
         await principal.replies.update(reply.reply_id, lambda _current: stop)
-        assert await journal.reply_job_stops() == ((_PRINCIPAL, reply.reply_id),)
+        [recorded] = await journal.reply_job_stops()
+        assert recorded.stop_id.startswith(f"{reply.reply_id}:")
 
         await coordinator._apply_job_stops()
 
@@ -376,3 +379,221 @@ async def test_a_stop_of_an_older_waiting_reply_leaves_a_newer_turns_work_alone(
         assert not user_stopped(runtime, "newer")
     finally:
         await runtime.shutdown()
+
+
+async def test_a_stop_applied_after_a_regeneration_cancels_what_the_stopped_reply_owned(tmp_path: Path) -> None:
+    """An edit stops a waiting reply and regenerates it before the runtime applies the Stop: the old work goes."""
+    owner = job_owner()
+    runtime = await tool_job_runtime(tmp_path)
+    coordinator = _coordinator(tmp_path, runtime, MagicMock())
+    journal = coordinator._journal
+    assert journal is not None
+    principal = journal.principal(_PRINCIPAL)
+    key = _key(owner)
+    reply = await _waiting_reply(principal, key)
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(runtime, "held", tool_name="tool", depth=0, adapter={}, owner=owner, operation=forever)
+        stop = rl.stop(reply, None, rl.StopFacts(receipt_order=5, span_live=False), now_ns=30)
+        await principal.replies.update(reply.reply_id, lambda _current: stop)
+        stopped = await principal.replies.load(reply.reply_id)
+        assert stopped is not None
+        # The regeneration's own work starts before the Stop is applied.
+        await principal.admit(
+            InboundEvent(
+                "$edit",
+                key.room_id,
+                key.thread_id,
+                EventKind.MESSAGE,
+                EventClass.ACTIONABLE,
+                key.requester_id,
+                3,
+                {},
+            ),
+        )
+        edit = replace(
+            _regeneration_request(stopped, key),
+            sources=ResponseSources(("$edit",), ("$turn",)),
+        )
+        await principal.replies.update(reply.reply_id, lambda current: rl.claim(edit, _claim_context(current)))
+        await start_job(
+            runtime,
+            "regenerated",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            source_event_id="$edit",
+            operation=forever,
+        )
+
+        await coordinator._apply_job_stops()
+
+        await wait_for_status(runtime, "held", "cancelled")
+        assert not user_stopped(runtime, "regenerated")
+    finally:
+        await runtime.shutdown()
+
+
+def _regeneration_request(reply: rl.Reply, key: HoldKey) -> rl.ClaimRequest:
+    return rl.ClaimRequest(
+        span_id="span-edit",
+        delivery_id="$edit",
+        sources=ResponseSources(("$edit",), ("$turn",)),
+        bot_generation="gen-1",
+        now_ns=40,
+        new_reply_id="unused",
+        entity_name=key.recipient,
+        room_id=reply.room_id,
+        thread_id=reply.thread_id,
+        membership_epoch=0,
+        empty_presentation=encode_presentation(Presentation()),
+        driving_edit_id="$edit",
+    )
+
+
+def _claim_context(reply: rl.Reply) -> rl.ClaimContext:
+    return rl.ClaimContext(
+        reply=replace(reply, owed_write=None),
+        last_span=None,
+        current_span=None,
+        interactive_span=None,
+        durable_write_debt=False,
+        active_generation="gen-1",
+    )
+
+
+async def test_a_silent_schedule_never_waits(tmp_path: Path) -> None:
+    """A silent run's outstanding work waits for the next silent run instead of its message."""
+    owner = replace(completed_delegation_job().owner)
+    runtime = await tool_job_runtime(tmp_path)
+    context = replace(_job_context(tmp_path, owner), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
+    finish = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "done")
+
+    handle = MagicMock(spec=SpanHandle)
+    handle.leaves_work = None
+    token = _current_slot.set(SpanSlot(handle=handle))
+    try:
+        await start_job(
+            runtime,
+            "quiet",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+            operation=operation,
+        )
+        with tool_runtime_context(context):
+            joined = await join_conversation_jobs(set(), joins=0)
+        assert not joined.holds
+        assert handle.leaves_work is None
+    finally:
+        _current_slot.reset(token)
+        finish.set()
+        await runtime.shutdown()
+
+
+async def test_a_wake_does_not_move_a_stops_cutoff_past_a_newer_message(tmp_path: Path) -> None:
+    """The cutoff of a Stop during a wake is the reply's own messages, not the wake that came after a newer one."""
+    owner = job_owner()
+    runtime = await tool_job_runtime(tmp_path)
+    coordinator = _coordinator(tmp_path, runtime, MagicMock())
+    journal = coordinator._journal
+    assert journal is not None
+    principal = journal.principal(_PRINCIPAL)
+    key = _key(owner)
+    reply = await _waiting_reply(principal, key)
+    await principal.admit(
+        InboundEvent(
+            "$newer",
+            key.room_id,
+            key.thread_id,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            key.requester_id,
+            2,
+            {},
+        ),
+    )
+    await principal.admit(wake_event(reply, "job-wake:after", sender_id="@mindroom_parent:test", now_ms=3))
+    wake = rl.ClaimRequest(
+        span_id="span-wake",
+        delivery_id="job-wake:after",
+        sources=ResponseSources(("job-wake:after",), ("$turn",)),
+        bot_generation="gen-1",
+        now_ns=40,
+        new_reply_id="unused",
+        entity_name=key.recipient,
+        room_id=reply.room_id,
+        thread_id=reply.thread_id,
+        membership_epoch=0,
+        empty_presentation=encode_presentation(Presentation()),
+        wake_reply_id=reply.reply_id,
+    )
+    woken = (await principal.replies.claim(wake)).transition
+    assert woken.reply is not None
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(
+            runtime,
+            "newer",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            source_event_id="$newer",
+            operation=forever,
+        )
+        stop = rl.stop(woken.reply, None, rl.StopFacts(receipt_order=6, span_live=False), now_ns=50)
+        await principal.replies.update(reply.reply_id, lambda _current: stop)
+        [recorded] = await journal.reply_job_stops()
+        turn = await principal.load_event("$turn")
+        assert turn is not None
+        assert recorded.cutoff_receipt_order == turn.receipt_order
+        assert "job-wake:after" in recorded.sources
+
+        await coordinator._apply_job_stops()
+
+        assert not user_stopped(runtime, "newer")
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_wake_whose_ad_hoc_member_left_ends_the_wait(tmp_path: Path) -> None:
+    """No team can continue a reply whose member left the configuration, so its wait ends with its answer."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = replace(_runner_key(bot), participants=(bot.agent_name, "departed"))
+    principal = bot.journal_principal()
+    reply = await _waiting_reply(principal, key)
+    event = await _wake(principal, reply, "job-wake:1")
+    runner.generate_team_response_helper = AsyncMock()
+    request = await runner._job_wake_request(
+        reply,
+        key,
+        event.event_id,
+        claimed=asyncio.Event(),
+        handoff=asyncio.Event(),
+    )
+
+    await runner._generate_job_wake(request, key)
+
+    runner.generate_team_response_helper.assert_not_awaited()
+    ended = await principal.replies.load(reply.reply_id)
+    assert ended is not None
+    assert ended.state is rl.ReplyState.COMPLETED

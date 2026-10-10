@@ -27,6 +27,7 @@ from mindroom.reply_lifecycle import (
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
 from .membership_state import claim_membership_epoch
+from .models import EventKind
 from .projection import is_tombstoned
 
 logger = get_logger(__name__)
@@ -187,11 +188,46 @@ def _run(
             post_commit.append(WakeApproval(approval_id))
         case CancelSpan():
             post_commit.append(effect)
-        case StopJobs(reply_id=reply_id):
-            reply_messages.record_job_stop(transaction, principal_id, reply_id, now_ns=time.time_ns())
+        case StopJobs():
+            reply = transition.reply
+            assert reply is not None, "a Stop of background work belongs to a reply's transition"
+            _record_job_stop(transaction, principal_id, reply)
         case _:
             msg = f"Reply effect {effect!r} has no transactional owner yet"
             raise NotImplementedError(msg)
+
+
+def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) -> None:
+    """Record which background work a Stop cancels, as the reply is now, so a later regeneration cannot change it.
+
+    Nothing is recorded while no background job exists: a stopped reply starts none afterwards.
+    """
+    if transaction.fetchone("SELECT 1 AS present FROM tool_jobs LIMIT 1") is None:
+        return
+    sources = tuple(
+        dict.fromkeys(
+            source
+            for span in reply_spans.for_reply(transaction, principal_id, reply.reply_id)
+            for source in span.sources.pending_event_ids
+        ),
+    )
+    # A wake is not a message: work a newer message started stays that message's even when a wake came after it.
+    messages = (journal.load(transaction, principal_id, source) for source in sources)
+    orders = [event.receipt_order for event in messages if event is not None and event.kind is not EventKind.JOB_WAKE]
+    reply_messages.record_job_stop(
+        transaction,
+        reply_messages.JobStop(
+            principal_id=principal_id,
+            stop_id=f"{reply.reply_id}:{reply.revision}",
+            entity_name=reply.entity_name,
+            room_id=reply.room_id,
+            sources=sources,
+            hold_key=reply.hold_key,
+            cutoff_receipt_order=max(orders, default=None),
+            stop_receipt_order=reply.stop_receipt_order or 0,
+        ),
+        now_ns=reply.updated_at_ns,
+    )
 
 
 def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None = None) -> bool:
@@ -1032,10 +1068,10 @@ class ReplyStore:
             lambda transaction: reply_messages.with_pending_work(transaction, self._principal_id),
         )
 
-    async def forget_job_stop(self, reply_id: str) -> None:
-        """Delete a reply's job cancellation once a job runtime applied it."""
+    async def forget_job_stop(self, stop_id: str) -> None:
+        """Delete a job Stop once a job runtime applied it."""
         await self._backend.write(
-            lambda transaction: reply_messages.forget_job_stop(transaction, self._principal_id, reply_id),
+            lambda transaction: reply_messages.forget_job_stop(transaction, self._principal_id, stop_id),
         )
 
     async def has_unresolved_rows(self, reply_id: str) -> bool:

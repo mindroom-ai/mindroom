@@ -310,11 +310,6 @@ def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: i
     reply_ids = tuple(str(row["reply_id"]) for row in rows)
     if reply_ids:
         placeholders = ", ".join("?" for _ in reply_ids)
-        # A Stop's cancellation of background work no runtime applied in that time goes with its reply.
-        transaction.execute(
-            f"DELETE FROM reply_job_stops WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
-            (principal_id, *reply_ids),
-        )
         for table in ("reply_span_sources", "reply_tool_calls"):
             transaction.execute(
                 f"""
@@ -392,23 +387,77 @@ def waiting_on(transaction: Transaction, principal_id: str, hold_key: str) -> st
     return None if row is None else str(row["reply_id"])
 
 
-def record_job_stop(transaction: Transaction, principal_id: str, reply_id: str, *, now_ns: int) -> None:
-    """Record, in a Stop's transaction, that the background work of a reply must be cancelled."""
+@dataclass(frozen=True, slots=True)
+class JobStop:
+    """A Stop's cancellation of a reply's background work, as the reply was when the Stop applied."""
+
+    principal_id: str
+    stop_id: str
+    entity_name: str
+    room_id: str
+    # The journal sources the reply's spans answered; a job naming one of them is the reply's.
+    sources: tuple[str, ...]
+    # The key of the work the reply waited for, when it waited.
+    hold_key: str | None
+    # The newest receipt order of the reply's own messages; work later messages started is theirs.
+    cutoff_receipt_order: int | None
+    stop_receipt_order: int
+
+
+def record_job_stop(transaction: Transaction, stop: JobStop, *, now_ns: int) -> None:
+    """Record, in a Stop's transaction, the background work it cancels."""
     transaction.execute(
         """
-        INSERT INTO reply_job_stops (principal_id, reply_id, created_at_ns) VALUES (?, ?, ?)
-        ON CONFLICT (principal_id, reply_id) DO NOTHING
+        INSERT INTO reply_job_stops (
+            principal_id, stop_id, entity_name, room_id, sources_json, hold_key,
+            cutoff_receipt_order, stop_receipt_order, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, stop_id) DO NOTHING
         """,
-        (principal_id, reply_id, now_ns),
+        (
+            stop.principal_id,
+            stop.stop_id,
+            stop.entity_name,
+            stop.room_id,
+            json.dumps(list(stop.sources), separators=(",", ":")),
+            stop.hold_key,
+            stop.cutoff_receipt_order,
+            stop.stop_receipt_order,
+            now_ns,
+        ),
     )
 
 
-def job_stops(transaction: Transaction) -> tuple[tuple[str, str], ...]:
-    """Return every principal's replies whose background work a Stop cancelled and no job runtime applied yet."""
+def job_stops(transaction: Transaction) -> tuple[JobStop, ...]:
+    """Return every principal's recorded job Stops no job runtime applied yet, oldest first."""
     rows = transaction.fetchall(
-        "SELECT principal_id, reply_id FROM reply_job_stops ORDER BY created_at_ns, principal_id, reply_id",
+        """
+        SELECT principal_id, stop_id, entity_name, room_id, sources_json, hold_key,
+               cutoff_receipt_order, stop_receipt_order
+        FROM reply_job_stops ORDER BY created_at_ns, principal_id, stop_id
+        """,
     )
-    return tuple((str(row["principal_id"]), str(row["reply_id"])) for row in rows)
+    return tuple(
+        JobStop(
+            principal_id=str(row["principal_id"]),
+            stop_id=str(row["stop_id"]),
+            entity_name=str(row["entity_name"]),
+            room_id=str(row["room_id"]),
+            sources=_ids(row["sources_json"]),
+            hold_key=cast("str | None", row["hold_key"]),
+            cutoff_receipt_order=_optional_int(row["cutoff_receipt_order"]),
+            stop_receipt_order=int(row["stop_receipt_order"]),
+        )
+        for row in rows
+    )
+
+
+def forget_job_stop(transaction: Transaction, principal_id: str, stop_id: str) -> None:
+    """Delete a job Stop once a job runtime applied it."""
+    transaction.execute(
+        "DELETE FROM reply_job_stops WHERE principal_id = ? AND stop_id = ?",
+        (principal_id, stop_id),
+    )
 
 
 def waiting_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
@@ -421,14 +470,6 @@ def waiting_replies(transaction: Transaction) -> tuple[tuple[str, Reply], ...]:
         """,  # noqa: S608 - a fixed column list
     )
     return tuple((str(row["principal_id"]), _reply(row)) for row in rows)
-
-
-def forget_job_stop(transaction: Transaction, principal_id: str, reply_id: str) -> None:
-    """Delete a reply's job cancellation once a job runtime applied it."""
-    transaction.execute(
-        "DELETE FROM reply_job_stops WHERE principal_id = ? AND reply_id = ?",
-        (principal_id, reply_id),
-    )
 
 
 def for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> Reply | None:

@@ -157,8 +157,9 @@ async def join_conversation_jobs(
     )
     work = await conversation_work(runtime, key, attempted=attempted)
     ready = bool(work.ready) and joins < _JOB_JOIN_LIMIT
-    # At the join limit the message stops holding, and the next reply in the conversation takes the work.
-    holds = not ready and bool(work.jobs) and joins < _JOB_JOIN_LIMIT
+    # At the join limit the message stops holding, and the next reply in the conversation takes the work; a silent
+    # schedule never holds, so its work waits for the next silent run.
+    holds = not ready and not key.silent and bool(work.jobs) and joins < _JOB_JOIN_LIMIT
     if (handle := current_span()) is not None:
         handle.leaves_work = key.encode() if holds else None
     if ready:

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, PrincipalStore
-    from mindroom.reply_lifecycle import Reply
+    from mindroom.event_journal.reply_messages import JobStop
     from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -314,45 +314,41 @@ class ToolJobRuntimeCoordinator:
         journal = self._journal
         if journal is None:
             return
-        for principal_id, reply_id in await journal.reply_job_stops():
-            principal = journal.principal(principal_id)
-            reply = await principal.replies.load(reply_id)
-            if reply is not None:
-                matches = await self._stopped_work(principal, reply)
-                await self.runtime.stop_jobs(receipt_order=reply.stop_receipt_order or 0, matches=matches)
-            await principal.replies.forget_job_stop(reply_id)
+        for stop in await journal.reply_job_stops():
+            principal = journal.principal(stop.principal_id)
+            await self.runtime.stop_jobs(
+                receipt_order=stop.stop_receipt_order,
+                matches=await self._stopped_work(principal, stop),
+            )
+            await principal.replies.forget_job_stop(stop.stop_id)
 
     async def _stopped_work(
         self,
         principal: PrincipalStore,
-        reply: Reply,
+        stop: JobStop,
     ) -> Callable[[BackgroundJob], Awaitable[bool]]:
         """Match the work a stopped reply started, and the work it waited for when it ever waited.
 
-        The work a newer turn of the conversation started after the reply's own sources is that turn's to stop.
+        The work a newer message of the conversation started after the reply's own messages is that message's to stop.
         """
-        spans = await principal.replies.spans(reply.reply_id)
-        sources = {source for span in spans for source in span.sources.pending_event_ids}
-        orders = [
-            event.receipt_order for source in sources if (event := await principal.load_event(source)) is not None
-        ]
-        cutoff = max(orders, default=None)
+        sources = frozenset(stop.sources)
         held = (
             frozenset()
-            if reply.hold_key is None
+            if stop.hold_key is None
             else frozenset(
-                job.job_id for job in (await conversation_work(self.runtime, HoldKey.decode(reply.hold_key))).jobs
+                job.job_id for job in (await conversation_work(self.runtime, HoldKey.decode(stop.hold_key))).jobs
             )
         )
 
         async def matches(job: BackgroundJob) -> bool:
-            if job.owner.recipient != reply.entity_name or job.owner.room_id != reply.room_id:
+            if job.owner.recipient != stop.entity_name or job.owner.room_id != stop.room_id:
                 return False
             if job.source_event_id in sources:
                 return True
             if job.job_id not in held:
                 return False
             started = None if job.source_event_id is None else await principal.load_event(job.source_event_id)
+            cutoff = stop.cutoff_receipt_order
             return started is None or cutoff is None or started.receipt_order <= cutoff
 
         return matches

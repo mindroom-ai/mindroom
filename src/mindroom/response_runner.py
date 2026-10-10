@@ -3585,7 +3585,10 @@ class ResponseRunner:
         member_names, team_mode = (team.agents, team.mode) if team is not None else (key.participants, "coordinate")
         registry = entity_identity_registry(config, self.deps.runtime_paths)
         if any(name not in registry.current_ids for name in member_names):
-            # A member left the configuration, so no team continues the reply; its wait ends once no work is left.
+            # A member left the configuration, so no team continues the reply: its wait ends with its answer, and the
+            # remaining outcomes stay retrievable for a later reply.
+            assert request.wake_reply_id is not None
+            await self.deps.delivery_gateway.end_wait(request.wake_reply_id)
             return
         await self.generate_team_response_helper(
             request,
