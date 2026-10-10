@@ -61,12 +61,14 @@ def wrap_native_shell_window(tools: Sequence[Toolkit]) -> bool:
     wrapped = False
     for toolkit in tools:
         function = toolkit.get_async_functions().get("run_shell_command")
-        # An approved command resumes in a later run without this response's CLI, like a minimal subagent's.
+        # An approved command resumes in a later run, or runs in its job after the reply ended, without this
+        # response's CLI, like a minimal subagent's.
         if (
             function is None
             or function.owning_toolkit != "shell"
             or function.entrypoint is None
             or function.requires_confirmation
+            or function.approval_type == JOB_APPROVAL_TYPE
         ):
             continue
         original = function.entrypoint

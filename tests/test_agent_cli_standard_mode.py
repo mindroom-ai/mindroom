@@ -234,12 +234,15 @@ async def test_approval_gated_tools_stay_native_only(
     assert '"function":"add"' not in listing, listing
 
 
-def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path) -> None:
-    """An approved command resumes later without this response's CLI, so none is offered."""
+@pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
+def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path, *, jobs: bool) -> None:
+    """An approved command resumes later, or runs in its job after the reply ended, without this response's CLI."""
     runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
     runtime.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
     )
+    # With shell managed, its gated command asks for approval as its job.
+    runtime.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=jobs, exclude_toolkits=[])
     set_api_server_address("127.0.0.1", 8765)
     try:
         agent = agents.create_agent(
