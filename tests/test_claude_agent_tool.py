@@ -6,7 +6,7 @@ import asyncio
 import contextvars
 import json
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -85,11 +85,18 @@ def _model_usage(inputs: int, outputs: int, cache_reads: int, cache_writes: int)
     }
 
 
+_TWO_MODEL_USAGE = {
+    "claude-sonnet-5-5": _model_usage(1000, 200, 5000, 300),
+    "claude-haiku-5-5": _model_usage(400, 50, 0, 0),
+}
+
+
 @dataclass
 class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
-    """Fake client whose session reports usage for two models, as Claude Code does."""
+    """Fake client reporting Claude Code's running usage totals, one scripted result per turn."""
 
     instances: ClassVar[list[_MeteredFakeClaudeSDKClient]] = []
+    usage_totals: ClassVar[list[dict[str, Any]]] = []
 
     async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
         yield AssistantMessage(content=[TextBlock(text="Fixed it")], model="claude-sonnet-5-5")
@@ -101,10 +108,7 @@ class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
             num_turns=3,
             session_id="claude-session-123",
             total_cost_usd=0.02,
-            model_usage={
-                "claude-sonnet-5-5": _model_usage(1000, 200, 5000, 300),
-                "claude-haiku-5-5": _model_usage(400, 50, 0, 0),
-            },
+            model_usage=type(self).usage_totals.pop(0),
         )
 
 
@@ -1136,6 +1140,7 @@ async def test_claude_session_usage_counts_toward_the_conversation(
 ) -> None:
     """Claude Code sessions spend tokens on the requester's behalf, so their usage joins the conversation's."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _MeteredFakeClaudeSDKClient)
+    monkeypatch.setattr(_MeteredFakeClaudeSDKClient, "usage_totals", [_TWO_MODEL_USAGE])
     config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
     open_scope = partial(
         open_resolved_scope_session_context,
@@ -1164,3 +1169,106 @@ async def test_claude_session_usage_counts_toward_the_conversation(
         assert [row.user_id for row in report.user_breakdown] == [context.requester_id]
     finally:
         storage.close()
+
+
+async def _send_metered_turns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    usage_totals: list[dict[str, Any]],
+    turns: list[tuple[str, str | None, str | None]],
+) -> list[tuple[str | None, int, int, int]]:
+    """Send (requester, session label, resume) turns; return each requester's input, output, and cache-read tokens."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _MeteredFakeClaudeSDKClient)
+    monkeypatch.setattr(_MeteredFakeClaudeSDKClient, "usage_totals", list(usage_totals))
+    config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
+    open_scope = partial(
+        open_resolved_scope_session_context,
+        agent_name="test_agent",
+        scope=scope,
+        session_id="session",
+        config=config,
+        runtime_paths=paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+    )
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    try:
+        for requester, label, resume in turns:
+            with (
+                open_scope() as scope_context,
+                helper_usage_context(scope_context),
+                tool_runtime_context(replace(context, requester_id=requester)),
+            ):
+                await tools.claude_send(
+                    "Keep going",
+                    session_label=label,
+                    resume=resume,
+                    run_context=RunContext(run_id="run-1", session_id="session"),
+                    agent=SimpleNamespace(name="test_agent"),
+                )
+        report = collect_admin_usage(config=config, runtime_paths=paths)
+        return sorted(
+            (row.user_id, row.totals.input_tokens, row.totals.output_tokens, row.totals.cache_read_tokens)
+            for row in report.user_breakdown
+        )
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_claude_session_records_only_each_turns_new_usage(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code reports running session totals, so each turn counts only its increase, for its own requester."""
+    rows = await _send_metered_turns(
+        tmp_path,
+        monkeypatch,
+        [
+            {"claude-sonnet-5-5": _model_usage(1000, 200, 5000, 0)},
+            {"claude-sonnet-5-5": _model_usage(1500, 260, 9000, 0)},
+        ],
+        [("@alice:localhost", None, None), ("@bob:localhost", None, None)],
+    )
+
+    assert rows == [("@alice:localhost", 1000, 200, 5000), ("@bob:localhost", 500, 60, 4000)]
+
+
+@pytest.mark.asyncio
+async def test_cleared_claude_session_counts_its_new_totals(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A /clear restarts Claude Code's running totals, so a lower total is the turn's whole usage."""
+    rows = await _send_metered_turns(
+        tmp_path,
+        monkeypatch,
+        [
+            {"claude-sonnet-5-5": _model_usage(1000, 200, 5000, 0)},
+            {"claude-sonnet-5-5": _model_usage(300, 50, 0, 0)},
+        ],
+        [("@alice:localhost", None, None), ("@alice:localhost", None, None)],
+    )
+
+    assert rows == [("@alice:localhost", 1300, 250, 5000)]
+
+
+@pytest.mark.asyncio
+async def test_resumed_claude_session_counts_only_usage_after_resuming(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed session starts from the totals it saved, which were already counted in this process."""
+    rows = await _send_metered_turns(
+        tmp_path,
+        monkeypatch,
+        [
+            {"claude-sonnet-5-5": _model_usage(1000, 200, 5000, 0)},
+            {"claude-sonnet-5-5": _model_usage(1500, 260, 9000, 0)},
+        ],
+        [("@alice:localhost", "first", None), ("@alice:localhost", "second", "claude-session-123")],
+    )
+
+    assert rows == [("@alice:localhost", 1500, 260, 9000)]

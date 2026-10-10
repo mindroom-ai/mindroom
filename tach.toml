@@ -954,6 +954,7 @@ depends_on = ["mindroom.agent_storage", "mindroom.constants", "mindroom.history.
 visibility = [
     "mindroom.response_turn",
     "mindroom.memory.auto_flush",
+    "mindroom.custom_tools.claude_agent",
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.approval_execution",
     "mindroom.teams",

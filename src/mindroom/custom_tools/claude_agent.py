@@ -107,6 +107,10 @@ def _parse_optional_int(value: int | None, *, minimum: int) -> int | None:
     return max(minimum, value)
 
 
+# Input, output, cache-read, and cache-write tokens of one model.
+type _UsageCounts = tuple[int, int, int, int]
+
+
 @dataclass
 class _ClaudeSessionState:
     """Runtime state for one persistent Claude coding session."""
@@ -121,6 +125,8 @@ class _ClaudeSessionState:
     last_used_at: float = field(default_factory=monotonic)
     ttl_seconds: int = _DEFAULT_SESSION_TTL_MINUTES * 60
     claude_session_id: str | None = None
+    # Claude Code's running usage totals per model, as of the last counted turn.
+    usage_totals: dict[str, _UsageCounts] = field(default_factory=dict)
     stderr_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
@@ -131,6 +137,8 @@ class _ClaudeSessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, _ClaudeSessionState] = {}
+        # Last counted running totals per Claude session ID, so resuming or forking one counts only new usage.
+        self.usage_totals: dict[str, dict[str, _UsageCounts]] = {}
         self._lock = asyncio.Lock()
         self._namespace_limits: dict[str, tuple[int, int]] = {}
 
@@ -175,6 +183,7 @@ class _ClaudeSessionManager:
                     owner=owner,
                     close_requested=close_requested,
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
+                    usage_totals=dict(self.usage_totals.get(options.resume, {})) if options.resume else {},
                 )
                 self._sessions[session_key] = session
                 return session, True
@@ -298,22 +307,35 @@ async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
         logger.warning("Claude session cleanup failed", error=str(error))
 
 
-async def _record_session_usage(result: ResultMessage | None) -> None:
+def _turn_usage(previous: dict[str, _UsageCounts], current: dict[str, _UsageCounts]) -> dict[str, _UsageCounts]:
+    """Return each model's usage since the previous running totals; a lower total means the session was cleared."""
+    turn: dict[str, _UsageCounts] = {}
+    for model_id, counts in current.items():
+        before = previous.get(model_id, (0, 0, 0, 0))
+        if any(now < then for now, then in zip(counts, before, strict=True)):
+            before = (0, 0, 0, 0)
+        delta = cast("_UsageCounts", tuple(now - then for now, then in zip(counts, before, strict=True)))
+        if any(delta):
+            turn[model_id] = delta
+    return turn
+
+
+async def _record_turn_usage(turn: dict[str, _UsageCounts]) -> None:
     """Count one Claude Code turn's usage toward the conversation and requester that ran it."""
     owner = get_helper_usage_owner()
-    if owner is None or result is None or not result.model_usage:
+    if owner is None or not turn:
         return
     models = [
         ModelMetrics(
             id=model_id,
             provider="Anthropic",
-            input_tokens=usage["inputTokens"],
-            output_tokens=usage["outputTokens"],
-            total_tokens=usage["inputTokens"] + usage["outputTokens"],
-            cache_read_tokens=usage["cacheReadInputTokens"],
-            cache_write_tokens=usage["cacheCreationInputTokens"],
+            input_tokens=inputs,
+            output_tokens=outputs,
+            total_tokens=inputs + outputs,
+            cache_read_tokens=cache_reads,
+            cache_write_tokens=cache_writes,
         )
-        for model_id, usage in result.model_usage.items()
+        for model_id, (inputs, outputs, cache_reads, cache_writes) in turn.items()
     ]
     metrics = RunMetrics(details={"model": models})
     for model in models:
@@ -610,6 +632,7 @@ class ClaudeAgentTools(Toolkit):
         response_text = ""
         tool_names: list[str] = []
         msg_result: ResultMessage | None = None
+        turn_usage: dict[str, _UsageCounts] = {}
         session_error: str | None = None
         async with session.lock:
             session.last_used_at = monotonic()
@@ -617,6 +640,20 @@ class ClaudeAgentTools(Toolkit):
                 await session.client.query(trimmed_prompt)
                 response_text, tool_names, msg_result = await self._collect_response(session)
                 session.last_used_at = monotonic()
+                if msg_result is not None and msg_result.model_usage:
+                    # Claude Code reports running session totals, so count only this turn's increase.
+                    totals = {
+                        model_id: (
+                            usage["inputTokens"],
+                            usage["outputTokens"],
+                            usage["cacheReadInputTokens"],
+                            usage["cacheCreationInputTokens"],
+                        )
+                        for model_id, usage in msg_result.model_usage.items()
+                    }
+                    turn_usage = _turn_usage(session.usage_totals, totals)
+                    session.usage_totals = totals
+                    self._session_manager.usage_totals[msg_result.session_id] = totals
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
@@ -631,7 +668,7 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        await _record_session_usage(msg_result)
+        await _record_turn_usage(turn_usage)
         return self._format_response_output(response_text, tool_names, msg_result)
 
     async def _collect_response(
