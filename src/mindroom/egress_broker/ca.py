@@ -19,6 +19,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from mindroom.atomic_file import atomic_write_bytes_at
+
 __all__ = [
     "BrokerCA",
     "materialize_ca_bundle",
@@ -332,6 +334,23 @@ class BrokerCA:
                 tmp_path.unlink()
 
 
+def _publish_unless_current(directory_fd: int, filename: str, content: bytes) -> None:
+    """Atomically write `content` unless `filename` is already a file, not a symlink, holding exactly it.
+
+    The bundle directory can sit in a shared /tmp, so an existing file is
+    never trusted by name: a symlink or a file with other content is replaced.
+    """
+    try:
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except OSError:
+        existing = None
+    else:
+        with os.fdopen(fd, "rb") as existing_file:
+            existing = existing_file.read()
+    if existing != content:
+        atomic_write_bytes_at(directory_fd, filename, content, file_mode=0o644, temp_prefix=f".{filename}.")
+
+
 def materialize_ca_bundle(ca_pem: str, directory: Path) -> tuple[Path, Path]:
     """Materialize CA bundle files in the given directory.
 
@@ -340,7 +359,8 @@ def materialize_ca_bundle(ca_pem: str, directory: Path) -> tuple[Path, Path]:
     - broker_ca_only: just the broker CA
 
     File names: bundle-<fingerprint[:16]>.pem and ca-<fingerprint[:16]>.pem.
-    Idempotent: returns existing files if already materialized.
+    Idempotent: existing files are reused only when their content matches,
+    and every write goes through a temp file and an atomic rename.
     """
     # Compute fingerprint for file naming
     cert = x509.load_pem_x509_certificate(ca_pem.encode("utf-8"))
@@ -350,16 +370,6 @@ def materialize_ca_bundle(ca_pem: str, directory: Path) -> tuple[Path, Path]:
 
     combined_path = directory / f"bundle-{prefix}.pem"
     ca_only_path = directory / f"ca-{prefix}.pem"
-
-    # If both files exist, return them
-    if combined_path.exists() and ca_only_path.exists():
-        return combined_path, ca_only_path
-
-    # Ensure directory exists
-    directory.mkdir(parents=True, exist_ok=True)
-
-    # Write broker CA only
-    ca_only_path.write_text(ca_pem)
 
     # Build combined bundle: system roots + broker CA
     # Try ssl.get_default_verify_paths().cafile first, fall back to certifi
@@ -375,6 +385,13 @@ def materialize_ca_bundle(ca_pem: str, directory: Path) -> tuple[Path, Path]:
         combined += "\n"
     combined += ca_pem
 
-    combined_path.write_text(combined)
+    # Ensure directory exists
+    directory.mkdir(parents=True, exist_ok=True)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        _publish_unless_current(directory_fd, ca_only_path.name, ca_pem.encode("utf-8"))
+        _publish_unless_current(directory_fd, combined_path.name, combined.encode("utf-8"))
+    finally:
+        os.close(directory_fd)
 
     return combined_path, ca_only_path

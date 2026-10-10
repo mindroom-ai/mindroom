@@ -245,3 +245,38 @@ def test_materialize_bundle_contains_system_roots_and_broker_ca(tmp_path: Path) 
     combined2, broker_only2 = materialize_ca_bundle(ca.cert_pem, bundle_dir)
     assert combined == combined2
     assert broker_only == broker_only2
+
+
+@pytest.mark.parametrize("which", ["combined", "broker_only"])
+def test_materialize_bundle_replaces_tampered_file(tmp_path: Path, which: str) -> None:
+    """A pre-existing bundle file with other content is rewritten instead of trusted."""
+    ca = BrokerCA.load_or_create(tmp_path / "ca", key_password=None)
+    bundle_dir = tmp_path / "bundles"
+    combined, broker_only = materialize_ca_bundle(ca.cert_pem, bundle_dir)
+    expected = {"combined": combined.read_text(), "broker_only": broker_only.read_text()}
+    tampered = combined if which == "combined" else broker_only
+    tampered.write_text("-----BEGIN CERTIFICATE-----\nplanted\n-----END CERTIFICATE-----\n")
+
+    combined2, broker_only2 = materialize_ca_bundle(ca.cert_pem, bundle_dir)
+
+    assert (combined2, broker_only2) == (combined, broker_only)
+    assert combined.read_text() == expected["combined"]
+    assert broker_only.read_text() == expected["broker_only"]
+    assert sorted(path.name for path in bundle_dir.iterdir()) == sorted([combined.name, broker_only.name])
+
+
+def test_materialize_bundle_replaces_symlink(tmp_path: Path) -> None:
+    """A symlink planted at a bundle path is replaced by a regular file, never followed."""
+    ca = BrokerCA.load_or_create(tmp_path / "ca", key_password=None)
+    bundle_dir = tmp_path / "bundles"
+    combined, broker_only = materialize_ca_bundle(ca.cert_pem, bundle_dir)
+    planted = tmp_path / "planted.pem"
+    planted.write_text(broker_only.read_text())
+    broker_only.unlink()
+    broker_only.symlink_to(planted)
+
+    materialize_ca_bundle(ca.cert_pem, bundle_dir)
+
+    assert not broker_only.is_symlink()
+    assert broker_only.read_text() == ca.cert_pem
+    assert combined.read_text().endswith(ca.cert_pem)
