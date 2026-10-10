@@ -17,7 +17,7 @@ from mindroom.delegation.lifecycle import active_delegation_edges
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
-from mindroom.tool_jobs.approvals import prune_job_approvals, settle_job_approvals
+from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.completion import HoldKey, conversation_work
 from mindroom.tool_jobs.disabled import index_parked_work
@@ -118,8 +118,7 @@ class ToolJobRuntimeCoordinator:
         """Settle a stopped job's own cleanup: deny the cards it waits on, and reconcile a subagent's child."""
         if job.kind != "delegation":
             # A gated tool call that runs as a job may wait on its approval card.
-            await settle_job_approvals(self.runtime, job.job_id)
-            return None
+            return await end_tool_call_approval(self.runtime, job)
         config = self.config_provider()
         if config is None:
             msg = "Cannot settle a background job without runtime configuration."

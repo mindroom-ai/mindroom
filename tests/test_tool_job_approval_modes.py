@@ -24,6 +24,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.approvals import end_tool_call_approval
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -32,7 +33,13 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    assembled_function,
+    saved_jobs,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,7 +47,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
 
     from mindroom.tool_approval import BackgroundScriptToolOrigin
-    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
 
 
 class _NativeTools(Toolkit):
@@ -255,7 +262,11 @@ class _GatedRun:
         async def stop_recorded(_job: BackgroundJob) -> bool:
             return self.stopped
 
-        self.runtime = await tool_job_runtime(self.tmp_path, stopped=stop_recorded)
+        async def interrupt(job: BackgroundJob) -> BackgroundOutcome | None:
+            # The coordinator's cleanup of a stopped tool call's job.
+            return await end_tool_call_approval(self.runtime, job)
+
+        self.runtime = await tool_job_runtime(self.tmp_path, cancel=interrupt, stopped=stop_recorded)
         pin_background_tool_jobs(self.config, self.paths)
         register_background_runtime(self.paths, self.runtime)
         self.cards = _Cards(asyncio.get_running_loop().create_future())
@@ -378,3 +389,23 @@ async def test_gated_call_that_cannot_become_a_job_never_runs(
                 response = await agent.arun("Write", session_id=run.context.session_id)
         assert "needs approval" in _tool_result(response)
         assert (run.effects, run.cards.requested) == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_shutdown_while_a_call_waits_for_approval_says_it_did_not_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike other interrupted work, a call stopped while it asked for approval has no effects to check."""
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0) as run, execution_resources():
+        with tool_runtime_context(run.context):
+            response = await run.agent().arun("Write", session_id=run.context.session_id)
+            job_id = json.loads(_tool_result(response))["job_id"]
+            await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+    # Leaving the run shuts its runtime down while the call still waits for its approval.
+    job = (await saved_jobs(tmp_path))[job_id]
+    assert job.status == "interrupted"
+    assert job.result == "The runtime stopped while this call waited for its approval, so it did not run."
+    [(card_run_id, _, _)] = run.cards.requested
+    assert card_run_id in run.cards.settled
+    assert run.effects == []

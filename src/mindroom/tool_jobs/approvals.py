@@ -18,6 +18,8 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import ApprovalDecision
 from mindroom.logging_config import get_logger
 from mindroom.tool_approval import BackgroundScriptToolOrigin, resolve_tool_approval_approver
+from mindroom.tool_jobs.control import job_stopped_by_shutdown
+from mindroom.tool_jobs.runtime import BackgroundOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _CANCELLED_REASON = "The background job asking for this approval ended before a decision."
+_UNASKED_REASON = "The runtime stopped while this call waited for its approval, so it did not run."
 
 
 def _approval_run_id(job_id: str) -> str:
@@ -153,6 +156,15 @@ async def _end_wait(
         decision.cancel()
     await asyncio.gather(*decisions, return_exceptions=True)
     await settle_job_approvals(runtime, job_id)
+
+
+async def end_tool_call_approval(runtime: ToolJobRuntime, job: BackgroundJob) -> BackgroundOutcome | None:
+    """Deny the card a stopped tool call's job waits on; a shutdown or restart during that wait leaves the call unrun."""
+    await settle_job_approvals(runtime, job.job_id)
+    if job.status == "awaiting_approval" and job_stopped_by_shutdown():
+        # The approval is the job's first phase, so unlike other interrupted work its call has no effects to check.
+        return BackgroundOutcome("interrupted", _UNASKED_REASON)
+    return None
 
 
 async def settle_job_approvals(runtime: ToolJobRuntime, job_id: str) -> None:

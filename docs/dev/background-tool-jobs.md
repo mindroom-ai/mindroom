@@ -114,6 +114,6 @@ A Stop on a reply whose work a newer reply already took over cancels nothing, si
 Removing an agent or team from the configuration ends its waiting replies, but their messages keep their waiting notice, since no bot remains to edit them.
 Turning the feature off ends waiting replies at startup, keeping their answers.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
-A restart interrupts a job that waits for its own call's approval, so that call never runs; the model is told to ask again only for a read-only call.
+A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
 Job cards offer no timed automatic approvals, and automatic approvals granted on paused-run cards do not apply to them.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
