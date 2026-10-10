@@ -153,7 +153,7 @@ describe("the editor form", () => {
         /a listed GraphQL rule reaches every repository the key can\s+reach/,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/fine-grained GitHub token/)).toBeInTheDocument();
+    expect(screen.getByText(/fine-grained token/)).toBeInTheDocument();
   });
 
   it("shows what is wrong instead of saving an invalid form", async () => {

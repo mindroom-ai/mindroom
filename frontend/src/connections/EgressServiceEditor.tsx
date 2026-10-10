@@ -654,8 +654,9 @@ export function EgressServiceEditor({
           refused with path_not_allowed instead of being sent without
           credentials. GraphQL (/graphql) is refused too unless a rule lists it,
           and a listed GraphQL rule reaches every repository the key can reach.
-          The real permission boundary is the key itself: use a fine-grained
-          GitHub token, or a GitHub App installed on selected repositories.
+          The real permission boundary is the key itself, so scope it as
+          narrowly as the service allows (on GitHub, a fine-grained token or a
+          GitHub App installed on selected repositories).
         </p>
         {broaderServices.length > 0 && (
           // A standing notice, not something to announce on every render.

@@ -17778,7 +17778,7 @@ They have the same fields and validators as a config service (a preset or `rules
 **Where they live.**
 A service is stored per scope, in the same primary-only store as that scope's keys, as one document under the reserved credential name `egress__services`; a service name starts with a letter or digit, so no key can take it.
 It follows the placement in the [scope table](#secret-management): per requester (and agent for `user_agent`), per agent for `shared`, and in the global store for unscoped agents, where every agent without a worker scope shares it.
-So a service saved on one of a user's `user` agents applies to all of that user's `user` agents, together with its key, while each `user_agent` agent has its own. Beside **Add service** and **Delete service** on a personal agent, the personal page notes that the service applies to all of your personal agents that share its scope.
+So a service saved on one of a user's `user` agents applies to all of that user's `user` agents, together with its key, while each `user_agent` agent has its own. On a personal agent, the service editor and the delete confirmation note that the service applies to all of your personal agents that share its scope.
 Workers never read that store.
 The broker merges the config services and the calling scope's own services per request, from a small per-scope cache that every save or delete clears, so a change applies to the next request without a restart.
 A user service routes only that scope's keys and accounts, so it cannot reach anyone else's credentials.
@@ -17847,7 +17847,7 @@ Both return the presets as the config model expands them:
 The example is abbreviated to one preset and one rule.
 Rules carry no auth settings, and `display_name` falls back to the preset id.
 The editor checks what it can before saving, and shows the server's message for the rest (a name that is taken, a limit, or a rule the server refuses).
-On the personal page the placeholder fields apply the user-service rules from [User services](#user-services) as you type (the name and value patterns and the refused words), and the hint under them lists those rules, so a placeholder the server would reject is flagged before saving.
+On the personal page the placeholder fields check the user-service rules from [User services](#user-services) (the name and value patterns and the refused words) after the first save attempt, and live from then on, and the hint under them lists those rules, so a placeholder the server would reject is flagged before saving.
 
 ## Personal request log
 

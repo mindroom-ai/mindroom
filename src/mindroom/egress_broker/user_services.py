@@ -17,6 +17,7 @@ in every requester's sandbox, and config placeholders win over theirs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
@@ -141,7 +142,8 @@ def inactive_user_services(
 
     An entry is `shadowed` when `config` has a service of that name, whether or not it would still validate, and
     `invalid` when it no longer validates as a user service. Both still count toward the scope's limits, and
-    `delete_user_service` removes either. This reads the store each time and logs nothing, so a listing can call it.
+    `delete_user_service` removes either. This reads the store each time and logs nothing per entry, so a listing can
+    call it.
     """
     inactive = []
     for name, authored in sorted(_stored_services(manager, target).items()):
@@ -240,7 +242,10 @@ def delete_user_service(
             else:
                 delete_egress_document(manager, target, USER_SERVICES_CREDENTIAL_SERVICE)
             if name not in config_services:
-                delete_secret(manager, target, name)
+                # Only an entry written outside `save_user_service` can have a name the store rejects, and such a
+                # name never had a key.
+                with contextlib.suppress(ValueError):
+                    delete_secret(manager, target, name)
         finally:
             _cache.invalidate()
     return True

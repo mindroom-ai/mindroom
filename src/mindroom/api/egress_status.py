@@ -309,17 +309,22 @@ def oauth_provider_of_service(
     `shared_worker_oauth`) is a 409 for both actions, as the status reports nothing connectable there. Connecting is
     also a 409 while a shared service account is configured for the provider, since personal accounts are not
     managed then. Disconnecting stays possible there, so a personal connection stored earlier can still be revoked.
+    A worker backend that cannot be read is a 503 for both actions.
     """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     provider = service_oauth_provider(snapshot, service)
     if provider is None:
         raise HTTPException(404, "Service has no account connection", headers=headers)
-    access = shared_worker_oauth(
-        provider,
-        worker_target,
-        opted_in=service.oauth_on_shared_workers,
-        runtime_paths=snapshot.runtime_paths,
-    )
+    try:
+        access = shared_worker_oauth(
+            provider,
+            worker_target,
+            opted_in=service.oauth_on_shared_workers,
+            runtime_paths=snapshot.runtime_paths,
+        )
+    except Exception as exc:
+        # An unreadable worker backend leaves the sandbox kind unknown, so neither action can be judged safe.
+        raise HTTPException(503, "Account connection is unavailable right now", headers=headers) from exc
     if access == "refused":
         detail = "Account connection is unavailable here because several users share this agent's sandbox"
         raise HTTPException(409, detail, headers=headers)

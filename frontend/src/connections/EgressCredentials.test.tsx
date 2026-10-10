@@ -1373,7 +1373,7 @@ describe("recent requests on the personal page", () => {
     render(<EgressCredentials />);
     fireEvent.click(await toggle());
     expect(
-      await screen.findByText("refused", { selector: "span" }),
+      await screen.findByText("refused", { selector: "div" }),
     ).toBeInTheDocument();
   });
 

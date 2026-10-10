@@ -2083,6 +2083,24 @@ def test_an_unreadable_worker_backend_degrades_one_service_without_failing_the_p
     assert _egress_row(portal, "alice", "personal", "github")["oauth"] is None
 
 
+def test_connect_and_disconnect_answer_503_when_the_worker_backend_cannot_be_read(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """Without the sandbox kind neither action can be judged safe, so both fail closed with a plain 503."""
+    portal = oauth_egress_portal
+    _use_worker_backend(portal, "no-such-backend")
+    headers = portal["headers"]["alice"]
+
+    for action in ("connect", "disconnect"):
+        response = portal["client"].post(
+            f"/api/connections/egress/agents/personal/gh/{action}",
+            headers=headers,
+            json={},
+        )
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == "Account connection is unavailable right now"
+
+
 def _scope_target(portal: dict[str, Any], agent: str = "personal", requester: str = "@alice:example.org") -> Any:  # noqa: ANN401
     config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
     return build_connection_agent_target(config, portal["paths"], requester, agent)

@@ -187,13 +187,13 @@ function RecentRequests({ agentName }: { agentName: string }) {
                         </td>
                         <td className="px-3 py-2">{record.host}</td>
                         <td
-                          className="max-w-xs truncate px-3 py-2 font-mono text-xs"
+                          className="max-w-[14rem] truncate px-3 py-2 font-mono text-xs"
                           title={record.path}
                         >
                           {record.path || "-"}
                         </td>
                         <td className="px-3 py-2">{record.service ?? "-"}</td>
-                        <td className="whitespace-nowrap px-3 py-2">
+                        <td className="px-3 py-2">
                           <Badge
                             variant={
                               record.status >= 400 ? "destructive" : "secondary"
@@ -203,9 +203,9 @@ function RecentRequests({ agentName }: { agentName: string }) {
                             {record.status}
                           </Badge>
                           {refusal && (
-                            <span className="ml-2 text-xs text-muted-foreground">
+                            <div className="mt-1 break-all text-xs text-muted-foreground">
                               {refusal}
-                            </span>
+                            </div>
                           )}
                         </td>
                       </tr>

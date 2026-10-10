@@ -265,6 +265,20 @@ def test_deleting_an_invalid_entry_removes_it_and_its_key(manager: CredentialsMa
     assert _delete(manager, _target(), "stale") is False
 
 
+def test_deleting_an_entry_with_a_name_the_store_rejects_still_succeeds(manager: CredentialsManager) -> None:
+    """An entry written outside `save_user_service` can carry a name no key can have; deleting it still works."""
+    store = manager.for_primary_runtime_scope(_ALICE, "code")
+    store.save_credentials(
+        USER_SERVICES_CREDENTIAL_SERVICE,
+        {"services": {"Bad Name": _service().authored_model_dump(), "good": _service().authored_model_dump()}},
+    )
+
+    assert _delete(manager, _target(), "Bad Name") is True
+
+    assert inactive_user_services(_CONFIG, manager, _target()) == []
+    assert list(load_user_services(manager, _target())) == ["good"]
+
+
 def test_malformed_document_reads_as_no_services(manager: CredentialsManager) -> None:
     """A document without a services mapping is ignored with a warning instead of failing the scope."""
     store = manager.for_primary_runtime_scope(_ALICE, "code")
