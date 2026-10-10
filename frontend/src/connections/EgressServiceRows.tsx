@@ -23,6 +23,18 @@ function statusLabel(service: EgressCredentialService): string {
     : "Set";
 }
 
+function removeWarning(service: EgressCredentialService): string {
+  if (service.is_global)
+    return "This deletes the global key, which every agent without a worker scope shares. Those agents lose access to this service until a key is set again.";
+  if (service.is_shared === null)
+    return "This deletes the saved key. The agent loses access to this service until a key is set again.";
+  // A shared agent's key, or for an agent without a worker scope the global
+  // key, so other agents may rely on it too.
+  if (service.is_shared)
+    return "This deletes the shared key. Everyone who relies on it loses access to this service until a key is set again.";
+  return "This deletes your saved key. Your agent loses access to this service until you set a key again.";
+}
+
 function EgressServiceRow({
   path,
   service,
@@ -214,13 +226,7 @@ function EgressServiceRow({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Remove {keyLabel}?</DialogTitle>
-            <DialogDescription>
-              {service.is_shared === null
-                ? "This deletes the saved key. The agent loses access to this service until a key is set again."
-                : service.is_shared
-                  ? "This deletes the shared key. Everyone using this agent loses access to this service until a key is set again."
-                  : "This deletes your saved key. Your agent loses access to this service until you set a key again."}
-            </DialogDescription>
+            <DialogDescription>{removeWarning(service)}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>

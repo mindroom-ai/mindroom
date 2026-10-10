@@ -45,6 +45,8 @@ export interface EgressCredentialService {
   description: string;
   /** `null` when the caller cannot tell whether the key is shared. */
   is_shared: boolean | null;
+  /** Set by the dashboard for the global key that every agent without a worker scope shares. */
+  is_global?: boolean;
   can_manage: boolean;
   configured: boolean;
   updated_at: string | null;

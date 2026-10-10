@@ -105,6 +105,17 @@ function canUseEgress(agent: Agent, defaults: Config["defaults"]): boolean {
   );
 }
 
+// Keys for `user` and `user_agent` agents belong to each requester, so the
+// admin API rejects them; their users set keys on the personal egress page.
+function isRequesterScoped(
+  agent: Agent,
+  defaults: Config["defaults"],
+): boolean {
+  if (agent.private != null) return true;
+  const scope = agent.worker_scope ?? defaults?.worker_scope ?? null;
+  return scope === "user" || scope === "user_agent";
+}
+
 function ServiceSection({ agentName }: { agentName: string | null }) {
   const [services, setServices] = useState<EgressCredentialService[] | null>(
     null,
@@ -120,13 +131,14 @@ function ServiceSection({ agentName }: { agentName: string | null }) {
       );
       if (request !== latest.current) return;
       // The dashboard operator manages every service. Without an agent the
-      // keys are the shared ones; for a selected agent the API does not report
+      // keys are the global ones; for a selected agent the API does not report
       // its scope, so the wording stays neutral.
       setServices(
         payload.services.map((service) => ({
           ...service,
           display_name: service.display_name ?? service.name,
           is_shared: agentName === null ? true : null,
+          is_global: agentName === null,
           can_manage: true,
         })),
       );
@@ -365,10 +377,16 @@ export function EgressBroker() {
   const defaults = useConfigStore((state) => state.config?.defaults);
   const [selected, setSelected] = useState<string | null>(null);
 
-  const eligibleAgents = useMemo(
+  const commandAgents = useMemo(
     () => agents.filter((agent) => canUseEgress(agent, defaults)),
     [agents, defaults],
   );
+  const eligibleAgents = useMemo(
+    () => commandAgents.filter((agent) => !isRequesterScoped(agent, defaults)),
+    [commandAgents, defaults],
+  );
+  const hidesRequesterScopedAgents =
+    eligibleAgents.length < commandAgents.length;
   // An agent that disappears from the config falls back to the global scope.
   const agentName = eligibleAgents.some((agent) => agent.id === selected)
     ? selected
@@ -401,6 +419,12 @@ export function EgressBroker() {
               </option>
             ))}
           </select>
+          {hidesRequesterScopedAgents && (
+            <p className="w-full text-xs text-muted-foreground">
+              Agents with user or user_agent scope are not listed: each user
+              sets their own keys on the personal egress page.
+            </p>
+          )}
         </div>
         {/* Keyed so an unsaved secret never carries over to another target. */}
         <ServiceSection

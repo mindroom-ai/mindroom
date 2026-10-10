@@ -190,6 +190,60 @@ describe("egress broker secret target", () => {
     expect(screen.getByLabelText("Secrets for")).toHaveValue("");
   });
 
+  it("leaves out agents whose keys belong to each requester", async () => {
+    storeState = {
+      agents: [
+        agent("coder", ["shell"]),
+        agent("mine", ["shell"], { private: { per: "user_agent" } }),
+        agent("per_user", ["shell"], { worker_scope: "user" }),
+        agent("team", ["python"], { worker_scope: "shared" }),
+        agent("unscoped", ["shell"], { worker_scope: null }),
+      ],
+      config: { defaults: { worker_scope: null } },
+    };
+    render(<EgressBroker />);
+    await screen.findByText("GitHub");
+
+    const options = within(screen.getByLabelText("Secrets for"))
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(options).toEqual([
+      "Global (unscoped agents)",
+      "Agent coder",
+      "Agent team",
+      "Agent unscoped",
+    ]);
+    expect(
+      screen.getByText(/Agents with user or user_agent scope are not listed/),
+    ).toBeInTheDocument();
+  });
+
+  it("follows the default worker scope for agents without their own", async () => {
+    storeState = {
+      agents: [
+        agent("inherits", ["shell"]),
+        agent("team", ["shell"], { worker_scope: "shared" }),
+      ],
+      config: { defaults: { worker_scope: "user_agent" } },
+    };
+    render(<EgressBroker />);
+    await screen.findByText("GitHub");
+
+    const options = within(screen.getByLabelText("Secrets for"))
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(options).toEqual(["Global (unscoped agents)", "Agent team"]);
+  });
+
+  it("does not mention requester-scoped agents when there are none", async () => {
+    render(<EgressBroker />);
+    await screen.findByText("GitHub");
+
+    expect(
+      screen.queryByText(/Agents with user or user_agent scope/),
+    ).toBeNull();
+  });
+
   it("only offers the global scope while the config is not loaded", async () => {
     storeState = { agents: [], config: null };
     render(<EgressBroker />);
@@ -338,7 +392,9 @@ describe("egress broker secret target", () => {
       screen.getByRole("button", { name: "Remove openai API key" }),
     );
     expect(
-      within(screen.getByRole("dialog")).getByText(/deletes the shared key/),
+      within(screen.getByRole("dialog")).getByText(
+        "This deletes the global key, which every agent without a worker scope shares. Those agents lose access to this service until a key is set again.",
+      ),
     ).toBeInTheDocument();
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", {

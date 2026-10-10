@@ -272,6 +272,24 @@ describe("egress service rows", () => {
     expect(screen.getByText("Managed by credential managers")).toBeVisible();
   });
 
+  it("warns that a shared key affects everyone who relies on it", async () => {
+    render(
+      <EgressServiceRows
+        agentName="shared_dev"
+        services={[{ ...openai, is_shared: true, can_manage: true }]}
+        onChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove OpenAI API key" }),
+    );
+    expect(
+      await screen.findByText(
+        "This deletes the shared key. Everyone who relies on it loses access to this service until a key is set again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("says the key is not shared when the scope is unknown", async () => {
     render(
       <EgressServiceRows
