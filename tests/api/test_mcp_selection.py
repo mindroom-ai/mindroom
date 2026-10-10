@@ -24,6 +24,7 @@ from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
     ORIGIN,
+    _authorize,
     _native_dispatch_builder,
     gateway_app,  # noqa: F401
     gateway_client,  # noqa: F401
@@ -381,6 +382,70 @@ def test_saved_shared_credential_agent_is_refused_without_opt_in(
     shared.mcp_gateway_shared_credentials = False
     assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {"personal": None}
     _assert_shared_agent_refused(gateway_client, token)
+
+
+def test_shared_only_user_connects_and_gets_the_shared_credentials_error(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """A user whose only agent needs the opt-in can still connect a client and sees why calls are refused."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.agents["personal"].access.users = ["@bob:example.org"]
+    _add_shared_agent(gateway_client)
+    token = _connect(gateway_client, signed_headers("alice"))["access_token"]
+    assert _call(gateway_client, token, "invoke_tool", {"agent": "shared", **ADD})["structuredContent"] == (
+        SHARED_CREDENTIALS_REFUSED
+    )
+    assert _call(gateway_client, token, "search_tools", {})["structuredContent"] == {"results": []}
+
+
+def test_consent_lists_only_saved_agents_available_through_mcp(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Consent for a new client does not name a saved shared agent that lost its opt-in."""
+    shared = _add_shared_agent(gateway_client, mcp_gateway_shared_credentials=True)
+    alice = signed_headers("alice")
+    choices = {"agents": {"personal": None, "shared": None}}
+    assert gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json=choices).status_code == 200
+    shared.mcp_gateway_shared_credentials = False
+    _client_id, url = _authorize(gateway_client)
+    consent = gateway_client.get(url, headers=alice)
+    assert consent.status_code == 200, consent.text
+    assert "Currently selected: <strong>Personal assistant</strong>." in consent.text
+
+
+def test_removing_the_opt_in_during_preparation_stops_the_tool_body(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider-boundary recheck refuses a call whose shared agent lost its opt-in while the call was prepared."""
+    shared = _add_shared_agent(gateway_client, mcp_gateway_shared_credentials=True)
+    alice = signed_headers("alice")
+    token = _connect(gateway_client, alice)["access_token"]
+    choices = {"agents": {"shared": None}}
+    assert gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json=choices).status_code == 200
+    paused, release = threading.Event(), threading.Event()
+    events: list[str] = []
+    build = _native_dispatch_builder("hook", False, paused, release, events, agent="shared")
+    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            _call,
+            gateway_client,
+            token,
+            "invoke_tool",
+            {"agent": "shared", "toolkit": "calculator", "function": "account", "arguments": {}},
+        )
+        try:
+            assert paused.wait(10), "Tool hook never paused"
+            shared.mcp_gateway_shared_credentials = False
+        finally:
+            release.set()
+        # The recheck fails inside the tool call, which the gateway reports as an unavailable tool.
+        assert pending.result(timeout=10)["structuredContent"]["error"]["code"] == "tool_unavailable"
+    assert events == ["close"], "The tool body ran after the opt-in was removed"
 
 
 @pytest.mark.parametrize("scope", ["user", "user_agent"])

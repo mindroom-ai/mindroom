@@ -140,6 +140,22 @@ it("keeps agents that are not available through MCP out of the MCP selection", a
   expect(screen.getAllByText("MindRoom only")).toHaveLength(2);
 });
 
+it("does not explain MCP availability while the gateway is disabled", async () => {
+  const data = catalog([service]);
+  data.agents[0].mcp_available = false;
+  installApi({
+    "/api/connections": async () => json(data),
+    "/api/connections/mcp/selection": async () => json({ enabled: false }),
+  });
+  render(<Connections />);
+  await screen.findByRole("button", { name: "Expand Personal assistant" });
+  expect(
+    screen.queryByTitle(
+      "Runs tools with shared credentials, so it is not exposed through MCP",
+    ),
+  ).not.toBeInTheDocument();
+});
+
 function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
   vi.mocked(fetch).mockImplementation(async (input, options) => {
     const path = String(input);

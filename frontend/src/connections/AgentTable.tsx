@@ -85,6 +85,8 @@ const columns: ColumnDef<AgentTableRow>[] = [
             Credential management only
           </span>
         );
+      if (!mcp.selection?.enabled)
+        return <span className="text-muted-foreground">—</span>;
       if (!row.original.mcp_available)
         return (
           <span
@@ -94,8 +96,6 @@ const columns: ColumnDef<AgentTableRow>[] = [
             MindRoom only
           </span>
         );
-      if (!mcp.selection?.enabled)
-        return <span className="text-muted-foreground">—</span>;
       const choice = mcp.selectedTools(row.original.agent_name);
       return (
         <label className="inline-flex items-center gap-2.5 whitespace-nowrap">
