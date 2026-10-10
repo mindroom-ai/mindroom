@@ -560,8 +560,8 @@ async def test_show_computer_once_sends_the_show_computer_notice_once_per_thread
 
 
 @pytest.mark.asyncio
-async def test_explicit_computer_request_still_sends_after_the_first_browser_notice(tmp_path: Path) -> None:
-    """An agent can always show the panel again, for example after the user closed it or to ask for a login."""
+async def test_explicit_computer_request_without_a_reply_identity_still_sends(tmp_path: Path) -> None:
+    """Without a reply identity to compare, an explicit request sends even after the browser notice."""
     context = _context(tmp_path)
 
     with tool_runtime_context(context):

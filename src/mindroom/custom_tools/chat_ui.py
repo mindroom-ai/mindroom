@@ -390,9 +390,9 @@ class ChatUITools(Toolkit):
         and it never opens or controls the user's own browser. Your first worker
         browser call in a conversation (browser_control with target='host', or any
         browser_mcp function) already shows the user this panel; call show_computer
-        only to show it again, for example when the user should log in or after they
-        closed it. Success means the request was sent, not that the client opened
-        the panel.
+        only to show it again in a later reply, for example when the user should log
+        in or after they closed it. One reply shows the panel once. Success means the
+        request was sent, not that the client opened the panel.
         """
         validated = self._validated_context("show_computer")
         if isinstance(validated, str):
@@ -405,7 +405,7 @@ class ChatUITools(Toolkit):
                 return self._payload(
                     "ok",
                     action="show_computer",
-                    message="The Computer panel was already shown in this reply.",
+                    message="A Computer panel request was already sent in this reply.",
                 )
             result = await self._send_validated_action(
                 context,
@@ -448,8 +448,9 @@ class ChatUITools(Toolkit):
         ChatGPT, or take control, and it never opens or controls the user's own
         browser. Your first worker browser call in a conversation (browser_control
         with target='host', or any browser_mcp function) already shows the user this
-        panel; call open_panel(panel='computer') only to show it again, for example
-        when the user should log in or after they closed it.
+        panel; call open_panel(panel='computer') only to show it again in a later
+        reply, for example when the user should log in or after they closed it. One
+        reply shows the panel once.
 
         panel='members' opens the Members panel, listing the people and agents in
         this room.

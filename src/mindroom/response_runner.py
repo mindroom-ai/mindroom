@@ -1519,7 +1519,7 @@ class ResponseRunner:
                     hook_source=request.response_envelope.hook_source,
                     message_received_depth=request.response_envelope.message_received_depth,
                     dispatch_policy_source_kind=request.response_envelope.dispatch_policy_source_kind,
-                    correlation_id=request.correlation_id,
+                    correlation_id=_correlation_id_for_request(request),
                     history_scope=history_scope,
                     origin=request.response_envelope.origin,
                     memory_prompt=request.prompt,
