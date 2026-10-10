@@ -153,7 +153,8 @@ Counter values can change between reports as coverage improves.
 `GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `get_my_private_usage()` but without `user_id` or `user_breakdown`.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
-The endpoint requires [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a verified Matrix identity, like the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal).
+The endpoint requires [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a verified Matrix identity.
+A [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal) session from Matrix sign-in does not authorize it.
 Without it, requests fail with `403` `Personal APIs require trusted signed authentication` or `Personal APIs require a verified Matrix identity`; an API key alone cannot select a user.
 Any signed-in user can call it, and it grants no administrator or export access.
 

@@ -175,22 +175,24 @@ def test_personal_identity_accepts_signed_matrix_user(
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "expected_status"),
     [
-        {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "false", "MINDROOM_API_KEY": "owner-key"},
-        {"MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "false"},
-        {"MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM": None},
+        # Without signed upstream auth, only a Connections session authenticates, so the page must sign in.
+        ({"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "false", "MINDROOM_API_KEY": "owner-key"}, 401),
+        ({"MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "false"}, 401),
+        ({"MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM": None}, 403),
     ],
 )
 def test_personal_identity_rejects_unverified_identity_modes(
     overrides: dict[str, str | None],
+    expected_status: int,
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """API keys, unsigned headers and JWTs without a bound Matrix identity cannot own personal credentials."""
     headers = {**signed_connections_headers("alice"), "Authorization": "Bearer owner-key"}
     response = connections_auth_client(**overrides).get("/api/connections/identity", headers=headers)
-    assert response.status_code == 403
+    assert response.status_code == expected_status
 
 
 def test_personal_identity_rejects_spoofed_headers_without_signed_assertion(
@@ -354,13 +356,19 @@ def test_connections_static_rejects_traversal_and_missing_assets(
     assert "administrator dashboard" not in response.text
 
 
-def test_connections_static_rejects_api_key_fallback(
+def test_connections_static_shell_is_public(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
 ) -> None:
-    """Standalone owner credentials cannot authenticate the enabled personal frontend."""
+    """The enabled portal shell holds no data and signs itself in, so it loads without credentials."""
+    (tmp_path / "connections").mkdir()
+    (tmp_path / "connections" / "index.html").write_text("connections")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     client = connections_auth_client(MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED="false", MINDROOM_API_KEY="owner-key")
-    response = client.get("/connections", headers={"Authorization": "Bearer owner-key"})
-    assert response.status_code == 403
+    response = client.get("/connections")
+    assert response.status_code == 200
+    assert response.text == "connections"
 
 
 def test_administrator_access_uses_canonical_matrix_alias_policy(

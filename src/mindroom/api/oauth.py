@@ -13,11 +13,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import authenticate_user, login_redirect_for_request, verify_user
+from mindroom.api.auth import (
+    allow_connections_session_for_oauth_callback,
+    authenticate_user,
+    login_redirect_for_request,
+    verify_user,
+)
 from mindroom.api.credentials_oauth_flows import (
     consume_pending_oauth_request,
     issue_pending_oauth_state,
-    pending_oauth_state_requires_browser_user,
+    pending_oauth_state_browser_auth_source,
 )
 from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
@@ -903,8 +908,12 @@ async def callback(provider_id: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail="No OAuth state received")
 
     provider, runtime_paths = _load_provider(request, provider_id)
-    browser_user_required = pending_oauth_state_requires_browser_user(request, provider.id, state)
-    if browser_user_required:
+    issuing_auth_source = pending_oauth_state_browser_auth_source(request, provider.id, state)
+    if issuing_auth_source is not None:
+        # Finish under the identity that started the flow, even if the browser holds both a dashboard login
+        # and a Connections session.
+        if issuing_auth_source == "matrix_openid":
+            allow_connections_session_for_oauth_callback(request)
         await _require_oauth_api_user(request)
     try:
         dashboard_flow = await _complete_oauth_callback(

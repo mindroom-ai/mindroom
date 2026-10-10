@@ -32,6 +32,7 @@ Neither the gateway nor clients should automatically retry a failed or timed-out
 ## Enable the gateway
 
 First configure the [Connections portal](trusted-upstream-auth.md#connections-portal), including strict signed upstream authentication (`MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`) and a private personal agent.
+The gateway stays disabled without strict signed upstream authentication, even when users could sign in to the portal through [Matrix sign-in](trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat).
 Then enable the gateway:
 
 ```bash
@@ -70,6 +71,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 Tools that share a service connection share its OAuth controls, and room-dependent tools are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
+[Matrix sign-in](trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) sessions carry no email, so with managed account provisioning those users see that notice and cannot approve MCP clients; they need trusted upstream sign-in for the MCP controls and consent.
 
 ## Route browser and machine traffic
 
@@ -78,7 +80,7 @@ Forward these paths to the MindRoom API:
 
 | Paths | Authentication at the access proxy |
 |-------|------------------------------------|
-| `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, existing `/api/oauth/*` | Existing signed browser authentication |
+| `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, existing `/api/oauth/*` | Existing signed browser authentication, or pass through for [Matrix sign-in](trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) |
 | `/mcp` | Pass through to gateway bearer authentication |
 | `/mcp/oauth/authorize`, `/mcp/oauth/register`, `/mcp/oauth/token`, `/mcp/oauth/revoke` | Public OAuth endpoints; pass through |
 | `/.well-known/oauth-authorization-server/mcp/oauth`, `/.well-known/oauth-protected-resource/mcp` | Public client discovery |

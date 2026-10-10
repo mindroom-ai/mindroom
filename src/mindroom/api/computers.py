@@ -19,8 +19,13 @@ from mindroom.api import config_lifecycle
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
-from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
-from mindroom.worker_computer.auth import MatrixOpenIDToken, computer_origins, verify_openid
+from mindroom.matrix_openid import (
+    MatrixOpenIDError,
+    MatrixOpenIDToken,
+    allowed_client_origins,
+    verify_matrix_openid,
+)
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
 from mindroom.workers.backend import WorkerBackend, WorkerBackendError
@@ -215,7 +220,10 @@ async def create_session(payload: _CreateSession, request: Request) -> dict[str,
     """Exchange configured-homeserver OpenID for a requester-bound computer viewer."""
     runtime = _runtime(request)
     config, paths = config_lifecycle.read_app_committed_runtime_config(request.app)
-    requester_id = await verify_openid(payload.openid_token, paths)
+    try:
+        requester_id = await verify_matrix_openid(payload.openid_token, paths)
+    except MatrixOpenIDError as error:
+        raise ComputerError(error.status_code, error.detail) from None
     target = await _authorized_target(runtime, requester_id, payload.room_id, payload.agent_user_id)
     if runtime is not _runtime(request):
         raise ComputerError(409, "Computer configuration changed; retry session creation.")
@@ -356,7 +364,7 @@ async def _maintain(websocket: WebSocket, session: ComputerSession, stream: asyn
 
 def _stream_session(websocket: WebSocket, session_id: str) -> ComputerSession:
     paths = config_lifecycle.require_api_state(websocket.app).snapshot.runtime_paths
-    if websocket.headers.get("origin") not in computer_origins(paths):
+    if websocket.headers.get("origin") not in allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV):
         raise ComputerError(403, "Computer stream origin is not allowed.")
     # Uvicorn SansIO can expose comma-separated header values instead of tokens.
     protocols = [protocol.strip() for value in websocket.scope.get("subprotocols", []) for protocol in value.split(",")]

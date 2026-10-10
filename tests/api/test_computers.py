@@ -27,8 +27,9 @@ from mindroom.api import main as api_main
 from mindroom.api.computers import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.matrix_openid import allowed_client_origins
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
-from mindroom.worker_computer.auth import computer_origins
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.worker_computer.protocol import BrowserSession, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
@@ -59,7 +60,7 @@ def gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway
         yield client, peer, app
 
 
-def create(client: TestClient) -> httpx.Response:
+def create(client: TestClient, headers: dict[str, str] | None = None) -> httpx.Response:
     """Create."""
     return client.post(
         "/api/computers/sessions",
@@ -73,6 +74,7 @@ def create(client: TestClient) -> httpx.Response:
             "room_id": "!room:example.org",
             "agent_user_id": "@agent:example.org",
         },
+        headers=headers,
     )
 
 
@@ -386,6 +388,66 @@ def test_openid_subject_server_and_verifier_failures(
     assert "openid-secret" not in caplog.text
 
 
+def _set_public_url(app: FastAPI, public_url: str) -> None:
+    state = config_lifecycle.require_api_state(app)
+    paths = state.snapshot.runtime_paths
+    state.snapshot = replace(
+        state.snapshot,
+        runtime_paths=replace(paths, process_env={**paths.process_env, "MINDROOM_PUBLIC_URL": public_url}),
+    )
+
+
+def test_session_creation_binds_openid_to_the_configured_public_url(gateway: Gateway) -> None:
+    """A binding homeserver gets the normalized MINDROOM_PUBLIC_URL origin, and a token for another origin is refused."""
+    client, peer, app = gateway
+    _set_public_url(app, "https://Mindroom.Example.org:443/some/path")
+    peer.advertise_audience = True
+    peer.expected_audience = "https://elsewhere.example.org"
+    response = create(client)
+    assert response.status_code == 401
+    assert "openid-secret" not in response.text
+    peer.expected_audience = "https://mindroom.example.org"
+    assert create(client).status_code == 200
+    assert peer.userinfo_audiences == ["https://mindroom.example.org"] * 2
+
+
+def test_session_creation_never_takes_the_audience_from_the_host_header(gateway: Gateway) -> None:
+    """A replaying backend controls `Host`, so a binding homeserver still sees the configured origin."""
+    client, peer, app = gateway
+    _set_public_url(app, "https://mindroom.example.org")
+    peer.advertise_audience = True
+    peer.expected_audience = "https://mindroom.example.org"
+    assert create(client, headers={"Host": "evil.example.org"}).status_code == 200
+    assert peer.userinfo_audiences == ["https://mindroom.example.org"]
+
+
+@pytest.mark.parametrize("public_url", [None, "mindroom.example.org"])
+def test_session_creation_with_binding_requires_a_valid_public_url(
+    gateway: Gateway,
+    public_url: str | None,
+) -> None:
+    """Binding active and no usable MINDROOM_PUBLIC_URL is a 503 that never reaches userinfo."""
+    client, peer, app = gateway
+    if public_url is not None:
+        _set_public_url(app, public_url)
+    peer.advertise_audience = True
+    response = create(client)
+    assert response.status_code == 503
+    assert "MINDROOM_PUBLIC_URL" in response.json()["detail"]
+    assert "openid-secret" not in response.text
+    assert peer.userinfo_audiences == []
+
+
+@pytest.mark.parametrize("public_url", [None, "mindroom.example.org"])
+def test_session_creation_without_binding_ignores_the_public_url(gateway: Gateway, public_url: str | None) -> None:
+    """A homeserver that cannot bind tokens keeps the unbound verification, whatever MINDROOM_PUBLIC_URL holds."""
+    client, peer, app = gateway
+    if public_url is not None:
+        _set_public_url(app, public_url)
+    assert create(client).status_code == 200
+    assert peer.userinfo_audiences == [None]
+
+
 def test_changed_config_conflicts_with_existing_session(gateway: Gateway) -> None:
     """An existing bearer cannot survive an API configuration generation change."""
     client, _, app = gateway
@@ -495,7 +557,7 @@ def test_prebound_computer_authorizer_survives_initial_api_config_load(
         0,
         config,
     )
-    monkeypatch.setattr(computers, "verify_openid", AsyncMock(return_value="@alice:example.org"))
+    monkeypatch.setattr(computers, "verify_matrix_openid", AsyncMock(return_value="@alice:example.org"))
     with TestClient(app) as client:
         loaded = config_lifecycle.require_api_state(app).snapshot.runtime_config
         assert loaded is not None
@@ -655,7 +717,7 @@ def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> No
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
     )
-    assert computer_origins(paths) == ()
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == ()
 
 
 @pytest.mark.parametrize(
@@ -675,7 +737,7 @@ def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, 
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
     )
-    assert computer_origins(paths) == (origin,)
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == (origin,)
 
 
 def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
@@ -686,9 +748,9 @@ def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(origins)},
     )
-    assert computer_origins(paths) == tuple(origins)
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == tuple(origins)
     invalid = replace(paths, process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([*origins, "null"])})
-    assert computer_origins(invalid) == ()
+    assert allowed_client_origins(invalid, COMPUTER_ALLOWED_ORIGINS_ENV) == ()
 
 
 @pytest.mark.parametrize("allowed", [False, True])

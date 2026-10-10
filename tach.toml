@@ -1470,6 +1470,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.api.connections_sessions",
     "mindroom.config_reload",
     "mindroom.response_activity",
     "mindroom.config.main",
@@ -1480,10 +1481,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections_sessions"
+depends_on = []
+
+[[modules]]
 path = "mindroom.api.auth"
 depends_on = [
     "mindroom.authorization",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.connections_sessions",
     "mindroom.api.open_access",
     "mindroom.constants",
     "mindroom.tool_system.dependencies",
@@ -1650,9 +1656,22 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections_session"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.api.connections_sessions",
+    "mindroom.constants",
+    "mindroom.matrix_openid",
+    "mindroom.runtime_env_policy",
+]
+
+[[modules]]
 path = "mindroom.api.connection_agents"
 depends_on = [
     "mindroom.access_policy",
+    "mindroom.api.auth",
     "mindroom.authorization",
     "mindroom.matrix.identity",
     "mindroom.mcp_gateway.types",
@@ -1704,9 +1723,10 @@ depends_on = [
     "mindroom.legacy_tool_credentials",
     "mindroom.legacy_usage_storage",
     "mindroom.api.computers",
-    "mindroom.worker_computer.auth",
+    "mindroom.matrix_openid",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
+    "mindroom.api.connections_session",
     "mindroom.api.thread_exports",
     "mindroom.agent_policy",
     "mindroom.api.auth",
@@ -7203,13 +7223,12 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.worker_computer.auth"
+path = "mindroom.matrix_openid"
 depends_on = [
     "mindroom.bounded_bytes",
-    "mindroom.runtime_env_policy",
     "mindroom.constants",
+    "mindroom.logging_config",
     "mindroom.requester_identity",
-    "mindroom.worker_computer.sessions",
 ]
 
 [[modules]]
@@ -7225,7 +7244,7 @@ path = "mindroom.api.computers"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.worker_computer.auth",
+    "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend",

@@ -48,6 +48,8 @@ def issue_pending_oauth_state(
 ) -> str:
     """Create opaque OAuth state bound to a browser user or conversation capability."""
     user_id = require_auth_user_id(request) if browser_user_required else ""
+    auth_user = request.scope.get("auth_user")
+    auth_source = auth_user.get("auth_source") if browser_user_required and isinstance(auth_user, dict) else None
     if browser_user_required:
         execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
             request,
@@ -62,6 +64,7 @@ def issue_pending_oauth_state(
         data={
             "service": service,
             "user_id": user_id,
+            "auth_source": auth_source if isinstance(auth_source, str) else "",
             "browser_user_required": browser_user_required,
             "agent_name": agent_name or "",
             "execution_scope_override_provided": execution_scope_override_provided,
@@ -85,10 +88,13 @@ def _read_pending_oauth_request(request: Request, service: str, state: str) -> d
     return data
 
 
-def pending_oauth_state_requires_browser_user(request: Request, service: str, state: str) -> bool:
-    """Return whether pending OAuth state must match an authenticated browser user."""
+def pending_oauth_state_browser_auth_source(request: Request, service: str, state: str) -> str | None:
+    """Return how the browser user that issued pending OAuth state authenticated, or None when none is bound."""
     data = _read_pending_oauth_request(request, service, state)
-    return data.get("browser_user_required") is not False
+    if data.get("browser_user_required") is False:
+        return None
+    auth_source = data.get("auth_source")
+    return auth_source if isinstance(auth_source, str) else ""
 
 
 def consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:

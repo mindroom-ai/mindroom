@@ -21,6 +21,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE
 from mindroom.api.open_access import open_access_rejection
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
@@ -56,6 +57,8 @@ _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 # Ticket IDs already exchanged by this runtime, mapped to their expiry.
 _used_platform_sso_ticket_ids: dict[str, int] = {}
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+# Set only by server code; ASGI scope keys cannot come from the client.
+_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
 _TRUSTED_UPSTREAM_JWT_MAX_BYTES = 16 * 1024
@@ -717,7 +720,7 @@ async def request_has_frontend_access(request: Request) -> bool:
     if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
         request.scope["path"],
     ):
-        await require_connections_user(request)
+        # The portal page is a static shell that signs itself in; its APIs authenticate every request.
         return True
     try:
         auth_user = await authenticate_user(request, authorization, allow_public_paths=False)
@@ -922,6 +925,39 @@ def _is_connections_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in ("/connections", "/api/connections"))
 
 
+def _is_oauth_popup_path(path: str, actions: frozenset[str]) -> bool:
+    """Recognize exactly `/api/oauth/{provider}/{action}` for one of `actions`."""
+    parts = path.split("/")
+    return len(parts) == 5 and parts[1:3] == ["api", "oauth"] and bool(parts[3]) and parts[4] in actions
+
+
+def allow_connections_session_for_oauth_callback(request: Request) -> None:
+    """Let this OAuth callback authenticate with the Connections session, because a session started its flow."""
+    request.scope[_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY] = True
+
+
+def _connections_session_path_honored(request: Request) -> bool:
+    """Honor sessions on portal paths and OAuth success pages, and on callbacks only for session-started flows."""
+    path = request.scope["path"]
+    if _is_oauth_popup_path(path, frozenset({"callback"})):
+        return request.scope.get(_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY) is True
+    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
+
+
+def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
+    """Return the Connections session identity, honored only on portal paths while the portal is enabled."""
+    snapshot = _bind_authenticated_request_snapshot(request)
+    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") or not _connections_session_path_honored(
+        request,
+    ):
+        return None
+    token = request.cookies.get(CONNECTIONS_SESSION_COOKIE)
+    matrix_user_id = config_lifecycle.app_state(request.app).connections_sessions.resolve(token) if token else None
+    if matrix_user_id is None:
+        return None
+    return {"user_id": matrix_user_id, "email": None, "matrix_user_id": matrix_user_id, "auth_source": "matrix_openid"}
+
+
 def _require_connections_route_authorized(
     request: Request,
     auth_user: dict[str, Any],
@@ -933,8 +969,7 @@ def _require_connections_route_authorized(
     path = request.scope["path"]
     if _is_connections_path(path):
         return
-    parts = path.split("/")
-    if len(parts) == 5 and parts[1:3] == ["api", "oauth"] and parts[3] and parts[4] in {"callback", "success", "reset"}:
+    if _is_oauth_popup_path(path, frozenset({"callback", "success", "reset"})):
         # These handlers independently validate their state or reset capability.
         return
     matrix_user_id = auth_user.get("matrix_user_id")
@@ -948,7 +983,15 @@ def _require_connections_route_authorized(
 
 
 async def require_connections_user(request: Request) -> dict[str, Any]:
-    """Authenticate a Connections user through a signed upstream Matrix identity."""
+    """Authenticate a Connections user through a portal session or a signed upstream Matrix identity."""
+    session_user = _connections_session_auth_user(request)
+    if session_user is not None:
+        request.scope["auth_user"] = session_user
+        return session_user
+    settings = _request_auth_state(request).settings.trusted_upstream
+    if not settings.enabled or not settings.jwt.require_jwt:
+        # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
+        raise HTTPException(status_code=401, detail="Connections sign-in required")
     return await _require_signed_matrix_user(request, label="Connections")
 
 
@@ -1048,6 +1091,12 @@ async def authenticate_user(
     """Authenticate the request, enforcing account ownership and browser mutation origin."""
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
+    session_user = _connections_session_auth_user(request)
+    if session_user is not None:
+        _require_browser_mutation_origin(request, auth_state.settings)
+        request.scope["auth_user"] = session_user
+        return session_user
+
     mindroom_api_key = auth_state.settings.mindroom_api_key
     trusted_auth_user = await _trusted_upstream_auth_user(
         request,

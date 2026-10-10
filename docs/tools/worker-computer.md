@@ -105,6 +105,18 @@ Other custom-scheme origins and opaque `"null"` origins are refused.
 The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
 Each entry must be a scheme and host with an optional port, with no path or wildcard, and HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
+The Connections portal's [Matrix sign-in](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules, and Chat uses the same runtime origin for both.
+
+Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
+When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), MindRoom requires `MINDROOM_PUBLIC_URL` and binds tokens to its normalized origin.
+The normalized origin has a lowercase scheme and host, no path, and no default port, so it matches the origin Chat requests.
+MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL` it answers 503.
+Without binding support tokens are not bound, and `MINDROOM_PUBLIC_URL` is not required for this.
+A backend that a user points Chat at could then replay the token to another deployment on the same homeserver until the token expires, so keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
+Roll out in this order: first MindRoom backends, then MindRoom Chat clients including the iOS app, and only then the homeserver release that binds tokens.
+Older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
+Older Chat clients, including iOS app versions that are still in App Store review, send unbound tokens that a new backend rejects with 401 once the homeserver binds.
+Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](../authorization.md#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.

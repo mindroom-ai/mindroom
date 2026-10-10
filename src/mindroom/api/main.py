@@ -25,6 +25,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
+from mindroom.api.connections_session import router as connections_session_router
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -64,9 +65,10 @@ from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
+from mindroom.matrix_openid import allowed_client_origins
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
-from mindroom.worker_computer.auth import computer_origins
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
@@ -141,7 +143,11 @@ class _RuntimeDashboardCorsMiddleware:
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
-        origins = computer_origins(paths) if path.startswith("/api/computers") else gateway_cors_origins(paths, path)
+        origins = (
+            allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
+            if path.startswith("/api/computers")
+            else gateway_cors_origins(paths, path)
+        )
         settings = (
             _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
             if origins is not None
@@ -756,6 +762,7 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 
 # Include routers
 app.include_router(auth_router)
+app.include_router(connections_session_router)
 app.include_router(connections_router)
 install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
