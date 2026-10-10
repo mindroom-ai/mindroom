@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.custom_tools import dynamic_workflow as workflow_module
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
@@ -378,8 +379,6 @@ async def test_declared_toolkits_are_never_built_just_for_approvals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Approvals for a declared toolkit come from its metadata, and its configured filters still apply."""
-    import mindroom.custom_tools.dynamic_workflow as workflow_module  # noqa: PLC0415 - patched where it is looked up
-
     built: list[list[str]] = []
     original = workflow_module._resolve_participant_toolkits
 
@@ -528,8 +527,6 @@ async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypat
 
 def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) -> None:
     """A workflow started by an authored subagent can grant participants only that subagent's tools."""
-    import mindroom.custom_tools.dynamic_workflow as workflow_module  # noqa: PLC0415 - private resolution seam
-
     paths = _runtime_paths(tmp_path)
     config = _config()
     entity_ids(config, paths)
