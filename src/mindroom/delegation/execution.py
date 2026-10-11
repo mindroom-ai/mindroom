@@ -32,7 +32,6 @@ from mindroom.approval_tools import (
     validate_approval_tool_owners,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.cancellation import classify_cancel_source
 from mindroom.delegation.background import (
     delegation_outcome,
     delegation_result,
@@ -796,7 +795,10 @@ async def _await_background_child(
     claim = None
     try:
         if fresh:
-            _, claim = await start_delegation(background, child, owner=owner, operation=operation, cancel=cancel)
+            try:
+                _, claim = await start_delegation(background, child, owner=owner, operation=operation, cancel=cancel)
+            finally:
+                await run_coroutine_until_complete(background.stop_unless_admitted(child.delegation_id))
         await release_liveness()
         waited = await background.wait(
             child.delegation_id,
@@ -1292,11 +1294,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     _pending_child(state, child, child_outcome)
                     await persist(state)
                     return True
-            except asyncio.CancelledError as cancelled:
+            except asyncio.CancelledError:
                 if background is not None and background.has_job(child.delegation_id):
-                    if classify_cancel_source(cancelled) == "user_stop":
-                        # A Stop that committed while the child's job was admitted can find no job to record.
-                        await run_coroutine_until_complete(background.stop_admitted(child.delegation_id))
                     state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
                     await after_delegation(
                         hook_state,

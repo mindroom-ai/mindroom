@@ -414,3 +414,7 @@ class SpanRecorder:
         """Record what a call returned."""
         assert call_id == "record-1"
         self.records.append(("finished", tool_name, dict(args), result))
+
+    async def admits(self) -> bool:
+        """Let tools start until a Stop committed."""
+        return not self.stopped

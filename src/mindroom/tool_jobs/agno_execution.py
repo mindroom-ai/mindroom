@@ -31,7 +31,6 @@ from mindroom.background_tasks import (
     run_coroutine_until_complete,
     wait_for_future_until_complete,
 )
-from mindroom.cancellation import classify_cancel_source
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
 from mindroom.tool_approval import JOB_APPROVAL_TYPE
@@ -562,18 +561,22 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         claim = None
         retained = False
         try:
-            _, claim = await runtime.start(
-                job_id,
-                tool_name=call.function.name,
-                depth=depth,
-                toolkit_name=call.function.owning_toolkit,
-                source_event_id=context.membership_turn_id,
-                source_kind=context.source_kind,
-                adapter=adapter,
-                owner=owner,
-                operation=lambda: _run_operation(original, owned_call, owner, baseline, reference, approval),
-                reattach=True,
-            )
+            try:
+                _, claim = await runtime.start(
+                    job_id,
+                    tool_name=call.function.name,
+                    depth=depth,
+                    toolkit_name=call.function.owning_toolkit,
+                    source_event_id=context.membership_turn_id,
+                    source_kind=context.source_kind,
+                    adapter=adapter,
+                    owner=owner,
+                    operation=lambda: _run_operation(original, owned_call, owner, baseline, reference, approval),
+                    reattach=True,
+                )
+            finally:
+                # A Stop or deletion that committed during admission found no job to cancel, so this call stops it.
+                await run_coroutine_until_complete(runtime.stop_unless_admitted(job_id))
             with Timer() as timer:
                 waited = await runtime.wait(
                     job_id,
@@ -598,11 +601,6 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             # The runtime refused the job, or this caller's wait for it: the call fails, not the reply's run.
             response = _failed_call(call, error)
             await record_return(call.error)
-        except asyncio.CancelledError as cancelled:
-            if classify_cancel_source(cancelled) == "user_stop":
-                # A Stop that committed while this job was admitted can find no job to record; this job is its work.
-                await run_coroutine_until_complete(runtime.stop_admitted(job_id))
-            raise
         finally:
             if not retained:
                 await runtime.release_wait(job_id, claim)

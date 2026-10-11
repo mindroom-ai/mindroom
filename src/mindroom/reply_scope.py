@@ -243,6 +243,10 @@ class _SpanToolCalls:
             # told to check before repeating it.
             logger.warning("tool_call_finish_not_recorded", tool_name=tool_name, call_id=call_id, exc_info=True)
 
+    async def admits(self) -> bool:
+        handle = current_span()
+        return handle is None or await self.runtime.store.replies.admits_tool_start(span_id=handle.span_id)
+
 
 class ClaimRefused(Enum):
     """Why a claim opened no span."""

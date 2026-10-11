@@ -24,6 +24,10 @@ class _ToolCallRecorder(Protocol):
         """Record that a call returned, or raised ``result``; never raises, since the call already ran."""
         ...
 
+    async def admits(self) -> bool:
+        """Return whether the work still lets a tool start, as recording a call's start checks."""
+        ...
+
 
 _recorder: ContextVar[_ToolCallRecorder | None] = ContextVar("mindroom_tool_call_recorder", default=None)
 
@@ -57,6 +61,16 @@ async def record_call(tool_name: str, args: Mapping[str, object]) -> Callable[[o
             await recorder.finished(record_id, tool_name, args, result)
 
     return finished
+
+
+async def admits_tool_start() -> bool:
+    """Return whether the work the current task runs tools for still lets a tool start; unrecorded work always does.
+
+    A background job's call asks again once its job is admitted: a Stop or deletion that committed after the call's
+    recorded start, but before its job was saved, found no job to cancel.
+    """
+    recorder = _recorder.get()
+    return recorder is None or await recorder.admits()
 
 
 @contextmanager

@@ -207,7 +207,7 @@ def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) 
     """Record which background work a Stop cancels, as the reply is now, so a later regeneration cannot change it.
 
     Nothing is recorded while no background job exists: a stopped reply starts none afterwards, and a call whose job
-    was being admitted when the Stop committed stops that job itself.
+    was being admitted when the Stop committed finds its span refusing tool starts and stops that job itself.
     """
     if not tool_jobs.any_saved(transaction):
         return False
@@ -859,6 +859,16 @@ class ReplyStore:
             return True
 
         return await self._backend.write(start)
+
+    async def admits_tool_start(self, *, span_id: str) -> bool:
+        """Return whether a span may still start a tool, as recording a start checks."""
+
+        def admits(transaction: Transaction) -> bool:
+            span = reply_spans.load(transaction, self._principal_id, span_id)
+            reply = None if span is None else reply_messages.load(transaction, self._principal_id, span.reply_id)
+            return span is not None and reply is not None and rl.admits_tool_start(reply, span)
+
+        return await self._backend.read(admits)
 
     async def record_tool_call(self, *, span_id: str, call_id: str, entry_json: str, now_ns: int) -> None:
         """Record what a started tool call returned, replacing its start."""

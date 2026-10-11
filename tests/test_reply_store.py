@@ -688,6 +688,27 @@ async def test_a_tool_starts_only_while_its_span_runs_without_a_recorded_stop(jo
     assert await principal.replies.tool_calls((span.span_id,)) == ("{}",)
 
 
+@pytest.mark.parametrize("ending", ["stop", "deletion"])
+async def test_a_span_stops_admitting_tools_once_a_stop_or_deletion_commits(
+    journal_store: EventJournalStore,
+    ending: str,
+) -> None:
+    """A background job admitted across the commit asks again and finds its span refusing tools, without a record."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    assert await principal.replies.admits_tool_start(span_id=span.span_id)
+
+    if ending == "stop":
+        transition = rl.stop(reply, span, rl.StopFacts(receipt_order=1, span_live=True), now_ns=30)
+    else:
+        transition = rl.sources_deleted(reply, span, now_ns=30)
+    assert transition.applied
+    await _apply(journal_store, transition)
+    assert not await principal.replies.admits_tool_start(span_id=span.span_id)
+    assert not await principal.replies.admits_tool_start(span_id="no-such-span")
+    assert await principal.replies.tool_calls((span.span_id,)) == ()
+
+
 async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took_over(
     journal_store: EventJournalStore,
 ) -> None:

@@ -29,7 +29,7 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
-from mindroom.tool_system.call_record import without_tool_call_recording
+from mindroom.tool_system.call_record import admits_tool_start, without_tool_call_recording
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -695,11 +695,14 @@ class ToolJobRuntime:
                 failures.append(error)
         return failures
 
-    async def stop_admitted(self, job_id: str) -> None:
-        """Stop a job a stopped reply's call admitted, as a Stop the reply recorded would; a recorded one wins.
+    async def stop_unless_admitted(self, job_id: str) -> None:
+        """Stop a job whose caller's work stopped letting tools start while the job was admitted.
 
-        A Stop that committed while the job was being admitted can find no job to record, so the call stops it.
+        A Stop or deletion that committed before the job was saved found no job to cancel, so the call stops it,
+        as a Stop the reply recorded would; a recorded one wins.
         """
+        if await admits_tool_start():
+            return
 
         async def admitted(job: BackgroundJob) -> bool:
             return job.job_id == job_id

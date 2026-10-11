@@ -187,14 +187,16 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", [False, True], ids=["cancelled", "user-stop"])
-async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
+@pytest.mark.parametrize("ending", ["restart", "stop", "deletion"])
+async def test_parent_cancellation_during_job_admission_keeps_accepted_child(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stop: bool,
+    ending: str,
 ) -> None:
-    """Cancellation before start returns must still relinquish the parent's child ownership; a Stop stops the child."""
+    """Cancellation before start returns must still relinquish the parent's child ownership.
+
+    A Stop or deletion that commits during admission stops the child, as its span then refuses tool starts.
+    """
     paths = _runtime_paths(tmp_path)
     config = with_responder_access(
         Config(
@@ -238,8 +240,13 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
         raise AssertionError
 
     intercept_job_saves(monkeypatch, before=blocked_writer)
+    recorder = SpanRecorder(stopped=False)
+    stop = ending != "restart"
     try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+        with (
+            tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)),
+            recording_tool_calls(recorder),
+        ):
             response = await parent.arun("Delegate", session_id="parent", user_id=owner.requester_id)
             driving = asyncio.create_task(
                 drive_delegations(
@@ -253,8 +260,9 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
                 ),
             )
             await written.wait()
-            if stop:
-                # A Stop committed while the job was admitted, before any job existed for it to record.
+            # A Stop or deletion commits while the job is admitted, before any job existed for it to record.
+            recorder.stopped = stop
+            if ending == "stop":
                 request_task_cancel(driving, cancel_source="user_stop")
             else:
                 driving.cancel()

@@ -1197,8 +1197,16 @@ async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_a_stop_during_admission_stops_the_job_it_admits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Stop that cancels the reply while its call's job is admitted, with no job recorded yet, still stops that job."""
+@pytest.mark.parametrize("ending", ["stop", "deletion", "restart"])
+async def test_a_stop_during_admission_stops_the_job_it_admits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """A Stop or deletion that commits while a call's job is admitted, with no job recorded yet, still stops that job.
+
+    A restart's cancellation leaves the span admitting tools, so the job it interrupts the wait of keeps running.
+    """
     ran: list[str] = []
 
     async def write_note(text: str) -> str:
@@ -1230,18 +1238,29 @@ async def test_a_stop_during_admission_stops_the_job_it_admits(tmp_path: Path, m
     install_tool_job_execution(model)
     agent = Agent(id="leader", model=model, tools=[assembled_function(write_note)])
     owner = build_execution_identity_from_runtime_context(context)
+    recorder = SpanRecorder(stopped=False)
     try:
         async with execution_resources():
-            with tool_runtime_context(context):
+            with tool_runtime_context(context), recording_tool_calls(recorder):
                 reply = asyncio.create_task(agent.arun("Note", session_id=context.session_id))
                 await asyncio.wait_for(admitting.wait(), JOB_TEST_TIMEOUT)
-                request_task_cancel(reply, cancel_source="user_stop")
+                # The Stop or deletion commits, so the span refuses tool starts, and then cancels the reply's task.
+                recorder.stopped = ending != "restart"
+                if ending == "stop":
+                    request_task_cancel(reply, cancel_source="user_stop")
+                else:
+                    reply.cancel()
                 admit.set()
                 with pytest.raises(asyncio.CancelledError):
                     await reply
         [job] = await runtime.list_jobs(owner=owner, depth=0)
-        assert job.user_stop_receipt_order == 0
-        await wait_for_status(runtime, job.job_id, "cancelled")
+        if ending == "restart":
+            assert job.user_stop_receipt_order is None
+            assert ran == ["hello"]
+            assert job.status == "running"
+        else:
+            assert job.user_stop_receipt_order == 0
+            await wait_for_status(runtime, job.job_id, "cancelled")
     finally:
         await runtime.shutdown()
 

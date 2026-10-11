@@ -95,6 +95,7 @@ Waiting replies are reply records and survive restarts; recovered outcomes wake 
 Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.
 Expiry then deletes the job; its originating turn has finished, so the call cannot run again.
 A Stop's job cancellation stays recorded until the runtime applies it, so a Stop recorded while the runtime was starting or disabled still cancels that work.
+A call checks its reply span again once its job is saved, so a Stop or deletion that committed during the job's admission, before any job existed to record, still cancels that job.
 Constructor identity is a digest, not a retained settings blob.
 
 Enabled recovery fails on a snapshot it cannot read and names its job.
