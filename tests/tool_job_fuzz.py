@@ -367,7 +367,9 @@ class JobFuzzRunner:
             return job.job_id == job_id
 
         await self.runtime.stop_jobs(receipt_order=self._order, matches=matches)
-        self.jobs[job_id].stop_order = self._order
+        # A consumed outcome is never offered again, so a Stop leaves it as it was.
+        if not self.jobs[job_id].consumed:
+            self.jobs[job_id].stop_order = self._order
 
     async def _revoke(self, _action: Action, job_id: str) -> None:
         self._cause(job_id, "cancel")

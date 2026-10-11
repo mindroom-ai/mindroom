@@ -668,10 +668,11 @@ class ToolJobRuntime:
 
         async with self._lock:
             self._ensure_open()
+            # A consumed outcome is never offered again, so a Stop changes nothing for it.
             candidates = [
                 (entry, await self._snapshot(entry))
                 for entry in self._entries.values()
-                if newer(entry.job) or entry.job.status not in TERMINAL_STATUSES
+                if entry.job.status not in TERMINAL_STATUSES or (newer(entry.job) and not entry.job.consumed)
             ]
         # `matches` may read the journal, so it judges snapshots outside the runtime lock.
         selected = [entry for entry, job in candidates if await matches(job)]

@@ -13,7 +13,7 @@ from uuid import uuid4
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
-from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child
+from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child, delegation_grant
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
@@ -181,7 +181,7 @@ class ToolJobRuntimeCoordinator:
             child = delegation_child(job)
             child_name = child.child_agent_name
             if (
-                child_name not in caller.delegate_to
+                not caller_grants_child(owner.agent_name, child_name, config, delegation_grant(child))
                 or child_name not in config.agents
                 or child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings)
             ):
