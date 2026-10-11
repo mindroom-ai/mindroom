@@ -426,6 +426,8 @@ class RealtimeVoiceBridge:
         self._session_event_tasks: set[asyncio.Future[None]] = set()
         self._usage_lock = asyncio.Lock()
         self._realtime_usage: RealtimeCallUsage | None = None
+        self._saved_realtime_usage: RealtimeCallUsage | None = None
+        self._record_realtime_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
         self._reported_error_notices: set[str] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
@@ -602,6 +604,7 @@ class RealtimeVoiceBridge:
 
         usage_id = uuid4().hex
         created_at = time.time()
+        self._record_realtime_usage = record_usage
 
         def _on_usage(event: SessionUsageUpdatedEvent) -> None:
             # Accept updates while the session drains at hang-up; teardown awaits their saves.
@@ -627,8 +630,15 @@ class RealtimeVoiceBridge:
     async def _save_realtime_usage(self, record_usage: Callable[[RealtimeCallUsage], Awaitable[None]]) -> None:
         # Saves run one at a time and write the newest totals, so a slow save cannot overwrite newer ones.
         async with self._usage_lock:
-            if self._realtime_usage is not None:
-                await record_usage(self._realtime_usage)
+            usage = self._realtime_usage
+            if usage is None or usage is self._saved_realtime_usage:
+                return
+            try:
+                await record_usage(usage)
+            except Exception as error:
+                logger.warning("call_realtime_usage_save_failed", error_type=type(error).__name__)
+            else:
+                self._saved_realtime_usage = usage
 
     def _register_error_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         """Turn provider/runtime failures into safe, actionable call notices."""
@@ -753,6 +763,11 @@ class RealtimeVoiceBridge:
             try:
                 if self._session_event_tasks:
                     await asyncio.gather(*self._session_event_tasks, return_exceptions=True)
+                if self._record_realtime_usage is not None:
+                    # Retry the call's latest total once if its last save failed.
+                    await self._save_realtime_usage(self._record_realtime_usage)
+                    if self._realtime_usage is not self._saved_realtime_usage:
+                        logger.error("call_realtime_usage_unpersisted")
             finally:
                 try:
                     await _close_speech_resources(speech_resource_closers)

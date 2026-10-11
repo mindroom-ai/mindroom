@@ -35,7 +35,7 @@ from mindroom.matrix_rtc.voice_agent import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 
 @pytest.mark.asyncio
@@ -352,6 +352,108 @@ async def test_realtime_usage_reported_while_the_call_closes_is_saved(monkeypatc
     await bridge.aclose()
 
     assert recorded[-1].input_tokens == 2000
+
+
+async def _realtime_bridge_with_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    record_usage: Callable[[RealtimeCallUsage], Awaitable[None]],
+) -> tuple[RealtimeVoiceBridge, Callable[[int], None]]:
+    """Start a realtime bridge on a fake session; return it and a function that reports cumulative input tokens."""
+    from livekit.agents.metrics.usage import AgentSessionUsage, LLMModelUsage  # noqa: PLC0415
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+            self.handlers: dict[str, Callable[[object], None]] = {}
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            return
+
+        def on(self, event: str, callback: Callable[[object], None]) -> None:
+            self.handlers[event] = callback
+
+        async def aclose(self) -> None:
+            return
+
+    fake_session = FakeSession()
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            record_usage=record_usage,
+        ),
+    )
+
+    def report(inputs: int) -> None:
+        usage = LLMModelUsage(provider="openai", model="gpt-realtime-2.1", input_tokens=inputs, output_tokens=10)
+        fake_session.handlers["session_usage_updated"](SimpleNamespace(usage=AgentSessionUsage(model_usage=[usage])))
+
+    return bridge, report
+
+
+@pytest.mark.asyncio
+async def test_slow_realtime_usage_saves_never_overlap_or_go_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer total reported during a slow save is saved after it, never before it."""
+    release_first = asyncio.Event()
+    saving = 0
+    overlapped = False
+    saved: list[int] = []
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        nonlocal saving, overlapped
+        saving += 1
+        overlapped = overlapped or saving > 1
+        if not saved:
+            await release_first.wait()
+        saved.append(usage.input_tokens)
+        saving -= 1
+
+    bridge, report = await _realtime_bridge_with_usage(monkeypatch, record_usage)
+    report(900)
+    await asyncio.sleep(0)
+    report(2000)
+    release_first.set()
+    await bridge.aclose()
+
+    assert not overlapped
+    assert saved[-1] == 2000
+
+
+@pytest.mark.asyncio
+async def test_unsaved_realtime_usage_is_retried_when_the_call_closes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed save of the latest total is retried at teardown, as GPT-Live duration is."""
+    saved: list[int] = []
+    failures = 1
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            msg = "database is locked"
+            raise RuntimeError(msg)
+        saved.append(usage.input_tokens)
+
+    bridge, report = await _realtime_bridge_with_usage(monkeypatch, record_usage)
+    report(900)
+    await bridge.aclose()
+
+    assert saved == [900]
 
 
 @pytest.mark.asyncio
