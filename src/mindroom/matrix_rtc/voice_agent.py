@@ -22,6 +22,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
     from types import ModuleType
 
     from livekit import rtc
@@ -88,11 +89,14 @@ class _AuthorizedParticipantAudioInput:
         participant_identities: frozenset[str],
         *,
         continuous_audio: bool = False,
+        on_frame: Callable[[rtc.AudioFrame, bool], None] | None = None,
     ) -> None:
         self._room = room
         self._rtc = rtc_module
         self._participant_identities = participant_identities
         self._continuous_audio = continuous_audio
+        #: Observes each returned frame and whether the paced loop zero-filled it.
+        self._on_frame = on_frame
         self._pending_frame: asyncio.Task[rtc.AudioFrame] | None = None
         self._next_frame_at = 0.0
         self._closed_event = asyncio.Event()
@@ -125,7 +129,10 @@ class _AuthorizedParticipantAudioInput:
 
     async def __anext__(self) -> rtc.AudioFrame:
         if not self._continuous_audio:
-            return await self._mixer.__anext__()
+            frame = await self._mixer.__anext__()
+            if self._on_frame is not None:
+                self._on_frame(frame, False)
+            return frame
         if self._closed:
             raise StopAsyncIteration
         if self._pending_frame is None:
@@ -148,14 +155,19 @@ class _AuthorizedParticipantAudioInput:
         if self._next_frame_at < now - frame_duration:
             self._next_frame_at = now
         self._next_frame_at += frame_duration
-        if self._pending_frame.done():
+        zero_filled = not self._pending_frame.done()
+        if zero_filled:
+            frame = self._rtc.AudioFrame.create(
+                _AUDIO_SAMPLE_RATE,
+                _AUDIO_CHANNELS,
+                _AUDIO_SAMPLE_RATE * _AUDIO_FRAME_SIZE_MS // 1000,
+            )
+        else:
             pending_frame, self._pending_frame = self._pending_frame, None
-            return pending_frame.result()
-        return self._rtc.AudioFrame.create(
-            _AUDIO_SAMPLE_RATE,
-            _AUDIO_CHANNELS,
-            _AUDIO_SAMPLE_RATE * _AUDIO_FRAME_SIZE_MS // 1000,
-        )
+            frame = pending_frame.result()
+        if self._on_frame is not None:
+            self._on_frame(frame, zero_filled)
+        return frame
 
     @property
     def source(self) -> AudioInput | None:
@@ -387,6 +399,8 @@ class LiveVoiceAgentOptions:
     on_tools_executed: Callable[[list[str]], None] | None = None
     on_session_terminated: Callable[[bool], None] | None = None
     on_session_error: Callable[[str], None] | None = None
+    #: Root for opt-in per-call PCM capture; None disables capture.
+    audio_capture_dir: Path | None = None
 
 
 type CallVoiceAgentOptions = VoiceAgentOptions | CascadedVoiceAgentOptions | LiveVoiceAgentOptions
@@ -499,6 +513,7 @@ class RealtimeVoiceBridge:
         *,
         rtc_module: ModuleType,
         room_io_module: ModuleType,
+        on_input_frame: Callable[[rtc.AudioFrame, bool], None] | None = None,
     ) -> None:
         """Attach authorized audio and start one configured LiveKit session."""
         if self._room is None:
@@ -510,6 +525,7 @@ class RealtimeVoiceBridge:
             rtc_module,
             self._participant_identities,
             continuous_audio=isinstance(options, LiveVoiceAgentOptions),
+            on_frame=on_input_frame,
         )
         self._audio_input = audio_input
         session.input.audio = cast("AudioInput", audio_input)

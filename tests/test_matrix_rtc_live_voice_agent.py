@@ -7,12 +7,14 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from livekit.agents.llm import ChatContext
+from livekit.agents.llm import ChatContext, ChatMessage
+from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 from structlog.testing import capture_logs
 
+from mindroom.matrix_rtc.call_telemetry import LiveCallTelemetry
 from mindroom.matrix_rtc.call_tools import CallAgentResponse
-from mindroom.matrix_rtc.live_voice_agent import _LiveDelegationRunner
+from mindroom.matrix_rtc.live_voice_agent import _LiveDelegationRunner, _record_assistant_reply
 from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions
 
 if TYPE_CHECKING:
@@ -46,7 +48,7 @@ async def test_live_delegations_capture_new_context_and_pending_speech_once() ->
     """Finalizing a previously pending utterance cannot repeat it next turn."""
     respond = AsyncMock(return_value=CallAgentResponse("Sunny."))
     sink = CommentarySink()
-    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink), LiveCallTelemetry())
     context = ChatContext.empty()
     context.add_message(role="user", content="I am in Paris.")
     runner.submit(GPTLiveDelegation("one", "What is the weather?"), context)
@@ -83,7 +85,7 @@ async def test_live_dispatched_request_cannot_replay_an_action(
 ) -> None:
     """An attempted request may have side effects even without a response text."""
     respond = AsyncMock(side_effect=[first_result, CallAgentResponse("Done.")])
-    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()), LiveCallTelemetry())
     context = ChatContext.empty()
     if not pending:
         context.add_message(role="user", content="Send the update.")
@@ -107,6 +109,7 @@ async def test_live_empty_result_still_answers_without_claiming_completion() -> 
     runner = _LiveDelegationRunner(
         _options(AsyncMock(return_value=CallAgentResponse(""))),
         cast("GPTLiveSession", sink),
+        LiveCallTelemetry(),
     )
     runner.submit(GPTLiveDelegation("one", "Perform a task."), ChatContext.empty())
     await asyncio.gather(*runner._tasks)
@@ -132,7 +135,7 @@ async def test_live_serializes_responder_admission_and_cancels_queued_work() -> 
         return CallAgentResponse("unreachable")
 
     sink = CommentarySink()
-    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink), LiveCallTelemetry())
     runner.submit(GPTLiveDelegation("one", "First task"), ChatContext.empty())
     await started.wait()
     runner.submit(GPTLiveDelegation("two", "Second task"), ChatContext.empty())
@@ -159,7 +162,7 @@ async def test_live_reconnect_discards_results_from_old_connection() -> None:
         return CallAgentResponse("unreachable")
 
     sink = CommentarySink()
-    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink), LiveCallTelemetry())
     runner.submit(GPTLiveDelegation("old", "Check status"), ChatContext.empty())
     await started.wait()
     runner.on_reconnected()
@@ -173,7 +176,7 @@ async def test_live_reconnect_discards_results_from_old_connection() -> None:
 async def test_live_pending_speech_growth_only_delegates_new_words() -> None:
     """Multiple delegations during one unfinished utterance share its prefix."""
     respond = AsyncMock(return_value=CallAgentResponse("Done."))
-    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()), LiveCallTelemetry())
     runner.submit(GPTLiveDelegation("one", "Check weather"), ChatContext.empty())
     runner.submit(GPTLiveDelegation("two", "Check weather and trains"), ChatContext.empty())
     await asyncio.gather(*runner._tasks)
@@ -194,7 +197,7 @@ async def test_live_reconnect_retains_context_from_cancelled_queue() -> None:
         return CallAgentResponse("unreachable")
 
     respond = AsyncMock(side_effect=wait_for_cancel)
-    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()), LiveCallTelemetry())
     runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
     await started.wait()
     context = ChatContext.empty()
@@ -216,7 +219,7 @@ async def test_live_splits_large_unicode_results_without_losing_content() -> Non
     result = "Status: 晴れです。 " * 200
     sink = CommentarySink()
     respond = AsyncMock(return_value=CallAgentResponse(result))
-    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink), LiveCallTelemetry())
     runner.submit(GPTLiveDelegation("one", "Give details"), ChatContext.empty())
     await asyncio.gather(*runner._tasks)
 
@@ -235,6 +238,7 @@ async def test_live_delegation_failure_returns_safe_notice_and_next_turn_works()
     runner = _LiveDelegationRunner(
         _options(respond, on_session_error=notices.append),
         cast("GPTLiveSession", sink),
+        LiveCallTelemetry(),
     )
     with capture_logs() as logs:
         runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
@@ -248,3 +252,114 @@ async def test_live_delegation_failure_returns_safe_notice_and_next_turn_works()
     assert any("live_voice_agent.py:" in frame for frame in failure["traceback_frames"])
     assert sink.results[-1] == ("Done.", "two")
     await runner.aclose()
+
+
+def _stages(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [entry for entry in logs if entry["event"] == "call_delegation_stage"]
+
+
+@pytest.mark.asyncio
+async def test_live_delegation_times_each_stage_and_matches_acks_by_client_event_id() -> None:
+    """Queued work reports its lock wait, and each acknowledgement finds its chunk by sent event ID."""
+    release = asyncio.Event()
+
+    async def respond(_text: str, _on_tools: Callable[[list[str]], None] | None) -> CallAgentResponse:
+        await release.wait()
+        return CallAgentResponse("x" * 700)
+
+    sink = CommentarySink()
+    telemetry = LiveCallTelemetry()
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink), telemetry)
+    with capture_logs() as logs:
+        runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
+        runner.submit(GPTLiveDelegation("two", "Second"), ChatContext.empty())
+        await asyncio.sleep(0.01)
+        release.set()
+        await asyncio.gather(*runner._tasks)
+        # The SDK sends commentary in call order; a greeting ask carries no delegation.
+        telemetry.on_client_event({"type": "session.commentary.append", "event_id": "greet", "delegation_id": None})
+        for index, (_text, delegation_id) in enumerate(sink.results):
+            telemetry.on_client_event(
+                {"type": "session.commentary.append", "event_id": f"append_{index}", "delegation_id": delegation_id},
+            )
+        for client_event_id in ("append_1", "greet", "append_0"):
+            telemetry.on_server_event({"type": "session.commentary.appended", "client_event_id": client_event_id})
+    await runner.aclose()
+
+    stages = _stages(logs)
+    assert [(entry["delegation_id"], entry["stage"]) for entry in stages] == [
+        ("one", "created"),
+        ("one", "enqueued"),
+        ("two", "created"),
+        ("two", "enqueued"),
+        ("one", "lock_acquired"),
+        ("one", "response_done"),
+        ("one", "commentary_appended"),
+        ("one", "commentary_appended"),
+        ("two", "lock_acquired"),
+        ("two", "response_done"),
+        ("two", "commentary_appended"),
+        ("two", "commentary_appended"),
+        ("one", "commentary_acked"),
+        ("one", "commentary_acked"),
+    ]
+    lock_waits = {
+        entry["delegation_id"]: entry["queue_wait_ms"] for entry in stages if entry["stage"] == "lock_acquired"
+    }
+    assert lock_waits["one"] < 10 <= lock_waits["two"]
+    assert {entry["response_chars"] for entry in stages if entry["stage"] == "response_done"} == {700}
+    appended = [
+        (entry["chunk_index"], entry["chunk_count"]) for entry in stages if entry["stage"] == "commentary_appended"
+    ]
+    assert appended == [(0, 2), (1, 2), (0, 2), (1, 2)]
+    acked = [(entry["chunk_index"], entry["correlation"]) for entry in stages if entry["stage"] == "commentary_acked"]
+    assert acked == [(1, "client_event_id"), (0, "client_event_id")]
+    for delegation_id in ("one", "two"):
+        elapsed = [entry["elapsed_ms"] for entry in stages if entry["delegation_id"] == delegation_id]
+        assert elapsed == sorted(elapsed)
+
+
+@pytest.mark.asyncio
+async def test_live_delegation_acks_without_client_event_ids_follow_send_order() -> None:
+    """Without IDs, acknowledgements match the oldest send, including commentary MindRoom did not delegate."""
+    sink = CommentarySink()
+    telemetry = LiveCallTelemetry()
+    runner = _LiveDelegationRunner(
+        _options(AsyncMock(side_effect=RuntimeError("delegate failed"))),
+        cast("GPTLiveSession", sink),
+        telemetry,
+    )
+    with capture_logs() as logs:
+        runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
+        await asyncio.gather(*runner._tasks)
+        telemetry.on_client_event({"type": "session.commentary.append", "event_id": "greet", "delegation_id": None})
+        telemetry.on_client_event({"type": "session.commentary.append", "event_id": "error", "delegation_id": "one"})
+        telemetry.on_server_event({"type": "session.commentary.appended"})
+        telemetry.on_server_event({"type": "session.commentary.appended"})
+        telemetry.on_server_event({"type": "session.commentary.appended"})
+    await runner.aclose()
+
+    stages = _stages(logs)
+    assert [entry["stage"] for entry in stages] == [
+        "created",
+        "enqueued",
+        "lock_acquired",
+        "commentary_appended",
+        "commentary_acked",
+    ]
+    assert (stages[3]["chunk_index"], stages[3]["chunk_count"]) == (0, 1)
+    assert stages[4]["correlation"] == "order"
+    failure = next(entry for entry in logs if entry["event"] == "call_live_delegation_failed")
+    assert failure["delegation_id"] == "one"
+
+
+def test_only_spoken_assistant_messages_reach_reply_routing() -> None:
+    """Caller turns and empty assistant items are not replies."""
+    telemetry = LiveCallTelemetry()
+    with capture_logs() as logs:
+        for role, content in (("user", "Hello"), ("assistant", ""), ("assistant", "Hi there")):
+            item = ChatMessage(role=role, content=[content], interrupted=role == "assistant")
+            _record_assistant_reply(telemetry, ConversationItemAddedEvent(item=item))
+
+    [reply] = [entry for entry in logs if entry["event"] == "call_assistant_reply"]
+    assert (reply["reply_chars"], reply["delegated"], reply["interrupted"]) == (8, False, True)

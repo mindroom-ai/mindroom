@@ -6,11 +6,14 @@ import asyncio
 import sys
 import time
 import traceback
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
+from mindroom.matrix_rtc.call_audio_capture import CallAudioCapture, tap_published_audio
+from mindroom.matrix_rtc.call_telemetry import LiveCallTelemetry
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     LiveVoiceAgentOptions,
@@ -23,6 +26,7 @@ if TYPE_CHECKING:
 
     from livekit.agents import Agent
     from livekit.agents.llm import ChatContext, RealtimeSessionReconnectedEvent
+    from livekit.agents.voice.events import ConversationItemAddedEvent
     from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 
 logger = get_logger(__name__)
@@ -56,9 +60,10 @@ def _commentary_chunks(text: str) -> Iterator[str]:
 class _LiveDelegationRunner:
     """Own and serialize client delegations, including authorization admission."""
 
-    def __init__(self, options: LiveVoiceAgentOptions, session: GPTLiveSession) -> None:
+    def __init__(self, options: LiveVoiceAgentOptions, session: GPTLiveSession, telemetry: LiveCallTelemetry) -> None:
         self._options = options
         self._session = session
+        self._telemetry = telemetry
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._delegation_ids: set[str] = set()
@@ -74,6 +79,7 @@ class _LiveDelegationRunner:
         if self._closed or delegation.id in self._delegation_ids:
             return
         self._delegation_ids.add(delegation.id)
+        self._telemetry.delegation_created(delegation.id)
         messages = tuple(
             (item.id, item.role, item.text_content)
             for item in context.items
@@ -82,6 +88,7 @@ class _LiveDelegationRunner:
         task = asyncio.create_task(self._answer(delegation, messages, self._generation))
         self._tasks.add(task)
         task.add_done_callback(self._on_task_done)
+        self._telemetry.delegation_enqueued(delegation.id)
 
     def _prompt(self, messages: tuple[tuple[str, str, str], ...], pending: str) -> tuple[str, str]:
         """Compute a delta against requests already dispatched to the delegate."""
@@ -116,6 +123,7 @@ class _LiveDelegationRunner:
         generation: int,
     ) -> None:
         async with self._lock:
+            self._telemetry.delegation_lock_acquired(delegation.id)
             if self._closed or generation != self._generation:
                 return
             prompt, pending = self._prompt(messages, delegation.pending_transcript.strip())
@@ -125,13 +133,17 @@ class _LiveDelegationRunner:
             self._pending_transcript = pending
             try:
                 response = await self._options.respond(prompt, self._options.on_tools_executed)
+                self._telemetry.delegation_response_done(delegation.id, len(response.text))
                 if self._closed or generation != self._generation:
                     return
-                for chunk in _commentary_chunks(response.text or _EMPTY_DELEGATION_RESPONSE):
-                    self._session.append_commentary(chunk, delegation_id=delegation.id)
+                self._append_commentary(
+                    delegation.id,
+                    list(_commentary_chunks(response.text or _EMPTY_DELEGATION_RESPONSE)),
+                )
             except Exception as error:
                 logger.warning(
                     "call_live_delegation_failed",
+                    delegation_id=delegation.id,
                     error_type=type(error).__name__,
                     traceback_frames=_exception_frames(error),
                 )
@@ -139,7 +151,12 @@ class _LiveDelegationRunner:
                     return
                 if self._options.on_session_error is not None:
                     self._options.on_session_error(_DELEGATION_ERROR)
-                self._session.append_commentary(_DELEGATION_ERROR, delegation_id=delegation.id)
+                self._append_commentary(delegation.id, [_DELEGATION_ERROR])
+
+    def _append_commentary(self, delegation_id: str, chunks: list[str]) -> None:
+        for index, chunk in enumerate(chunks):
+            self._session.append_commentary(chunk, delegation_id=delegation_id)
+            self._telemetry.commentary_appended(delegation_id, chunk_index=index, chunk_count=len(chunks))
 
     def _on_task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
@@ -169,7 +186,11 @@ class _LiveDelegationRunner:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
 
-def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agent:  # noqa: C901 - SDK class is defined lazily
+def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
+    options: LiveVoiceAgentOptions,
+    instructions: str,
+    telemetry: LiveCallTelemetry,
+) -> Agent:
     """Load the optional SDK only when a Live call starts."""
     from livekit.agents import Agent  # noqa: PLC0415
     from livekit.plugins.openai.realtime import GPTLiveSession  # noqa: PLC0415
@@ -194,10 +215,14 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 msg = "GPT-Live requires a GPTLiveSession"
                 raise TypeError(msg)
             self._live_session = session
-            self._delegations = _LiveDelegationRunner(options, session)
+            self._delegations = _LiveDelegationRunner(options, session, telemetry)
             session.on("delegation_created", self._on_delegation)
             session.on("session_reconnected", self._on_reconnected)
             session.on("openai_server_event_received", self._on_server_event)
+            # A separate listener: the emitter isolates telemetry failures from call handling.
+            session.on("openai_server_event_received", telemetry.on_server_event)
+            session.on("openai_client_event_queued", telemetry.on_client_event)
+            session.on("input_speech_stopped", telemetry.on_input_speech_stopped)
 
         def _on_delegation(self, event: GPTLiveDelegation) -> None:
             if self._delegations is not None:
@@ -277,6 +302,9 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 self._live_session.off("delegation_created", self._on_delegation)
                 self._live_session.off("session_reconnected", self._on_reconnected)
                 self._live_session.off("openai_server_event_received", self._on_server_event)
+                self._live_session.off("openai_server_event_received", telemetry.on_server_event)
+                self._live_session.off("openai_client_event_queued", telemetry.on_client_event)
+                self._live_session.off("input_speech_stopped", telemetry.on_input_speech_stopped)
                 self._live_session = None
             if self._provider_close_task is not None:
                 await asyncio.gather(self._provider_close_task, return_exceptions=True)
@@ -288,6 +316,15 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 logger.error("call_live_usage_unpersisted", sessions=len(self._failed_usage))
 
     return LiveCallAgent()
+
+
+def _record_assistant_reply(telemetry: LiveCallTelemetry, event: ConversationItemAddedEvent) -> None:
+    """Pass each spoken assistant message to reply routing."""
+    from livekit.agents.llm import ChatMessage  # noqa: PLC0415
+
+    item = event.item
+    if isinstance(item, ChatMessage) and item.role == "assistant" and (text := item.text_content):
+        telemetry.assistant_reply(len(text), started_at=item.created_at, interrupted=item.interrupted)
 
 
 class LiveVoiceBridge(RealtimeVoiceBridge):
@@ -312,6 +349,9 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         if options.close_responder is not None:
             self._owned_speech_resource_closers += (options.close_responder,)
         instructions = await options.get_instructions()
+        capture = None if options.audio_capture_dir is None else CallAudioCapture(options.audio_capture_dir)
+        telemetry = LiveCallTelemetry(capture)
+        self._owned_speech_resource_closers += (telemetry.aclose,)
         model = GPTLiveModel(
             model=options.model,
             api_key=options.api_key,
@@ -324,8 +364,18 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         )
         self._owned_speech_resource_closers += (model.aclose,)
         session = AgentSession(llm=model)
-        self._live_agent = _build_live_agent(options, instructions)
-        await self._start_session(session, self._live_agent, options, rtc_module=rtc, room_io_module=room_io)
+        session.on("conversation_item_added", partial(_record_assistant_reply, telemetry))
+        self._live_agent = _build_live_agent(options, instructions, telemetry)
+        await self._start_session(
+            session,
+            self._live_agent,
+            options,
+            rtc_module=rtc,
+            room_io_module=room_io,
+            on_input_frame=None if capture is None else capture.mic_in,
+        )
+        if capture is not None:
+            tap_published_audio(session, capture)
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)
 
