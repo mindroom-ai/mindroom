@@ -369,19 +369,21 @@ async def _run_operation(
 
             def encode_outcome() -> BackgroundOutcome:
                 isolated = function_run_context(owned_call.function)
-                delta = session_state_delta(baseline, isolated.session_state or {}) if isolated is not None else {}
-                payload = ToolResultPayload(
-                    value=value,
-                    state_delta=delta,
-                    error=owned_call.error or result.error,
-                    elapsed=timer.elapsed,
-                    replay=replay,
-                    control=_control_payload(success) if isinstance(success, AgentRunException) else None,
-                )
                 try:
-                    encoded = encode_result_payload(payload)
-                except (ValueError, OSError) as error:
-                    # The call already ran, so its lost result must not read as a call that did not take effect.
+                    delta = session_state_delta(baseline, isolated.session_state or {}) if isolated is not None else {}
+                    encoded = encode_result_payload(
+                        ToolResultPayload(
+                            value=value,
+                            state_delta=delta,
+                            error=owned_call.error or result.error,
+                            elapsed=timer.elapsed,
+                            replay=replay,
+                            control=_control_payload(success) if isinstance(success, AgentRunException) else None,
+                        ),
+                    )
+                except Exception as error:
+                    # Whatever fails here fails after the call ran, so its lost result must not read as a call that
+                    # did not take effect.
                     return BackgroundOutcome(
                         "failed",
                         f"The call ran, but its result could not be saved ({error}). "

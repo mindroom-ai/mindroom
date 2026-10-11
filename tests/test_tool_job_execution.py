@@ -1144,7 +1144,7 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("result", ["driver_type", "oversized", "missing_file"])
+@pytest.mark.parametrize("result", ["driver_type", "oversized", "missing_file", "cyclic"])
 async def test_a_call_that_ran_never_reads_as_one_that_did_not(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1152,8 +1152,8 @@ async def test_a_call_that_ran_never_reads_as_one_that_did_not(
 ) -> None:
     """A result the job cannot keep as returned still tells the model the call ran, so it is not repeated.
 
-    A value with no wire tag keeps its text, as inline; a result over the size limit, or whose media file is gone,
-    says the call took effect.
+    A value with no wire tag keeps its text, as inline; a result over the size limit, whose media file is gone, or
+    that refers to itself says the call took effect.
     """
     ran: list[str] = []
 
@@ -1161,6 +1161,10 @@ async def test_a_call_that_ran_never_reads_as_one_that_did_not(
         ran.append("created")
         if result == "missing_file":
             return ToolResult(content="event card", images=[Image(filepath=tmp_path / "gone.png")])
+        if result == "cyclic":
+            cycle: dict[str, object] = {}
+            cycle["self"] = cycle
+            return cycle
         return {"at": datetime(2026, 10, 10, tzinfo=UTC)}
 
     if result == "oversized":
