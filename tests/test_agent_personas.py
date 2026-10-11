@@ -39,8 +39,6 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import SubagentPersona
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-_BASH_HINT = "MindRoom tools are callable from Bash through mindroom-agent; run mindroom-agent --help to list them."
-
 
 def _runtime(tmp_path: Path, **agent_fields: object) -> ToolRuntimeContext:
     runtime = _runtime_context(tmp_path)
@@ -97,21 +95,25 @@ async def _prepare(runtime: ToolRuntimeContext, persona: SubagentPersona, prompt
 
 
 @pytest.mark.asyncio
-async def test_persona_system_message_is_verbatim(tmp_path: Path) -> None:
-    """The model receives the authored prompt byte for byte, with no MindRoom framing or state substitution."""
+async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_path: Path) -> None:
+    """The authored prompt leads in place of the agent's identity, and runtime sections stay as for every agent."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
-    prompt = "Plain {not_a_var} text\n"
+    prompt = "Plain {not_a_var} text"
     prepared = await _prepare(runtime, inline_persona(prompt, None), "task")
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
 
     assert message is not None
-    assert message.content == prompt
+    content = str(message.content)
+    assert content.startswith(f"{prompt}\n")
+    assert "Configured role" not in content
+    assert "Configured rule" not in content
+    assert "## Tool Execution Environment" in content
 
 
 @pytest.mark.asyncio
 async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> None:
-    """A compacted session's summary follows an authored child's verbatim prompt, as Agno adds it for configured agents."""
+    """A compacted session's summary reaches an authored child through the same prompt builder as every agent."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
     identity = build_execution_identity_from_runtime_context(runtime)
     old_run = RunOutput(
@@ -145,24 +147,21 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
         runtime_paths=runtime.runtime_paths,
         execution_identity=identity,
     ) as scope_context:
-        turn = replace(_turn_context(), persona=inline_persona("P", None))
-        options = {"runtime_paths": runtime.runtime_paths, "config": runtime.config, "execution_identity": identity}
-        prepared = await ai._prepare_agent_and_prompt(turn, prompt="task", scope_context=scope_context, **options)
-        # A retried turn reuses the agent its first attempt prepared.
-        retried = await ai._prepare_agent_and_prompt(
-            turn,
+        assert scope_context is not None
+        prepared = await ai._prepare_agent_and_prompt(
+            replace(_turn_context(), persona=inline_persona("P", None)),
             prompt="task",
+            runtime_paths=runtime.runtime_paths,
+            config=runtime.config,
+            execution_identity=identity,
             scope_context=scope_context,
-            reusable_agent=prepared.agent,
-            **options,
         )
+        message = await prepared.agent.aget_system_message(scope_context.session, _run_context(), [])
 
-    message = await retried.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
     assert message is not None
     content = str(message.content)
-    assert content.startswith("P\n\n")
+    assert content.startswith("P\n")
     assert content.count("<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>") == 1
-    assert retried.prepared_history.prepared_context_tokens == prepared.prepared_history.prepared_context_tokens
 
 
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
@@ -350,19 +349,21 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
     assert "the task" in prepared.prompt_text
 
 
-def test_minimal_persona_uses_authored_prompt_and_bash_hint(tmp_path: Path) -> None:
-    """A minimal persona presents the authored prompt and tells the model where its tools are."""
+def test_minimal_persona_prompt_replaces_only_the_bootstrap_identity(tmp_path: Path) -> None:
+    """A minimal persona's authored prompt replaces the bootstrap's identity line and keeps its runtime lines."""
     runtime = _runtime(tmp_path, tools=["shell"])
     agent = _child(runtime, None, prompt="Authored minimal prompt", agent_mode="minimal")
     assert isinstance(agent, MinimalAgent)
-    assert agent.bootstrap_message == "Authored minimal prompt"
-    assert agent.system_message == "Authored minimal prompt"
-    [bash] = agent.get_tools(RunOutput(run_id="run-1"), _run_context(), AgentSession(session_id="session-1"))
-    assert bash.get_async_functions()["bash"].description.endswith(_BASH_HINT)
+    assert agent.system_message == agent.bootstrap_message
+    assert agent.system_message.startswith("Authored minimal prompt\n")
+    assert "You are Helper" not in agent.system_message
+    assert "mindroom-agent --help" in agent.system_message
+    assert "Configured role" not in "\n".join(agent.context_documents.values())
+    assert "Configured rule" not in "\n".join(agent.context_documents.values())
 
 
 def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
-    """Configured agents keep their built prompt and the plain Bash description."""
+    """Configured agents keep their built prompt and their own minimal identity line."""
     runtime = _runtime(tmp_path, tools=["shell"])
     standard = agents.create_agent(
         "helper",
@@ -385,8 +386,6 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
     assert standard.resolve_in_context
     assert isinstance(minimal, MinimalAgent)
     assert minimal.system_message.startswith("You are Helper (helper) in minimal mode.")
-    [bash] = minimal.get_tools(RunOutput(run_id="run-1"), _run_context(), AgentSession(session_id="session-1"))
-    assert _BASH_HINT not in bash.get_async_functions()["bash"].description
 
 
 @pytest.mark.asyncio

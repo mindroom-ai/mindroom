@@ -2,7 +2,7 @@
 
 ## Goal
 
-Let an agent create effective subagents by writing their entire system prompt and choosing their tools, model, and mode.
+Let an agent create effective subagents by writing their prompt and choosing their tools, model, and mode.
 An authored subagent runs as the calling agent itself, so it can reach at most, and by default exactly, what the caller can reach.
 Authored subagents are durable: `continue_subagent` reaches them across turns and restarts, and reusable personas live as files the agent edits in its own workspace.
 Dynamic Workflow participants are rebuilt on the same primitive, so there is one way to define, authorize, run, and audit an agent-authored agent.
@@ -30,7 +30,7 @@ A persona is a typed value with these fields:
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `system_prompt` | string, 1 byte to 64 KiB UTF-8 | required | The child's entire system message, sent byte for byte; once compaction summarizes a standard child's older turns, that summary follows it |
+| `system_prompt` | string, 1 byte to 64 KiB UTF-8 | required | The child's prompt, which leads its system message in place of the agent's identity and instructions |
 | `tools` | list of strings or null | null | Toolkit names (`gmail`) or single functions (`gmail.search_emails`); null means every tool the caller has, except for workflow participants, where it means none |
 | `model` | configured model alias or null | null | Same rule as today's `run_subagent(model=...)` |
 | `mode` | `standard` or `minimal` | `standard` | Same rule as today's `run_subagent(minimal=...)` |
@@ -122,18 +122,18 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 
 `create_agent` accepts an optional persona and applies it in one private helper beside it:
 
-- The agent's `system_message` is the persona's `system_prompt`, and `resolve_in_context` is off so braces in the prompt are never treated as session-state variables.
-- No MindRoom identity, role, instructions, date context, skills listing, knowledge description, toolkit instructions, context files, or memory text is added to the system message.
+- The child's system message is built by Agno's normal prompt builder, like every agent's: the persona's `system_prompt` is Agno's `description`, so it leads, and `resolve_in_context` is off so braces in the prompt are never treated as session-state variables.
+- The prompt replaces the agent's identity: MindRoom's identity block, the configured role and instructions, personality and context files, and the skills listing are left out.
+- The runtime sections every agent gets still follow: the tool execution environment, MindRoom's runtime notes, the date context, toolkit instructions, and the session summary.
 - Tool schemas still reach the model through the provider's tool API, so the child sees every function in its tool subset with its normal description.
 - The persona's `tools` compose with the existing `tool_function_filter` through each function's owning toolkit.
 - Agno learning is off and automatic memory recall is skipped, so no recalled memories enter the child's prompt; it uses memory only through memory tools in its subset, and delegated children never run automatic memory capture.
-- Session history stays on, so follow-ups see the child's earlier turns.
-  After compaction, a standard child's system message is the authored prompt followed by the summary block Agno adds for configured agents, so the summary also survives an approval resume, which replays the saved system message.
+- Session history stays on, so follow-ups see the child's earlier turns, and a compacted session's summary reaches the child exactly as it reaches configured agents.
 - The task still arrives as the user message with the same per-turn framing delegated children receive today.
 
 ### Minimal personas
 
-A minimal persona uses `MinimalAgent` with the persona's `system_prompt` as its entire system message instead of the generated minimal bootstrap.
+A minimal persona uses `MinimalAgent` with the persona's `system_prompt` in place of the minimal bootstrap's identity line; the bootstrap's workspace, memory, and `mindroom-agent` lines stay, and its toolkit list names only the persona's toolkits.
 Its tool catalog behind `mindroom-agent` is the persona's tool subset.
 Because the prompt no longer mentions `mindroom-agent`, the Bash function description of a minimal persona adds one sentence saying that MindRoom tools are callable through `mindroom-agent` and that `mindroom-agent --help` lists them.
 Normal minimal agents keep their current prompt and Bash description, so their wording needs no new A/B evaluation.
@@ -242,7 +242,7 @@ The primary reads profiles only through no-follow confinement with the count and
 ## Testing
 
 - Persona module: inline validation, profile parsing, invalid frontmatter, name rules, size and count caps, symlinked and non-regular files refused, and the tool-subset check against an effective caller tool list.
-- Agent construction: the system message equals the persona prompt byte for byte, including braces, and a compacted session's summary follows it exactly once, including on a retried turn; only subset functions are visible; learning is off; minimal personas present the authored prompt and the extended Bash description.
+- Agent construction: the system message starts with the persona prompt, braces intact, holds none of the configured identity, keeps the runtime sections, and includes a compacted session's summary exactly once; only subset functions are visible; learning is off; minimal personas replace only the bootstrap's identity line.
 - Delegate tool: inline and profile start, self-only enforcement, parameter conflicts, profile overrides, follow-up after a profile edit keeps the snapshot, and restart recovery keeps the persona on both delegation paths.
 - Approvals: a standard persona pauses and resumes through the existing approval tests, and a minimal persona hides gated tools.
 - Workflows: the subset error closes the tool gap, participants write delegation records, a participant reused by two steps continues one session, gated tools are rejected or hidden as specified, and legacy revisions load, run, and update as `subagent` participants.

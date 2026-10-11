@@ -13,13 +13,17 @@ def minimal_system_message(
     *,
     agent_name: str,
     display_name: str,
+    identity: str | None = None,
     toolkit_names: Sequence[str],
     instructions: Sequence[str],
     context_files: Sequence[str] = (),
     memory_root: Path | None = None,
     runtime_context: str = "",
 ) -> str:
-    """Identify the same agent's workspace, memory, and discoverable CLI tools."""
+    """Identify the same agent's workspace, memory, and discoverable CLI tools.
+
+    An authored subagent's ``identity`` replaces the agent's own identity line.
+    """
     names = sorted(set(toolkit_names))
     roster = "Toolkits callable through mindroom-agent: " + ", ".join(names)
     if len(roster) > 2000:
@@ -37,7 +41,7 @@ def minimal_system_message(
     return "\n".join(
         part
         for part in [
-            f"You are {display_name} ({agent_name}) in minimal mode.",
+            identity if identity is not None else f"You are {display_name} ({agent_name}) in minimal mode.",
             "Bash starts in your workspace.",
             *guidance,
             "Other tools and full agent context: mindroom-agent --help.",

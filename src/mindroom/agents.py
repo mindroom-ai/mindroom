@@ -80,7 +80,7 @@ from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from contextlib import AbstractContextManager
 
     from agno.db.base import BaseDb
@@ -1441,15 +1441,6 @@ def _generated_function_visible(
     )
 
 
-def _apply_persona(agent: Agent, persona: SubagentPersona) -> None:
-    """Present the authored prompt verbatim, without MindRoom framing or session-state substitution."""
-    agent.system_message = persona.system_prompt
-    agent.resolve_in_context = False
-    if isinstance(agent, MinimalAgent):
-        agent.bootstrap_message = persona.system_prompt
-        agent.persona_hint = True
-
-
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
@@ -1725,8 +1716,12 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
+    persona: SubagentPersona | None = None,
 ) -> _AgentRoleContext:
-    """Resolve the model name and render shared identity and preload context into the role."""
+    """Resolve the model name and render shared identity and preload context into the role.
+
+    An authored ``persona`` replaces the identity, context files, and configured role; the runtime facts stay.
+    """
     # Get model config for identity context
     model_name = active_model_name or agent_config.model or "default"
     if model_name in config.models:
@@ -1738,16 +1733,18 @@ def _build_agent_role_context(
         model_provider = "AI"
         model_id = model_name
 
-    with _agent_create_timing("identity_context"):
-        identity_context = _render_agent_identity_context(
-            agent_name,
-            agent_config.display_name,
-            config,
-            runtime_paths,
-            model_provider=model_provider,
-            model_id=model_id,
-            include_openai_compat_guidance=include_openai_compat_guidance,
-        )
+    identity_context = ""
+    if persona is None:
+        with _agent_create_timing("identity_context"):
+            identity_context = _render_agent_identity_context(
+                agent_name,
+                agent_config.display_name,
+                config,
+                runtime_paths,
+                model_provider=model_provider,
+                model_id=model_id,
+                include_openai_compat_guidance=include_openai_compat_guidance,
+            )
 
     full_context = identity_context + _get_mind_runtime_context(agent_name, runtime_paths)
     context_documents: list[_AdditionalContextChunk] = []
@@ -1768,6 +1765,7 @@ def _build_agent_role_context(
                 requires_primary_runtime=True,
             ),
         )
+    if not disable_runtime_capabilities and persona is None:
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
             agent_name,
@@ -1785,14 +1783,14 @@ def _build_agent_role_context(
 
     return _AgentRoleContext(
         model_name=model_name,
-        role=full_context + agent_config.role,
+        role=full_context.lstrip() if persona is not None else full_context + agent_config.role,
         context_documents=tuple(context_documents),
     )
 
 
 def _build_agent_instructions(
     agent_name: str,
-    agent_config: AgentConfig,
+    configured_instructions: Sequence[str],
     config: Config,
     agent_runtime: ResolvedAgentRuntime,
     *,
@@ -1806,7 +1804,7 @@ def _build_agent_instructions(
     all_deferred_tools_eager: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance."""
-    instructions = list(agent_config.instructions)
+    instructions = list(configured_instructions)
 
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
@@ -2043,6 +2041,7 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         local_tool_names=tool_assembly.local_tool_names,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
+        persona=persona,
     )
 
     # Create agent with defaults applied
@@ -2066,9 +2065,10 @@ def create_agent(
     )
 
     workspace = agent_runtime.workspace
+    # An authored subagent gets no skills until it can choose them like its tools.
     skills = (
         None
-        if disable_runtime_capabilities
+        if disable_runtime_capabilities or persona is not None
         else _load_agent_skills(
             agent_name,
             config,
@@ -2088,7 +2088,7 @@ def create_agent(
     prompt_skills = None if skill_functions_hidden else skills
     instructions = _build_agent_instructions(
         agent_name,
-        agent_config,
+        agent_config.instructions if persona is None else (),
         config,
         agent_runtime,
         skills=prompt_skills,
@@ -2138,6 +2138,9 @@ def create_agent(
         cli_shell=cli_shell,
         name=agent_config.display_name,
         id=agent_name,
+        # An authored prompt leads the system message in place of the agent's identity, never substituted.
+        description=persona.system_prompt if persona is not None else None,
+        resolve_in_context=persona is None,
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,
@@ -2179,8 +2182,13 @@ def create_agent(
             else "",
             context_documents=[document.body for document in role_context.context_documents],
             deferred_toolkits=tool_assembly.cli_deferred,
-            toolkit_names=get_agent_toolkit_names(agent_name, config),
-            minimal_instructions=agent_config.minimal_instructions,
+            toolkit_names=[
+                name
+                for name in get_agent_toolkit_names(agent_name, config)
+                if persona_tools is None or name in {entry.partition(".")[0] for entry in persona_tools}
+            ],
+            identity=persona.system_prompt if persona is not None else None,
+            minimal_instructions=agent_config.minimal_instructions if persona is None else (),
             context_files=role_context.workspace_context_files(agent_runtime.tool_base_dir),
             memory_root=(
                 agent_runtime.file_memory_root.relative_to(agent_runtime.tool_base_dir)
@@ -2204,8 +2212,6 @@ def create_agent(
         )
         agent.delegation_depth = delegation_depth
         agent.refresh_scheduler = refresh_scheduler
-    if persona is not None:
-        _apply_persona(agent, persona)
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
 
