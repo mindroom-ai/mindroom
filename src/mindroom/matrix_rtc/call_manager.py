@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -126,6 +126,8 @@ _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TY
 _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
+# A voice session that stays up this long proves the call works, so its failure retries from the first delay.
+_STABLE_CALL_SESSION_MS = 60_000
 _RECONCILE_MIN_INTERVAL_S = 1.0
 # Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
 _ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
@@ -213,6 +215,10 @@ class _LogicalCallState:
     requester_id: str
     agent_session_id: str
     join_blocked: bool = False
+    #: Sessions that failed since the call last had a stable one; keeps rejoins backing off.
+    failed_sessions: int = 0
+    session_started_ms: int = 0
+    reported_failures: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -974,7 +980,7 @@ class CallManager:
             room=room,
             bridge=bridge,
             backend=backend,
-            requester_id=members[0].user_id,
+            logical_call=logical_call,
             origin_context=origin_context,
         )
         try:
@@ -1002,7 +1008,7 @@ class CallManager:
                     ),
                     on_failure=lambda message: self._send_call_failure_notice(
                         room_id,
-                        requester_id,
+                        logical_call,
                         message,
                     ),
                 ),
@@ -1022,6 +1028,7 @@ class CallManager:
             await self._stop_session(session)
             return "skip"
         self._sessions[room_id] = session
+        logical_call.session_started_ms = self._clock_ms()
         self._replay_pending_keys(room_id, session)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
         return "joined"
@@ -1144,15 +1151,19 @@ class CallManager:
         task = asyncio.create_task(self._handle_session_termination(room, bridge, retryable=retryable))
         self._track_background_task(task, event="call_session_termination_failed", room_id=room.room_id)
 
-    def _schedule_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> None:
+    def _schedule_call_failure_notice(self, room_id: str, logical_call: _LogicalCallState, message: str) -> None:
         """Publish an asynchronous diagnostic without blocking SDK callbacks."""
         if self._shutting_down:
             return
-        task = asyncio.create_task(self._send_call_failure_notice(room_id, requester_id, message))
+        task = asyncio.create_task(self._send_call_failure_notice(room_id, logical_call, message))
         self._track_background_task(task, event="call_failure_notice_failed", room_id=room_id)
 
-    async def _send_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> None:
-        """Post a cross-client Matrix notice explaining a silent call failure."""
+    async def _send_call_failure_notice(self, room_id: str, logical_call: _LogicalCallState, message: str) -> None:
+        """Post a cross-client Matrix notice explaining a silent call failure, once per logical call."""
+        if message in logical_call.reported_failures:
+            return
+        logical_call.reported_failures.add(message)
+        requester_id = logical_call.requester_id
         try:
             async with admitted_response_decision(
                 self._response_admission_gate,
@@ -1205,6 +1216,11 @@ class CallManager:
             if retryable and not self._shutting_down:
                 if logical_call is not None:
                     logical_call.join_blocked = False
+                    if self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS:
+                        logical_call.failed_sessions = 0
+                    # Resume this call's backoff, so a provider that fails every session cannot rejoin every second.
+                    self._retry_attempts[room.room_id] = logical_call.failed_sessions
+                    logical_call.failed_sessions += 1
                 self._schedule_reconcile_retry(room)
 
     def _observe_background_task(self, event: str, room_id: str, task: asyncio.Task[None]) -> None:
@@ -1456,7 +1472,7 @@ class CallManager:
         room: nio.MatrixRoom,
         bridge: VoiceBridgeLike,
         backend: _ResolvedVoiceBackend,
-        requester_id: str,
+        logical_call: _LogicalCallState,
         origin_context: CallOriginContext | None = None,
     ) -> CallVoiceAgentOptions:
         """Build selected-backend options with shared transcript hooks."""
@@ -1465,7 +1481,7 @@ class CallManager:
             self._schedule_session_termination(room, bridge, retryable=retryable)
 
         def on_session_error(message: str) -> None:
-            self._schedule_call_failure_notice(room.room_id, requester_id, message)
+            self._schedule_call_failure_notice(room.room_id, logical_call, message)
 
         if self._call_config.backend == "realtime":
             realtime_config = cast("RealtimeCallProfile", self._call_config)
