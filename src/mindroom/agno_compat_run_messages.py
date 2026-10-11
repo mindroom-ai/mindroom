@@ -126,18 +126,15 @@ def _with_current_messages(original: Callable[..., Any]) -> Callable[..., Any]:
 # Reason: A delegated member run is saved only through the team run it is attached to,
 # and Agno attaches it only when the member hands back its run output. A member whose
 # run is hard-cancelled re-raises without one, and a streaming member that fails yields
-# only an error event, so all of that member's usage is lost from every report. A
-# hard-cancelled team run also leaves its members' delegation tasks running, so they
-# finish, still spending, after the team run is saved; stopping them reads Agno's
-# private per-run task set. MindRoom runs teams only asynchronously, so the
-# synchronous delegation path is left alone. The hold runs from the terminal-snapshot
-# and cancellation hooks in this module, so removing those must keep calling it.
+# only an error event, so all of that member's usage is lost from every report.
+# MindRoom runs teams only asynchronously, so the synchronous delegation path is left
+# alone. The hold runs from the terminal-snapshot and cancellation hooks in this module,
+# so removing those must keep calling it.
 # Upstream issue: No matching issue identified; member-run attachment on cancellation
-# and streaming errors, and stopping member tasks of a cancelled team run, are untracked.
+# and streaming errors is untracked.
 # Upstream PR: None identified.
 # Remove when: Agno attaches every delegated member run to its team run when the member
-# is cancelled or fails, in streaming and non-streaming delegation, exactly once, and
-# stops in-flight member tasks before saving a cancelled team run.
+# is cancelled or fails, in streaming and non-streaming delegation, exactly once.
 # Coverage: tests/test_team_member_usage.py::test_stopped_team_member_keeps_its_usage;
 # tests/test_team_member_usage.py::test_failed_team_member_keeps_its_usage_once;
 # tests/test_team_member_usage.py::test_finished_team_member_counts_once;
@@ -190,6 +187,24 @@ async def _attach_member_run(
     session.upsert_run(await team_run._amember_run_for_storage(team, session, member_run))
 
 
+# AGNO_COMPAT: A hard-cancelled team run leaves its members' delegation tasks running.
+# Reason: Agno runs each async delegation in its own task and drains those tasks only
+# when a run is cancelled cooperatively. A task cancellation of the team run, which is
+# how MindRoom stops a reply, leaves members running and spending after the team run
+# is saved, and they never hand over their runs. Stopping them reads Agno's private
+# per-run task set before its public bounded drain.
+# Upstream issue: No matching issue identified; stopping member tasks of a cancelled
+# team run is untracked.
+# Upstream PR: None identified.
+# Remove when: Agno cancels and drains in-flight member tasks before saving a team run
+# that was cancelled by cancelling its task.
+# Coverage: tests/test_team_member_usage.py::test_stopped_team_member_keeps_its_usage.
+async def _stop_member_tasks(team_run_id: str) -> None:
+    for task in agno_cancel._member_drain_tasks.get(team_run_id, set()):
+        task.cancel()
+    await agno_cancel.adrain_member_tasks(team_run_id)
+
+
 def _with_member_runs(original: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
     @wraps(original)
     async def cleanup_and_store(
@@ -199,10 +214,7 @@ def _with_member_runs(original: Callable[..., Awaitable[None]]) -> Callable[...,
         run_context: RunContext | None = None,
     ) -> None:
         if run_response.run_id and run_response.status == RunStatus.cancelled:
-            # A stopped team run leaves its members' delegation tasks running; stop them so they hand over their runs.
-            for task in agno_cancel._member_drain_tasks.get(run_response.run_id, set()):
-                task.cancel()
-            await agno_cancel.adrain_member_tasks(run_response.run_id)
+            await _stop_member_tasks(run_response.run_id)
         for member_run in _UNATTACHED_MEMBER_RUNS.pop(run_response.run_id, []) if run_response.run_id else []:
             await _attach_member_run(team, session, run_response, member_run)
         for member_run_id in [key for key, value in _MEMBER_TEAM_RUN_IDS.items() if value == run_response.run_id]:
