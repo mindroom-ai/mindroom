@@ -131,37 +131,23 @@ def test_conflicting_prices_for_one_model_keep_the_higher_price(tmp_path: Path) 
     assert priced.pricing == ModelPricing(input=0.2, output=2)
 
 
-def test_gemini_thinking_tokens_are_charged_at_the_output_price() -> None:
-    priced = PricedModel(
-        ModelPricing(input=1.0, output=10.0),
-        input_includes_cache=True,
-        output_includes_reasoning=False,
-    )
-    totals = TokenTotals(input_tokens=1_000_000, output_tokens=100_000, reasoning_tokens=400_000)
-
-    assert cost_usd(totals, priced) == pytest.approx(1.0 + (100_000 + 400_000) * 10.0 / 1e6)
-
-
-@pytest.mark.parametrize(("provider", "includes"), [("google", False), ("gemini", False), ("openai", True)])
-def test_price_table_marks_providers_that_report_thinking_outside_output(
-    tmp_path: Path,
-    provider: str,
-    includes: bool,
-) -> None:
+@pytest.mark.parametrize("provider", ["google", "gemini", "openai"])
+def test_reasoning_tokens_are_charged_as_part_of_output(tmp_path: Path, provider: str) -> None:
+    """Recorded output already includes reasoning and Gemini thinking tokens, so they are not added again."""
     config = Config(
         models={
             "m": ModelConfig(
                 provider=provider,
                 id="some-model",
                 api_key="key",
-                pricing=ModelPricing(input=1, output=2),
+                pricing=ModelPricing(input=1, output=10),
             ),
         },
     )
-
     (priced,) = price_table(config, _paths(tmp_path)).prices.values()
+    totals = TokenTotals(input_tokens=1_000_000, output_tokens=500_000, reasoning_tokens=400_000)
 
-    assert priced.output_includes_reasoning is includes
+    assert cost_usd(totals, priced) == pytest.approx(1.0 + 500_000 * 10.0 / 1e6)
 
 
 def test_conflicting_cache_prices_keep_the_higher_cache_price(tmp_path: Path) -> None:

@@ -21,8 +21,6 @@ logger = get_logger(__name__)
 
 # Provider names that select the same model class and so record the same usage identity.
 _PROVIDER_ALIASES = {"gemini": "google", "openai_codex": "codex", "kimi_code": "kimi"}
-# Gemini reports thinking tokens beside output_tokens and bills them as output; the others count them inside it.
-_REASONING_EXCLUDED_PROVIDERS = frozenset({"google"})
 
 
 def provider_identity(provider: str) -> str:
@@ -37,7 +35,6 @@ class PricedModel:
 
     pricing: ModelPricing
     input_includes_cache: bool
-    output_includes_reasoning: bool = True
 
 
 def cost_usd(totals: TokenTotals, priced: PricedModel) -> float:
@@ -46,14 +43,12 @@ def cost_usd(totals: TokenTotals, priced: PricedModel) -> float:
     uncached_input = totals.input_tokens
     if priced.input_includes_cache:
         uncached_input = max(0, uncached_input - totals.cache_read_tokens - totals.cache_write_tokens)
-    output = (
-        totals.output_tokens if priced.output_includes_reasoning else totals.output_tokens + totals.reasoning_tokens
-    )
+    # Recorded output already includes reasoning and thinking tokens for every provider.
     return (
         uncached_input * pricing.input
         + totals.cache_read_tokens * pricing.cache_read_price
         + totals.cache_write_tokens * pricing.cache_write_price
-        + output * pricing.output
+        + totals.output_tokens * pricing.output
     ) / 1_000_000
 
 
@@ -85,7 +80,6 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
             complete = False
             continue
         key = (model.get_provider(), model.id)
-        provider = provider_identity(model_config.provider)
         priced = PricedModel(
             pricing=model_config.pricing,
             input_includes_cache=not provider_reports_cache_tokens_outside_input(
@@ -93,7 +87,6 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
                 configured_provider=model_config.provider,
                 model_id=model.id,
             ),
-            output_includes_reasoning=provider not in _REASONING_EXCLUDED_PROVIDERS,
         )
         existing = table.get(key)
         if existing is not None and existing.pricing != priced.pricing:
