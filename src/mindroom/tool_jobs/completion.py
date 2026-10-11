@@ -133,17 +133,18 @@ async def join_conversation_jobs(
     *,
     joins: int,
     agent_names: Sequence[str] | None = None,
-    minimal: bool = False,
+    can_retrieve: bool = True,
 ) -> _JobJoin:
     """Continue this reply with ready results, or report what it leaves outstanding.
 
     The reply retrieves its conversation's work, including work earlier replies started. Work it already asked to
     retrieve is not asked for again. With nothing ready and work outstanding, the span's answer waits for that work,
     unless the span runs for an approval or reached the join limit; the conversation's next reply then takes it.
-    A minimal reply could retrieve only through its CLI, which saves no exact call to acknowledge, so it takes none.
+    A reply that cannot retrieve results as an exact call of its own takes none: a minimal reply, whose CLI saves no
+    such call, and a voice turn, whose call session owns no conversation's results.
     """
     context = get_tool_runtime_context()
-    if context is None or job_owns_execution() or _DELEGATED_CHILD.get() or minimal:
+    if context is None or job_owns_execution() or _DELEGATED_CHILD.get() or not can_retrieve:
         return _JobJoin()
     runtime = get_background_runtime(context.runtime_paths)
     if runtime is None:

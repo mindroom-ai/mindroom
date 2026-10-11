@@ -1237,7 +1237,7 @@ async def _settle_joined_blocking_attempt(
         run.attempted_job_outcomes,
         joins=run.job_joins,
         agent_names=ctx.tool_job_agent_names,
-        minimal=ctx.agent_mode == "minimal",
+        can_retrieve=ctx.background_tool_jobs and ctx.agent_mode != "minimal",
     )
     if join.prompt is not None:
         return _advance_job_continuation(ctx, adapter, sinks, run, resolution, continuation, join.prompt)
@@ -1533,7 +1533,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             run.attempted_job_outcomes,
                             joins=run.job_joins,
                             agent_names=ctx.tool_job_agent_names,
-                            minimal=ctx.agent_mode == "minimal",
+                            can_retrieve=ctx.background_tool_jobs and ctx.agent_mode != "minimal",
                         )
                         if join_document is not None and (join.prompt is not None or join.holds):
                             # A continued or held reply keeps its live document, which later turns extend.

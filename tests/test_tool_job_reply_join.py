@@ -380,8 +380,8 @@ async def test_boundary_records_outstanding_work_for_the_message_to_hold(tmp_pat
         finish.set()
         await wait_for_status(runtime, "work", "completed")
         with tool_runtime_context(context):
-            # A minimal reply could retrieve only through its CLI, so it leaves the work to a standard reply.
-            assert await join_conversation_jobs(set(), joins=0, minimal=True) == _JobJoin()
+            # A minimal reply, or a voice turn, cannot retrieve it as its own call, so it leaves the work to a reply that can.
+            assert await join_conversation_jobs(set(), joins=0, can_retrieve=False) == _JobJoin()
             joined = await join_conversation_jobs(set(), joins=0)
         assert joined.prompt is not None
         assert 'job_id="work"' in joined.prompt
