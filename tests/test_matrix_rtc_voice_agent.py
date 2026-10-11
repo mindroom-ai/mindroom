@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from livekit import rtc
 from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm
+from livekit.agents.metrics.usage import AgentSessionUsage, LLMModelUsage, TTSModelUsage
 from livekit.agents.voice import io as agents_io
 from openai import AsyncOpenAI
 from structlog.testing import capture_logs
@@ -217,9 +218,7 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     fake_model.aclose.assert_awaited_once()
 
 
-def _llm_usage(inputs: int, outputs: int = 10, **counters: int) -> object:
-    from livekit.agents.metrics.usage import LLMModelUsage  # noqa: PLC0415
-
+def _llm_usage(inputs: int, outputs: int = 10, **counters: int) -> LLMModelUsage:
     return LLMModelUsage(
         provider="openai",
         model="gpt-realtime-2.1",
@@ -233,10 +232,9 @@ async def _realtime_bridge_with_usage(
     monkeypatch: pytest.MonkeyPatch,
     record_usage: Callable[[RealtimeCallUsage], Awaitable[None]],
     *,
-    usage_on_close: tuple[object, ...] = (),
+    usage_on_close: tuple[LLMModelUsage, ...] = (),
 ) -> tuple[RealtimeVoiceBridge, Callable[..., None]]:
     """Start a realtime bridge on a fake session; return it and a function reporting LiveKit's running usage."""
-    from livekit.agents.metrics.usage import AgentSessionUsage  # noqa: PLC0415
 
     def report_to(handlers: dict[str, Callable[[object], None]], *model_usage: object) -> None:
         handlers["session_usage_updated"](SimpleNamespace(usage=AgentSessionUsage(model_usage=list(model_usage))))
@@ -287,8 +285,6 @@ async def _realtime_bridge_with_usage(
 @pytest.mark.asyncio
 async def test_realtime_session_records_each_responses_token_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     """LiveKit reports running totals after each response; the call keeps one record listing every response."""
-    from livekit.agents.metrics.usage import TTSModelUsage  # noqa: PLC0415
-
     recorded: list[RealtimeCallUsage] = []
 
     async def record_usage(usage: RealtimeCallUsage) -> None:

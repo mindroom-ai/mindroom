@@ -644,15 +644,16 @@ class RealtimeVoiceBridge:
                 created_at=created_at,
                 responses=tuple(responses),
             )
-            self._schedule_session_event(self._save_realtime_usage(record_usage))
+            self._schedule_session_event(self._save_realtime_usage())
 
         session.on("session_usage_updated", _on_usage)
 
-    async def _save_realtime_usage(self, record_usage: Callable[[RealtimeCallUsage], Awaitable[None]]) -> None:
+    async def _save_realtime_usage(self) -> None:
         # Saves run one at a time and write the newest totals, so a slow save cannot overwrite newer ones.
         async with self._usage_lock:
             usage = self._realtime_usage
-            if usage is None or usage is self._saved_realtime_usage:
+            record_usage = self._record_realtime_usage
+            if usage is None or record_usage is None or usage is self._saved_realtime_usage:
                 return
             try:
                 await record_usage(usage)
@@ -786,7 +787,7 @@ class RealtimeVoiceBridge:
                     await asyncio.gather(*self._session_event_tasks, return_exceptions=True)
                 if self._record_realtime_usage is not None:
                     # Retry the call's latest total once if its last save failed.
-                    await self._save_realtime_usage(self._record_realtime_usage)
+                    await self._save_realtime_usage()
                     if self._realtime_usage is not self._saved_realtime_usage:
                         logger.error("call_realtime_usage_unpersisted")
             finally:
