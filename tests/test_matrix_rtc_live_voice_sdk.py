@@ -512,7 +512,6 @@ async def test_live_sdk_times_delegation_stages_through_the_provider_ack(provide
     stages = [entry for entry in logs if entry["event"] == "call_delegation_stage"]
     assert [(entry["delegation_id"], entry["stage"]) for entry in stages] == [
         ("first", "created"),
-        ("first", "enqueued"),
         ("first", "lock_acquired"),
         ("first", "response_done"),
         ("first", "commentary_appended"),

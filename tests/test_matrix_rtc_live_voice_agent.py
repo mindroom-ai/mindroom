@@ -280,9 +280,7 @@ async def test_live_delegation_times_each_stage_and_matches_acks_by_client_event
     stages = [entry for entry in logs if entry["event"] == "call_delegation_stage"]
     assert [(entry["delegation_id"], entry["stage"]) for entry in stages] == [
         ("one", "created"),
-        ("one", "enqueued"),
         ("two", "created"),
-        ("two", "enqueued"),
         ("one", "lock_acquired"),
         ("one", "response_done"),
         ("one", "commentary_appended"),
@@ -294,10 +292,8 @@ async def test_live_delegation_times_each_stage_and_matches_acks_by_client_event
         ("one", "commentary_acked"),
         ("one", "commentary_acked"),
     ]
-    lock_waits = {
-        entry["delegation_id"]: entry["queue_wait_ms"] for entry in stages if entry["stage"] == "lock_acquired"
-    }
-    assert lock_waits["one"] < 10 <= lock_waits["two"]
+    lock_waits = {entry["delegation_id"]: entry["elapsed_ms"] for entry in stages if entry["stage"] == "lock_acquired"}
+    assert lock_waits["two"] >= 10
     assert {entry["response_chars"] for entry in stages if entry["stage"] == "response_done"} == {700}
     appended = [
         (entry["chunk_index"], entry["chunk_count"]) for entry in stages if entry["stage"] == "commentary_appended"

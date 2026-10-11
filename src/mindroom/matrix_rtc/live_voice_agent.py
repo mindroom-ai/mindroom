@@ -88,10 +88,9 @@ class _LiveDelegationRunner:
             for item in context.items
             if isinstance(item, ChatMessage) and item.role in {"user", "assistant"} and item.text_content
         )
-        task = asyncio.create_task(self._answer(delegation, messages, self._generation, time.monotonic()))
+        task = asyncio.create_task(self._answer(delegation, messages, self._generation))
         self._tasks.add(task)
         task.add_done_callback(self._on_task_done)
-        self._log_stage(delegation.id, "enqueued")
 
     def _prompt(self, messages: tuple[tuple[str, str, str], ...], pending: str) -> tuple[str, str]:
         """Compute a delta against requests already dispatched to the delegate."""
@@ -124,10 +123,9 @@ class _LiveDelegationRunner:
         delegation: GPTLiveDelegation,
         messages: tuple[tuple[str, str, str], ...],
         generation: int,
-        enqueued_at: float,
     ) -> None:
         async with self._lock:
-            self._log_stage(delegation.id, "lock_acquired", queue_wait_ms=elapsed_ms_since(enqueued_at))
+            self._log_stage(delegation.id, "lock_acquired")
             if self._closed or generation != self._generation:
                 return
             prompt, pending = self._prompt(messages, delegation.pending_transcript.strip())

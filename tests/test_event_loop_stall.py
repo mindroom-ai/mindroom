@@ -593,20 +593,16 @@ def _short_stall_detector(monkeypatch: pytest.MonkeyPatch) -> tuple[EventLoopSta
     return detector, captures
 
 
-def _beat(monotonic_seconds: float) -> event_loop_stall._Heartbeat:
-    return event_loop_stall._Heartbeat(monotonic_seconds=monotonic_seconds, process_cpu_seconds=0.0)
-
-
 def test_short_stall_logs_mid_stall_stack_with_total_lag_after_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
     """A sub-second stall keeps the stack sampled while blocked and reports the full lag once."""
     detector, captures = _short_stall_detector(monkeypatch)
 
     with capture_logs() as logs:
-        detector._observe_short_stall(1.2, _beat(1.0))  # 150 ms late: below the threshold
-        detector._observe_short_stall(1.35, _beat(1.0))  # 300 ms late: sample now, report later
+        detector._observe_short_stall(1.2, 1.0)  # 150 ms late: below the threshold
+        detector._observe_short_stall(1.35, 1.0)  # 300 ms late: sample now, report later
         assert logs == []
-        detector._observe_short_stall(1.4, _beat(1.0))  # still the same stall
-        detector._observe_short_stall(1.6, _beat(1.55))  # the late heartbeat finally ran
+        detector._observe_short_stall(1.4, 1.0)  # still the same stall
+        detector._observe_short_stall(1.6, 1.55)  # the late heartbeat finally ran
 
     assert len(captures) == 1
     [entry] = logs
@@ -616,7 +612,6 @@ def test_short_stall_logs_mid_stall_stack_with_total_lag_after_recovery(monkeypa
     assert entry["threshold_ms"] == 250.0
     assert entry["stack"] == "blocking-frame"
     assert entry["suppressed_count"] == 0
-    assert entry["process_cpu_seconds_since_heartbeat"] >= 0
 
 
 def test_short_stall_stacks_share_a_cooldown_and_count_suppressed_stalls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -625,8 +620,8 @@ def test_short_stall_stacks_share_a_cooldown_and_count_suppressed_stalls(monkeyp
 
     with capture_logs() as logs:
         for last_beat in (1.0, 3.0, 5.0, 12.0):
-            detector._observe_short_stall(last_beat + 0.4, _beat(last_beat))
-            detector._observe_short_stall(last_beat + 0.5, _beat(last_beat + 0.45))
+            detector._observe_short_stall(last_beat + 0.4, last_beat)
+            detector._observe_short_stall(last_beat + 0.5, last_beat + 0.45)
 
     assert len(captures) == 2
     assert [(entry["event"], entry["suppressed_count"]) for entry in logs] == [
@@ -656,7 +651,7 @@ async def test_detector_samples_the_stack_of_a_sub_second_stall() -> None:
 def test_stack_threshold_defaults_and_env_override() -> None:
     """Stack sampling defaults to 250 ms; zero or negative disables only the sampling."""
     assert _event_loop_stall_stack_seconds(_fake_runtime_paths()) == 0.25
-    assert _event_loop_stall_stack_seconds(_fake_runtime_paths(**{_EVENT_LOOP_STALL_STACK_ENV: "100"})) == 0.1
+    assert _event_loop_stall_stack_seconds(_fake_runtime_paths(**{_EVENT_LOOP_STALL_STACK_ENV: "0.1"})) == 0.1
     assert _event_loop_stall_stack_seconds(_fake_runtime_paths(**{_EVENT_LOOP_STALL_STACK_ENV: "0"})) is None
 
 
