@@ -25,7 +25,7 @@ from mindroom.reply_lifecycle import (
     Transition,
 )
 
-from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
+from . import approval_continuations, journal, outbox, reply_messages, reply_spans, tool_jobs, turn_records
 from .membership_state import claim_membership_epoch
 from .models import EventKind
 from .projection import is_tombstoned
@@ -209,7 +209,7 @@ def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) 
     Nothing is recorded while no background job exists: a stopped reply starts none afterwards, and a call whose job
     was being admitted when the Stop committed stops that job itself.
     """
-    if transaction.fetchone("SELECT 1 AS present FROM tool_jobs LIMIT 1") is None:
+    if not tool_jobs.any_saved(transaction):
         return False
     sources = tuple(
         dict.fromkeys(

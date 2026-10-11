@@ -93,6 +93,11 @@ def delete(transaction: Transaction, runtime_generation: str, job_id: str) -> No
     transaction.execute("DELETE FROM tool_jobs WHERE job_id = ?", (job_id,))
 
 
+def any_saved(transaction: Transaction) -> bool:
+    """Return whether any job is saved."""
+    return transaction.fetchone("SELECT 1 AS present FROM tool_jobs LIMIT 1") is not None
+
+
 def load_all(transaction: Transaction) -> tuple[SavedToolJob, ...]:
     """Return every saved job in ID order."""
     rows = transaction.fetchall("SELECT job_id, job_json FROM tool_jobs ORDER BY job_id/*bytes*/")
