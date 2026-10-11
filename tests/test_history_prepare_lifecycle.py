@@ -864,7 +864,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
     summary_mock = AsyncMock(return_value=SessionSummary(summary="short summary", updated_at=datetime.now(UTC)))
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
