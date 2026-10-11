@@ -302,3 +302,31 @@ async def test_claude_stream_still_retries_an_overload_after_it_starts(
         }
     finally:
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_that_fails_after_starting_counts_nothing(tmp_path: Path) -> None:
+    """A failed attempt is retried or reported as an error, so only a stopped stream keeps its start usage."""
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    overloaded = _start_and_text() + _event("error", error={"type": "overloaded_error", "message": "Overloaded"})
+    client = AsyncAnthropic(
+        api_key="test-key",
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, headers={"content-type": "text/event-stream"}, content=overloaded),
+            ),
+        ),
+    )
+    model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", async_client=client, max_tokens=1024)
+    try:
+        agent = Agent(id="status", model=model, db=storage, telemetry=False)
+        async for _ in agent.arun("Check status", session_id="session", stream=True):
+            pass
+
+        assert model.take_unfinished_stream_usage() is None
+        session = storage.get_session("session", session_type=SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        assert not session.session_data["session_metrics"].get("input_tokens")
+    finally:
+        storage.close()
