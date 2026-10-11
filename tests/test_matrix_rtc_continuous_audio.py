@@ -589,6 +589,29 @@ async def test_caller_speech_over_late_audio_clears_it_once(output_clock: Output
 
 
 @pytest.mark.asyncio
+async def test_audio_discarded_after_a_clear_does_not_count_as_queued(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """Frames RoomIO drops from a cleared segment cannot make a later short burst look late."""
+    with capture_logs() as logs:
+        for value in range(10):
+            await deliver(call.output, output_clock, value, at=value * 0.1)
+        for value in range(10, 16):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.caller("speaking")
+        # The rest of the stalled burst still arrives, and RoomIO discards it.
+        for value in range(16, 35):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.output.flush()
+        call.caller("listening")
+        await deliver(call.output, output_clock, 35, at=3.4)
+        call.caller("speaking")
+    assert call.sink.calls == ["clear", "flush"]
+    assert len(drop_logs(logs)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("queued_deltas", "cleared"), [(1, False), (5, False), (6, True)])
 async def test_caller_speech_leaves_up_to_half_a_second_queued(
     output_clock: OutputClock,

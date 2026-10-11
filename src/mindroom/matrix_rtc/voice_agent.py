@@ -1055,18 +1055,23 @@ def _drop_live_backlog_on_caller_speech(session: AgentSession) -> None:
             self._sink = cast("AudioOutput", self.next_in_chain)
             # When the audio already handed to the sink finishes playing at real-time pace.
             self._playout_end = 0.0
+            # RoomIO discards the rest of a cleared segment, so those frames never play.
+            self._segment_cleared = False
 
         async def capture_frame(self, frame: rtc.AudioFrame) -> None:
             await super().capture_frame(frame)
             await self._sink.capture_frame(frame)
-            self._playout_end = max(self._playout_end, time.monotonic()) + frame.duration
+            if not self._segment_cleared:
+                self._playout_end = max(self._playout_end, time.monotonic()) + frame.duration
 
         def flush(self) -> None:
             super().flush()
+            self._segment_cleared = False
             self._sink.flush()
 
         def clear_buffer(self) -> None:
             self._playout_end = 0.0
+            self._segment_cleared = True
             self._sink.clear_buffer()
 
         def drop_backlog(self) -> None:
