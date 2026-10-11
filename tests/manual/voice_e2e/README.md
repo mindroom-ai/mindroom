@@ -10,6 +10,7 @@ The instance must include mindroom-ai/mindroom#2810, because delegated steps wai
 4. Start the instance: `tests/manual/voice_e2e/instance_ctl.sh start` (`MINDROOM_VOICETEST_REPO` selects another checkout).
 5. Load the keys into your shell with `set -a; . ~/.mindroom-voicetest/.env; set +a`, then run a scenario: `.venv314/bin/python tests/manual/voice_e2e/voice_call_e2e.py baseline` (also `latency`, `probe`, `queue`, `stale_queue`, `stall`, `delegated_barge`).
 6. Summarize: `python tests/manual/voice_e2e/analyze.py ~/.mindroom-voicetest/runs/<run>`.
+7. When done, stop the instance with `tests/manual/voice_e2e/instance_ctl.sh stop` and the stack with `docker compose --env-file ~/.mindroom-voicetest/stack.env -f tests/manual/voice_e2e/compose.yaml down`, which frees `127.0.0.1:8008`, `:80` and `:443`.
 
 The caller always calls the agent `openclaw` and reads call transcripts from its file-memory workspace, and the scenarios ask for calculator and web-search tools:
 

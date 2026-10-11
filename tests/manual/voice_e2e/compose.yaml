@@ -16,7 +16,6 @@ services:
       TUWUNEL_WELL_KNOWN__SERVER: localhost:443
     volumes:
       - tuwunel_data:/var/lib/tuwunel
-    restart: unless-stopped
 
   # TLS front for the homeserver, needed only by lk-jwt-service's OpenID check.
   caddy:
@@ -25,7 +24,6 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
-    restart: unless-stopped
 
   livekit:
     image: ${LIVEKIT_IMAGE:-livekit/livekit-server:latest}
@@ -35,7 +33,6 @@ services:
       LIVEKIT_KEYS: "voicetest: ${LIVEKIT_SECRET:?set LIVEKIT_SECRET}"
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
-    restart: unless-stopped
 
   lk-jwt:
     image: ${LK_JWT_IMAGE:-ghcr.io/element-hq/lk-jwt-service:latest}
@@ -47,7 +44,6 @@ services:
       LIVEKIT_JWT_BIND: 127.0.0.1:8781
       LIVEKIT_FULL_ACCESS_HOMESERVERS: localhost
       LIVEKIT_INSECURE_SKIP_VERIFY_TLS: YES_I_KNOW_WHAT_I_AM_DOING
-    restart: unless-stopped
 
 volumes:
   tuwunel_data:

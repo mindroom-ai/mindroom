@@ -29,14 +29,13 @@ import os
 import re
 import secrets
 import sys
-import tempfile
 import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from analyze import delegation_answered
+from analyze import SAMPLE_RATE, VOICED_RMS, delegation_answered
 from google.protobuf.json_format import MessageToDict
 from livekit import rtc
 
@@ -55,10 +54,8 @@ AGENT_NAME = "openclaw"
 AGENT_USER_ID = f"@mindroom_{AGENT_NAME}:localhost"
 CALLER_LOCALPART = "voicecaller"
 
-SAMPLE_RATE = 24000
 FRAME_MS = 20
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
-VOICED_RMS = 200.0
 MEMBERSHIP_EXPIRES_MS = 30 * 60 * 1000
 
 
@@ -378,13 +375,18 @@ def transcript_text(started_after: float) -> str:
     return max(files, key=lambda path: path.stat().st_mtime).read_text(encoding="utf-8") if files else ""
 
 
-def delegation_records(offset: int) -> list[dict]:
-    """Delegation events among the complete instance log lines after byte `offset`."""
+def instance_log_lines(offset: int) -> list[str]:
+    """Complete JSON lines of the instance log after byte `offset`."""
     with INSTANCE_LOG.open("rb") as log_file:
         log_file.seek(offset)
         data = log_file.read()
     lines = data[: data.rfind(b"\n") + 1].decode("utf-8", errors="replace").splitlines()
-    return [json.loads(line) for line in lines if line.startswith("{") and '"delegation_id"' in line]
+    return [line for line in lines if line.startswith("{")]
+
+
+def delegation_records(offset: int) -> list[dict]:
+    """Delegation events in the instance log after byte `offset`."""
+    return [json.loads(line) for line in instance_log_lines(offset) if '"delegation_id"' in line]
 
 
 class Scenario:
@@ -413,51 +415,47 @@ class Scenario:
         await self.caller.mic.wait_done()
         self.recorder.mark("say_end", label=label)
 
-    async def wait_speaking(self, label: str, timeout_s: float = 60.0) -> bool:
+    async def wait_speaking(self, label: str, timeout_s: float = 60.0) -> None:
         """Wait until the agent produces voiced audio after this call."""
         start_ns = time.time_ns()
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if self.listener.last_voiced_ns > start_ns:
                 self.recorder.mark("agent_speaking", label=label)
-                return True
+                return
             await asyncio.sleep(0.02)
         self.recorder.mark("timeout_speaking", label=label)
-        return False
 
-    async def wait_quiet(self, label: str, quiet_s: float = 2.0, timeout_s: float = 120.0) -> bool:
+    async def wait_quiet(self, label: str, quiet_s: float = 2.0, timeout_s: float = 120.0) -> None:
         """Wait until the agent has been silent for `quiet_s` seconds."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if self.listener.quiet_for() >= quiet_s:
                 self.recorder.mark("agent_quiet", label=label, quiet_s=quiet_s)
-                return True
+                return
             await asyncio.sleep(0.05)
         self.recorder.mark("timeout_quiet", label=label)
-        return False
 
-    async def wait_transcript(self, label: str, pattern: str, timeout_s: float = 90.0) -> bool:
+    async def wait_transcript(self, label: str, pattern: str, timeout_s: float = 90.0) -> None:
         """Wait until the call transcript matches `pattern` (case-insensitive)."""
         regex = re.compile(pattern, re.IGNORECASE)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if regex.search(transcript_text(self.started)):
                 self.recorder.mark("transcript_match", label=label, pattern=pattern)
-                return True
+                return
             await asyncio.sleep(0.25)
         self.recorder.mark("timeout_transcript", label=label, pattern=pattern)
-        return False
 
-    async def wait_delegated(self, label: str, timeout_s: float = 90.0) -> bool:
+    async def wait_delegated(self, label: str, timeout_s: float = 90.0) -> None:
         """Wait until the delegations since the last utterance finished and the agent spoke after them."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if delegation_answered(delegation_records(self.log_offset), self.listener.last_voiced_ns / 1e9):
                 self.recorder.mark("delegation_answered", label=label)
-                return True
+                return
             await asyncio.sleep(0.25)
         self.recorder.mark("timeout_delegation", label=label)
-        return False
 
     async def reply(
         self,
@@ -474,17 +472,16 @@ class Scenario:
             await self.wait_delegated(label, timeout_s=timeout_s)
         await self.wait_quiet(label)
 
-    async def wait_voiced(self, label: str, seconds: float, timeout_s: float = 120.0) -> bool:
+    async def wait_voiced(self, label: str, seconds: float, timeout_s: float = 120.0) -> None:
         """Wait until the agent has produced `seconds` more voiced audio."""
         base = self.listener.voiced_ms
         deadline = time.monotonic() + timeout_s
         while self.listener.voiced_ms - base < seconds * 1000:
             if time.monotonic() > deadline:
                 self.recorder.mark("timeout_voiced", label=label, seconds=seconds)
-                return False
+                return
             await asyncio.sleep(0.02)
         self.recorder.mark("agent_voiced", label=label, seconds=seconds)
-        return True
 
     async def barge_in(self, label: str, parts: list[str | int], after_speech_s: float) -> None:
         """Interrupt once the agent has spoken `after_speech_s` seconds of this reply."""
@@ -495,9 +492,9 @@ class Scenario:
     def inject_stall(self, seconds: float) -> None:
         """Block the instance's event-loop thread for `seconds` via sys.remote_exec."""
         pid = int((ROOT / "run" / "instance.pid").read_text())
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, dir=ROOT / "run") as script:
-            script.write(f"import time\ntime.sleep({seconds})\n")
-        sys.remote_exec(pid, script.name)
+        script = ROOT / "run" / "stall.py"
+        script.write_text(f"import time\ntime.sleep({seconds})\n", encoding="utf-8")
+        sys.remote_exec(pid, script)
         self.recorder.mark("stall_injected", seconds=seconds)
 
 
@@ -640,24 +637,13 @@ SCENARIOS = {
 }
 
 
-def copy_instance_artifacts(out: Path, started: float) -> None:
-    """Copy the call transcript and the instance log window into the run dir."""
+def copy_instance_artifacts(out: Path, started: float, log_offset: int) -> None:
+    """Copy the call transcript and this run's instance log lines into the run dir."""
     text = transcript_text(started)
     if text:
         (out / "transcript.md").write_text(text, encoding="utf-8")
-    if INSTANCE_LOG.exists():
-        start_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(started - 5))
-        rows = []
-        for line in INSTANCE_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.startswith("{"):
-                continue
-            try:
-                stamp = json.loads(line).get("timestamp", "")
-            except json.JSONDecodeError:
-                continue
-            if stamp >= start_iso:
-                rows.append(line)
-        (out / "instance.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    lines = instance_log_lines(log_offset)
+    (out / "instance.jsonl").write_text("".join(line + "\n" for line in lines), encoding="utf-8")
 
 
 async def main() -> int:
@@ -668,6 +654,7 @@ async def main() -> int:
     args = parser.parse_args()
     openai_key = os.environ["OPENAI_API_KEY"]
     started = time.time()
+    log_offset = INSTANCE_LOG.stat().st_size
     run_name = time.strftime("%Y%m%d-%H%M%S") + f"-{args.scenario}" + (f"-{args.tag}" if args.tag else "")
     out = ROOT / "runs" / run_name
     recorder = Recorder(out)
@@ -684,7 +671,7 @@ async def main() -> int:
             await end_call(http, caller, room_id)
             recorder.write()
     await asyncio.sleep(3)  # let the agent finalize the transcript after the hangup
-    copy_instance_artifacts(out, started)
+    copy_instance_artifacts(out, started, log_offset)
     log(f"done {out}")
     return 0
 
