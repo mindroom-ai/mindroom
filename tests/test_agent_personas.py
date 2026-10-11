@@ -173,6 +173,20 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
     assert content.count("<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>") == 1
 
 
+def test_persona_with_tools_hides_generated_functions_from_the_agent(tmp_path: Path) -> None:
+    """An explicit tool list hides functions with no owning toolkit, which the configured agent offers."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    generated = Function(name="generated")
+    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
+
+    authored = _child(runtime, ["file"])
+
+    assert configured.tool_function_filter is not None
+    assert configured.tool_function_filter(generated)
+    assert authored.tool_function_filter is not None
+    assert not authored.tool_function_filter(generated)
+
+
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
     """Only the named toolkit's functions are offered; an unnamed caller toolkit offers none."""
     runtime = _runtime(tmp_path, tools=["file", "shell"])

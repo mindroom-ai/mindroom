@@ -459,7 +459,7 @@ class _PersonaToolPolicy:
 
     @property
     def offers_generated_functions(self) -> bool:
-        """Skill and knowledge-search functions have no toolkit an explicit list could name, so it hides them."""
+        """Functions Agno generates, such as knowledge search, have no toolkit an explicit list could name."""
         return self.named_tools is None
 
     @property

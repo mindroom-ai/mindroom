@@ -1716,7 +1716,7 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
-    include_identity: bool = True,
+    include_identity: bool,
 ) -> _AgentRoleContext:
     """Resolve the model name and render the runtime facts, the identity, and preload context into the role.
 
@@ -2168,7 +2168,7 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
-        tool_function_filter=partial(_generated_function_visible, config, tool_function_filter),
+        tool_function_filter=partial(_generated_function_visible, config, policy.tool_function_filter),
         tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
