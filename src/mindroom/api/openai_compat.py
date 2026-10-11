@@ -81,7 +81,6 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import render_prepared_team_messages_text
-from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import (
     ScopeSessionContext,
     close_team_runtime_state_dbs,
@@ -1166,18 +1165,14 @@ async def _non_stream_team_completion(
                 logger.exception("Team member preparation failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
             try:
-                with (
-                    bind_llm_request_log_context(
-                        **_openai_team_request_log_context(
-                            team_name=team_name,
-                            session_id=session_id,
-                            requester_id=execution_identity.requester_id if execution_identity else None,
-                            prompt=prepared_team_run.prompt,
-                            metadata=prepared_team_run.run_metadata,
-                        ),
+                with bind_llm_request_log_context(
+                    **_openai_team_request_log_context(
+                        team_name=team_name,
+                        session_id=session_id,
+                        requester_id=execution_identity.requester_id if execution_identity else None,
+                        prompt=prepared_team_run.prompt,
+                        metadata=prepared_team_run.run_metadata,
                     ),
-                    # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                    helper_usage_context(scope_context),
                 ):
                     response = await team.arun(
                         prepared_team_run.prompt,
@@ -1326,23 +1321,19 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
                 stream_with_tool_execution_identity(
                     execution_identity,
-                    # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                    stream_factory=lambda: context_bound_async_stream(
-                        context_factory=lambda: helper_usage_context(scope_context),
-                        stream_factory=lambda: stream_with_llm_request_log_context(
-                            cast(
-                                "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
-                                team.arun(
-                                    prepared_team_run.prompt,
-                                    stream=True,
-                                    stream_events=True,
-                                    session_id=session_id,
-                                    user_id=execution_identity.requester_id if execution_identity else None,
-                                    metadata=prepared_team_run.run_metadata,
-                                ),
+                    stream_factory=lambda: stream_with_llm_request_log_context(
+                        cast(
+                            "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
+                            team.arun(
+                                prepared_team_run.prompt,
+                                stream=True,
+                                stream_events=True,
+                                session_id=session_id,
+                                user_id=execution_identity.requester_id if execution_identity else None,
+                                metadata=prepared_team_run.run_metadata,
                             ),
-                            request_context=request_log_context,
                         ),
+                        request_context=request_log_context,
                     ),
                 ),
             )
