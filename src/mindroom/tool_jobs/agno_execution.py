@@ -602,7 +602,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                     timeout=wait_timeout,
                     claim=claim,
                     # The reply waits this long for a human decision, then goes on while the job waits for it.
-                    approval_timeout=context.config.background_tool_jobs.approval_wait_timeout
+                    approval_timeout=context.current_config.background_tool_jobs.approval_wait_timeout
                     if job_approval
                     else None,
                 )

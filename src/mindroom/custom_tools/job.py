@@ -181,7 +181,7 @@ class JobTools(Toolkit):
                     # A job awaiting a human decision holds the reply no longer than the gated call itself does.
                     approval_timeout=None
                     if context is None
-                    else context.config.background_tool_jobs.approval_wait_timeout,
+                    else context.current_config.background_tool_jobs.approval_wait_timeout,
                 )
                 if waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)

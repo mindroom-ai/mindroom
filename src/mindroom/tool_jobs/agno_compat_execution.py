@@ -108,13 +108,16 @@ def _wrap_tool_schemas(
 
 
 # AGNO_COMPAT: Bind after the SDK driver has admitted paused approvals and external calls.
-# Reason: Agno exposes no public hook around the complete approved call executor.
+# Reason: Agno exposes no public hook around the complete approved call executor. The binding is also the approval gate
+# of job-gated calls: their functions carry no requires_confirmation, so only this executor asks for their approval.
 # Upstream issue: No matching public accepted-operation extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK exposes public approved-call execution ownership.
 # Coverage: tests/test_tool_job_execution.py::test_fast_result_acknowledges_exact_saved_sdk_run
 # Coverage: tests/test_tool_job_control_calls.py::test_model_control_preserves_timing_across_human_followup
 # Coverage: tests/test_tool_job_sdk_functions.py::test_sdk_generated_functions_run_inline_with_native_schemas
+# Coverage: tests/test_tool_job_approval_modes.py::test_gated_call_waits_for_its_approval_then_runs_once
+# Coverage: tests/test_tool_job_approval_modes.py::test_gated_call_that_cannot_become_a_job_never_runs
 def install_tool_job_execution(
     model: Model,
     fallback_config: FallbackConfig | None = None,

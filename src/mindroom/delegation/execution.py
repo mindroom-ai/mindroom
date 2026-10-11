@@ -807,7 +807,9 @@ async def _await_background_child(
             timeout=wait_timeout,
             claim=claim,
             # A child awaiting a human decision holds its caller's reply no longer than a gated call's own wait does.
-            approval_timeout=None if context is None else context.config.background_tool_jobs.approval_wait_timeout,
+            approval_timeout=None
+            if context is None
+            else context.current_config.background_tool_jobs.approval_wait_timeout,
         )
     except JobAccessError as error:
         await background.release_wait(child.delegation_id, claim)
