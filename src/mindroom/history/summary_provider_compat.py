@@ -122,20 +122,13 @@ def summary_completion_status(  # noqa: PLR0911 - explicit provider terminal sta
     response: ModelResponse,
     *,
     output_token_limit: int | None,
-) -> Literal["complete", "output_limit", "context_limit", "incomplete"]:
-    """Normalize provider completion signals, with a conservative legacy usage fallback.
-
-    ``context_limit`` means input plus output filled the context window before
-    the output cap, so only a smaller input can help; ``output_limit`` means the
-    output cap itself stopped the response.
-    """
+) -> Literal["complete", "output_limit", "incomplete"]:
+    """Normalize provider completion signals, with a conservative legacy usage fallback."""
     data = response.provider_data or {}
     reason = data.get("stop_reason")
     if reason is not None:
-        if reason == "max_tokens":
+        if reason in {"max_tokens", "model_context_window_exceeded"}:
             return "output_limit"
-        if reason == "model_context_window_exceeded":
-            return "context_limit"
         return "complete" if reason in {"end_turn", "stop_sequence"} else "incomplete"
     finish_reason = data.get("finish_reason")
     if finish_reason is not None:
