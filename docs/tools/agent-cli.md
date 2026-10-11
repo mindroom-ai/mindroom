@@ -65,8 +65,8 @@ Use it for self-contained tasks where the child does not need its role, instruct
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
-A minimal [authored subagent](agent-orchestration.md#authored-subagents) uses its authored prompt as its whole minimal prompt, its Bash tool description points it to `mindroom-agent`, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
-It can still read the caller's configured instructions on demand with `mindroom-agent context`.
+A minimal [authored subagent](agent-orchestration.md#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
+Its `mindroom-agent context` documents hold its own prompt and runtime guidance, not the caller's configured role or instructions.
 
 ## Standard mode
 

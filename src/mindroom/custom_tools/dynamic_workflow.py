@@ -112,7 +112,7 @@ _TOOL_DESCRIPTIONS = {
     "create_workflow": (
         "Create a Dynamic Workflow from a declarative workflow spec. "
         f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
-        "Subagent participants are authored copies of you: each sets its entire system_prompt, or a profile "
+        "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
         "saved as subagents/<name>.md in your workspace, plus tools, model, and mode. A participant gets only "
         "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs. "
         "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "

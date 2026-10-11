@@ -324,7 +324,7 @@ class ResponseTurnContext:
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     agent_mode: AgentMode = "standard"
-    # Set only for authored subagents: their whole system prompt and tool subset.
+    # Set only for authored subagents: their authored prompt and tool subset.
     persona: SubagentPersona | None = None
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None

@@ -114,12 +114,12 @@ Common errors:
 
 ### Authored Subagents
 
-An agent whose own name is in `delegate_to` can write the entire system prompt of a fresh copy of itself instead of using its configured prompt.
+An agent whose own name is in `delegate_to` can write the prompt of a fresh copy of itself in place of its configured identity and instructions.
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
-It sees exactly the authored prompt, with no role, instructions, date, memories, or tool guidance added, plus the task and the schemas of its tools.
-Once [compaction](https://docs.mindroom.chat/configuration/history/) summarizes older turns of a standard-mode child, that summary follows the authored prompt, so follow-ups still know the earlier work.
+The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories and skills are left out; a child with a `tools` list also has no knowledge search, though it can still read file-mode knowledge bases with its file tools.
+The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](https://docs.mindroom.chat/configuration/history/), the summary of its earlier turns.
 [Minimal subagents](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) describes what a minimal authored subagent, started with `minimal=True` or a profile's `mode: minimal`, needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent whose `tools` include `delegate` can author further copies only within those tools, a copy without `tools` inherits them except `delegate` at the maximum depth, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.

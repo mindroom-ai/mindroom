@@ -98,6 +98,7 @@ class DelegateTools(Toolkit):
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
         workspace_root: Path | None = None,
         persona_tools: tuple[str, ...] | None = None,
+        authored: bool = False,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
@@ -110,6 +111,8 @@ class DelegateTools(Toolkit):
         self._workspace_root = workspace_root
         # An authored subagent's own tools cap the copies it authors, on every channel.
         self._persona_tools = persona_tools
+        # An authored subagent must not see its configured role through its own target entry.
+        self._authored = authored
         # A caller that may run itself may also author that copy's prompt, tools, or profile.
         self._authoring = agent_name in delegate_to
 
@@ -137,10 +140,12 @@ class DelegateTools(Toolkit):
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
-        lines: list[str] = []
-        for target_name in self._delegate_to:
-            description = describe_agent(target_name, self._config)
-            lines.append(description)
+        lines = [
+            f"{target_name}\n  - Yourself, run as a fresh copy."
+            if self._authored and target_name == self._agent_name
+            else describe_agent(target_name, self._config)
+            for target_name in self._delegate_to
+        ]
         instructions = self._config.render_prompt(
             "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
@@ -208,9 +213,10 @@ class DelegateTools(Toolkit):
             return ""
         minimal = " or minimal=true" if self._agent_name in self._minimal_targets else ""
         return (
-            "To author a fresh copy of yourself, pass system_prompt, its entire system prompt, and optionally tools, "
-            "a subset of your toolkit names or toolkit.function entries; omit tools to keep all of yours. "
-            "The child keeps your workspace, credentials, and approval rules but sees only that prompt and those tools. "
+            "To author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, "
+            "and optionally tools, a subset of your toolkit names or toolkit.function entries; omit tools to keep all "
+            "of yours. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of "
+            "your configured role and instructions, and gets only those tools. "
             "Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with "
             "description and optional tools, model, and mode, then the system prompt as the body. "
             f"An explicit model{minimal} overrides the profile. "
@@ -242,7 +248,7 @@ class DelegateTools(Toolkit):
             agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
             model: Configured model name from models; omitted or null uses normal model selection.
             minimal: True runs the child in token-efficient minimal mode, only for subagents listed as supporting it.
-            system_prompt: Entire system prompt for a fresh copy of yourself; omit to use the configured prompt.
+            system_prompt: Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt.
             tools: Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours.
             profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt and tools.
 
