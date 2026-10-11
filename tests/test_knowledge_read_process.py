@@ -27,6 +27,7 @@ from mindroom.knowledge.read_process import read_chroma
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.knowledge.read_proxy import ChromaReadProxy
 from mindroom.knowledge.utils import _MultiKnowledgeVectorDb
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -428,13 +429,15 @@ async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.Monk
             asyncio.create_task(asyncio.to_thread(read_chroma, ReadRequest("unused", "published"))) for _ in range(6)
         ]
         try:
-            for _ in range(200):
-                if all(event.is_set() for event in active):
-                    break
-                await asyncio.sleep(0.005)
-            assert all(event.is_set() for event in active)
+            # Release only once the four reads hold every slot and the other two were refused.
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                while not all(event.is_set() for event in active) or sum(task.done() for task in tasks) < 2:  # noqa: ASYNC110
+                    await asyncio.sleep(0.005)
             assert (
-                await asyncio.wait_for(asyncio.to_thread(lambda: "unrelated work completed"), timeout=0.5)
+                await asyncio.wait_for(
+                    asyncio.to_thread(lambda: "unrelated work completed"),
+                    timeout=SETTLE_TIMEOUT_SECONDS,
+                )
                 == "unrelated work completed"
             )
         finally:
