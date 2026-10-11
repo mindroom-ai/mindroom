@@ -9,29 +9,22 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
 - Tools block by default.
   `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
-  A newer human message in the conversation, or any turn already queued for its lock other than a wake, releases that wait while accepted work continues; the reply then finishes and waits for the work.
+  A newer human message in the conversation, or any turn already queued for its lock other than a follow-up, releases that wait while accepted work continues; the reply then finishes without it.
   Other agents' messages and scheduled turns that arrive during such a wait queue as behind any running reply.
   Neither action pauses a job or authorizes a protected tool.
-- One `job` tool provides scoped list, wait and cancel.
+- One `job` tool provides scoped list, wait, cancel, and collect.
   Complete registered toolkits can be excluded, including plugins.
   Shell is excluded by default and keeps its own execution and cancellation controls.
-- A reply never waits for background work inside its turn.
-  At its response boundary, it continues with every ready outcome of its agent (or team members) and requester in the conversation, including outcomes of jobs earlier replies started.
-  With work still outstanding but nothing ready, the reply ends its turn with its answer and stays `waiting` (see [Reply Messages](../architecture/reply-messages.md#background-work)): its message keeps a waiting notice below the answer, a streaming status, and its Stop button.
-  When the work is ready, a wake continues the same message below its answer with the results.
-  A newer reply of the same key (agent, requester, conversation, and participants) that starts waiting takes the work over, and the older message shows its answer without the notice.
-  A reply that runs for an approval, reaches the join limit, or is a delegated child inside its caller never waits; the key's next reply takes the work.
-  A silent schedule never waits; its work waits for the next silent run in that conversation.
-  A wake the conversation's newer reply made pointless runs nothing: under the conversation lock it retrieves only what is still ready, and a wait with no work left ends with its answer.
-  A wake a restart cut short continues below what it showed and is told which calls it already made.
-  A conversation is not held by a waiting reply: later messages are answered as usual.
-- Stop cancels the reply and the background work it started or waits for; work a newer message of the conversation started is that message's to stop.
-  It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
-  Deleting the messages a reply answers, editing a waiting reply's message, or the bot leaving the room cancels that work too.
+- A reply never waits for background work: it ends with its answer while its jobs run on.
+  A running reply of the same agent, requester, and conversation is told once, on a tool result or at the start of its next turn, about every job that ended, and is asked to acknowledge them with one `job(action="collect")` call; a noticed cancellation needs none.
+  Ended jobs no reply collected get one follow-up turn per conversation, which posts a new reply; it waits for the conversation to be free, never ends a running reply's tool waits, and runs nothing once a reply collected the jobs.
+  At most 20 follow-ups run in a row: a job a follow-up turn started counts that follow-up, and a job a human message started counts none.
+  Cancelled jobs and a silent schedule's jobs get no follow-up; the next notice or turn reports them.
+- Stop, an edit, or deleting a message stops only the reply.
+  Background jobs end only through their own cancel: the client's jobs bar, `!cancel_job`, `job(action="cancel")`, revoked access, or the bot leaving the room.
 - A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.
 - A background child that needs approval asks through cards its job posts, and the job stays `awaiting_approval` until the decisions arrive.
   A gated call of a top-level agent that can become a managed job asks the same way, as its job's first phase: it is marked `mindroom_job` instead of pausing the run, the reply waits up to `approval_wait_timeout` for the decision and then goes on, and the call runs only once approved.
-  A Stop recorded for its reply before the approval lands wins over that approval; the card still shows the approval, though the call never runs.
   Such a call never runs inline: one that cannot become a job fails, and the agent CLI never offers it.
   Calls that must finish inside their run, tools whose own definition requires confirmation, excluded toolkits, subagents, and minimal mode keep the paused-run approval.
   Turning the feature off parks saved work.
