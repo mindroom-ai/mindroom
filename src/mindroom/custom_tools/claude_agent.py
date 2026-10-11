@@ -27,8 +27,7 @@ from claude_agent_sdk import (
 
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
@@ -343,15 +342,15 @@ async def _record_turn_usage(turn: _ClaudeTurn) -> None:
         metrics.cache_write_tokens += model.cache_write_tokens
     if not (metrics.total_tokens or metrics.cache_read_tokens or metrics.cache_write_tokens):
         return
-    # An OpenAI-compatible request has no Matrix conversation, only its execution identity.
-    requester = get_tool_runtime_context() or get_tool_execution_identity()
+    # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
+    requester_context = get_tool_runtime_context() or get_detached_requester_context()
     invocation_id = uuid4().hex
     await record_helper_usage(
         RunOutput(run_id=invocation_id, metrics=metrics),
         owner=owner,
         invocation_id=invocation_id,
         kind="claude_agent",
-        requester_id=requester.requester_id if requester is not None else None,
+        requester_id=requester_context.requester_id if requester_context is not None else None,
     )
 
 

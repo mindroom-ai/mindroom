@@ -19,12 +19,17 @@ from agno.run.base import RunContext
 from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ProcessError, ResultMessage, TextBlock
 
 import mindroom.tools  # noqa: F401
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.custom_tools import claude_agent as claude_agent_module
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.worker_routing import tool_execution_identity
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    build_execution_identity_from_runtime_context,
+    detached_requester_context,
+    tool_runtime_context,
+)
 from mindroom.usage_stats import collect_admin_usage
 from tests.history_helpers import _forced_compaction_context, _session
 
@@ -1179,10 +1184,16 @@ async def _send_metered_turns(
     replies: list[str] = []
     try:
         for requester in requesters:
-            # An OpenAI-compatible request has no Matrix conversation, only its execution identity.
+            # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
             requester_context = (
-                tool_execution_identity(
-                    replace(build_execution_identity_from_runtime_context(context), requester_id=requester),
+                detached_requester_context(
+                    DetachedRequesterContext(
+                        requester_id=requester,
+                        config=config,
+                        runtime_paths=paths,
+                        agent_reply_memberships=AgentReplyMembershipIndex(),
+                        config_provider=lambda: config,
+                    ),
                 )
                 if api_requests
                 else tool_runtime_context(replace(context, requester_id=requester))
