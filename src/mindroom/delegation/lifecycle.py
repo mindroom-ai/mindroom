@@ -70,13 +70,13 @@ def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
 
 
 def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:
-    """Rebind a caller's tool context to one child turn, carrying its persona's tool cap."""
+    """Rebind a caller's tool context to one child turn, carrying its persona as the cap on copies it authors."""
     return replace(
         context,
         agent_name=child.child_agent_name,
         active_model_name=child.model_name,
         target=replace(context.target, session_id=child.session_id),
-        persona_tools=child.persona.tools if child.persona is not None else None,
+        persona=child.persona,
     )
 
 

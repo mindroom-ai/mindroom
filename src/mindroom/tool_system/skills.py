@@ -8,7 +8,7 @@ import os
 import platform
 import re
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import islice
@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
+# The functions Agno generates for an agent's skills; none has an owning toolkit.
+SKILL_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference", "get_skill_script"})
 _WORKSPACE_SKILLS_DIRNAME = "skills"
 _MAX_WORKSPACE_SKILLS = 256
 MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
@@ -135,9 +137,11 @@ class _MindroomSkills(Skills):
         *,
         loaders: list[SkillLoader],
         output_file_policy: ToolOutputFilePolicy | None = None,
+        only: Collection[str] | None = None,
     ) -> None:
         self._workspace_roots_by_skill: dict[str, Path] = {}
         self._output_file_policy = output_file_policy
+        self._only = None if only is None else frozenset(only)
         super().__init__(loaders=loaders)
 
     def get_tools(self) -> list[Function]:
@@ -148,13 +152,15 @@ class _MindroomSkills(Skills):
         return [wrap_function_for_output_files(tool, self._output_file_policy) for tool in tools]
 
     def _load_skills(self) -> None:
-        """Load skills while tracking which final skills came from workspace loaders."""
+        """Load skills, keeping only the names in ``only`` when set, and track which came from workspace loaders."""
         self._workspace_roots_by_skill.clear()
         for loader in self.loaders:
             try:
                 skills = loader.load()
                 workspace_root = loader.workspace_root if isinstance(loader, _WorkspaceSkillsLoader) else None
                 for skill in skills:
+                    if self._only is not None and skill.name not in self._only:
+                        continue
                     if skill.name in self._skills:
                         logger.warning("Duplicate skill name; overwriting with newer version", skill=skill.name)
                     self._skills[skill.name] = skill
@@ -281,8 +287,9 @@ def build_agent_skills(
     env_vars: Mapping[str, str] | None = None,
     credential_keys: set[str] | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
+    only: Collection[str] | None = None,
 ) -> Skills | None:
-    """Build an Agno Skills object for a specific agent."""
+    """Build an Agno Skills object for a specific agent, narrowed to the skill names in ``only`` when set."""
     agent_config = config.get_agent(agent_name)
     resolved_credential_keys = (
         credential_keys if credential_keys is not None else _collect_credential_keys(config, runtime_paths)
@@ -318,7 +325,7 @@ def build_agent_skills(
     else:
         loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
 
-    skills = _MindroomSkills(loaders=loaders, output_file_policy=output_file_policy)
+    skills = _MindroomSkills(loaders=loaders, output_file_policy=output_file_policy, only=only)
     if agent_config.skills or skills.get_skill_names():
         return skills
     return None

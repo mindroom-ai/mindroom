@@ -47,6 +47,7 @@ from mindroom.delegation.lifecycle import (
     start_child_turn,
 )
 from mindroom.delegation.personas import (
+    caller_skill_names,
     caller_toolkit_names,
     follow_up_refusal,
     resolve_persona_request,
@@ -81,6 +82,7 @@ from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from pathlib import Path
 
     from agno.agent import Agent
     from agno.session.agent import AgentSession
@@ -711,32 +713,39 @@ def _resolve_fresh_target(
     if retained is not None:
         # A resumed call never rereads a profile the worker could have changed.
         return _DelegationTarget(child_name, task, model=model)
-    workspace = (
-        resolve_agent_runtime(
+
+    def caller_workspace_root() -> Path | None:
+        workspace = resolve_agent_runtime(
             caller_identity.agent_name,
             config,
             runtime_paths,
             execution_identity=caller_identity,
         ).workspace
-        if args.get("profile") is not None
-        else None
-    )
+        return workspace.root if workspace is not None else None
+
     request = resolve_persona_request(
         caller_name=caller_identity.agent_name,
         agent_name=child_name,
         system_prompt=args.get("system_prompt"),
         tools=args.get("tools"),
+        skills=args.get("skills"),
         profile=args.get("profile"),
         model=model,
         minimal=bool(minimal),
-        workspace_root=workspace.root if workspace is not None else None,
+        workspace_root=caller_workspace_root() if args.get("profile") is not None else None,
         # The copy runs one level deeper, where delegate may no longer be offered.
         available_toolkits=lambda: caller_toolkit_names(
             caller_identity.agent_name,
             live_delegation_config(config),
             delegation_depth=depth + 1,
         ),
-        cap=context.persona_tools if (context := get_tool_runtime_context()) is not None else None,
+        available_skills=lambda: caller_skill_names(
+            caller_identity.agent_name,
+            live_delegation_config(config),
+            runtime_paths,
+            caller_workspace_root(),
+        ),
+        cap=context.persona if (context := get_tool_runtime_context()) is not None else None,
     )
     if isinstance(request, str):
         return request

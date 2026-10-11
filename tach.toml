@@ -6689,6 +6689,7 @@ expose = [
     "MAX_WORKSPACE_SKILL_FILE_BYTES",
     "MAX_WORKSPACE_SKILL_NAME_CHARS",
     "SKILL_FILENAME",
+    "SKILL_FUNCTION_NAMES",
     "SkillMarkdownError",
     "agent_workspace_skills_root",
     "build_agent_skills",

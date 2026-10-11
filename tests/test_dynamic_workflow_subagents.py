@@ -16,6 +16,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools import dynamic_workflow as workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
+from mindroom.delegation.personas import inline_persona
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -525,7 +526,10 @@ def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) 
     paths = _runtime_paths(tmp_path)
     config = _config()
     entity_ids(config, paths)
-    context = replace(_delegate_runtime_context(config, paths, execution_identity=_identity()), persona_tools=("file",))
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=_identity()),
+        persona=inline_persona("P", ["file"]),
+    )
 
     request = workflow_module._participant_request(
         context,
@@ -538,5 +542,78 @@ def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) 
         workflow_module._participant_request(
             context,
             {"id": "p", "system_prompt": "P", "tools": ["calculator"]},
+            workflow_id="w",
+        )
+
+
+def _write_skill(workflow: _Workflow, name: str) -> None:
+    skill = workflow.workspace() / "skills" / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} skill\n---\n\n{name} body\n")
+
+
+@pytest.mark.asyncio
+async def test_participant_skills_must_be_caller_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant can name only its caller's skills."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    _write_skill(workflow, "research")
+
+    created = await workflow.create(_spec([{"id": "critic", "system_prompt": "Critic.", "skills": ["absent"]}]))
+
+    assert created["status"] == "error"
+    assert created["message"] == "Cannot delegate: unknown skill 'absent'. Your skills: research."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False])
+async def test_participant_offers_only_the_skills_it_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    approved: bool,
+) -> None:
+    """A participant lists only its named skills, and only when an operator rule auto-approves skill loading."""
+    rules = {"get_skill_instructions": "auto_approve"} if approved else {}
+    workflow = _Workflow(tmp_path, monkeypatch, _config(rules=rules))
+    _write_skill(workflow, "research")
+    _write_skill(workflow, "writing")
+
+    run = await workflow.run(_spec([{"id": "critic", "system_prompt": "Critic.", "tools": [], "skills": ["research"]}]))
+
+    assert run["status"] == "completed", run
+    assert workflow.model.offered == [["get_skill_instructions"] if approved else []]
+    [prompt] = workflow.model.system_prompts
+    assert ("The research skill" in prompt) is approved
+    assert "The writing skill" not in prompt
+
+
+def test_participant_from_authored_child_stays_within_its_skills(tmp_path: Path) -> None:
+    """A participant gets only the skills it names, within those of the authored subagent that started the workflow."""
+    paths = _runtime_paths(tmp_path)
+    config = _config()
+    entity_ids(config, paths)
+    for name in ("research", "writing"):
+        skill = paths.storage_root / "agents" / "leader" / "workspace" / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: D\n---\n\nBody\n")
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=_identity()),
+        persona=inline_persona("P", None, ["research"]),
+    )
+
+    unnamed = workflow_module._participant_request(context, {"id": "p", "system_prompt": "P"}, workflow_id="w")
+    named = workflow_module._participant_request(
+        context,
+        {"id": "p", "system_prompt": "P", "skills": ["research"]},
+        workflow_id="w",
+    )
+
+    assert unnamed.persona is not None
+    assert unnamed.persona.skills == ()
+    assert named.persona is not None
+    assert named.persona.skills == ("research",)
+    with pytest.raises(DynamicWorkflowError, match="unknown skill 'writing'"):
+        workflow_module._participant_request(
+            context,
+            {"id": "p", "system_prompt": "P", "skills": ["writing"]},
             workflow_id="w",
         )

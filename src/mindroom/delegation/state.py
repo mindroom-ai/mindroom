@@ -21,12 +21,14 @@ _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
 
 @dataclass(frozen=True)
 class SubagentPersona:
-    """The authored presentation of one child: its authored prompt and optional tool subset."""
+    """The authored presentation of one child: its authored prompt and optional tool and skill subsets."""
 
     source_kind: PersonaSourceKind
     source_name: str
     system_prompt: str
     tools: tuple[str, ...] | None = None
+    # None keeps every caller skill, and an empty tuple keeps none.
+    skills: tuple[str, ...] | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> SubagentPersona:
@@ -37,13 +39,18 @@ class SubagentPersona:
             data["system_prompt"],
             data["tools"],
         )
+        # LEGACY_COMPAT: Authored subagent personas persisted without skills.
+        # Legacy format: Persona snapshots in parent delegation state and subagent session records omitted skills; every authored child ran without skills.
+        # Last legacy release: v2026.10.237; replacement: the next release persists each persona's skills, null keeping every caller skill.
+        # Handling: An absent skills field reads as no skills, so retained authored children and their follow-ups keep running without skills.
+        # Coverage: tests/test_delegation_sessions.py::test_persona_snapshot_without_skills_reads_as_skill_less.
+        skills = data.get("skills", ())
         if (
             source_kind not in _SOURCE_KINDS
             or not isinstance(source_name, str)
             or not isinstance(system_prompt, str)
-            or not (
-                tools is None or (isinstance(tools, (list, tuple)) and all(isinstance(tool, str) for tool in tools))
-            )
+            or not _optional_names(tools)
+            or not _optional_names(skills)
         ):
             msg = "Invalid subagent persona snapshot"
             raise TypeError(msg)
@@ -52,7 +59,12 @@ class SubagentPersona:
             source_name=source_name,
             system_prompt=system_prompt,
             tools=None if tools is None else tuple(cast("list[str] | tuple[str, ...]", tools)),
+            skills=None if skills is None else tuple(cast("list[str] | tuple[str, ...]", skills)),
         )
+
+
+def _optional_names(value: object) -> bool:
+    return value is None or (isinstance(value, (list, tuple)) and all(isinstance(name, str) for name in value))
 
 
 @dataclass

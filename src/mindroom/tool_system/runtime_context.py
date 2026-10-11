@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.delegation.state import SubagentPersona
     from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import (
         HookMatrixAdmin,
@@ -132,8 +133,8 @@ class ToolRuntimeContext:
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[Function], bool] | None = None
-    # Tools of the authored subagent running this turn; copies it authors stay within them.
-    persona_tools: tuple[str, ...] | None = None
+    # Persona of the authored subagent running this turn; copies it authors stay within its tools and skills.
+    persona: SubagentPersona | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     config_provider: Callable[[], Config] | None = None

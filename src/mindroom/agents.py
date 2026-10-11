@@ -723,12 +723,12 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
-    persona_tools: tuple[str, ...] | None = None,
+    persona: SubagentPersona | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
-    ``persona_tools`` holds an authored subagent's tools; its ``delegate`` toolkit
-    keeps the copies it authors within them.
+    ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
+    the copies it authors within the persona's tools and skills.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
@@ -802,7 +802,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
-                persona_tools=persona_tools,
+                persona=persona,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -1399,6 +1399,7 @@ def _load_agent_skills(
     *,
     workspace_root: Path | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
+    only: tuple[str, ...] | None = None,
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
@@ -1406,6 +1407,7 @@ def _load_agent_skills(
         runtime_paths,
         workspace_root=workspace_root,
         output_file_policy=output_file_policy,
+        only=only,
     )
 
 
@@ -1478,9 +1480,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     eager_deferred_tools: bool,
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
-    persona_tools: tuple[str, ...] | None,
+    persona: SubagentPersona | None,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
+    persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
@@ -1584,7 +1587,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=dynamic_tool_continuation,
-                persona_tools=persona_tools,
+                persona=persona,
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
@@ -1972,7 +1975,8 @@ def create_agent(
     # Gate on this agent's resolved runtime model (thread overrides and team
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
-    # An authored persona's prompt replaces the agent's identity, and it gets no skills or learning of its own.
+    # An authored persona's prompt replaces the agent's identity; it gets no learning of its own and only the caller
+    # skills its persona keeps.
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
     # up front; it also hides functions Agno generates without an owning toolkit, such as knowledge search.
     persona_prompt = persona.system_prompt if persona is not None else None
@@ -2021,7 +2025,7 @@ def create_agent(
         eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
-        persona_tools=persona_tools,
+        persona=persona,
     )
     storage = _open_agent_session_storage(
         agent_name,
@@ -2078,7 +2082,7 @@ def create_agent(
     workspace = agent_runtime.workspace
     skills = (
         None
-        if disable_runtime_capabilities or persona is not None
+        if disable_runtime_capabilities or (persona is not None and persona.skills == ())
         else _load_agent_skills(
             agent_name,
             config,
@@ -2089,6 +2093,7 @@ def create_agent(
                 runtime_paths,
                 config.defaults.tool_output_auto_save_threshold_bytes,
             ),
+            only=persona.skills if persona is not None else None,
         )
     )
     # Approval rules hide generated functions, so prompts must not advertise skills whose functions are all hidden.

@@ -26,7 +26,9 @@ from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn
 from mindroom.delegation.personas import (
     PersonaError,
     PersonaRequest,
+    caller_skill_names,
     caller_toolkit_names,
+    capped_persona_skills,
     declared_function_names,
     inline_persona,
     load_profile,
@@ -58,6 +60,8 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agno.agent import Agent
 
     from mindroom.agent_modes import AgentMode
@@ -113,8 +117,9 @@ _TOOL_DESCRIPTIONS = {
         "Create a Dynamic Workflow from a declarative workflow spec. "
         f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
         "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
-        "saved as subagents/<name>.md in your workspace, plus tools, model, and mode. A participant gets only "
-        "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs. "
+        "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
+        "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
+        "and only the skills it names from your own. "
         "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
         "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
         "without tools."
@@ -767,10 +772,10 @@ def _reject_unapproved_participant_tools(
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
-    """Return the calling authored subagent's tools that a participant may also use, if the caller is one."""
-    if context.persona_tools is None:
+    """Return the calling authored subagent's tools that a participant may also use, if the caller lists them."""
+    if context.persona is None or context.persona.tools is None:
         return None
-    return tuple(entry for entry in context.persona_tools if entry.partition(".")[0] not in _WORKFLOW_RESTRICTED_TOOLS)
+    return tuple(entry for entry in context.persona.tools if entry.partition(".")[0] not in _WORKFLOW_RESTRICTED_TOOLS)
 
 
 def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
@@ -782,27 +787,31 @@ def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
     ]
 
 
+def _caller_workspace_root(context: ToolRuntimeContext) -> Path | None:
+    workspace = resolve_agent_runtime(
+        context.agent_name,
+        context.config,
+        context.runtime_paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+    ).workspace
+    return workspace.root if workspace is not None else None
+
+
 def _participant_request(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     *,
     workflow_id: str,
 ) -> PersonaRequest:
-    """Resolve one participant's persona, model, and mode; it uses only the tools it names."""
+    """Resolve one participant's persona, model, and mode; it uses only the tools and skills it names."""
     participant_id = _required_participant_text(participant, "id")
     source_name = f"{workflow_id}/{participant_id}"
     available = _participant_available_toolkits(context)
     cap = _participant_cap(context)
     try:
         if participant.get("profile") is not None:
-            workspace = resolve_agent_runtime(
-                context.agent_name,
-                context.config,
-                context.runtime_paths,
-                execution_identity=build_execution_identity_from_runtime_context(context),
-            ).workspace
             profile = load_profile(
-                workspace.root if workspace is not None else None,
+                _caller_workspace_root(context),
                 _required_participant_text(participant, "profile"),
             )
             persona = replace(profile.persona, source_kind="workflow", source_name=source_name)
@@ -811,6 +820,7 @@ def _participant_request(
             persona = inline_persona(
                 participant.get("system_prompt"),
                 participant.get("tools"),
+                participant.get("skills"),
                 source_kind="workflow",
                 source_name=source_name,
             )
@@ -818,6 +828,16 @@ def _participant_request(
             mode = cast("AgentMode", participant.get("mode") or "standard")
         persona = replace(persona, tools=persona.tools or ())
         validate_persona_tools(persona.tools, available, cap)
+        persona = capped_persona_skills(
+            persona,
+            lambda: caller_skill_names(
+                context.agent_name,
+                context.config,
+                context.runtime_paths,
+                _caller_workspace_root(context),
+            ),
+            context.persona.skills if context.persona is not None else None,
+        )
         require_minimal_shell(persona, mode)
     except PersonaError as exc:
         raise DynamicWorkflowError(str(exc)) from exc

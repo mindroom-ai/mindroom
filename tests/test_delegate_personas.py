@@ -22,6 +22,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _resolve_delegation_target, drive_delegations
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
+from mindroom.delegation.personas import inline_persona
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.execution import _DelegationTarget
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _CRITIC = """---
 description: Finds the biggest risk.
@@ -160,6 +163,7 @@ async def test_inline_persona_starts_self_child(tmp_path: Path, monkeypatch: pyt
         "source_name": "",
         "system_prompt": "Inline {x} prompt",
         "tools": ["file"],
+        "skills": [],
     }
 
 
@@ -183,13 +187,16 @@ async def test_profile_persona_uses_profile_prompt_and_model(tmp_path: Path, mon
         ({"profile": "absent"}, "Cannot delegate: subagent profile 'absent' was not found in subagents/."),
         (
             {"agent_name": "child", "system_prompt": "P"},
-            "Cannot author a subagent for 'child': system_prompt, tools, and profile apply only to yourself.",
+            "Cannot author a subagent for 'child': system_prompt, tools, skills, and profile apply only to yourself.",
         ),
         (
             {"profile": "critic", "system_prompt": "P"},
-            "Cannot delegate: pass either profile or system_prompt and tools",
+            "Cannot delegate: pass either profile or system_prompt, tools, and skills",
         ),
-        ({"profile": "critic", "tools": ["file"]}, "Cannot delegate: pass either profile or system_prompt and tools"),
+        (
+            {"profile": "critic", "tools": ["file"]},
+            "Cannot delegate: pass either profile or system_prompt, tools, and skills",
+        ),
         (
             {"system_prompt": "P", "tools": ["shell"]},
             "Cannot delegate: unknown tool 'shell'. Your tools: delegate, file",
@@ -220,8 +227,8 @@ def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monke
     def properties(toolkit: DelegateTools) -> set[str]:
         return set(toolkit.async_functions["run_subagent"].parameters["properties"])
 
-    assert {"system_prompt", "tools", "profile"}.isdisjoint(properties(other_only))
-    assert {"system_prompt", "tools", "profile"} <= properties(self_allowed)
+    assert {"system_prompt", "tools", "skills", "profile"}.isdisjoint(properties(other_only))
+    assert {"system_prompt", "tools", "skills", "profile"} <= properties(self_allowed)
     assert "system_prompt" not in other_only.async_functions["run_subagent"].description
     assert "system_prompt" in self_allowed.async_functions["run_subagent"].description
 
@@ -329,7 +336,10 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
     assert not isinstance(target, str)
     assert target.agent_name == "child"
     assert target.persona == SubagentPersona(source_kind="inline", source_name="", system_prompt="Member prompt")
-    assert refused == "Cannot author a subagent for 'leader': system_prompt, tools, and profile apply only to yourself."
+    assert (
+        refused
+        == "Cannot author a subagent for 'leader': system_prompt, tools, skills, and profile apply only to yourself."
+    )
 
 
 @pytest.mark.asyncio
@@ -396,6 +406,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
         source_name="adder",
         system_prompt="You add numbers.",
         tools=("calculator",),
+        skills=(),
     )
 
 
@@ -476,7 +487,7 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
     identity = _identity()
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=identity),
-        persona_tools=("delegate", "file"),
+        persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("delegate", "file")),
     )
 
     with tool_runtime_context(context):
@@ -647,3 +658,56 @@ async def test_plain_delegation_never_lists_caller_tools(tmp_path: Path, monkeyp
     result = await harness.run(harness.toolkit.run_subagent(task="Summarize.", agent_name="child"))
 
     assert "Reply 0." in result
+
+
+def _write_skill(tmp_path: Path, name: str) -> None:
+    skill = _workspace(tmp_path) / "skills" / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} skill\n---\n\n{name} body\n")
+
+
+@pytest.mark.asyncio
+async def test_authored_skills_are_checked_against_the_callers_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A named skill must be one of the caller's own, and the child records the skills it was given."""
+    _write_skill(tmp_path, "research")
+    harness = _Harness(tmp_path, monkeypatch, _config())
+
+    refused = await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", skills=["absent"]))
+    await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", skills=["research"]))
+
+    assert refused == "Cannot delegate: unknown skill 'absent'. Your skills: research."
+    assert harness.session_child()["persona"]["skills"] == ["research"]
+
+
+@pytest.mark.asyncio
+async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> None:
+    """The native path checks named skills against the caller's own, and a copy without skills inherits its parent's."""
+    _write_skill(tmp_path, "research")
+    _write_skill(tmp_path, "writing")
+    config = _config()
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    base = _delegate_runtime_context(config, paths, execution_identity=identity)
+
+    async def resolve(context: ToolRuntimeContext, **arguments: object) -> _DelegationTarget | str:
+        with tool_runtime_context(context):
+            return await _resolve_delegation_target(
+                ToolExecution(tool_name="run_subagent", tool_args={"task": "Read.", "system_prompt": "Q", **arguments}),
+                None,
+                caller_identity=identity,
+                config=config,
+                runtime_paths=paths,
+                depth=0,
+            )
+
+    refused = await resolve(base, skills=["absent"])
+    inherited = await resolve(replace(base, persona=inline_persona("P", None, ["writing"])))
+
+    assert refused == "Cannot delegate: unknown skill 'absent'. Your skills: research, writing."
+    assert not isinstance(inherited, str)
+    assert inherited.persona is not None
+    assert inherited.persona.skills == ("writing",)
