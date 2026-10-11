@@ -58,6 +58,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
+from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.judgment.client import JudgmentClient
@@ -3212,6 +3213,43 @@ def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config
         )
 
     assert arun.call_args.kwargs["user_id"] == "@alice:localhost"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_team_run_records_helper_usage_in_its_conversation(team_app_client: TestClient, stream: bool) -> None:
+    """Helper work during an API team run, such as a member's Claude Code session, belongs to the team conversation."""
+    owners: list[HelperUsageOwner | None] = []
+    mock_team = _make_test_team()
+
+    async def stream_events() -> AsyncIterator[object]:
+        owners.append(get_helper_usage_owner())
+        yield TeamContentEvent(content="Team answer")
+
+    async def run() -> TeamRunOutput:
+        owners.append(get_helper_usage_owner())
+        return TeamRunOutput(content="Team answer")
+
+    mock_team.arun = MagicMock(side_effect=lambda *_args, **kwargs: stream_events() if kwargs.get("stream") else run())
+    with (
+        patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
+        ),
+        patch(
+            "mindroom.api.openai_compat._prepare_openai_team_prompt",
+            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+        ),
+    ):
+        response = team_app_client.post(
+            "/v1/chat/completions",
+            headers={"X-Session-Id": "team-session"},
+            json={"model": "team/super_team", "messages": [{"role": "user", "content": "Build it"}], "stream": stream},
+        )
+
+    assert response.status_code == 200
+    assert len(owners) == 1
+    assert owners[0] is not None
+    assert owners[0].session_id == mock_team.arun.call_args.kwargs["session_id"]
 
 
 class TestTeamCompletion:
