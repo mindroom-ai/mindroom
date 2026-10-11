@@ -1,5 +1,5 @@
 # ruff: noqa: D100, B018, F821
-# Hand-maintained list of names vulture would otherwise report as unused, plus plugin-facing API names, each with its reason and file.
+# Names vulture would otherwise report as unused; each line names the files where vulture reports it.
 _.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_budgets  # Pydantic model validator (src/mindroom/config/main.py)
 _._validate_user_ids  # Pydantic field validator (src/mindroom/config/budgets.py)
@@ -73,7 +73,7 @@ header_params  # unused variable (src/mindroom/workers/backends/kubernetes_resou
 post_params  # unused variable (src/mindroom/workers/backends/kubernetes_resources.py)
 response_type  # unused variable (src/mindroom/workers/backends/kubernetes_resources.py)
 collection_formats  # unused variable (src/mindroom/workers/backends/kubernetes_resources.py)
-_.invite_user  # unused method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
+_.invite_user  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
 _.force_join_user  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
 _.kick_user  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
 _.get_profile_avatar  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
@@ -304,9 +304,6 @@ chat_completions  # unused function (src/mindroom/api/openai_compat.py)
 _agent_vault_access_tools  # unused function (src/mindroom/tools/__init__.py)
 _.apply_derived_defaults  # unused method (src/mindroom/custom_tools/todo.py)
 _.exactly_one_of_title_or_sub_template  # unused method (src/mindroom/custom_tools/todo.py)
-_.resolve_worker_target  # plugin-facing API method (src/mindroom/tool_system/runtime_context.py)
-ThreadExportTarget  # plugin-facing API class (src/mindroom/thread_export/models.py)
-export_threads_to_targets_once  # plugin-facing API function (src/mindroom/thread_export/service.py)
 _._naive_execute_at_is_utc  # unused method (src/mindroom/scheduling/tasks.py)
 _.on_attached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
 _.on_enter  # LiveKit Agent lifecycle callback (src/mindroom/matrix_rtc/live_voice_agent.py)
@@ -319,7 +316,6 @@ _._validate_connection  # Pydantic validator (src/mindroom/config/voice.py)
 # vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
-# Agno 3 adapter overrides.
 _.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
 _.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
 _.external_execution_silent  # Agno suppresses the internal delegation wait message (src/mindroom/agents.py)
@@ -328,7 +324,6 @@ _enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.
 
 export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)
 
-# MCP SDK OAuthAuthorizationServerProvider callbacks invoked by SDK HTTP handlers.
 _.register_client  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 _.load_authorization_code  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
 _.load_refresh_token  # MCP SDK OAuth provider callback (src/mindroom/mcp_gateway/oauth.py)
@@ -358,11 +353,9 @@ icon_url  # ModelCatalogEntry optional Matrix wire field, accessed through JSON 
 
 _.controller_session_id  # serialized TypedDict field (src/mindroom/worker_computer/protocol.py)
 
-# Provider setup routes are invoked by FastAPI.
 get_provider_setup_status  # FastAPI endpoint (src/mindroom/api/provider_setup.py)
 connect_provider  # FastAPI endpoint (src/mindroom/api/provider_setup.py)
 
-# Computer routes are invoked by FastAPI; dataclass equality binds config identity.
 create_session  # FastAPI Computer endpoint (src/mindroom/api/computers.py)
 session_status  # FastAPI Computer endpoint (src/mindroom/api/computers.py)
 stream_ticket  # FastAPI Computer endpoint (src/mindroom/api/computers.py)
@@ -371,11 +364,9 @@ _.config_identity  # ComputerTarget dataclass equality field (src/mindroom/worke
 _.require_adoption_room_id  # Pydantic model validator for explicit personal-room adoption (src/mindroom/matrix/personal_room_store.py)
 _.validate_additional_user_ids  # Pydantic field validator for imported room membership attestations (src/mindroom/matrix/personal_room_store.py)
 
-# Agent CLI Pydantic validator.
 _._validate_bounded_json  # Pydantic model validator (src/mindroom/agent_cli/protocol.py)
 
 _.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically (src/mindroom/custom_tools/agno_compat_moviepy.py)
-# AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.
 _.scrape_website  # Agno registers this toolkit override as a tool (src/mindroom/custom_tools/agno_compat_agentql.py)
 _.custom_scrape_website  # Agno registers this toolkit override as a tool (src/mindroom/custom_tools/agno_compat_agentql.py)
 _._execute_query  # AgentQL page query methods call this override (src/mindroom/custom_tools/agno_compat_agentql.py)
