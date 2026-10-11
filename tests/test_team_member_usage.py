@@ -136,7 +136,10 @@ def _squad(
         name="worker",
         model=member_model,
         telemetry=False,
-        tools=[Function(name="lookup", entrypoint=_lookup)],
+        tools=[
+            Function(name="lookup", entrypoint=_lookup),
+            Function(name="publish", entrypoint=_lookup, requires_confirmation=True),
+        ],
     )
     team = Team(id="squad", name="Squad", members=[worker], model=leader_model, db=storage, telemetry=False)
     return _Squad(team=team, leader=leader_model, member=member_model, config=config, tmp_path=tmp_path)
@@ -219,3 +222,46 @@ async def test_finished_team_member_counts_once(tmp_path: Path, stream: bool) ->
     await _run(squad, stream=stream)
 
     assert squad.model_tokens() == {"leader-model": 11, "member-model": 1100}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
+async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path, stream: bool) -> None:
+    """A member resumed after an approval keeps the requests it makes before a Stop, as well as those before it paused."""
+    squad = _squad(
+        tmp_path,
+        leader=[_delegation(), _answer(1)],
+        member=[_calling("publish", "{}", 100), _calling("lookup", "{}", 1000), _HANG],
+    )
+    paused = await squad.team.arun("Go", session_id="session", user_id="@alice:localhost", run_id="team-run")
+    assert paused.is_paused
+    for requirement in paused.requirements or ():
+        requirement.confirm()
+
+    async def resume() -> None:
+        # Resume from storage, as the reply to an approval does.
+        if stream:
+            async for _ in squad.team.acontinue_run(
+                run_id="team-run",
+                requirements=paused.requirements,
+                session_id="session",
+                user_id="@alice:localhost",
+                stream=True,
+            ):
+                pass
+        else:
+            await squad.team.acontinue_run(
+                run_id="team-run",
+                requirements=paused.requirements,
+                session_id="session",
+                user_id="@alice:localhost",
+            )
+
+    reply = asyncio.create_task(resume())
+    await squad.member.hanging.wait()
+    reply.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reply
+    await _finish_detached_saves()
+
+    assert squad.model_tokens() == {"leader-model": 10, "member-model": 1100}

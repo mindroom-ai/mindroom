@@ -139,7 +139,8 @@ def _with_current_messages(original: Callable[..., Any]) -> Callable[..., Any]:
 # stops in-flight member tasks before saving a cancelled team run.
 # Coverage: tests/test_team_member_usage.py::test_stopped_team_member_keeps_its_usage;
 # tests/test_team_member_usage.py::test_failed_team_member_keeps_its_usage_once;
-# tests/test_team_member_usage.py::test_finished_team_member_counts_once.
+# tests/test_team_member_usage.py::test_finished_team_member_counts_once;
+# tests/test_team_member_usage.py::test_member_stopped_after_approval_keeps_its_usage.
 _MEMBER_TEAM_RUN_IDS: dict[str, str] = {}
 _UNATTACHED_MEMBER_RUNS: dict[str, list[RunOutput | TeamRunOutput]] = {}
 
@@ -166,9 +167,18 @@ async def _attach_member_run(
     team_response: TeamRunOutput,
     member_run: RunOutput | TeamRunOutput,
 ) -> None:
-    """Attach a member run the way Agno's delegation does when the member hands it back."""
+    """Attach a member run the way Agno's delegation does when the member hands it back.
+
+    A member resumed after an approval may already be attached as the run loaded from storage, so its entry is
+    replaced by the live run and its session row is saved again.
+    """
     member_run.parent_run_id = team_response.run_id
-    team_response.add_member_run(member_run)
+    responses = team_response.member_responses
+    index = next((index for index, attached in enumerate(responses) if attached.run_id == member_run.run_id), None)
+    if index is None:
+        team_response.add_member_run(member_run)
+    else:
+        responses[index] = member_run
     member_id = member_run.team_id if isinstance(member_run, TeamRunOutput) else member_run.agent_id
     members = cast("list[Agent | Team]", team.members) if isinstance(team.members, list) else []
     member = next((member for member in members if member.id == member_id), None)
@@ -192,11 +202,8 @@ def _with_member_runs(original: Callable[..., Awaitable[None]]) -> Callable[...,
             for task in agno_cancel._member_drain_tasks.get(run_response.run_id, set()):
                 task.cancel()
             await agno_cancel.adrain_member_tasks(run_response.run_id)
-        held = _UNATTACHED_MEMBER_RUNS.pop(run_response.run_id, []) if run_response.run_id else []
-        attached = {member_run.run_id for member_run in run_response.member_responses}
-        for member_run in held:
-            if member_run.run_id not in attached:
-                await _attach_member_run(team, session, run_response, member_run)
+        for member_run in _UNATTACHED_MEMBER_RUNS.pop(run_response.run_id, []) if run_response.run_id else []:
+            await _attach_member_run(team, session, run_response, member_run)
         for member_run_id in [key for key, value in _MEMBER_TEAM_RUN_IDS.items() if value == run_response.run_id]:
             del _MEMBER_TEAM_RUN_IDS[member_run_id]
         await original(team, run_response=run_response, session=session, run_context=run_context)
@@ -358,7 +365,9 @@ def install_patch() -> None:
             "Any",
             _with_current_messages(team_run._handle_team_run_cancellation),
         )
+        # Delegation and approval continuations each register member runs through their own module's binding.
         team_tools.aregister_member_run = cast("Any", _with_member_team_run(team_tools.aregister_member_run))
+        team_run.aregister_member_run = cast("Any", _with_member_team_run(team_run.aregister_member_run))
         team_run._acleanup_and_store = cast("Any", _with_member_runs(team_run._acleanup_and_store))
         Model.process_response_stream = cast("Any", _with_metered_messages(Model.process_response_stream))
         Model.aprocess_response_stream = cast("Any", _with_metered_messages_async(Model.aprocess_response_stream))
