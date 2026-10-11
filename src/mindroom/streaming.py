@@ -326,16 +326,11 @@ def build_restart_interrupted_body(text: str) -> str:
 
 @dataclass(frozen=True)
 class UnfinishedStreamedReply:
-    """What one reply showed that a continuation streams below.
-
-    That is an attempt that stopped before finishing, or the answer of a reply that waited for background work.
-    """
+    """What one reply showed when the process streaming it stopped before finishing it."""
 
     # The visible text as the user saw it, tool markers included.
     visible_text: str
     tool_trace: tuple[ToolTraceEntry, ...]
-    # Whether an interruption stopped it, so the restart note separates it from its continuation.
-    interrupted: bool = True
 
     @property
     def partial_text(self) -> str:
@@ -344,9 +339,8 @@ class UnfinishedStreamedReply:
 
     @property
     def resumed_text(self) -> str:
-        """Return the text a continuation streams below: what was shown, then the restart note if it was stopped."""
-        shown = build_restart_interrupted_body(self.visible_text) if self.interrupted else self.visible_text.rstrip()
-        return f"{shown}\n\n"
+        """Return the text a continuation streams below: what was shown, then the restart note."""
+        return f"{build_restart_interrupted_body(self.visible_text)}\n\n"
 
 
 @dataclass(frozen=True)

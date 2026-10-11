@@ -72,7 +72,7 @@ class SubagentLifecycles(RuleBasedStateMachine):
         self._step("approve", index=index, approve=approve)
 
     @precondition(lambda self: self._has_job())
-    @rule(kind=st.sampled_from(("cancel", "stop")), index=_INDEXES)
+    @rule(kind=st.sampled_from(("cancel", "client_cancel")), index=_INDEXES)
     def end(self, kind: str, index: int) -> None:
         """Cancel or Stop a child's job."""
         self._step(kind, index=index)

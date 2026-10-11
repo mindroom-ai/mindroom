@@ -20,7 +20,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
-from mindroom.tool_jobs.completion import ConversationKey, conversation_work, ended_jobs
+from mindroom.tool_jobs.completion import ConversationKey, ended_jobs
 from mindroom.tool_jobs.disabled import index_parked_work
 from mindroom.tool_jobs.follow_ups import FOLLOW_UP_LIMIT, follow_up_event_id, follow_up_jobs, follow_up_streak
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
@@ -37,7 +37,7 @@ from mindroom.tool_jobs.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from agno.tools.function import Function
 
@@ -45,8 +45,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import EventJournalStore, PrincipalStore
-    from mindroom.event_journal.reply_messages import JobStop
+    from mindroom.event_journal import EventJournalStore
     from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -143,7 +142,6 @@ class ToolJobRuntimeCoordinator:
                     authorize_execution=self._authorize_execution,
                     cancel=self._interrupt,
                     denied=self._denied,
-                    stopped=self._stop_recorded,
                 )
         else:
             instance.parked = await index_parked_work(journal)
@@ -350,68 +348,12 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked and stopped work, publish live jobs, deny interrupted jobs' cards, and admit follow-ups."""
+        """Stop revoked work, publish live jobs, deny interrupted jobs' cards, and admit follow-ups."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._publisher.publish(self.bot_provider, self.runtime.retained_jobs())
         for job_id in tuple(self.runtime.unsettled_approvals):
             await settle_job_approvals(self.runtime, job_id)
-        await self._apply_job_stops()
         await self._admit_follow_ups(self.runtime)
-
-    async def _apply_job_stops(self) -> None:
-        """Cancel the work each recorded Stop names, then forget the Stop; one that fails is retried next pass."""
-        journal = self._journal
-        if journal is None:
-            return
-        for stop in await journal.reply_job_stops():
-            principal = journal.principal(stop.principal_id)
-            await self.runtime.stop_jobs(
-                receipt_order=stop.stop_receipt_order,
-                matches=await self._stopped_work(principal, stop),
-            )
-            await principal.replies.forget_job_stop(stop.stop_id)
-
-    async def _stop_recorded(self, job: BackgroundJob) -> bool:
-        """Return whether a recorded Stop not applied yet names this job."""
-        journal = self._journal
-        if journal is None:
-            return False
-        for stop in await journal.reply_job_stops():
-            if await (await self._stopped_work(journal.principal(stop.principal_id), stop))(job):
-                return True
-        return False
-
-    async def _stopped_work(
-        self,
-        principal: PrincipalStore,
-        stop: JobStop,
-    ) -> Callable[[BackgroundJob], Awaitable[bool]]:
-        """Match the work a stopped reply started, and the work it waited for when it ever waited.
-
-        The work a newer message of the conversation started after the reply's own messages is that message's to stop.
-        """
-        sources = frozenset(stop.sources)
-        held = (
-            frozenset()
-            if stop.hold_key is None
-            else frozenset(
-                job.job_id
-                for job in (await conversation_work(self.runtime, ConversationKey.decode(stop.hold_key))).jobs
-            )
-        )
-
-        async def matches(job: BackgroundJob) -> bool:
-            if job.owner.recipient != stop.entity_name or job.owner.room_id != stop.room_id:
-                return False
-            if job.source_event_id in sources:
-                return True
-            if job.job_id not in held:
-                return False
-            started = None if job.source_event_id is None else await principal.load_event(job.source_event_id)
-            cutoff = stop.cutoff_receipt_order
-            return started is None or cutoff is None or started.receipt_order <= cutoff
-
-        return matches
 
     async def _admit_follow_ups(self, runtime: ToolJobRuntime) -> None:
         """Admit one follow-up per conversation whose ended jobs no reply collected, at most the limit in a row.

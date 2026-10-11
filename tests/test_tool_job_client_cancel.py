@@ -11,16 +11,20 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom import reply_lifecycle as rl
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.message_target import MessageTarget
+from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.requester_identity import runtime_matrix_domain
+from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.client_cancel import (
     JobCancelRequest,
     _parse_job_cancel,
@@ -33,7 +37,7 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import make_conversation_reader_mock
 from tests.delegation_helpers import _runtime_paths
-from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import job_coordinator, job_owner, start_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -276,6 +280,69 @@ async def test_cancel_job_command_refuses_a_sender_without_access(tmp_path: Path
         )
         reply = await _command(tmp_path, "!cancel_job job_a", agent=restricted)
         assert reply == "No such background job here."
+        assert _status(runtime, "job_a") == "running"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_on_the_reply_leaves_its_job_running(tmp_path: Path) -> None:
+    """🛑 on a reply stops the reply; the job it started keeps running until the jobs bar or a command cancels it."""
+    runtime = await tool_job_runtime(tmp_path)
+    coordinator = job_coordinator(tmp_path, runtime, MagicMock())
+    # The requester keeps access, so only a Stop could end the job here.
+    coordinator._denied = lambda _job: False
+    journal = coordinator._journal
+    assert journal is not None
+    principal = journal.principal("@mindroom_agent_a:test")
+    owner = job_owner()
+    assert owner.room_id is not None
+    await principal.admit(
+        InboundEvent(
+            event_id="$turn",
+            room_id=owner.room_id,
+            thread_id=owner.resolved_thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@alice:test",
+            origin_server_ts=1,
+            source={},
+        ),
+    )
+    await principal.replies.write_generation("gen-1")
+    claimed = (
+        await principal.replies.claim(
+            rl.ClaimRequest(
+                span_id="span-1",
+                delivery_id="$turn",
+                sources=ResponseSources(("$turn",), ("$turn",)),
+                bot_generation="gen-1",
+                now_ns=10,
+                new_reply_id="reply-1",
+                entity_name=owner.recipient,
+                room_id=owner.room_id,
+                thread_id=owner.resolved_thread_id,
+                membership_epoch=0,
+                empty_presentation=encode_presentation(Presentation()),
+            ),
+        )
+    ).transition
+    assert claimed.reply is not None
+
+    try:
+        await start_job(
+            runtime,
+            "job_a",
+            tool_name="run_tests",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=_forever,
+            source_event_id="$turn",
+        )
+        stop = rl.stop(claimed.reply, claimed.claimed, rl.StopFacts(receipt_order=5, span_live=False), now_ns=30)
+        await principal.replies.update(claimed.reply.reply_id, lambda _current: stop)
+        await coordinator._reconcile()
         assert _status(runtime, "job_a") == "running"
     finally:
         await runtime.shutdown()

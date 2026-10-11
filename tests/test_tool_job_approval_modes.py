@@ -248,7 +248,6 @@ class _GatedRun:
     tmp_path: Path
     monkeypatch: pytest.MonkeyPatch
     approval_wait_timeout: float | None
-    stopped: bool = False
     effects: list[str] = field(default_factory=list)
     gate: asyncio.Event | None = None
 
@@ -265,14 +264,11 @@ class _GatedRun:
         self.context = _delegate_runtime_context(self.config, self.paths)
         self.owner = build_execution_identity_from_runtime_context(self.context)
 
-        async def stop_recorded(_job: BackgroundJob) -> bool:
-            return self.stopped
-
         async def interrupt(job: BackgroundJob) -> BackgroundOutcome | None:
             # The coordinator's cleanup of a stopped tool call's job.
             return await end_tool_call_approval(self.runtime, job)
 
-        self.runtime = await tool_job_runtime(self.tmp_path, cancel=interrupt, stopped=stop_recorded)
+        self.runtime = await tool_job_runtime(self.tmp_path, cancel=interrupt)
         pin_background_tool_jobs(self.config, self.paths)
         register_background_runtime(self.paths, self.runtime)
         self.cards = _Cards(asyncio.get_running_loop().create_future())
@@ -337,14 +333,8 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stopped", [False, True])
-async def test_reply_goes_on_while_its_call_waits_for_approval(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    stopped: bool,
-) -> None:
-    """After the wait, the reply continues and the job runs the call once approved, unless a Stop came first."""
+async def test_reply_goes_on_while_its_call_waits_for_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the wait, the reply continues and the job runs the call once approved."""
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0.05) as run:
         async with execution_resources():
             with tool_runtime_context(run.context):
@@ -355,10 +345,9 @@ async def test_reply_goes_on_while_its_call_waits_for_approval(
                 assert response.status is RunStatus.completed
                 handle = json.loads(_tool_result(response))
                 assert (handle["tool"], handle["status"], run.effects) == ("write_report", "awaiting_approval", [])
-                run.stopped = stopped
                 run.decide("approved")
-                await wait_for_status(run.runtime, handle["job_id"], "cancelled" if stopped else "completed")
-        assert run.effects == ([] if stopped else ["q3"])
+                await wait_for_status(run.runtime, handle["job_id"], "completed")
+        assert run.effects == ["q3"]
 
 
 @pytest.mark.asyncio

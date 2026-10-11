@@ -432,3 +432,9 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
         bot.admit_job_follow_up.assert_awaited_once()
     finally:
         await runtime.shutdown()
+
+
+async def test_a_key_round_trips_through_its_recorded_json() -> None:
+    """A follow-up's recorded key restores the conversation it was admitted for."""
+    key = _key(job_owner())
+    assert ConversationKey.decode(key.encode()) == key

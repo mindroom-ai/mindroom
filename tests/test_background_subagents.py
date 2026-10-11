@@ -397,9 +397,9 @@ async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stopped", [False, True])
-async def test_shutdown_keeps_a_saved_stop_a_cancellation(tmp_path: Path, stopped: bool) -> None:
-    """A Stop saved while shutdown refused new cancellations still stops the job as a cancellation."""
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_shutdown_keeps_a_saved_cancel_a_cancellation(tmp_path: Path, cancelled: bool) -> None:
+    """A cancel saved while shutdown refused new cancellations still ends the job as a cancellation."""
     runtime = await tool_job_runtime(tmp_path)
     started = asyncio.Event()
     by_shutdown: list[bool] = []
@@ -415,11 +415,11 @@ async def test_shutdown_keeps_a_saved_stop_a_cancellation(tmp_path: Path, stoppe
 
     job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
     await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
-    if stopped:
+    if cancelled:
         entry = runtime._entries[job.job_id]
-        entry.job = replace(entry.job, user_stop_receipt_order=1)
+        entry.job = replace(entry.job, status="cancel_requested")
     await runtime.shutdown()
-    assert by_shutdown == [not stopped]
+    assert by_shutdown == [not cancelled]
 
 
 @pytest.mark.asyncio

@@ -157,7 +157,7 @@ from .startup_errors import PermanentStartupError
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
 from .tool_jobs.disabled import event_is_parked
 from .tool_jobs.follow_ups import follow_up_event
-from .tool_jobs.runtime import get_background_runtime, notify_job_stops
+from .tool_jobs.runtime import get_background_runtime
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -650,8 +650,6 @@ class AgentBot:
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
             hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
             approval_ended=lambda ended: self._approval_ended(ended),
-            settle_debt=self._settle_reply_debt_later,
-            jobs_stopped=lambda: notify_job_stops(self.runtime_paths),
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(

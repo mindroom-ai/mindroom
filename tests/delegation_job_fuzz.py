@@ -1,7 +1,7 @@
 """Generated background subagent lifecycles checked against invariants that must hold on every path.
 
 Real Agno parents and children run scripted models through MindRoom's native delegation, background jobs, the
-approval cards each job posts for its child, parent waits, cancellation, Stop, orderly restart, and crash recovery.
+approval cards each job posts for its child, parent waits, cancellation, client cancels, orderly restart, and crash recovery.
 The child's approval-gated tool records every execution, so the oracle compares effects with the decisions given.
 """
 
@@ -82,7 +82,7 @@ class ChildScript:
 class Step:
     """A printable, shrinkable step; it names a child or card by index, never by identity."""
 
-    kind: Literal["delegate", "wait", "approve", "cancel", "stop", "release", "restart", "crash"]
+    kind: Literal["delegate", "wait", "approve", "cancel", "client_cancel", "release", "restart", "crash"]
     index: int = 0
     script: ChildScript = ChildScript()
     # A parent wait budget: None waits until the job finishes, 0 returns at once.
@@ -165,7 +165,6 @@ class DelegationFuzzRunner:
         self._baseline = asyncio.all_tasks()
         self._crashing = False
         self._turn_count = 0
-        self._order = 0
         self.gate = asyncio.Event()
         self.children: list[_Child] = []
         self.approvals = _Cards()
@@ -175,7 +174,7 @@ class DelegationFuzzRunner:
         # Notes of calls some resolution approved; only those may ever run.
         self.approved: set[str] = set()
         self.violations: list[str] = []
-        # What first stopped each job's work: a cancellation or Stop, or a restart; the first cause stands.
+        # What first stopped each job's work: a cancellation or a restart; the first cause stands.
         self.causes: dict[str, Literal["cancel", "restart"]] = {}
         self._sessions: dict[str, int] = {}
         self._storages: list[BaseDb] = []
@@ -390,16 +389,12 @@ class DelegationFuzzRunner:
             self._cause(job_id, "cancel")
             self._start_turn(f"cancel:{job_id}", JobTools(self.paths, self.identity).job("cancel", job_id))
 
-    async def _stop(self, step: Step) -> None:
+    async def _client_cancel(self, step: Step) -> None:
+        """Cancel from the jobs bar, which asks the job to stop without waiting for it."""
         if (job_id := self._job(step.index)) is None:
             return
         self._cause(job_id, "cancel")
-        self._order += 1
-
-        async def matches(job: BackgroundJob) -> bool:
-            return job.job_id == job_id
-
-        await self.runtime.stop_jobs(receipt_order=self._order, matches=matches)
+        await self.runtime.request_cancel(job_id)
 
     async def _release(self, _step: Step) -> None:
         self.gate.set()
@@ -516,7 +511,7 @@ class DelegationFuzzRunner:
                 assert job.adapter["child"]["status"] == job.status, (job.job_id, job.adapter["child"]["status"])
             cause = self.causes.get(job.job_id)
             if cause == "cancel":
-                # A cancellation or Stop ends the child as cancelled, even when a restart finishes settling it.
+                # A cancellation ends the child as cancelled, even when a restart finishes settling it.
                 assert job.status == "cancelled", (job.job_id, job.status, job.result)
             elif cause == "restart":
                 assert job.status in {"failed", "interrupted"}, (job.job_id, job.status, job.result)

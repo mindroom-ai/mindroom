@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _LIVE = ("running", "cancel_requested", "awaiting_approval")
 _JOB_STEPS = (
     *("wait", "wait", "ack", "drop"),
-    *("cancel", "cancel", "stop", "stop", "revoke", "restart_stop"),
+    *("cancel", "cancel", "revoke"),
 )
 _SCRIPTS = st.builds(
     Script,
@@ -168,33 +168,8 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
             id="cancelled-approval-wait-then-crash",
         ),
         pytest.param(
-            [
-                Action("start", script=_AWAITING),
-                Action("start", job=1, script=_PARKED),
-                Action("restart_stop"),
-            ],
-            id="stop-approval-wait-during-shutdown",
-        ),
-        pytest.param(
-            [
-                Action("start", script=_PARKED, cleanup="park"),
-                Action("stop"),
-                Action("crash_shutdown"),
-            ],
-            id="stop-cleanup-then-crash-during-shutdown",
-        ),
-        pytest.param(
             [Action("start", script=_PARKED, cleanup="classify"), Action("restart")],
             id="cleanup-sees-orderly-shutdown",
-        ),
-        pytest.param(
-            [
-                Action("start", script=_AWAITING),
-                Action("fail_write", skip=1),
-                Action("stop"),
-                Action("release"),
-            ],
-            id="stop-saved-but-cancellation-save-failed",
         ),
         pytest.param(
             [Action("start", script=_AWAITING), Action("fail_write"), Action("release")],
@@ -207,16 +182,6 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
         pytest.param(
             [Action("start", script=_PARKED, cleanup="classify"), Action("cancel"), Action("restart")],
             id="cleanup-sees-cancellation-before-shutdown",
-        ),
-        pytest.param(
-            [
-                Action("start"),
-                Action("fail_write", skip=2),
-                Action("start", job=1, script=_PARKED, cleanup="classify"),
-                Action("stop", job=1),
-                Action("restart"),
-            ],
-            id="stop-whose-save-failed-then-restart",
         ),
     ],
 )

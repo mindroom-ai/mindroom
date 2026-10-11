@@ -1,6 +1,6 @@
 """Generated tool job lifecycles checked against invariants that must hold on every path.
 
-Execution, approval waits, cancellation, Stop, revocation, result consumption, failed saves, orderly restart, and crash
+Execution, approval waits, cancellation, revocation, result consumption, failed saves, orderly restart, and crash
 recovery interleave at await boundaries.
 Blocking work runs inline, so an idle event loop marks the end of each step and a crash lands between two awaits.
 The oracle keeps the facts a caller observed and the outcome precedence the runtime documents, not its bookkeeping.
@@ -54,7 +54,7 @@ _CLASSIFIED = "Interrupted by a shutdown or restart."
 _IDLE_ROUNDS = 10_000
 _LONG_RESULT = "x" * 600
 # Steps that act on the whole runtime; every other step needs its job to exist, except the one that starts it.
-_RUNTIME_ACTIONS = frozenset({"restart", "restart_stop", "crash", "crash_shutdown", "fail_write", "die_on_write"})
+_RUNTIME_ACTIONS = frozenset({"restart", "crash", "crash_shutdown", "fail_write", "die_on_write"})
 
 
 @dataclass(frozen=True)
@@ -83,10 +83,8 @@ class Action:
         "ack",
         "drop",
         "cancel",
-        "stop",
         "revoke",
         "restart",
-        "restart_stop",
         "crash",
         "crash_shutdown",
         "fail_write",
@@ -122,7 +120,6 @@ class _Job:
     cleanup: Cleanup
     cleanup_gate: asyncio.Event = field(default_factory=asyncio.Event)
     observed: BackgroundJob | None = None
-    stop_order: int | None = None
     consumed: bool = False
     consumer: str | None = None
     # What stopped the job, in order; the first cause stands.
@@ -135,7 +132,6 @@ class JobFuzzRunner:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._epoch = 0
-        self._order = 0
         self._sources = 0
         self._recovering = False
         self._crashing = False
@@ -358,42 +354,17 @@ class JobFuzzRunner:
     async def _die_on_write(self, action: Action, _job_id: str) -> None:
         self._fault, self._skip = "die", action.skip
 
-    async def _stop(self, _action: Action, job_id: str) -> None:
-        # During shutdown, the shutdown that already stopped running work stays its first cause.
-        self._cause(job_id, "cancel")
-        self._order += 1
-
-        async def matches(job: BackgroundJob) -> bool:
-            return job.job_id == job_id
-
-        await self.runtime.stop_jobs(receipt_order=self._order, matches=matches)
-        # A consumed outcome is never offered again, so a Stop leaves it as it was.
-        if not self.jobs[job_id].consumed:
-            self.jobs[job_id].stop_order = self._order
-
     async def _revoke(self, _action: Action, job_id: str) -> None:
         self._cause(job_id, "cancel")
         await self.runtime.cancel_revoked(denied=lambda job: job.job_id == job_id)
 
-    async def _restart(self, action: Action | None = None, job_id: str | None = None) -> None:
-        """Shut down in order, optionally Stopping a job while shutdown drains, then recover."""
-        for owner, model in self.jobs.items():
-            # A Stop saved before the shutdown, even one whose cancellation request was not, makes it a cancellation.
-            if model.stop_order is not None:
-                self._cause(owner, "cancel")
+    async def _restart(self, action: Action | None = None, _job_id: str | None = None) -> None:
+        """Shut down in order, then recover."""
+        for owner in self.jobs:
             self._cause(owner, "shutdown")
         faults = self._faults
         shutdown = asyncio.create_task(self.runtime.shutdown())
         await self._idle()
-        if action is not None and action.kind == "restart_stop" and job_id in self.jobs and not shutdown.done():
-            stopping = self._faults
-            try:
-                await self._stop(action, job_id)
-            except (OSError, ExceptionGroup):
-                # A failed save loses this Stop; shutdown goes on.
-                if self._faults == stopping:
-                    raise
-            await self._idle()
         if action is not None and action.kind == "crash_shutdown":
             await self._lose_process()
             return
@@ -406,9 +377,6 @@ class JobFuzzRunner:
             await self._lose_process()
             return
         await self._reopen()
-
-    async def _restart_stop(self, action: Action, job_id: str) -> None:
-        await self._restart(action, job_id)
 
     async def _crash_shutdown(self, action: Action, job_id: str) -> None:
         await self._restart(action, job_id)
@@ -428,8 +396,8 @@ class JobFuzzRunner:
             # Observation resumes from what was saved; memory a failed save never wrote is gone.
             model.observed = saved
             if saved.status not in TERMINAL_STATUSES:
-                # A shutdown under way left nothing durable; a saved cancellation or Stop did.
-                cancelled = saved.status == "cancel_requested" or saved.user_stop_receipt_order is not None
+                # A shutdown under way left nothing durable; a saved cancellation did.
+                cancelled = saved.status == "cancel_requested"
                 model.causes = ["cancel", "restart"] if cancelled else ["restart"]
                 # So did an outcome execution stopped with but no settlement saved.
                 if (admission := self.admissions.get(job_id)) is not None:
@@ -453,7 +421,6 @@ class JobFuzzRunner:
                 self._forget(job_id)
                 continue
             job, model = entry.job, self.jobs[job_id]
-            model.stop_order = job.user_stop_receipt_order
             model.consumed, model.consumer = job.consumed, job.consumed_by_source
             if job.status in {"running", "awaiting_approval"}:
                 # A cancellation that took effect would have saved its request.
@@ -536,12 +503,11 @@ class JobFuzzRunner:
     def _pending(self, job_id: str) -> bool:
         job, model, held = self._current(job_id), self.jobs[job_id], self.claims.get(job_id)
         claimed = held is not None and held.epoch == self._epoch
-        return job.status in TERMINAL_STATUSES and not model.consumed and model.stop_order is None and not claimed
+        return job.status in TERMINAL_STATUSES and not model.consumed and not claimed
 
     def _observe(self, job: BackgroundJob) -> None:
         model = self.jobs[job.job_id]
         previous, model.observed = model.observed, job
-        assert job.user_stop_receipt_order == model.stop_order, job.job_id
         assert (job.consumed, job.consumed_by_source) == (model.consumed, model.consumer), job.job_id
         if previous is not None:
             _check_transition(previous, job)

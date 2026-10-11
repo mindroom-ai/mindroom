@@ -29,7 +29,7 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
-from mindroom.tool_system.call_record import admits_tool_start, without_tool_call_recording
+from mindroom.tool_system.call_record import without_tool_call_recording
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -103,7 +103,6 @@ class BackgroundJob:
     # Whether a parent run saved the outcome as its tool result, and the admitted turn whose run first saved it.
     consumed: bool = False
     consumed_by_source: str | None = None
-    user_stop_receipt_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -186,7 +185,7 @@ class _Entry:
     # That unsaved outcome's payload, kept only until a retried save lands it.
     unsaved_payload: EncodedResultPayload | None = None
     stopped_outcome: BackgroundOutcome | None = None
-    # The one in-flight cancellation drain; Stop and revocation do not await it, so a done callback logs its failure.
+    # The one in-flight cancellation drain; a cancel and revocation do not await it, so a done callback logs its failure.
     drain: asyncio.Task[BackgroundJob] | None = None
 
     def notify_changed(self) -> None:
@@ -237,13 +236,6 @@ def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None
     return instance.runtime if (instance := tool_job_instance(runtime_paths)) is not None else None
 
 
-def notify_job_stops(runtime_paths: RuntimePaths) -> None:
-    """Let the storage root's job runtime apply a recorded Stop now, instead of on its next pass."""
-    runtime = get_background_runtime(runtime_paths)
-    if runtime is not None:
-        runtime.changed.set()
-
-
 def register_background_runtime(runtime_paths: RuntimePaths, runtime: ToolJobRuntime) -> None:
     """Publish the recovered runtime of the instance pinned for its storage root; releasing the instance withdraws it."""
     instance = tool_job_instance(runtime_paths)
@@ -276,7 +268,6 @@ class ToolJobRuntime:
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: _Cleanup,
         denied: Callable[[BackgroundJob], bool] | None = None,
-        stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
     ) -> None:
         # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
@@ -286,8 +277,6 @@ class ToolJobRuntime:
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
         self.authorize_execution = authorize_execution
         self._cancel = cancel
-        # Whether a Stop recorded for the reply that owns a job still waits to be applied to it.
-        self._stopped = stopped
         self._entries: dict[str, _Entry] = {}
         # Conversation lookups read this instead of scanning every entry; `_add_entry` and `_remove_entry` keep it.
         # Jobs are keyed by their recipient, room, thread, and requester.
@@ -436,8 +425,8 @@ class ToolJobRuntime:
                     continue
                 entry = _Entry(await asyncio.to_thread(parse_saved_job, saved))
                 if entry.job.status not in TERMINAL_STATUSES:
-                    # Only work the restart cut short is interrupted by it; a cancellation or Stop saved before it is not.
-                    cancelled = entry.job.status == "cancel_requested" or entry.job.user_stop_receipt_order is not None
+                    # Only work the restart cut short is interrupted by it; a cancellation saved before it is not.
+                    cancelled = entry.job.status == "cancel_requested"
                     reason = _interrupted_reason("restart")
                     default = BackgroundOutcome("cancelled") if cancelled else BackgroundOutcome("interrupted", reason)
                     entry.control.cancel(shutdown=not cancelled)
@@ -694,36 +683,6 @@ class ToolJobRuntime:
         # The runtime owns the drain, so a Stop of the caller does not wait for work that ignores cancellation.
         return await asyncio.shield(drain)
 
-    async def stop_jobs(self, *, receipt_order: int, matches: Callable[[BackgroundJob], Awaitable[bool]]) -> None:
-        """Persist explicit Stop apart from result consumption, then request cleanup unless shutdown settles it."""
-
-        def newer(job: BackgroundJob) -> bool:
-            return job.user_stop_receipt_order is None or job.user_stop_receipt_order < receipt_order
-
-        async def stop(entry: _Entry) -> None:
-            if newer(entry.job):
-                await self._publish(entry, _updated(entry.job, user_stop_receipt_order=receipt_order))
-            if self._shutdown_task is None and entry.job.status not in TERMINAL_STATUSES:
-                await self._request_cancel(entry)
-
-        async with self._lock:
-            self._ensure_open()
-            # A consumed outcome is never offered again, so a Stop changes nothing for it.
-            candidates = [
-                (entry, await self._snapshot(entry))
-                for entry in self._entries.values()
-                if entry.job.status not in TERMINAL_STATUSES or (newer(entry.job) and not entry.job.consumed)
-            ]
-        # `matches` may read the journal, so it judges snapshots outside the runtime lock.
-        selected = [entry for entry, job in candidates if await matches(job)]
-        async with self._lock:
-            self._ensure_open()
-            current = (entry for entry in selected if self._entries.get(entry.job.job_id) is entry)
-            failures = await self._isolated(current, stop, "Tool job Stop failed")
-        if failures:
-            msg = "Tool job Stop failed"
-            raise ExceptionGroup(msg, failures)
-
     @staticmethod
     async def _isolated(
         entries: Iterable[_Entry],
@@ -739,30 +698,6 @@ class ToolJobRuntime:
                 logger.exception(failure, job_id=entry.job.job_id)
                 failures.append(error)
         return failures
-
-    async def stop_unless_admitted(self, job_id: str) -> None:
-        """Stop a job whose caller's work stopped letting tools start while the job was admitted.
-
-        A Stop or deletion that committed before the job was saved found no job to cancel, so the call stops it,
-        as a Stop the reply recorded would; a recorded one wins.
-        """
-        if await admits_tool_start():
-            return
-
-        async def admitted(job: BackgroundJob) -> bool:
-            return job.job_id == job_id
-
-        # The lowest receipt order, so the recorded Stop that also names this job still sets its own.
-        await self.stop_jobs(receipt_order=0, matches=admitted)
-
-    async def stop_recorded(self, job_id: str) -> bool:
-        """Return whether a Stop reached a job, applied or only recorded for the reply that owns it."""
-        async with self._lock:
-            entry = self._entries.get(job_id)
-            if entry is None:
-                return True
-            job = await self._snapshot(entry)
-        return job.user_stop_receipt_order is not None or (self._stopped is not None and await self._stopped(job))
 
     async def cancel_revoked(self, *, denied: Callable[[BackgroundJob], bool]) -> None:
         """Withdraw execution whose grant is proven revoked, retaining owned cleanup; a failed job retries next pass."""
@@ -849,10 +784,10 @@ class ToolJobRuntime:
         requester_id: str,
         source_kind: str | None = None,
     ) -> list[tuple[BackgroundJob, bool]]:
-        """Outstanding work a reply's message holds for one requester and conversation, each with whether it is readable.
+        """Unacknowledged work of one requester and conversation, each job with whether its outcome is readable now.
 
-        Work stays held while a waiter claims it or while its access is only unresolved, such as while room membership
-        resolves; neither is readable then. Consumption, a Stop, or a proven denial ends the hold.
+        A job stays listed while a waiter claims it or while its access is only unresolved, such as while room
+        membership resolves; neither is readable then. Consumption or a proven denial ends the listing.
         """
         silent = source_kind == SILENT_SCHEDULE_SOURCE_KIND
         async with self._lock:
@@ -863,7 +798,6 @@ class ToolJobRuntime:
                 for entry in self._by_conversation.get((transport_agent_name, room_id, thread_id, requester_id))
                 if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent
                 and not entry.job.consumed
-                and entry.job.user_stop_receipt_order is None
                 and not self._denied(entry.job)
             ]
 
@@ -939,8 +873,8 @@ class ToolJobRuntime:
         async with self._lock:
             for entry in self._entries.values():
                 if entry.job.status not in TERMINAL_STATUSES:
-                    # A Stop that arrived while shutdown refused new cancellations remains a cancellation.
-                    entry.control.cancel(shutdown=entry.job.user_stop_receipt_order is None)
+                    # A cancellation requested before shutdown remains a cancellation.
+                    entry.control.cancel(shutdown=entry.job.status != "cancel_requested")
                 if entry.drain is not None:
                     # The cancellation request already cancelled execution; its drain settles it.
                     tasks.append(entry.drain)
@@ -950,7 +884,7 @@ class ToolJobRuntime:
         await asyncio.gather(*tasks, return_exceptions=True)
         reason = _interrupted_reason("shutdown")
         for entry in self._entries.values():
-            # A job its Stop cancelled before the shutdown ends cancelled, as its cleanup was told.
+            # A job cancelled before the shutdown ends cancelled, as its cleanup was told.
             stopped = entry.control.cancelled and not entry.control.shutdown
             try:
                 await self._settle(

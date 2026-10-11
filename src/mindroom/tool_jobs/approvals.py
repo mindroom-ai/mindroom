@@ -34,8 +34,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _CANCELLED_REASON = "The background job asking for this approval ended before a decision."
-# A Stop recorded for the reply while its job's cards were open wins over their approvals.
-STOPPED_BEFORE_APPROVED_CALL = "Stopped before the approved call ran."
 _INTERRUPTED_APPROVAL_REASON = "The runtime stopped while this call waited for its approval, so it did not run."
 
 

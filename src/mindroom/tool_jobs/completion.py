@@ -40,18 +40,18 @@ class ConversationKey:
     room_id: str
     thread_id: str | None
     requester_id: str
-    # Work a silent schedule started is delivered silently, so visible replies never hold it, and the reverse.
+    # Work a silent schedule started is reported silently, so visible replies never hear of it, and the reverse.
     silent: bool
-    # The entities whose work the reply retrieves: the agent, or a team's members.
+    # The entities whose work the reply collects: the agent, or a team's members.
     participants: tuple[str, ...]
 
     def encode(self) -> str:
-        """Return the key as the opaque JSON a waiting reply records."""
+        """Return the key as the opaque JSON a follow-up records."""
         return json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
 
     @classmethod
     def decode(cls, stored: str) -> ConversationKey:
-        """Restore a key a waiting reply recorded."""
+        """Restore a key a follow-up recorded."""
         data = cast("dict[str, object]", json.loads(stored))
         return cls(
             recipient=str(data["recipient"]),
@@ -61,33 +61,6 @@ class ConversationKey:
             silent=data["silent"] is True,
             participants=tuple(cast("list[str]", data["participants"])),
         )
-
-
-@dataclass(frozen=True)
-class _ConversationWork:
-    """The outstanding work of one key, and the ended outcomes of it a turn may read now."""
-
-    jobs: tuple[BackgroundJob, ...]
-    ready: tuple[BackgroundJob, ...]
-
-
-async def conversation_work(runtime: ToolJobRuntime, key: ConversationKey) -> _ConversationWork:
-    """Return the outstanding work of ``key``, and which of it ended and may be read now."""
-    held = [
-        (job, readable)
-        for job, readable in await runtime.held_jobs(
-            transport_agent_name=key.recipient,
-            room_id=key.room_id,
-            thread_id=key.thread_id,
-            requester_id=key.requester_id,
-            source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else None,
-        )
-        if job.owner.agent_name in key.participants
-    ]
-    return _ConversationWork(
-        jobs=tuple(job for job, _readable in held),
-        ready=tuple(job for job, readable in held if readable and job.status in TERMINAL_STATUSES),
-    )
 
 
 def current_conversation(agent_names: Sequence[str] | None = None) -> tuple[ToolJobRuntime, ConversationKey] | None:
@@ -113,5 +86,16 @@ def current_conversation(agent_names: Sequence[str] | None = None) -> tuple[Tool
 
 async def ended_jobs(runtime: ToolJobRuntime, key: ConversationKey) -> tuple[BackgroundJob, ...]:
     """Return the ended, readable, unacknowledged jobs of ``key``, oldest first."""
-    work = await conversation_work(runtime, key)
-    return tuple(sorted(work.ready, key=lambda job: (job.created_at, job.job_id)))
+    held = await runtime.held_jobs(
+        transport_agent_name=key.recipient,
+        room_id=key.room_id,
+        thread_id=key.thread_id,
+        requester_id=key.requester_id,
+        source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else None,
+    )
+    ended = (
+        job
+        for job, readable in held
+        if readable and job.status in TERMINAL_STATUSES and job.owner.agent_name in key.participants
+    )
+    return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))

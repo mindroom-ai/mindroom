@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.delegation.lifecycle import live_delegation_config
-from mindroom.tool_jobs.approvals import STOPPED_BEFORE_APPROVED_CALL, ask_job_approvals
+from mindroom.tool_jobs.approvals import ask_job_approvals
 from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
@@ -66,9 +66,6 @@ async def request_child_approvals(
         config=config,
         runtime_paths=runtime_paths,
     )
-    if any(approved for approved, _reason in decided) and await runtime.stop_recorded(child.delegation_id):
-        # A Stop recorded for the reply while the cards were open wins over their approvals.
-        decided = tuple((False, STOPPED_BEFORE_APPROVED_CALL) for _ in decided)
     decisions = {call.tool_call_id: approved for call, (approved, _reason) in zip(plan.calls, decided, strict=True)}
     reasons = {
         call.tool_call_id: None if approved else reason

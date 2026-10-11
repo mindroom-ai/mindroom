@@ -32,7 +32,6 @@ from mindroom.approval.tool_owners import (
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
 )
-from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.delegation.background import (
     delegation_outcome,
     delegation_result,
@@ -797,10 +796,7 @@ async def _await_background_child(
     claim = None
     try:
         if fresh:
-            try:
-                _, claim = await start_delegation(background, child, owner=owner, operation=operation, cancel=cancel)
-            finally:
-                await run_coroutine_until_complete(background.stop_unless_admitted(child.delegation_id))
+            _, claim = await start_delegation(background, child, owner=owner, operation=operation, cancel=cancel)
         await release_liveness()
         waited = await background.wait(
             child.delegation_id,

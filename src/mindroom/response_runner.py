@@ -4020,7 +4020,7 @@ class ResponseRunner:
         account goes into the new attempt's prompt, where later turns keep it.
         """
         handle = current_span()
-        if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION, rl.SpanKind.WAKE}:
+        if handle is None or handle.span.kind not in {rl.SpanKind.REPLAY, rl.SpanKind.REGENERATION}:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
         return self._with_recorded_interrupted_attempt(request, handle, recorded)
@@ -4032,9 +4032,7 @@ class ResponseRunner:
         recorded: tuple[ToolTraceEntry, ...],
     ) -> ResponseRequest:
         """Tell a new attempt what its stopped attempts showed and which tool calls they made, from the reply's records."""
-        # A wake continues a waiting reply's finished answer, which is no stopped attempt, unless a restart cut it short.
-        resumed = handle.resumed
-        unfinished = resumed if resumed is not None and resumed.interrupted else None
+        unfinished = handle.resumed if handle.span.kind is rl.SpanKind.REPLAY else None
         tools = recorded or (() if unfinished is None else unfinished.tool_trace)
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tools)
         if unfinished is not None:

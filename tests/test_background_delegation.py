@@ -190,14 +190,14 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["restart", "stop", "deletion"])
-async def test_parent_cancellation_during_job_admission_keeps_accepted_child(  # noqa: PLR0915
+async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     ending: str,
 ) -> None:
     """Cancellation before start returns must still relinquish the parent's child ownership.
 
-    A Stop or deletion that commits during admission stops the child, as its span then refuses tool starts.
+    A Stop or deletion that commits during admission leaves the child running as its job, which only a cancel ends.
     """
     paths = _runtime_paths(tmp_path)
     config = with_responder_access(
@@ -275,13 +275,9 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(  #
             assert state.children == []
             assert len(state.hooks) == 1
             assert next(iter(state.hooks.values())).after_called
-            [job] = await runtime.list_jobs(owner=owner, depth=0)
-            if stop:
-                assert job.user_stop_receipt_order == 0
-                await wait_for_status(runtime, job.job_id, "cancelled")
-            else:
-                await executing.wait()
-                assert children[0].status == "running"
+            assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
+            await executing.wait()
+            assert children[0].status == "running"
     finally:
         release_writer.set()
         await runtime.shutdown()
@@ -318,14 +314,14 @@ class _JobApprovalCards:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("detach", "human"), [(False, False), (True, False), (True, True)])
-@pytest.mark.parametrize("approval", [None, "approved", "denied", "cancelled", "stopped"])
+@pytest.mark.parametrize("approval", [None, "approved", "denied", "cancelled"])
 @pytest.mark.parametrize("exclude_after_acceptance", [False, True])
 async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     detach: bool,
     human: bool,
-    approval: Literal["approved", "denied", "cancelled", "stopped"] | None,
+    approval: Literal["approved", "denied", "cancelled"] | None,
     exclude_after_acceptance: bool,
 ) -> None:
     """A released parent cannot cancel the child, the job owns its approval cards, and later waits read its result."""
@@ -352,10 +348,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         "parent",
     )
 
-    async def stop_recorded(_job: object) -> bool:
-        return approval == "stopped"
-
-    runtime = await tool_job_runtime(tmp_path, stopped=stop_recorded)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
@@ -549,7 +542,6 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             assert saved.adapter["child"]["status"] == saved.status
             # Only the reader's own reply consumed the outcome, so that reply alone can still recover it.
             assert saved.consumed_by_source in {None, "$native-reader"}
-            assert saved.user_stop_receipt_order is None
     finally:
         release.set()
         await runtime.shutdown()

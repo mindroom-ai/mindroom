@@ -9,7 +9,6 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from agno.exceptions import AgentRunException
@@ -40,7 +39,7 @@ from mindroom.tool_jobs.agno_compat_functions import (
     isolated_function_call,
     uses_sdk_async_dispatch,
 )
-from mindroom.tool_jobs.approvals import STOPPED_BEFORE_APPROVED_CALL, ask_tool_call_approval
+from mindroom.tool_jobs.approvals import ask_tool_call_approval
 from mindroom.tool_jobs.authorization import function_authority
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
@@ -335,10 +334,9 @@ async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> Too
 
 @dataclass(frozen=True)
 class _JobApproval:
-    """The approval a gated call asks for as the first phase of its job, and the recorded Stops it then checks."""
+    """The approval a gated call asks for as the first phase of its job."""
 
     ask: Callable[[], Awaitable[tuple[bool, str | None]]]
-    stopped: Callable[[], Awaitable[bool]]
 
 
 async def _run_operation(
@@ -355,9 +353,6 @@ async def _run_operation(
             if not approved:
                 return BackgroundOutcome("denied", reason or "The requester did not approve this call.")
             job_checkpoint()
-            # A Stop recorded while the call waited for its approval wins over that approval.
-            if await approval.stopped():
-                return BackgroundOutcome("cancelled", STOPPED_BEFORE_APPROVED_CALL)
         with (
             tool_execution_identity(owner),
             authorized_tool_call(owner, owned_call),
@@ -478,7 +473,6 @@ def _job_approval(
             config=context.current_config,
             runtime_paths=context.runtime_paths,
         ),
-        stopped=partial(runtime.stop_recorded, job_id),
     )
 
 
@@ -580,22 +574,18 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         claim = None
         retained = False
         try:
-            try:
-                _, claim = await runtime.start(
-                    job_id,
-                    tool_name=call.function.name,
-                    depth=depth,
-                    toolkit_name=call.function.owning_toolkit,
-                    source_event_id=context.membership_turn_id,
-                    source_kind=context.source_kind,
-                    adapter=adapter,
-                    owner=owner,
-                    operation=lambda: _run_operation(original, owned_call, owner, baseline, reference, approval),
-                    reattach=True,
-                )
-            finally:
-                # A Stop or deletion that committed during admission found no job to cancel, so this call stops it.
-                await run_coroutine_until_complete(runtime.stop_unless_admitted(job_id))
+            _, claim = await runtime.start(
+                job_id,
+                tool_name=call.function.name,
+                depth=depth,
+                toolkit_name=call.function.owning_toolkit,
+                source_event_id=context.membership_turn_id,
+                source_kind=context.source_kind,
+                adapter=adapter,
+                owner=owner,
+                operation=lambda: _run_operation(original, owned_call, owner, baseline, reference, approval),
+                reattach=True,
+            )
             with Timer() as timer:
                 waited = await runtime.wait(
                     job_id,

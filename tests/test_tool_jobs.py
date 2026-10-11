@@ -202,7 +202,7 @@ async def test_saved_outcome_keeps_its_payload_only_in_the_journal(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["acknowledge", "stop", "cancel"])
+@pytest.mark.parametrize("action", ["acknowledge", "cancel"])
 async def test_settled_payload_is_written_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str) -> None:
     """Acknowledgement, Stop, cancelling settled work, and restart recovery rewrite only job metadata."""
     runtime = await tool_job_runtime(tmp_path)
@@ -218,9 +218,6 @@ async def test_settled_payload_is_written_once(tmp_path: Path, monkeypatch: pyte
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved", result_payload=payload)
 
-    async def every_job(_job: runtime_module.BackgroundJob) -> bool:
-        return True
-
     try:
         await start_job(runtime, "once", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation)
         waited = await runtime.wait("once", owner=job_owner(), depth=0)
@@ -228,10 +225,7 @@ async def test_settled_payload_is_written_once(tmp_path: Path, monkeypatch: pyte
             await runtime.acknowledge_wait("once", waited.claim)
         else:
             await runtime.release_wait("once", waited.claim)
-            if action == "stop":
-                await runtime.stop_jobs(receipt_order=1, matches=every_job)
-            else:
-                await runtime.cancel("once", owner=job_owner(), depth=0)
+            await runtime.cancel("once", owner=job_owner(), depth=0)
     finally:
         await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
@@ -239,7 +233,6 @@ async def test_settled_payload_is_written_once(tmp_path: Path, monkeypatch: pyte
         await restored.recover()
         job = await lookup(restored, "once", owner=job_owner(), depth=0)
         assert job.consumed is (action == "acknowledge")
-        assert (job.user_stop_receipt_order is not None) is (action == "stop")
         assert (await read_result_payload(restored, job)).value == "saved"
     finally:
         await restored.shutdown()
@@ -1791,13 +1784,11 @@ async def test_repeated_waiter_cancellation_still_releases_its_claim(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["stop", "revoke"])
 async def test_one_failed_cancellation_request_does_not_block_the_others(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    action: str,
 ) -> None:
-    """Stop and revocation still reach later jobs when one job's save fails, and report which job failed."""
+    """Revocation still reaches later jobs when one job's save fails, and reports which job failed."""
     revoked = False
     runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: not revoked)
     failing = False
@@ -1810,9 +1801,6 @@ async def test_one_failed_cancellation_request_does_not_block_the_others(
     async def operation() -> BackgroundOutcome:
         await asyncio.Event().wait()
         raise AssertionError
-
-    async def every_job(_job: runtime_module.BackgroundJob) -> bool:
-        return True
 
     intercept_job_saves(monkeypatch, before=failing_writer)
     try:
@@ -1828,12 +1816,8 @@ async def test_one_failed_cancellation_request_does_not_block_the_others(
             )
         failing = revoked = True
         with capture_logs() as logs:
-            if action == "stop":
-                with pytest.raises(ExceptionGroup, match="Tool job Stop failed"):
-                    await runtime.stop_jobs(receipt_order=1, matches=every_job)
-            else:
-                # Revocation only logs; its next pass retries the failed job.
-                await runtime.cancel_revoked(denied=lambda _job: revoked)
+            # Revocation only logs; its next pass retries the failed job.
+            await runtime.cancel_revoked(denied=lambda _job: revoked)
         failing = revoked = False
         assert [entry["job_id"] for entry in logs if entry["log_level"] == "error"] == ["first"]
         settled = await runtime.wait("second", owner=job_owner(), depth=0)
@@ -1847,7 +1831,7 @@ async def test_one_failed_cancellation_request_does_not_block_the_others(
 
 @pytest.mark.asyncio
 async def test_failed_detached_drain_reports_its_job(tmp_path: Path) -> None:
-    """A drain Stop leaves running reports its failure with the job it could not settle, which stays requested."""
+    """A drain a cancel leaves running reports its failure with the job it could not settle, which stays requested."""
     release = asyncio.Event()
     blocked = True
 
@@ -1861,13 +1845,10 @@ async def test_failed_detached_drain_reports_its_job(tmp_path: Path) -> None:
         await asyncio.Event().wait()
         raise AssertionError
 
-    async def every_job(_job: runtime_module.BackgroundJob) -> bool:
-        return True
-
     runtime = await tool_job_runtime(tmp_path, cancel=cleanup)
     try:
         await start_job(runtime, "held", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation)
-        await runtime.stop_jobs(receipt_order=1, matches=every_job)
+        await runtime.request_cancel("held")
         drain = runtime._entries["held"].drain
         assert drain is not None
         with capture_logs() as logs:

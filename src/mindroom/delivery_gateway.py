@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import time
 from collections import ChainMap
@@ -117,7 +116,6 @@ from mindroom.reply_scope import (
     suppress_decision,
     terminal_source_decision,
     terminal_write,
-    wait_decision,
 )
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
@@ -299,42 +297,6 @@ def _with_note(shown: Presentation, note: Segment) -> Presentation:
         # Matrix refused this content for good, so the note cannot carry it.
         return with_trailing_note(replace(shown, segments=()), note)
     return with_trailing_note(shown, note)
-
-
-async def _span_recorded_a_row(handle: SpanHandle) -> bool:
-    """Return whether the reply recorded a row since the span claimed it, which the outbox delivers despite a failed send.
-
-    A wait is shown by the reply's create, as a pause is, only while nothing was recorded; after a placeholder whose
-    send failed, the wait edits that pending create, as an answer does.
-    """
-    reply = await handle.runtime.store.replies.load(handle.reply_id)
-    return reply is not None and reply.reply_sequence > handle.span.base_sequence
-
-
-def _answer_write(handle: SpanHandle, shown: Presentation, *, waits_for: str | None, creates: bool) -> ReplyWrite:
-    """Return the row a span's answer writes: its terminal row, or its wait for the background work it leaves."""
-    if waits_for is None:
-        return terminal_write(handle, shown, state=ReplyState.COMPLETED)
-    if creates:
-        return initial_write(handle, shown, placeholder_only=False)
-    return terminal_write(handle, shown, state=ReplyState.WAITING, hold_key=waits_for)
-
-
-def _waiting_content(content: Mapping[str, Any], *, placeholder_only: bool) -> dict[str, Any]:
-    """Return a streamed answer's content as the reply shows it while it waits: open, with the waiting note below.
-
-    The note follows the answer the way a warmup notice follows progress; an answer that showed only its
-    placeholder shows the note instead.
-    """
-    note = note_segment(NoteKind.JOB_WAIT).text
-    waiting = dict(content)
-    waiting[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_STREAMING
-    body = "" if placeholder_only else str(content.get("body", "")).rstrip()
-    waiting["body"] = f"{body}\n\n{note}" if body else note
-    if "formatted_body" in content:
-        formatted = "" if placeholder_only else str(content["formatted_body"])
-        waiting["formatted_body"] = f"{formatted}<p>{html.escape(note)}</p>"
-    return waiting
 
 
 def _shown_before(reply: rl.Reply, handle: SpanHandle | None) -> Presentation:
@@ -1690,18 +1652,7 @@ class DeliveryGateway:
             owed = reply.owed_write
             span = await self.deps.outbox.replies.span(owed.span_id)
             assert span is not None, "an owed write names a span of its reply"
-            shown = _shown_before(reply, None)
-            if owed.note is None:
-                # The reply's answer without the note it waited with; a wait with no answer leaves nothing to show.
-                shown = with_trailing_note(shown, None)
-                if render_body(shown)[0] == shown.placeholder:
-                    await self.deps.outbox.replies.update(
-                        reply_id,
-                        lambda latest, owed=owed: rl.vacated(latest, owed, now_ns=time.time_ns()),
-                    )
-                    continue
-            else:
-                shown = _with_note(shown, note_segment(owed.note, owed.text))
+            shown = _with_note(_shown_before(reply, None), note_segment(owed.note, owed.text))
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
             rendered = render(shown, state=reply.state)
@@ -1915,15 +1866,11 @@ class DeliveryGateway:
                     source_event_id=request.identity.response_envelope.source_event_id,
                 ),
             )
-        edited_event_id = request.existing_event_id
-        waits_for = handle.waits_for
-        shown = handle.presentation(
-            display_text,
-            tuple(draft.tool_trace or ()),
-            trailing_note=None if waits_for is None else note_segment(NoteKind.JOB_WAIT),
+        reply_write = terminal_write(
+            handle,
+            handle.presentation(display_text, tuple(draft.tool_trace or ())),
+            state=ReplyState.COMPLETED,
         )
-        creates = waits_for is not None and edited_event_id is None and not await _span_recorded_a_row(handle)
-        reply_write = _answer_write(handle, shown, waits_for=waits_for, creates=creates)
         # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
         shown_text, _shown_trace = _reply_body(display_text, draft.tool_trace, reply_write.shown)
         delivery_result: dict[str, object] | None = None
@@ -1932,18 +1879,15 @@ class DeliveryGateway:
             # Recovery after a restart registers an approved run's question from its frozen answer.
             delivery_result = None if metadata is None else {"interactive": metadata.to_metadata()}
 
-        if waits_for is not None:
-            # The reply stays open for the background work it waits for.
-            delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_STREAMING
-        elif edited_event_id is not None:
+        edited_event_id = request.existing_event_id
+        if edited_event_id is not None:
             # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
             delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
         try:
             event_id = await self._send_reply_write(
                 reply_write,
                 request.target,
-                # The waiting note follows the answer.
-                text=display_text if waits_for is None else render_body(shown)[0],
+                text=display_text,
                 tool_trace=draft.tool_trace,
                 extra_content=delivery_extra_content,
                 event_id=edited_event_id,
@@ -1952,13 +1896,6 @@ class DeliveryGateway:
             )
         except ReplyWriteRefusedError as refused:
             return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
-        if creates:
-            assert waits_for is not None
-            # The create's row stays recorded even when its send failed, so the reply waits either way.
-            waited = await handle.runtime.decide(handle, wait_decision(handle, shown, hold_key=waits_for))
-            if not waited.transition.applied:
-                refused = ReplyWriteRefusedError(waited.transition)
-                return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
         if event_id is None:
             if handle.exited:
                 return _owed_answer_outcome()
@@ -2318,63 +2255,22 @@ class DeliveryGateway:
             status = state_content.get(constants.STREAM_STATUS_KEY)
             return status == constants.STREAM_STATUS_COMPLETED and progress.placeholder_only
 
-        def terminal(
-            state_content: dict[str, Any],
-            progress: ProgressState,
-            *,
-            waits_for: str | None = None,
-        ) -> ReplyWrite:
+        def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite:
             status = state_content.get(constants.STREAM_STATUS_KEY)
-            state = ReplyState.WAITING if waits_for is not None else _reply_state_for_stream_status(status)
-            note = None if waits_for is None else note_segment(NoteKind.JOB_WAIT)
+            state = _reply_state_for_stream_status(status)
             if progress.untransformed_text is None:
-                return terminal_write(
-                    handle,
-                    with_trailing_note(shown(progress), note),
-                    state=state,
-                    hold_key=waits_for,
-                )
+                return terminal_write(handle, shown(progress), state=state)
             # The final transform reshaped the whole reply: that is what it
             # shows from now on, and the span's own answer stays canonical.
             whole = Presentation(
                 segments=(
                     Segment(kind="answer", text=progress.text, span_id=handle.span_id, tool_trace=progress.tool_trace),
                 ),
-                trailing_note=note,
                 placeholder=handle.base.placeholder,
                 show_tool_calls=handle.base.show_tool_calls,
             )
-            canonical = with_trailing_note(shown(replace(progress, text=progress.untransformed_text)), note)
-            return terminal_write(handle, canonical, state=state, frozen_display=whole, hold_key=waits_for)
-
-        def waits_for(state_content: dict[str, Any]) -> str | None:
-            # Only an answer waits; a Stop's, an error's, or an interruption's end ends the reply.
-            completed = state_content.get(constants.STREAM_STATUS_KEY) == constants.STREAM_STATUS_COMPLETED
-            return handle.waits_for if completed else None
-
-        async def wait_shown_by_create(
-            content: dict[str, Any],
-            progress: ProgressState,
-            hold: str,
-            *,
-            retry_sync_recovery: bool,
-        ) -> DeliveredMatrixEvent | None:
-            # The wait is the reply's first visible message, so its create shows it, as a pause's does.
-            waiting = with_trailing_note(shown(progress), note_segment(NoteKind.JOB_WAIT))
-            delivered = await deliver(
-                lambda: initial_write(handle, waiting, placeholder_only=False),
-                content=_waiting_content(content, placeholder_only=progress.placeholder_only),
-                new_text=None,
-                retry_sync_recovery=retry_sync_recovery,
-            )
-            if delivered is None and not await _span_recorded_a_row(handle):
-                return None
-            # The create's row stays recorded even when its send failed, so the reply waits either way.
-            waited = await handle.runtime.decide(handle, wait_decision(handle, waiting, hold_key=hold))
-            if not waited.transition.applied and waited.transition.outcome is ReplyOutcome.RECOMPUTE:
-                # A Stop committed while the wait was sent; the span's Stop path writes the reply from here.
-                raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
-            return delivered
+            canonical = shown(replace(progress, text=progress.untransformed_text))
+            return terminal_write(handle, canonical, state=state, frozen_display=whole)
 
         async def terminal_send(
             client: nio.AsyncClient,
@@ -2387,16 +2283,6 @@ class DeliveryGateway:
         ) -> DeliveredMatrixEvent | None:
             # A create sends its content as rendered; only an edit names its new text.
             del client, room_id, display_text
-            if (hold := waits_for(content)) is not None:
-                if not await _span_recorded_a_row(handle):
-                    return await wait_shown_by_create(content, progress, hold, retry_sync_recovery=retry_sync_recovery)
-                # A placeholder whose send failed is still the reply's create, so the wait edits it.
-                return await deliver(
-                    lambda: terminal(content, progress, waits_for=hold),
-                    content=_waiting_content(content, placeholder_only=progress.placeholder_only),
-                    new_text=None,
-                    retry_sync_recovery=retry_sync_recovery,
-                )
             if answered_nothing(content, progress):
                 return None
             return await deliver(
@@ -2417,14 +2303,6 @@ class DeliveryGateway:
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             del client, room_id
-            if (hold := waits_for(content)) is not None:
-                waiting = _waiting_content(content, placeholder_only=progress.placeholder_only)
-                return await deliver(
-                    lambda: terminal(content, progress, waits_for=hold),
-                    content=waiting,
-                    new_text=str(waiting["body"]),
-                    retry_sync_recovery=retry_sync_recovery,
-                )
             if answered_nothing(content, progress):
                 return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
             return await deliver(

@@ -79,7 +79,6 @@ class ProcessRuntime(ToolJobRuntime):
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
         denied: Callable[[BackgroundJob], bool] | None = None,
-        stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__(
             journal.tool_jobs(uuid4().hex),
@@ -87,7 +86,6 @@ class ProcessRuntime(ToolJobRuntime):
             authorize_execution=authorize_execution,
             cancel=cancel,
             denied=denied,
-            stopped=stopped,
         )
         self._journal = journal
 
@@ -110,7 +108,6 @@ async def tool_job_runtime(
     authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
     denied: Callable[[BackgroundJob], bool] | None = None,
-    stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
 ) -> ProcessRuntime:
     """Start one process's runtime whose grants allow every job and call and whose adapters need no extra cleanup.
 
@@ -122,7 +119,6 @@ async def tool_job_runtime(
         authorize_execution=authorize_execution,
         cancel=cancel,
         denied=denied,
-        stopped=stopped,
     )
     await runtime._store.take_ownership()
     return runtime
@@ -217,26 +213,20 @@ async def lookup(runtime: ToolJobRuntime, job_id: str, *, owner: ToolExecutionId
 
 
 def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
-    """Ready outcomes a holding reply would still deliver: unconsumed, not stopped, unclaimed, and authorized."""
+    """Ended outcomes a reply could still collect: unconsumed, unclaimed, and authorized."""
     return [
         entry.job
         for entry in runtime._entries.values()
         if entry.job.status in TERMINAL_STATUSES
         and not entry.job.consumed
-        and entry.job.user_stop_receipt_order is None
         and entry.claim is None
         and runtime._authorize(entry.job)
     ]
 
 
 def pending_outcome(runtime: ToolJobRuntime, job_id: str) -> BackgroundJob | None:
-    """The pending outcome of one job, if a holding reply would still deliver it."""
+    """The pending outcome of one job, if a reply could still collect it."""
     return next((job for job in pending_outcomes(runtime) if job.job_id == job_id), None)
-
-
-def user_stopped(runtime: ToolJobRuntime, job_id: str) -> bool:
-    """Whether an explicit Stop marked this job; consuming its outcome does not count."""
-    return runtime._entries[job_id].job.user_stop_receipt_order is not None
 
 
 def assembled_function(entrypoint: Callable[..., object]) -> Function:
@@ -417,10 +407,6 @@ class SpanRecorder:
         """Record what a call returned."""
         assert call_id == "record-1"
         self.records.append(("finished", tool_name, dict(args), result))
-
-    async def admits(self) -> bool:
-        """Let tools start until a Stop committed."""
-        return not self.stopped
 
 
 def job_coordinator(tmp_path: Path, runtime: ToolJobRuntime, bot: MagicMock) -> ToolJobRuntimeCoordinator:

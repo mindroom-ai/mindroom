@@ -26,7 +26,7 @@ from mindroom.event_journal.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approval_continuations, approvals, membership_hooks, replies
+from . import approval_continuations, approvals, membership_hooks, replies, reply_messages
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -666,7 +666,7 @@ def _advance_membership_epoch(
         room_id=room_id,
         reason="Approval transport left the room.",
     )
-    replies.depart_room(transaction, principal_id, room_id, now_ns=time.time_ns())
+    reply_messages.depart_room(transaction, principal_id, room_id, now_ns=time.time_ns())
     transaction.execute(
         """
         UPDATE matrix_delivery_outbox AS delivery SET retired = 1
