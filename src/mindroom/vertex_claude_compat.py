@@ -496,6 +496,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         compress_tool_results: bool = False,
     ) -> AsyncIterator[ModelResponse]:
         """Fit every async streaming request, including tool-loop requests."""
+        # A new attempt starts without an earlier attempt's start usage, even if it is stopped while fitting.
+        self.take_unfinished_stream_usage()
         fitted_messages = await self._fit_request_messages(
             messages,
             tools=tools,

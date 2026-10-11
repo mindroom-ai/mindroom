@@ -1037,7 +1037,7 @@ visibility = ["mindroom.agent_storage"]
 
 [[modules]]
 path = "mindroom.agno_compat_run_messages"
-depends_on = ["mindroom.usage_storage"]
+depends_on = ["mindroom.agno_compat_claude", "mindroom.usage_storage"]
 visibility = ["mindroom.agent_storage"]
 
 [[modules]]
@@ -7649,7 +7649,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.agno_compat_claude"
 depends_on = ["mindroom.claude_wire_blocks", "mindroom.model_defaults"]
-visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache"]
+visibility = ["mindroom.agno_compat_run_messages", "mindroom.claude_compat", "mindroom.claude_prompt_cache"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_claude"]
@@ -7969,16 +7969,6 @@ visibility = ["mindroom.response_runner"]
 path = "mindroom.routing_judgment"
 depends_on = ["mindroom.agent_descriptions", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
 visibility = ["mindroom.routing"]
-
-# The bundled research_check plugin is loaded from its directory by the plugin loader, never imported.
-[[modules]]
-path = "mindroom.research_check.hooks"
-depends_on = ["mindroom.agents", "mindroom.attachments", "mindroom.config.judgment", "mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.redaction", "mindroom.tool_system.events"]
-visibility = []
-
-[[interfaces]]
-from = ["mindroom.research_check.hooks"]
-expose = ["check_research"]
 
 [[modules]]
 path = "mindroom.tools.moviepy_video_tools"

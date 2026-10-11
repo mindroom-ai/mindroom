@@ -297,7 +297,6 @@ class ResponseResult:
     delivery_kind: str
     response_kind: str
     envelope: MessageEnvelope
-    tool_trace: tuple[ToolTraceEntry, ...] = ()
 
 
 @dataclass(slots=True, kw_only=True)

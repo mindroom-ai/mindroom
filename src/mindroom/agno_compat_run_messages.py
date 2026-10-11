@@ -1,4 +1,4 @@
-"""Preserve Agno's current request messages when a run is interrupted."""
+"""Preserve the usage and current request messages of Agno model requests."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from agno.run.team import TeamRunOutput
 from agno.team import _default_tools as team_tools
 from agno.team import _run as team_run
 
+from mindroom.agno_compat_claude import ClaudeProviderSDKCompat
 from mindroom.usage_storage import has_token_usage
 
 if TYPE_CHECKING:
@@ -69,11 +70,10 @@ def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
     if request is None:
         return
     settled = request.assistant_message.model_copy()
+    received = request.stream_data.response_metrics
+    received = _claude_start_usage(request, received) or received
     # Reuse provider accounting, including counters retained from failed attempts.
-    request.model._populate_assistant_message_from_stream_data(
-        settled,
-        MessageData(response_metrics=request.stream_data.response_metrics),
-    )
+    request.model._populate_assistant_message_from_stream_data(settled, MessageData(response_metrics=received))
     # Late finalization of the abandoned stream must not count this request again.
     request.assistant_message.metrics = MessageMetrics()
     if not has_token_usage(settled.metrics.to_dict()):
@@ -85,6 +85,24 @@ def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
         request.model.model_type,
         run_response.metrics,
     )
+
+
+# Claude start usage: see the AGNO_COMPAT marker for Claude stream usage in agno_compat_claude.py.
+def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None) -> MessageMetrics | None:
+    """Return an interrupted Claude request's start usage when it received no other usage."""
+    if not isinstance(request.model, ClaudeProviderSDKCompat):
+        return None
+    if received is not None and has_token_usage(received.to_dict()):
+        return None
+    # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
+    return request.model.take_unfinished_stream_usage()
+
+
+def _settle_claude_start_usage(request: _ModelRequest, error: BaseException) -> None:
+    """Give a stopped or closed Claude request its start usage before Agno counts it; a failed request forgets it."""
+    start = _claude_start_usage(request, request.assistant_message.metrics)
+    if start is not None and not isinstance(error, Exception):
+        request.assistant_message.metrics = start
 
 
 # AGNO_COMPAT: Terminal cleanup retains stale checkpoint or continuation messages.
@@ -268,6 +286,34 @@ def _with_request_model[T](original: Callable[..., T]) -> Callable[..., T]:
     return populate
 
 
+# AGNO_COMPAT: A tool loop called without a run reports only its last request's usage.
+# Reason: Model.aresponse replaces ModelResponse.response_usage with each request's usage and
+# adds it to metrics only when a run is passed. Agno Learning extraction passes no run and meters
+# the returned response once, so each request before the last in its tool loop goes uncounted.
+# Upstream issue: Tracking gap; no issue identified.
+# Upstream PR: None identified.
+# Remove when: Model.aresponse without a run returns the usage of every request in its tool loop,
+# or Agno Learning meters each extraction request.
+# Coverage: tests/test_agno_compat_run_messages.py::test_tool_loop_without_a_run_reports_every_request;
+# tests/test_agno_compat_run_messages.py::test_default_learning_counts_every_extraction_request.
+def _with_loop_usage(original: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
+    @wraps(original)
+    async def process(
+        model: Model,
+        *args: object,
+        model_response: ModelResponse,
+        run_response: RunOutput | TeamRunOutput | None = None,
+        **kwargs: object,
+    ) -> None:
+        previous = model_response.response_usage if run_response is None else None
+        await original(model, *args, model_response=model_response, run_response=run_response, **kwargs)
+        current = model_response.response_usage
+        if previous is not None and current is not None and current is not previous:
+            model_response.response_usage = previous + current
+
+    return process
+
+
 def _begin_request(request: _ModelRequest) -> None:
     _record_request_model(request.model, request.assistant_message)
     if request.run_response is not None:
@@ -314,8 +360,9 @@ def _with_metered_messages(
                 run_response=run_response,
                 compress_tool_results=compress_tool_results,
             )
-        except BaseException:
+        except BaseException as error:
             if _finish_request(request):
+                _settle_claude_start_usage(request, error)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
@@ -353,8 +400,9 @@ def _with_metered_messages_async(
                 compress_tool_results=compress_tool_results,
             ):
                 yield response
-        except BaseException:
+        except BaseException as error:
             if _finish_request(request):
+                _settle_claude_start_usage(request, error)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
@@ -384,6 +432,7 @@ def install_patch() -> None:
         team_run._acleanup_and_store = cast("Any", _with_member_runs(team_run._acleanup_and_store))
         Model.process_response_stream = cast("Any", _with_metered_messages(Model.process_response_stream))
         Model.aprocess_response_stream = cast("Any", _with_metered_messages_async(Model.aprocess_response_stream))
+        Model._aprocess_model_response = cast("Any", _with_loop_usage(Model._aprocess_model_response))
         Model._populate_assistant_message = cast("Any", _with_request_model(Model._populate_assistant_message))
         Model._populate_assistant_message_from_stream_data = cast(
             "Any",
