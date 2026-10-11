@@ -1037,7 +1037,7 @@ visibility = ["mindroom.agent_storage"]
 
 [[modules]]
 path = "mindroom.agno_compat_run_messages"
-depends_on = ["mindroom.usage_storage"]
+depends_on = ["mindroom.agno_compat_claude", "mindroom.usage_storage"]
 visibility = ["mindroom.agent_storage"]
 
 [[modules]]
@@ -7648,7 +7648,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.agno_compat_claude"
 depends_on = ["mindroom.claude_wire_blocks", "mindroom.model_defaults"]
-visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache"]
+visibility = ["mindroom.agno_compat_run_messages", "mindroom.claude_compat", "mindroom.claude_prompt_cache"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_claude"]

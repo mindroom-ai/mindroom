@@ -14,6 +14,7 @@ from agno.models.base import MessageData, Model
 from agno.models.response import ModelResponse
 from agno.team import _run as team_run
 
+from mindroom.agno_compat_claude import ClaudeProviderSDKCompat
 from mindroom.usage_storage import has_token_usage
 
 if TYPE_CHECKING:
@@ -62,11 +63,10 @@ def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
     if request is None:
         return
     settled = request.assistant_message.model_copy()
+    received = request.stream_data.response_metrics
+    received = _claude_start_usage(request, received) or received
     # Reuse provider accounting, including counters retained from failed attempts.
-    request.model._populate_assistant_message_from_stream_data(
-        settled,
-        MessageData(response_metrics=request.stream_data.response_metrics),
-    )
+    request.model._populate_assistant_message_from_stream_data(settled, MessageData(response_metrics=received))
     # Late finalization of the abandoned stream must not count this request again.
     request.assistant_message.metrics = MessageMetrics()
     if not has_token_usage(settled.metrics.to_dict()):
@@ -78,6 +78,24 @@ def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
         request.model.model_type,
         run_response.metrics,
     )
+
+
+# Claude start usage: see the AGNO_COMPAT marker for Claude stream usage in agno_compat_claude.py.
+def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None) -> MessageMetrics | None:
+    """Return an interrupted Claude request's start usage when it received no other usage."""
+    if not isinstance(request.model, ClaudeProviderSDKCompat):
+        return None
+    if received is not None and has_token_usage(received.to_dict()):
+        return None
+    # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
+    return request.model.take_unfinished_stream_usage()
+
+
+def _settle_claude_start_usage(request: _ModelRequest, error: BaseException) -> None:
+    """Give a stopped or closed Claude request its start usage before Agno counts it; a failed request forgets it."""
+    start = _claude_start_usage(request, request.assistant_message.metrics)
+    if start is not None and not isinstance(error, Exception):
+        request.assistant_message.metrics = start
 
 
 # AGNO_COMPAT: Terminal cleanup retains stale checkpoint or continuation messages.
@@ -203,8 +221,9 @@ def _with_metered_messages(
                 run_response=run_response,
                 compress_tool_results=compress_tool_results,
             )
-        except BaseException:
+        except BaseException as error:
             if _finish_request(request):
+                _settle_claude_start_usage(request, error)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
@@ -242,8 +261,9 @@ def _with_metered_messages_async(
                 compress_tool_results=compress_tool_results,
             ):
                 yield response
-        except BaseException:
+        except BaseException as error:
             if _finish_request(request):
+                _settle_claude_start_usage(request, error)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)

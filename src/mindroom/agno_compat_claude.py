@@ -13,7 +13,12 @@ from mindroom.claude_wire_blocks import (
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
+    from agno.metrics import MessageMetrics
+    from agno.models.message import Message
     from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutput
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
 
@@ -39,10 +44,95 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # Coverage: tests/test_compaction_summary_provider_compat.py::test_summary_uses_stop_reason_and_raw_body_precedence.
 
 
+# AGNO_COMPAT: Claude streams report usage only when they complete.
+# Reason: Agno 3.0.9 reads stream usage only from the final message_stop snapshot, although Anthropic
+# reports input and cache usage in message_start. A reply stopped before message_stop records no usage
+# for that request, though Anthropic bills the input and cache tokens it reported.
+# Upstream issue: Tracking gap; no issue tracks stopped streams. Agno moved Claude stream usage to
+# message_stop to fix double counting in https://github.com/agno-agi/agno/issues/6537, so a fix must still
+# count completed streams once.
+# Upstream PR: None identified.
+# Remove when: The pinned Agno release keeps message_start usage for a stream that ends before
+# message_stop, while counting completed streams once.
+# Coverage: tests/test_claude_stream_usage.py::test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start;
+# tests/test_claude_stream_usage.py::test_hard_stopped_claude_reply_keeps_the_usage_reported_at_stream_start;
+# tests/test_claude_stream_usage.py::test_claude_reply_closed_from_another_task_keeps_its_start_usage;
+# tests/test_claude_stream_usage.py::test_completed_claude_stream_counts_its_usage_once;
+# tests/test_claude_stream_usage.py::test_claude_stream_that_fails_after_starting_counts_nothing;
+# tests/test_claude_stream_usage.py::test_stalled_claude_stream_counts_nothing;
+# tests/test_vertex_claude_context_guard.py::test_stream_attempt_forgets_earlier_start_usage_before_fitting.
+
+
 class ClaudeProviderSDKCompat:
-    """Sanitize Agno-built requests and preserve terminal metadata."""
+    """Sanitize Agno-built requests, preserve terminal metadata, and keep stream start usage for settlement."""
 
     id: str
+    # Usage from message_start of the stream this model is reading, until it reports its final usage.
+    # A turn's model normally streams one request at a time, and settlement of an interrupted request may run in
+    # another task. Agno can run two delegations to one team member in parallel, which share this value.
+    _stream_start_usage: MessageMetrics | None = None
+
+    def take_unfinished_stream_usage(self) -> MessageMetrics | None:
+        """Return and forget the start usage of a stream that never reported its final usage."""
+        start, self._stream_start_usage = self._stream_start_usage, None
+        return start
+
+    def invoke_stream(
+        self,
+        messages: list[Message],
+        assistant_message: Message,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
+        compress_tool_results: bool = False,
+    ) -> Iterator[ModelResponse]:
+        """Stream one attempt, keeping its start usage only while it runs or after it stops."""
+        # A new attempt starts without any earlier attempt's start usage.
+        self._stream_start_usage = None
+        try:
+            yield from super().invoke_stream(  # ty: ignore[unresolved-attribute]
+                messages,
+                assistant_message,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+                run_response=run_response,
+                compress_tool_results=compress_tool_results,
+            )
+        except Exception:
+            # A failed attempt is retried or reported as an error, as before; only a stopped stream keeps its start.
+            self._stream_start_usage = None
+            raise
+
+    async def ainvoke_stream(
+        self,
+        messages: list[Message],
+        assistant_message: Message,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
+        compress_tool_results: bool = False,
+    ) -> AsyncIterator[ModelResponse]:
+        """Stream one attempt asynchronously, keeping its start usage only while it runs or after it stops."""
+        # A new attempt starts without any earlier attempt's start usage.
+        self._stream_start_usage = None
+        try:
+            async for chunk in super().ainvoke_stream(  # ty: ignore[unresolved-attribute]
+                messages,
+                assistant_message,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+                run_response=run_response,
+                compress_tool_results=compress_tool_results,
+            ):
+                yield chunk
+        except Exception:
+            # A failed attempt is retried or reported as an error, as before; only a stopped stream keeps its start.
+            self._stream_start_usage = None
+            raise
 
     def get_request_params(
         self,
@@ -76,6 +166,26 @@ class ClaudeProviderSDKCompat:
             **kwargs,
         )
         parsed.provider_data = {**(parsed.provider_data or {}), "stop_reason": response.stop_reason}
+        return parsed
+
+    def _parse_provider_response_delta(
+        self,
+        response: object,
+        response_format: dict[str, Any] | type[Any] | None = None,
+    ) -> ModelResponse:
+        # Only Claude models parse these events, so the provider SDK is already loaded.
+        from anthropic.types import RawMessageStartEvent  # noqa: PLC0415
+        from anthropic.types.beta import BetaRawMessageStartEvent  # noqa: PLC0415
+
+        parsed = super()._parse_provider_response_delta(  # ty: ignore[unresolved-attribute]
+            response,
+            response_format=response_format,
+        )
+        if isinstance(response, (RawMessageStartEvent, BetaRawMessageStartEvent)):
+            # Keep it aside: settlement adds it only if the stream ends before its final usage.
+            self._stream_start_usage = self._get_metrics(response.message.usage)  # ty: ignore[unresolved-attribute]
+        elif parsed.response_usage is not None:
+            self._stream_start_usage = None
         return parsed
 
 
