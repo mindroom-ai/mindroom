@@ -68,8 +68,10 @@ from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceBridge,
     LiveVoiceAgentOptions,
     LiveVoiceUsage,
+    RealtimeCallUsage,
     RealtimeVoiceBridge,
     VoiceAgentOptions,
+    _RealtimeResponseUsage,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.model_loading import get_model_instance
@@ -2511,6 +2513,12 @@ async def test_realtime_call_instructions_include_validated_origin_brief(
     assert build_context.call_args.kwargs["user_id"] == "@alice:example.org"
     assert build_context.call_args.kwargs["agent_name"] == "helper"
     assert client.room_get_state.await_count == 1
+    record_usage = bridge.agent_options.record_usage
+    assert record_usage is not None
+    response = _RealtimeResponseUsage(1_700_000_010, input_tokens=900, output_tokens=300)
+    await record_usage(RealtimeCallUsage("call-1", "gpt-realtime-2.1", 1_700_000_000, (response,)))
+    report = collect_admin_usage(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
+    assert [(row.user_id, row.totals.total_tokens) for row in report.user_breakdown] == [("@alice:example.org", 1200)]
     await manager.shutdown()
 
 

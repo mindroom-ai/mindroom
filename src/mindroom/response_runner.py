@@ -21,6 +21,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
+from mindroom.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
@@ -4853,6 +4854,8 @@ class ResponseRunner:
             )
 
         async def persist_interrupted_team_turn() -> None:
+            # Agno saves the stopped team run in the background; this turn's record must land after it.
+            await drain_cancelled_team_save(team_turn_recorder.run_id or response_run_id)
             await self._persist_interrupted_recorder_off_loop(
                 recorder=team_turn_recorder,
                 session_scope=session_scope,

@@ -25,6 +25,7 @@ from mindroom.usage_storage import (
     SYSTEM_USAGE_RELATIVE_PATH,
     SYSTEM_USAGE_SESSION_TABLE,
     TOKEN_FIELDS,
+    USAGE_KINDS,
     quote_identifier,
 )
 
@@ -610,20 +611,7 @@ def _extract_run(
         raise TypeError
     run = cast("dict[str, object]", raw_run)
     kind = run.get("kind", "run")
-    if kind not in {
-        "run",
-        "compaction_summary",
-        "memory_auto_flush",
-        "dynamic_workflow",
-        "live_voice",
-        "skill_learning",
-        "routing",
-        "room_topic",
-        "schedule_parse",
-        "thread_summary",
-        "voice_normalization",
-        "voice_transcription",
-    }:
+    if kind not in USAGE_KINDS:
         raise ValueError
     parent_run_id = run.get("parent_run_id")
     if parent_run_id is not None:

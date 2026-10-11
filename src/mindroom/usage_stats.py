@@ -1205,8 +1205,7 @@ def _detailed_model_totals(
     try:
         for entry in model_metrics:
             model_totals = _metrics_totals(entry.metrics)
-            if model_totals is None and require_usable_entries:
-                return None
+            # Agno also records a model whose requests reported no usage, as an entry without counters.
             if model_totals is None:
                 continue
             if require_usable_entries and (entry.model_provider is None or entry.model is None):
