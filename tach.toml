@@ -509,7 +509,6 @@ visibility = [
     "mindroom.reply_scope",
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
-    "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
@@ -2826,7 +2825,6 @@ depends_on = [
     "mindroom.scheduling.executor",
     "mindroom.thread_export.workspace_sync",
     "mindroom.approval.tool_approval",
-    "mindroom.tool_jobs.disabled",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.workers.backends.legacy_state_root_mounts",
@@ -2841,7 +2839,6 @@ depends_on = [
     "mindroom.agent_modes",
     "mindroom.agno_compat_session_persistence",
     "mindroom.tool_jobs.conversation",
-    "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.reply_lifecycle",
@@ -4335,7 +4332,6 @@ depends_on = [
     "mindroom.timestamp_formatting",
     "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.conversation",
-    "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
@@ -7897,7 +7893,6 @@ visibility = [
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.conversation",
-    "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.execution_authority",
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.approvals",
@@ -7908,7 +7903,6 @@ path = "mindroom.tool_jobs.instances"
 depends_on = []
 visibility = [
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
 ]
@@ -7941,7 +7935,6 @@ depends_on = [
     "mindroom.delegation.storage",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.conversation",
-    "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.instances",
     "mindroom.tool_jobs.provenance",
     "mindroom.tool_jobs.runtime",
@@ -8734,20 +8727,4 @@ visibility = [
     "mindroom.orchestration.config_lifecycle",
     "mindroom.teams",
     "mindroom.tool_jobs.agno_execution",
-    "mindroom.tool_jobs.disabled",
-]
-
-[[modules]]
-path = "mindroom.tool_jobs.disabled"
-depends_on = [
-    "mindroom.event_journal",
-    "mindroom.tool_jobs.instances",
-    "mindroom.tool_jobs.runtime",
-    "mindroom.tool_jobs.settings",
-]
-visibility = [
-    "mindroom.bot",
-    "mindroom.orchestration.tool_job_runtime",
-    "mindroom.orchestrator",
-    "mindroom.response_runner",
 ]

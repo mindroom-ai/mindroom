@@ -103,7 +103,6 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J20 | Removed/superseded | No reply an earlier release left paused for approval is adopted: the [continuation upgrade][legacy-response-attempts] cancels its approval, and the reply gets no records. |
 | J21 | Current behavior | [`handled_turns.py`][handled] ignores the Stop, edit order, and correlation id keys earlier releases wrote on turn records, and an edit of an AI answer older than the reply records regenerates nothing. |
 | J22 | Removed/superseded | A continuation reads its tool-call visibility from the reply it paused; the [continuation upgrade][legacy-response-attempts] cancels every continuation an earlier release left, so none reads the visibility v2026.8.85 began freezing in its context. |
-| J23 | Tiny retained default | [`approval_continuations.py`][approval-continuations] reads a continuation context without `requires_background_tool_jobs` as false, which every continuation an earlier release wrote was. |
 
 ## Agent state, history, memory, and knowledge
 
@@ -261,7 +260,6 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [invited-rooms]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/invited_rooms_store.py
 [journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/opening.py
 [journal-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_schema.py
-[approval-continuations]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/approval_continuations.py
 [knowledge-collections]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/collections.py
 [knowledge-git-source]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/git_source.py
 [knowledge-index]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/index_metadata.py

@@ -120,7 +120,6 @@ async def advance_continuation(
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
     cli_call: dict[str, object] | None = None,
     continuation_count: int | None = None,
-    requires_background_tool_jobs: bool = False,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause, pausing the resume that ran it."""
     current = await principal.approval_continuation(approval_id)
@@ -142,7 +141,6 @@ async def advance_continuation(
             delegation_storage_bindings=delegation_storage_bindings,
             cli_call=cli_call,
             continuation_count=continuation_count,
-            requires_background_tool_jobs=requires_background_tool_jobs,
         ),
         ReplyRowRequest(
             reply_id=reply.reply_id,

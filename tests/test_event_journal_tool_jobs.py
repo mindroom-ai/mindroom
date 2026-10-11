@@ -27,7 +27,7 @@ async def test_snapshot_and_payload_round_trip(journal_store: EventJournalStore)
         ("job", '{"status": "completed", "consumed": true}'),
     ]
     assert await jobs.load_payload("job") == '{"value": "full result"}'
-    assert [job.job_id for job in await journal_store.saved_tool_jobs()] == ["job"]
+    assert [job.job_id for job in await journal_store.tool_jobs("reader").load_all()] == ["job"]
     await jobs.delete("job")
     assert await jobs.load_all() == ()
     assert await jobs.load_payload("job") is None

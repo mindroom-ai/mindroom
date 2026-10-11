@@ -31,7 +31,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     ToolJobRuntime,
-    parse_saved_job,
+    _parse_saved_job,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -177,7 +177,7 @@ async def saved_jobs(storage_root: Path) -> dict[str, BackgroundJob]:
     """Read every job the journal of one storage root holds, as the next process would recover it."""
     journal = tool_job_journal(storage_root)
     try:
-        return {saved.job_id: parse_saved_job(saved) for saved in await journal.saved_tool_jobs()}
+        return {saved.job_id: _parse_saved_job(saved) for saved in await journal.tool_jobs("reader").load_all()}
     finally:
         await journal.close()
 
@@ -188,7 +188,7 @@ async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> Non
     try:
         store = journal.tool_jobs(uuid4().hex)
         await store.take_ownership()
-        if job_id in {saved.job_id for saved in await journal.saved_tool_jobs()}:
+        if job_id in {saved.job_id for saved in await journal.tool_jobs("reader").load_all()}:
             await store.save(job_id, job_json)
         else:
             await store.accept(job_id, job_json)

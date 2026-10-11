@@ -21,7 +21,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     JobClaim,
-    parse_saved_job,
+    _parse_saved_job,
 )
 from tests.tool_job_helpers import (
     cancel_settled,
@@ -221,7 +221,7 @@ class JobFuzzRunner:
         raise OSError(msg)
 
     async def _saved_jobs(self) -> dict[str, BackgroundJob]:
-        return {saved.job_id: parse_saved_job(saved) for saved in await self._saved.saved_tool_jobs()}
+        return {saved.job_id: _parse_saved_job(saved) for saved in await self._saved.tool_jobs("reader").load_all()}
 
     async def _cleanup(self, job: BackgroundJob) -> BackgroundOutcome | None:
         model = self.jobs[job.job_id]

@@ -36,7 +36,6 @@ from mindroom.tool_jobs.authorization import (
     function_authority,
 )
 from mindroom.tool_jobs.control import JobControl, job_control_context
-from mindroom.tool_jobs.disabled import ParkedWork
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
@@ -671,7 +670,7 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
 
 @pytest.mark.asyncio
 async def test_initialize_reads_the_journal_only_once_configured(tmp_path: Path) -> None:
-    """An initialize before configuration needs no journal; parking indexes it once configuration arrives."""
+    """An initialize before configuration needs no journal; a disabled instance leaves saved jobs untouched."""
     config: Config | None = None
     paths = test_runtime_paths(tmp_path)
     journal = MagicMock()
@@ -686,13 +685,10 @@ async def test_initialize_reads_the_journal_only_once_configured(tmp_path: Path)
     await coordinator.initialize()
     journal_provider.assert_not_called()
     config = Config()
-    with patch(
-        "mindroom.orchestration.tool_job_runtime.index_parked_work",
-        new=AsyncMock(return_value=ParkedWork()),
-    ) as index:
-        await coordinator.sync()
+    await coordinator.sync()
     try:
-        index.assert_awaited_once_with(journal)
+        journal_provider.assert_called_once()
+        journal.tool_jobs.assert_not_called()
     finally:
         await coordinator.stop()
 

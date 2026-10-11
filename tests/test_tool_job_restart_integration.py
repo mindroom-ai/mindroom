@@ -5,56 +5,33 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import nullcontext
-from dataclasses import replace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
-from agno.tools import Toolkit
-from agno.tools.function import Function
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_storage import create_session_storage
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.event_journal import (
-    EventClass,
-    EventKind,
-    InboundEvent,
-    ProjectedEvent,
-)
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_turn import (
     CompletedAttempt,
     TurnRunState,
     TurnSinks,
-    paused_attempt_from_response,
     run_blocking_response_turn,
 )
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import pending_human_messages_context
-from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
-from mindroom.tool_system.events import format_tool_started_event
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_response_runner_focused import _in_reply_span
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
 from tests.test_tool_job_turn_integration import _provider_tool_content, _wait_until_ready
 from tests.tool_job_helpers import (
@@ -298,167 +275,3 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         if restored is not None:
             await restored.shutdown()
         await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("native_timeout", [False, True])
-async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa: PLR0915 - Real SDK pause and disabled startup.
-    tmp_path: Path,
-    native_timeout: bool,
-) -> None:
-    """Disabled startup trusts the real writer marker after session storage moves."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    config = bot.config
-    config.background_tool_jobs.enabled = True
-    config.background_tool_jobs.exclude_toolkits = ["test_toolkit"] if native_timeout else []
-    paths = bot.runtime_paths
-    owner = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="!room:localhost:$thread",
-        transport_agent_name="general",
-    )
-    context = replace(
-        _delegate_runtime_context(config, paths, execution_identity=owner),
-        agent_name="general",
-        transport_agent_name="general",
-        membership_turn_id="$approval-source",
-    )
-    runtime = await tool_job_runtime(bot.storage_path)
-    instance = pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    side_effects: list[str] = []
-
-    async def write_report(**options: int | None) -> str:
-        side_effects.append(f"executed:{options.get('wait_timeout')}")
-        return "approved report"
-
-    function = Function.from_callable(write_report)
-    function.requires_confirmation = True
-    function.owning_toolkit = "test_toolkit"
-    toolkit = Toolkit(name="test_toolkit", tools=[function])
-    bind_toolkit_construction(toolkit, ToolConstruction("test_toolkit", None))
-    bind_toolkit_authority(toolkit, authored_name="test_toolkit")
-    paused_model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("write_report", "approval-call", wait_timeout=None)]),
-        ],
-    )
-    install_tool_job_execution(paused_model)
-    storage = create_session_storage("general", config, paths, owner)
-    actor = Agent(
-        id="general",
-        model=paused_model,
-        tools=[toolkit, JobTools(paths, owner)],
-        metadata={},
-        db=storage,
-        telemetry=False,
-    )
-    disabled = None
-    try:
-        with tool_runtime_context(context):
-            response = await actor.arun(
-                "Write the report",
-                session_id=owner.session_id,
-                user_id=owner.requester_id,
-            )
-        assert response.status is RunStatus.paused
-        paused = paused_attempt_from_response(
-            response,
-            fallback_session_id=owner.session_id,
-            fallback_run_id=response.run_id,
-            toolkit_owners={("general", "write_report"): "test_toolkit"},
-        )
-        assert paused is not None
-        marker, trace = format_tool_started_event(paused.tools[0], tool_index=1)
-        assert trace is not None
-        paused = replace(
-            paused,
-            response_text=marker.strip(),
-            tool_trace=(trace,),
-        )
-
-        store = runner.deps.approval_store
-        await store.admit(
-            InboundEvent(
-                "$approval-source",
-                owner.room_id,
-                owner.resolved_thread_id,
-                EventKind.MESSAGE,
-                EventClass.ACTIONABLE,
-                owner.requester_id,
-                1,
-                {"event_id": "$approval-source", "content": {"body": "write report"}},
-            ),
-            ProjectedEvent(
-                "$approval-source",
-                owner.room_id,
-                owner.resolved_thread_id,
-                owner.requester_id,
-                1,
-                {"body": "write report"},
-                None,
-                None,
-            ),
-        )
-        request = _plain_request(
-            _target(thread_id="$thread", reply_to_event_id="$approval-source"),
-            source_event_id="$approval-source",
-        )
-        with (
-            patch(
-                "mindroom.approval.response.resolve_tool_approval_approver",
-                return_value=owner.requester_id,
-            ),
-            patch(
-                "mindroom.approval.response.evaluate_tool_approval",
-                new=AsyncMock(return_value=(True, 60.0)),
-            ),
-            patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
-        ):
-            async with _in_reply_span(runner, request, placeholder_event_id=None):
-                await runner._suspend_for_approval(
-                    paused,
-                    request=request,
-                    target=request.response_envelope.target,
-                    execution_identity=owner,
-                    entity_kind="agent",
-                    history_scope=HistoryScope(kind="agent", scope_id="general"),
-                    show_tool_calls=True,
-                )
-
-        saved = await store.approval_continuation_for_source("$approval-source")
-        assert saved is not None
-        assert saved.requires_background_tool_jobs is (not native_timeout)
-
-        storage.close()
-        config.agents["general"].private = AgentPrivateConfig(per="user")
-        release_background_tool_jobs(paths, instance)
-        await runtime.shutdown()
-        config.background_tool_jobs.enabled = False
-        disabled = ToolJobRuntimeCoordinator(
-            paths,
-            lambda: config,
-            lambda _: None,
-            AgentReplyMembershipIndex(),
-            lambda: bot._journal_store,
-        )
-        await disabled.initialize()
-        source_event_id = "$approval-source"
-        event = await store.load_event(source_event_id)
-        assert event is not None
-        assert approval_is_parked(paths, saved.approval_id) is (not native_timeout)
-        assert event_is_parked(config, paths, "general", event) is (not native_timeout)
-        assert await store.is_pending(source_event_id)
-        assert side_effects == []
-    finally:
-        if disabled is not None:
-            await disabled.stop()
-        await runtime.shutdown()
-        storage.close()

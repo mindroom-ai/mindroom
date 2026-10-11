@@ -21,7 +21,6 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
-from mindroom.tool_jobs.disabled import index_parked_work
 from mindroom.tool_jobs.follow_ups import FOLLOW_UP_LIMIT, follow_up_event_id, follow_up_jobs, follow_up_streak
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
@@ -115,7 +114,7 @@ class ToolJobRuntimeCoordinator:
     _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
 
     async def initialize(self) -> None:
-        """Pin execution mode, then build the job runtime or index parked ownership, before dispatch can start."""
+        """Pin execution mode, then build the job runtime when the instance runs jobs, before dispatch can start."""
         if self._initialized:
             return
         config = self.config_provider()
@@ -123,21 +122,19 @@ class ToolJobRuntimeCoordinator:
             return
         self._journal = journal = self.journal_provider()
         self._instance = instance = pin_background_tool_jobs(config, self.runtime_paths)
-        if instance.settings.enabled:
-            if self._runtime is None:
-                store = journal.tool_jobs(uuid4().hex)
-                # Take the jobs over before dispatch starts, fencing any runtime that still writes from before;
-                # the first sync recovers them, and a later one never takes them back from a newer process.
-                await store.take_ownership()
-                self._runtime = ToolJobRuntime(
-                    store,
-                    authorize=self._authorized,
-                    authorize_execution=self._authorize_execution,
-                    cancel=self._interrupt,
-                    denied=self._denied,
-                )
-        else:
-            instance.parked = await index_parked_work(journal)
+        # With background jobs off, saved jobs wait untouched for the next enabled start, which reports them.
+        if instance.settings.enabled and self._runtime is None:
+            store = journal.tool_jobs(uuid4().hex)
+            # Take the jobs over before dispatch starts, fencing any runtime that still writes from before;
+            # the first sync recovers them, and a later one never takes them back from a newer process.
+            await store.take_ownership()
+            self._runtime = ToolJobRuntime(
+                store,
+                authorize=self._authorized,
+                authorize_execution=self._authorize_execution,
+                cancel=self._interrupt,
+                denied=self._denied,
+            )
         self._initialized = True
 
     @property

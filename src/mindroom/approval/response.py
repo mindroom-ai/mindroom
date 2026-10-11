@@ -29,7 +29,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
 from mindroom.reply_lifecycle import NoteKind, SpanOutcome
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.events import tool_markers_match_trace
 from mindroom.turn_origin import TurnIntent
 
@@ -356,22 +355,6 @@ class ApprovalResponseCoordinator:
         if continuation.state == "ready":
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
-    def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
-        """Recognize a paused call that can resume only through the job runtime."""
-        if any(call.toolkit_name == "job" for call in calls):
-            return True
-        config = self.config()
-        if not background_tool_jobs_enabled(config, self.runtime_paths):
-            return False
-        budgeted = {tool.tool_call_id for tool in paused.tools if "wait_timeout" in (tool.tool_args or {})}
-        # A budget on a managed toolkit is framework metadata; on an excluded toolkit it is the tool's own argument.
-        return any(
-            call.tool_call_id in budgeted
-            and call.toolkit_name is not None
-            and not toolkit_is_background_excluded(call.toolkit_name, config, self.runtime_paths)
-            for call in calls
-        )
-
     async def advance_pause(
         self,
         current: ApprovalContinuation,
@@ -405,7 +388,6 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
-            requires_background_tool_jobs=self.requires_background_jobs(paused, plan.calls),
             runtime_model_name=paused.runtime_model_name,
             continuation_count=max(current.continuation_count, paused.continuation_count),
             delegation_storage_bindings=paused.delegation_storage_bindings,

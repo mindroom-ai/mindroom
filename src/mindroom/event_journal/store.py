@@ -2391,10 +2391,6 @@ class EventJournalStore:
             raise ValueError(msg)
         return ToolJobStore(_backend=self.backend, _runtime_generation=runtime_generation)
 
-    async def saved_tool_jobs(self) -> tuple[SavedToolJob, ...]:
-        """Read every saved tool job without taking ownership, as a disabled instance parks them."""
-        return await self.backend.read(tool_jobs.load_all)
-
     async def close(self) -> None:
         """Release every connection the backend owns."""
         await self.backend.close()

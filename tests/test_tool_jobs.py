@@ -1640,7 +1640,7 @@ async def test_invalid_saved_snapshot_fails_enabled_recovery(tmp_path: Path) -> 
             await restored.recover()
         journal = tool_job_journal(tmp_path)
         try:
-            assert [saved.job_json for saved in await journal.saved_tool_jobs()] == [retired]
+            assert [saved.job_json for saved in await journal.tool_jobs("reader").load_all()] == [retired]
         finally:
             await journal.close()
     finally:

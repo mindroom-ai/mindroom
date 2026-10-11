@@ -157,7 +157,6 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
-from mindroom.tool_jobs.disabled import approval_is_parked
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -172,7 +171,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind, TurnIntent
+from mindroom.turn_origin import SenderKind
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -1649,11 +1648,6 @@ class ResponseRunner:
                 team_member_model_names=paused.team_member_model_names,
                 team_mode=team_mode,
                 request_body=request.response_envelope.body,
-                requires_background_tool_jobs=(
-                    self._approval_responses.requires_background_jobs(paused, plan.calls)
-                    # Only a background job runtime can collect what a follow-up asks for.
-                    or request.response_envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP
-                ),
                 attachment_ids=tuple(request.attachment_ids or ()),
                 mentioned_agents=request.response_envelope.mentioned_agents,
                 hook_source=request.response_envelope.hook_source,
@@ -2989,12 +2983,8 @@ class ResponseRunner:
             return
 
     async def _release_ended_approval_holds(self, room_id: str, thread_id: str | None) -> None:
-        """Release the holds of a conversation whose approvals no longer exist, or cannot end while jobs are off."""
+        """Release the holds of a conversation whose approvals no longer exist."""
         for approval_id in self._lifecycle_coordinator.approval_holds(room_id, thread_id):
-            if approval_is_parked(self.deps.runtime_paths, approval_id):
-                # Parked until background jobs are on again, it neither resumes nor expires meanwhile.
-                self._lifecycle_coordinator.release_approval_hold(approval_id)
-                continue
             try:
                 ended = await self.deps.approval_store.approval_continuation(approval_id) is None
             except Exception:

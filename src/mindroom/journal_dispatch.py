@@ -100,7 +100,6 @@ class JournalCallbacks:
     # Runs a follow-up turn; False while a response owner holds the follow-up, which settles it.
     on_job_follow_up: Callable[[JournalEvent], Awaitable[bool]]
     on_rtc: _RtcCallback | None = None
-    event_is_parked: Callable[[JournalEvent], bool] = lambda _event: False
     on_job_cancel: _JobCancelCallback = _ignore_job_cancel
 
 
@@ -202,8 +201,6 @@ class JournalDispatcher:
         this replaces; a wrong "gone" costs a re-dispatch that ``TurnStore``
         then has to refuse.
         """
-        if self.callbacks.event_is_parked(event):
-            return True
         needs_turn_replay = _needs_turn_replay(event)
         if not needs_turn_replay and event.event_id not in self._deferred_reaction_ids:
             # A completing callback settles or raises. It never defers, so a
@@ -230,8 +227,6 @@ class JournalDispatcher:
         journal was meant to remove, and it answered the wrong question: a turn
         can be terminal with nothing durable behind it.
         """
-        if self.callbacks.event_is_parked(event):
-            return False
         needs_turn_replay = _needs_turn_replay(event)
         if needs_turn_replay and not self._turn_replay_released:
             # Turn work waits until the orchestrator has started responders.

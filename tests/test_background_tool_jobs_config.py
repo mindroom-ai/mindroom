@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import textwrap
-from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -14,7 +12,6 @@ import pytest
 import yaml
 from agno.models.response import ModelResponse
 from pydantic import ValidationError
-from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_session_storage
@@ -23,42 +20,21 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.event_journal import (
-    ApprovalCall,
-    ApprovalContinuation,
-    ApprovalDecision,
-    EventClass,
-    EventKind,
-    InboundEvent,
-    JournalEvent,
-    ProjectedEvent,
-)
-from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked, index_parked_work
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import (
-    BackgroundJob,
-    BackgroundOutcome,
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
-from mindroom.turn_record import TurnRecord
-from tests.conftest import message_origin, test_runtime_paths, unwrap_extracted_collaborator
+from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
-from tests.reply_span_helpers import paused_for_approval
-from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
 from tests.tool_job_helpers import (
     completed_delegation_job,
-    start_job,
     tool_job_journal,
-    tool_job_runtime,
-    write_saved_job,
 )
 
 if TYPE_CHECKING:
@@ -168,113 +144,6 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
         assert get_background_runtime(paths) is not None
     finally:
         await recreated.stop()
-
-
-@pytest.mark.asyncio
-async def test_disabled_startup_parks_only_explicitly_marked_approvals(tmp_path: Path) -> None:
-    """Disabled startup uses durable ownership markers without opening SDK session storage."""
-    bot = _bot(tmp_path)
-    paths = bot.runtime_paths
-    store = bot._journal_store.principal(bot._journal_principal_id)
-
-    async def admit_source(event_id: str) -> None:
-        await store.admit(
-            InboundEvent(
-                event_id,
-                "!room:localhost",
-                "$thread",
-                EventKind.MESSAGE,
-                EventClass.ACTIONABLE,
-                "@user:localhost",
-                1,
-                {"event_id": event_id, "content": {"body": "report"}},
-            ),
-            ProjectedEvent(
-                event_id,
-                "!room:localhost",
-                "$thread",
-                "@user:localhost",
-                1,
-                {"body": "report"},
-                None,
-                None,
-            ),
-        )
-
-    async def create_continuation(
-        approval_id: str,
-        source_event_id: str,
-        *,
-        requires_background_tool_jobs: bool,
-    ) -> ApprovalContinuation:
-        await admit_source(source_event_id)
-        continuation = ApprovalContinuation(
-            approval_id=approval_id,
-            run_id=f"run-{approval_id}",
-            session_id="session",
-            entity_kind="agent",
-            entity_name="general",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            origin=message_origin(),
-            response_event_id=f"$response-{approval_id}",
-            sources=ResponseSources((source_event_id,), (source_event_id,)),
-            calls=(
-                ApprovalCall(
-                    "call",
-                    "write_report",
-                    "general",
-                    2**62,
-                    decision=ApprovalDecision.APPROVED,
-                    toolkit_name="reports",
-                ),
-            ),
-            state="ready",
-            requires_background_tool_jobs=requires_background_tool_jobs,
-        )
-        saved = await paused_for_approval(store, continuation)
-        assert saved is not None
-        return saved
-
-    feature = await create_continuation("feature", "$feature-source", requires_background_tool_jobs=True)
-    ordinary = await create_continuation("ordinary", "$ordinary-source", requires_background_tool_jobs=False)
-
-    def remove_ordinary_marker(transaction: object) -> None:
-        row = transaction.fetchone(  # type: ignore[attr-defined]
-            "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-            (ordinary.approval_id,),
-        )
-        context = json.loads(str(row["context_json"]))
-        context.pop("requires_background_tool_jobs")
-        transaction.execute(  # type: ignore[attr-defined]
-            "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-            (json.dumps(context), ordinary.approval_id),
-        )
-
-    await store._backend.write(remove_ordinary_marker)
-    coordinator = ToolJobRuntimeCoordinator(
-        paths,
-        lambda: bot.config,
-        lambda _: None,
-        AgentReplyMembershipIndex(),
-        lambda: bot._journal_store,
-    )
-    try:
-        await coordinator.initialize()
-
-        assert approval_is_parked(paths, feature.approval_id)
-        assert not approval_is_parked(paths, ordinary.approval_id)
-        assert await store.is_pending("$feature-source")
-        assert await store.is_pending("$ordinary-source")
-        feature_event = await store.load_event("$feature-source")
-        ordinary_event = await store.load_event("$ordinary-source")
-        assert feature_event is not None
-        assert ordinary_event is not None
-        assert event_is_parked(bot.config, paths, "general", feature_event)
-        assert not event_is_parked(bot.config, paths, "general", ordinary_event)
-    finally:
-        await coordinator.stop()
 
 
 def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> None:
@@ -411,135 +280,3 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
         text=True,
         timeout=30,
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["tool", "delegation"])
-async def test_disabled_startup_parks_job_sources_and_completion_without_mutation(
-    tmp_path: Path,
-    kind: str,
-) -> None:
-    """Saved ownership parks before approval handoff; new human ingress still dispatches."""
-    bot = _bot(tmp_path)
-    paths = bot.runtime_paths
-    owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
-    runtime = await tool_job_runtime(bot.storage_path)
-
-    executions = 0
-
-    async def operation() -> BackgroundOutcome:
-        nonlocal executions
-        executions += 1
-        return BackgroundOutcome("completed", "kept result")
-
-    await start_job(
-        runtime,
-        "saved",
-        tool_name="tool",
-        depth=0,
-        kind=kind,
-        source_event_id="$saved",
-        adapter=completed_delegation_job().adapter if kind == "delegation" else {},
-        owner=owner,
-        operation=operation,
-    )
-    waited = await runtime.wait("saved", owner=owner, depth=0)
-    await runtime.release_wait("saved", waited.claim)
-    await runtime.shutdown()
-    original = await bot._journal_store.saved_tool_jobs()
-    record = TurnRecord.create(("$saved", "$sibling"), anchor_event_id="$saved", completed=False)
-    await bot._journal_store.turn_records("general").upsert(
-        index_event_ids=record.indexed_event_ids,
-        anchor_event_id="$saved",
-        record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
-    )
-    coordinator = ToolJobRuntimeCoordinator(
-        runtime_paths=paths,
-        config_provider=lambda: bot.config,
-        bot_provider=lambda _: None,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        journal_provider=lambda: bot._journal_store,
-    )
-    reached: list[str] = []
-
-    async def continuation(event_id: str) -> bool:
-        reached.append(event_id)
-        return True
-
-    dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
-    dispatcher.callbacks = replace(dispatcher.callbacks, on_approval_continuation=continuation)
-    dispatcher.release_turn_replay()
-    event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
-    try:
-        await coordinator.sync()
-        assert not await dispatcher._run_event(replace(event, event_id="$sibling"))
-        assert not await dispatcher._run_event(event)
-        assert dispatcher._deferral_is_live(event)
-        assert await dispatcher._run_event(replace(event, event_id="$new-human"))
-        assert reached == ["$new-human"]
-        assert await bot._journal_store.saved_tool_jobs() == original
-        assert get_background_runtime(paths) is None
-    finally:
-        await coordinator.stop()
-
-    bot.config.background_tool_jobs.enabled = True
-    restarted = ToolJobRuntimeCoordinator(
-        paths,
-        lambda: bot.config,
-        lambda _: None,
-        AgentReplyMembershipIndex(),
-        lambda: bot._journal_store,
-    )
-    try:
-        await restarted.sync()
-        # Current grants no longer cover this parked job, so every authorized lookup hides it.
-        [recovered] = [entry.job for entry in restarted.runtime._entries.values()]
-        assert recovered.result == "kept result"
-        assert not recovered.consumed
-        assert executions == 1
-        assert await dispatcher._run_event(event)
-    finally:
-        await restarted.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "unreadable",
-    [
-        '{"job_id": "retired"}',
-        "[]",
-        '{"job_id": "trunc',
-        pytest.param(json.dumps(asdict(replace(completed_delegation_job(), job_id="another"))), id="other-job-id"),
-        pytest.param(
-            json.dumps(
-                {**asdict(replace(completed_delegation_job(), job_id="retired")), "source_event_id": ["$saved"]},
-            ),
-            id="non-string-source",
-        ),
-    ],
-)
-async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:
-    """A disabled instance never opted in, so an unreadable snapshot cannot block parking the others."""
-    paths = test_runtime_paths(tmp_path)
-    await write_saved_job(paths.storage_root, "retired", unreadable)
-    owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
-    saved = BackgroundJob(
-        job_id="saved",
-        owner=owner,
-        tool_name="tool",
-        depth=0,
-        source_event_id="$saved",
-        status="completed",
-        has_result_payload=True,
-    )
-    await write_saved_job(paths.storage_root, "saved", json.dumps(asdict(saved)))
-    event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
-    instance = pin_background_tool_jobs(Config(), paths)
-    journal = tool_job_journal(paths.storage_root)
-    try:
-        with capture_logs() as logs:
-            instance.parked = await index_parked_work(journal)
-    finally:
-        await journal.close()
-    assert [entry["job_id"] for entry in logs if entry["log_level"] == "warning"] == ["retired"]
-    assert event_is_parked(Config(), paths, "general", event)

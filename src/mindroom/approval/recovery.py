@@ -34,7 +34,6 @@ class ApprovalRecovery:
     entity_permanently_unavailable: Callable[[str], bool] | None = None
     recover_unavailable_final: Callable[[str, ApprovalContinuation], Awaitable[bool]] | None = None
     cancel_delegations: Callable[[ApprovalContinuation, str], Awaitable[None]] | None = None
-    approval_is_parked: Callable[[str], bool] = lambda _approval_id: False
     manager: ApprovalManager | None = None
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
@@ -91,9 +90,7 @@ class ApprovalRecovery:
                 break
             cursor = owners[-1][1].approval_id
             for principal_id, continuation in owners:
-                if self.approval_is_parked(continuation.approval_id) or (
-                    entity_names is not None and continuation.entity_name not in entity_names
-                ):
+                if entity_names is not None and continuation.entity_name not in entity_names:
                     continue
                 reason = self._unavailable_entity_reason(continuation.entity_name)
                 if reason is not None:

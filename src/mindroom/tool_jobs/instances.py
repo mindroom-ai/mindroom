@@ -11,17 +11,15 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import BackgroundToolJobsConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_jobs.disabled import ParkedWork
     from mindroom.tool_jobs.runtime import ToolJobRuntime
 
 
 @dataclass
 class ToolJobInstance:
-    """One running instance's startup setting and, depending on it, its recovered runtime or parked work."""
+    """One running instance's startup setting and, when it runs background jobs, its recovered runtime."""
 
     settings: BackgroundToolJobsConfig
     runtime: ToolJobRuntime | None = None
-    parked: ParkedWork | None = None
 
 
 _instances: dict[Path, ToolJobInstance] = {}
@@ -40,6 +38,6 @@ def pin_background_tool_jobs(config: Config, runtime_paths: RuntimePaths) -> Too
 
 
 def release_background_tool_jobs(runtime_paths: RuntimePaths, instance: ToolJobInstance) -> None:
-    """Withdraw a stopped instance's setting, runtime, and parked work together, unless a newer instance replaced it."""
+    """Withdraw a stopped instance's setting and runtime together, unless a newer instance replaced it."""
     if _instances.get(runtime_paths.storage_root) is instance:
         del _instances[runtime_paths.storage_root]

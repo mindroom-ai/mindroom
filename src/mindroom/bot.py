@@ -155,7 +155,6 @@ from .scheduling.tasks import (
 )
 from .startup_errors import PermanentStartupError
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
-from .tool_jobs.disabled import event_is_parked
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
 from .turn_controller import TurnController, TurnControllerDeps
@@ -717,7 +716,6 @@ class AgentBot:
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
                 on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
-                event_is_parked=lambda event: event_is_parked(self.config, self.runtime_paths, self.agent_name, event),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)
