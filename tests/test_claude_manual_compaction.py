@@ -18,17 +18,6 @@ from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.test_claude_native_compaction import _CHECKPOINT, _TEXT, _response, _stream_response
 
 
-def _is_rewritten_compaction(block: dict[str, Any]) -> bool:
-    """Return whether Vertex counting replaced a compaction block with its serialized text."""
-    if block.get("type") != "text":
-        return False
-    try:
-        original = json.loads(block["text"])
-    except (TypeError, ValueError):
-        return False
-    return isinstance(original, dict) and original.get("type") == "compaction"
-
-
 @pytest.mark.asyncio
 @pytest.mark.filterwarnings("ignore:Using Claude with claude-opus-4-6.*:UserWarning")
 @pytest.mark.parametrize("model_id", ["claude-sonnet-4-6", "claude-opus-4-6"])
@@ -44,24 +33,12 @@ async def test_manual_thinking_survives_checkpoint_fallback(
 ) -> None:
     """Removing required thinking makes the outgoing legacy tool continuation invalid."""
     requests: list[dict[str, Any]] = []
-    counts: list[int] = []
     thinking = {"type": "thinking", "thinking": "Need a lookup.", "signature": "original-signature"}
     tool_use = {"type": "tool_use", "id": "toolu_lookup", "name": "lookup", "input": {}}
     manual = {"type": "enabled", "budget_tokens": 1024}
 
     def respond(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        if "count-tokens" in request.url.path:
-            blocks = [block for message in payload["messages"] for block in message["content"]]
-            if any(_is_rewritten_compaction(block) for block in blocks):
-                # A rewritten block changes a signed thinking turn, so that count runs without thinking.
-                assert "thinking" not in payload
-                assert not any(block["type"] in {"thinking", "redacted_thinking"} for block in blocks)
-            else:
-                assert payload["thinking"] == manual
-            tokens = 1000 if "Original launch facts." in json.dumps(blocks) else 20000
-            counts.append(tokens)
-            return httpx.Response(200, json={"input_tokens": tokens})
         requests.append(payload)
         if payload.get("stream"):
             return _stream_response([_TEXT])
@@ -116,10 +93,8 @@ async def test_manual_thinking_survives_checkpoint_fallback(
             ],
         )
         original = [message.model_dump() for message in messages]
-        if vertex:
-            model.context_window = 10000
-        else:
-            model.configure_native_compaction(threshold=None)
+        # Mid-turn compaction turns native replay off when a checkpoint cannot keep the request in its window.
+        model.configure_native_compaction(threshold=None)
         if stream:
             async for _ in model.ainvoke_stream(messages, Message(role="assistant")):
                 pass
@@ -132,8 +107,6 @@ async def test_manual_thinking_survives_checkpoint_fallback(
     assert latest_assistant["content"] == [thinking, tool_use]
     assert "compaction" not in {block["type"] for message in requests[-1]["messages"] for block in message["content"]}
     assert [message.model_dump() for message in messages] == original
-    if vertex:
-        assert counts == [20000, 1000]
 
 
 @pytest.mark.parametrize(
@@ -149,13 +122,13 @@ async def test_manual_thinking_survives_checkpoint_fallback(
         ),
     ],
 )
-def test_thinking_overrides_align_replay_and_vertex_counting(
+def test_thinking_overrides_align_replay_with_the_effective_mode(
     request_params: dict[str, Any],
     expected_thinking: dict[str, Any] | None,
     *,
     keep_thinking: bool,
 ) -> None:
-    """Wrong override precedence either drops required reasoning or counts a different mode."""
+    """Wrong override precedence drops reasoning legacy manual thinking still requires."""
     model = MindroomVertexAIClaude(
         id="claude-sonnet-4-6",
         thinking={"type": "enabled", "budget_tokens": 1024},
@@ -173,7 +146,7 @@ def test_thinking_overrides_align_replay_and_vertex_counting(
         ),
         Message(role="user", content="Continue."),
     ]
-    payload = model._request_input_kwargs(messages, tools=None, response_format=None, compress_tool_results=False)
-    assert payload.get("thinking") == expected_thinking
-    assert (redacted in payload["messages"][1]["content"]) is keep_thinking
+    replayed = model.native_replay_messages(messages)
+    assert model.effective_thinking() == expected_thinking
+    assert (redacted in (replayed[1].provider_data or {})["content_blocks"]) is keep_thinking
     assert messages[1].provider_data["content_blocks"][1] == redacted

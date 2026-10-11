@@ -29,6 +29,7 @@ from mindroom.delegation.personas import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
+from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
@@ -2062,7 +2063,6 @@ def create_agent(
         role_context.model_name,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
     )
-    install_model_call_cap(model, entity_name=agent_name)
     if tool_assembly.deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
@@ -2178,7 +2178,8 @@ def create_agent(
         tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
-        add_session_summary_to_context=persist_runtime_state,
+        # The summary replays as the first history message instead (history/agno_compat_message_builder.py).
+        add_session_summary_to_context=False,
         num_history_runs=history_policy.num_history_runs,
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
@@ -2188,6 +2189,15 @@ def create_agent(
         tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,
     )
+    install_mid_turn_compaction(
+        agent,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=agent_name,
+        model_name=role_context.model_name,
+    )
+    # Installed after mid-turn compaction so a refused request never spends a summary call.
+    install_model_call_cap(model, entity_name=agent_name)
     if isinstance(agent, MinimalAgent):
         agent.configure_minimal(
             instructions=instructions,

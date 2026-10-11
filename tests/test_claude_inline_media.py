@@ -18,8 +18,8 @@ from mindroom.attachments import AttachmentRecord
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.vertex_request_helpers import vertex_request_body
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -127,15 +127,8 @@ def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tmp_path
 
 
 def test_vertex_claude_request_payload_describes_unsupported_documents(tmp_path: Path) -> None:
-    """Vertex shares the Claude request preparation, including its token-count payload."""
-    model = MindroomVertexAIClaude(id="claude-opus-5", project_id="demo-project", region="us-central1")
-
-    payload = model._request_input_kwargs(
-        [_attachment_turn(tmp_path)],
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
+    """Vertex shares the Claude request preparation."""
+    payload = vertex_request_body(tmp_path, [_attachment_turn(tmp_path)])
 
     _assert_only_supported_documents_inline(payload["messages"][0]["content"])
 
@@ -184,11 +177,7 @@ def test_bedrock_uses_a_smaller_inline_media_budget_than_vertex(tmp_path: Path) 
 
     http_client, bodies = _capturing_http_client()
     _loaded_claude(tmp_path, "bedrock_claude", http_client).response(messages=[turn()], compression_manager=None)
-    vertex_payload = MindroomVertexAIClaude(
-        id="claude-opus-5",
-        project_id="demo-project",
-        region="us-central1",
-    )._request_input_kwargs([turn()], tools=None, response_format=None, compress_tool_results=False)
+    vertex_payload = vertex_request_body(tmp_path, [turn()])
 
     bedrock_blocks = _user_blocks(bodies[0])
     assert not [block for block in bedrock_blocks if block["type"] == "document"]

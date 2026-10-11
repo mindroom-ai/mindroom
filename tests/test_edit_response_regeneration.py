@@ -885,7 +885,7 @@ def test_remove_run_by_event_id_removes_following_runs_even_without_metadata() -
         remove_following_runs=True,
     )
 
-    assert removed is True
+    assert set(removed) == set(storage.deleted_run_ids)
     assert [run.run_id for run in session.runs or []] == ["before"]
     assert sorted(storage.deleted_run_ids) == ["after", "bare-after", "matched"]
 
@@ -919,7 +919,8 @@ def test_remove_run_by_event_id_removes_team_runs() -> None:
         session_type=SessionType.TEAM,
     )
 
-    assert removed is True
+    # The member run goes with its team run; only the matched top-level run is reported.
+    assert removed == [original_run_id]
     assert sorted(storage.deleted_run_ids) == sorted([original_run_id, "member"])
     assert len(session.runs or []) == 1
     assert session.runs[0].metadata["matrix_event_id"] == "$other:example.com"
@@ -949,7 +950,7 @@ def test_remove_run_by_event_id_matches_coalesced_source_event_ids() -> None:
         session_type=SessionType.TEAM,
     )
 
-    assert removed is True
+    assert set(removed) == set(storage.deleted_run_ids)
     assert session.runs == []
 
 
@@ -978,7 +979,7 @@ def test_remove_run_by_event_id_matches_discovery_aliases() -> None:
         session_type=SessionType.TEAM,
     )
 
-    assert removed is True
+    assert set(removed) == set(storage.deleted_run_ids)
     assert session.runs == []
 
 
@@ -1007,7 +1008,7 @@ def test_remove_run_by_event_id_optionally_matches_consumed_history() -> None:
         include_seen_event_ids=True,
     )
 
-    assert removed is True
+    assert set(removed) == set(storage.deleted_run_ids)
     assert session.runs == []
 
 

@@ -424,7 +424,6 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
-    assert model.context_window == 200000
 
 
 def test_bedrock_claude_provider_uses_runtime_env() -> None:
@@ -893,12 +892,7 @@ async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_prov
         Message(role="user", content="Current question"),
     ]
 
-    fitted_messages = await model._fit_request_messages(
-        messages,
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
+    fitted_messages = model._request_messages(messages)
     chat_messages, _system_prompt = format_messages(fitted_messages)
 
     assert [block.type for block in chat_messages[1]["content"]] == ["text", "tool_use"]
@@ -1866,7 +1860,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         setup_finished.set()
         return request_kwargs
 
-    monkeypatch.setattr("mindroom.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
+    monkeypatch.setattr("mindroom.claude_prompt_cache._prepare_claude_request_kwargs", blocking_prepare)
     vars(model)["get_async_client"] = lambda: client
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
     vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta

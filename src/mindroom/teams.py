@@ -72,6 +72,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
+from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
 from mindroom.history.native import restore_native_history
 from mindroom.history.prompt_tokens import team_tool_definition_payloads_for_logging
 from mindroom.history.runtime import note_prepared_history_timing
@@ -2294,8 +2295,6 @@ def _create_team_instance(
         model,
         notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
-    # The team budget caps the coordinator's own calls; members carry their own.
-    install_model_call_cap(model, entity_name=configured_team_name or team_display_name)
     team_scope = config.resolve_entity(
         configured_team_name if configured_team_name is not None and configured_team_name in config.teams else None,
     )
@@ -2325,7 +2324,8 @@ def _create_team_instance(
         db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
-        add_session_summary_to_context=True,
+        # The summary replays as the first history message instead (history/agno_compat_message_builder.py).
+        add_session_summary_to_context=False,
         num_history_runs=history_settings.policy.num_history_runs,
         num_history_messages=history_settings.policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
@@ -2342,6 +2342,16 @@ def _create_team_instance(
     )
     if history_settings.policy.mode == "all":
         enable_all_history_replay(team)
+    install_mid_turn_compaction(
+        team,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=configured_team_name if configured_team_name in config.teams else None,
+        model_name=model_name,
+    )
+    # The team budget caps the coordinator's own calls; members carry their own. Installed after mid-turn
+    # compaction so a refused request never spends a summary call.
+    install_model_call_cap(model, entity_name=configured_team_name or team_display_name)
     return team
 
 
@@ -2896,6 +2906,7 @@ async def prepare_materialized_team_execution(
         pipeline_timing=pipeline_timing,
     )
     prepared_history = prepared_execution.prepared_history
+    bind_compaction_lifecycle(team, compaction_lifecycle)
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)

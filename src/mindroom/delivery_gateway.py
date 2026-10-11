@@ -2055,7 +2055,7 @@ class DeliveryGateway:
         """Edit the foreground compaction lifecycle notice after failure."""
         if event.notice_event_id is None:
             return
-        body = f"Compaction failed; continuing with trimmed history. {event.failure_reason}"
+        body = f"Compaction failed; continuing without compaction. {event.failure_reason}"
         await self._edit_compaction_lifecycle_notice(
             target=target,
             event_id=event.notice_event_id,

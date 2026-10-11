@@ -21,6 +21,7 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_storage import runs_without, save_runs
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
+from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
@@ -112,7 +113,6 @@ def stream_attempt_with_model[ChunkT](
     )
 
 
-_QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER = "persisted"
 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
@@ -201,7 +201,7 @@ def bind_mid_turn_conversation_context(
 
 def _has_queued_notice_marker(message: Message) -> bool:
     provider_data = message.provider_data
-    return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
+    return isinstance(provider_data, dict) and provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
         True,
         _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
     )
@@ -211,7 +211,7 @@ def _queued_notice_marker(message: Message) -> bool | str | None:
     provider_data = message.provider_data
     if not isinstance(provider_data, dict):
         return None
-    marker = provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY)
+    marker = provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
     return marker if marker in (True, _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER) else None
 
 
@@ -282,7 +282,7 @@ def _append_queued_notice_if_needed(
             role="user",
             content=notice_text,
             provider_data={
-                _QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
+                QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
                 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
             },
         ),
@@ -459,7 +459,7 @@ def _new_persisted_queued_notice(response_turn_id: str, notice_text: str) -> Mes
         role="user",
         content=notice_text,
         provider_data={
-            _QUEUED_MESSAGE_NOTICE_MARKER_KEY: _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+            QUEUED_MESSAGE_NOTICE_MARKER_KEY: _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
             _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
         },
     )

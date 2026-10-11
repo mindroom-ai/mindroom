@@ -15,8 +15,8 @@ from agno.models.message import Message
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.vertex_request_helpers import vertex_request_body
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -203,16 +203,9 @@ def test_poisoned_stored_thread_replays_without_citations(tmp_path: Path, citati
     assert messages[1].provider_data == stored_provider_data
 
 
-def test_vertex_claude_request_payload_replays_without_citations() -> None:
-    """Vertex shares the Claude request preparation, including its token-count payload."""
-    model = MindroomVertexAIClaude(id="claude-opus-5", project_id="demo-project", region="us-central1")
-
-    payload = model._request_input_kwargs(
-        _poisoned_history(_STORED_CITATIONS["char_location_without_title"]),
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
+def test_vertex_claude_request_payload_replays_without_citations(tmp_path: Path) -> None:
+    """Vertex shares the Claude request preparation."""
+    payload = vertex_request_body(tmp_path, _poisoned_history(_STORED_CITATIONS["char_location_without_title"]))
 
     replayed_blocks = _assistant_blocks(payload)
     assert all("citations" not in block for block in replayed_blocks)

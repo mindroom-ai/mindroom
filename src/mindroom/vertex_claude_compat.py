@@ -2,47 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
-from agno.exceptions import ContextWindowExceededError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
-from agno.utils.models.claude import format_messages
-from agno.utils.tokens import count_schema_tokens
-from anthropic import BadRequestError
 
 from mindroom.agno_compat_vertex_claude_tools import (
-    format_tools_for_vertex_claude,
     strip_vertex_claude_tool_strict,
 )
 from mindroom.claude_compat import ClaudeProviderCompat
-from mindroom.claude_prompt_cache import prepare_claude_request_kwargs
-from mindroom.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, TOOL_SEARCH_TOOL_TYPE
-from mindroom.logging_config import get_logger
 from mindroom.native_compaction import common_native_endpoint
-from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable
+    from collections.abc import AsyncIterator
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from anthropic import AnthropicVertex, AsyncAnthropicVertex
-
-logger = get_logger(__name__)
-
-_EXACT_COUNT_THRESHOLD_RATIO = 0.5
-_EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
-_VERTEX_COUNT_AS_TEXT_BLOCK_TYPES = frozenset(
-    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
-)
-_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
-# Before any tools are discovered, Vertex generation reports 213 input tokens
-# for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
-# Keep a small margin because count_tokens cannot count that server-tool prefix.
-_VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
 
 
 def _messages_with_replay_safe_reasoning(messages: list[Message]) -> list[Message]:
@@ -62,192 +39,10 @@ def _messages_with_replay_safe_reasoning(messages: list[Message]) -> list[Messag
     return sanitized_messages if sanitized_messages is not None else messages
 
 
-def _blocks_require_exact_count(blocks: list[Any]) -> bool:
-    """Return whether content includes media that cannot be estimated safely."""
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") in _EXACT_COUNT_BLOCK_TYPES:
-            return True
-        source = block.get("source")
-        data = source.get("data") if isinstance(source, dict) else None
-        if data:
-            return True
-        nested = block.get("content")
-        if isinstance(nested, list) and _blocks_require_exact_count(nested):
-            return True
-    return False
-
-
-def _request_requires_exact_count(request_kwargs: dict[str, Any]) -> bool:
-    """Return whether any provider-formatted message contains media."""
-    messages = request_kwargs.get("messages")
-    if not isinstance(messages, list):
-        return False
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, list) and _blocks_require_exact_count(content):
-            return True
-    return False
-
-
-def _referenced_tool_names(search_result_block: object) -> set[str]:
-    """Return tool names selected by one native search-result block."""
-    if not isinstance(search_result_block, dict):
-        return set()
-    block_dict = cast("dict[str, Any]", search_result_block)
-    if block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
-        return set()
-    search_result = block_dict.get("content")
-    references = search_result.get("tool_references") if isinstance(search_result, dict) else None
-    if not isinstance(references, list):
-        return set()
-    names: set[str] = set()
-    for reference in references:
-        tool_name = reference.get("tool_name") if isinstance(reference, dict) else None
-        if isinstance(tool_name, str):
-            names.add(tool_name)
-    return names
-
-
-def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None, set[str]]:
-    """Convert unsupported blocks to countable text and collect selected tool names."""
-    referenced_tool_names: set[str] = set()
-    count_messages: list[Any] | None = None
-    if not isinstance(messages, list):
-        return count_messages, referenced_tool_names
-    for message_index, message in enumerate(messages):
-        if not isinstance(message, dict):
-            continue
-        message_dict = cast("dict[str, Any]", message)
-        content = message_dict.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            referenced_tool_names.update(_referenced_tool_names(block))
-        count_content = [
-            {"type": "text", "text": stable_serialize(block)}
-            if isinstance(block, dict) and block.get("type") in _VERTEX_COUNT_AS_TEXT_BLOCK_TYPES
-            else block
-            for block in content
-        ]
-        if count_content != content:
-            if count_messages is None:
-                count_messages = list(messages)
-            count_message = dict(message_dict)
-            count_message["content"] = count_content
-            count_messages[message_index] = count_message
-    return count_messages, referenced_tool_names
-
-
-def _thinking_block_field(block: object, field: str) -> str:
-    value = cast("dict[str, Any]", block).get(field) if isinstance(block, dict) else getattr(block, field, None)
-    return value if isinstance(value, str) else ""
-
-
-def _messages_with_thinking_as_text(messages: list[Any]) -> tuple[list[Any], int]:
-    """Count thinking as its visible text, and return an allowance for its hidden reasoning.
-
-    The visible text is a summary, possibly empty; the base64 signature (or a
-    redacted block's data) encrypts the full reasoning that generation counts.
-    Measured on live Opus 5.5 tool turns, allowing one token per four base64
-    characters (three decoded bytes) stays just above the real input. Messages
-    left without blocks are dropped.
-    """
-    text_messages: list[Any] = []
-    hidden_tokens = 0
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            text_messages.append(message)
-            continue
-        text_content: list[Any] = []
-        for block in content:
-            # Agno emits stored turns as dicts and rebuilt turns as SDK block objects.
-            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-            if block_type not in _THINKING_BLOCK_TYPES:
-                text_content.append(block)
-                continue
-            if (thinking := _thinking_block_field(block, "thinking")).strip():
-                text_content.append({"type": "text", "text": thinking})
-            hidden_tokens += len(_thinking_block_field(block, "signature") or _thinking_block_field(block, "data")) // 4
-        if text_content:
-            text_messages.append({**message, "content": text_content})
-    return text_messages, hidden_tokens
-
-
-def _is_vertex_tool_search(tool: object) -> bool:
-    """Return whether one wire tool is Vertex's unsupported count entry."""
-    return isinstance(tool, dict) and cast("dict[str, Any]", tool).get("type") == TOOL_SEARCH_TOOL_TYPE
-
-
-def _tools_for_vertex_token_count(
-    tools: object,
-    referenced_tool_names: set[str],
-) -> tuple[list[Any] | None, bool]:
-    """Keep eager and selected tools in a schema accepted by token counting."""
-    if not isinstance(tools, list):
-        return None, False
-    has_native_search = any(_is_vertex_tool_search(tool) for tool in tools)
-    count_tools: list[Any] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            count_tools.append(tool)
-            continue
-        tool_dict = cast("dict[str, Any]", tool)
-        if _is_vertex_tool_search(tool_dict):
-            continue
-        if tool_dict.get("defer_loading") is not True:
-            count_tools.append(tool_dict)
-        elif not has_native_search or tool_dict.get("name") in referenced_tool_names:
-            count_tool = dict(tool_dict)
-            count_tool.pop("defer_loading", None)
-            count_tools.append(count_tool)
-    return (count_tools if count_tools != tools else None), has_native_search
-
-
-def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Build a countable equivalent of native provider output.
-
-    Vertex generation accepts Anthropic's native tool-search schema, but its
-    count-tokens endpoint rejects the search tool, ``defer_loading``, and the
-    two server-search history block types. Count eager and previously selected
-    definitions, preserve search traces as text, and reserve the fixed
-    server-side search prefix separately. Definitions selected by a new search
-    are generated inside the server-tool loop and cannot be known by any
-    preflight count; they become countable on the following request.
-    Compaction blocks are also unsupported, so count their serialized contents
-    as text while generation keeps the actual checkpoint blocks unchanged.
-    """
-    count_messages, referenced_tool_names = _messages_for_vertex_token_count(request_kwargs.get("messages"))
-    count_tools, has_native_search = _tools_for_vertex_token_count(
-        request_kwargs.get("tools"),
-        referenced_tool_names,
-    )
-
-    if count_messages is None and count_tools is None:
-        return request_kwargs, 0
-    count_kwargs = dict(request_kwargs)
-    hidden_thinking_tokens = 0
-    if count_messages is not None:
-        # With thinking enabled, the endpoint rejects a request whose rewritten
-        # blocks sit among signed thinking blocks, as the text conversion above
-        # does. Count that thinking as text and send no thinking setting.
-        count_kwargs["messages"], hidden_thinking_tokens = _messages_with_thinking_as_text(count_messages)
-        count_kwargs.pop("thinking", None)
-    if count_tools:
-        count_kwargs["tools"] = count_tools
-    elif count_tools is not None:
-        count_kwargs.pop("tools", None)
-    reserve = _VERTEX_TOOL_SEARCH_TOKEN_RESERVE if has_native_search else 0
-    return count_kwargs, reserve + hidden_thinking_tokens
-
-
 @dataclass
 class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     """Vertex Claude model with Mindroom-specific provider compatibility fixes."""
 
-    context_window: int | None = None
     client: AnthropicVertex | None = None
     async_client: AsyncAnthropicVertex | None = None
 
@@ -268,195 +63,9 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         endpoint = str(params["base_url"] or default_endpoint)
         return f"{endpoint.rstrip('/')}|{project}|{region}"
 
-    def _request_input_kwargs(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[dict[str, Any]] | None,
-        response_format: dict[str, Any] | type[Any] | None,
-        compress_tool_results: bool,
-    ) -> dict[str, Any]:
-        """Build the provider-shaped payload used for input token counting."""
-        messages = self.native_replay_messages(messages)
-        anthropic_messages, system_prompt = format_messages(
-            messages,
-            compress_tool_results=compress_tool_results,
-            append_trailing_user_message=self.append_trailing_user_message,
-            trailing_user_message_content=self.trailing_user_message_content,
-            enable_citations=self.citations and not self._output_format_enabled(response_format),
-        )
-        request_kwargs: dict[str, Any] = {
-            "messages": anthropic_messages,
-            "model": self.id,
-        }
-        system = self._build_system(system_prompt)
-        if system:
-            request_kwargs["system"] = system
-        formatted_tools = format_tools_for_vertex_claude(tools)
-        if formatted_tools:
-            request_kwargs["tools"] = formatted_tools
-        if thinking := self.effective_thinking():
-            request_kwargs["thinking"] = thinking
-        return prepare_claude_request_kwargs(self, request_kwargs)
-
-    def _estimate_request_input_tokens(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[dict[str, Any]] | None,
-        response_format: dict[str, Any] | type[Any] | None,
-        compress_tool_results: bool,
-    ) -> int | None:
-        """Estimate text payloads; return ``None`` when exact counting is required.
-
-        CPU-bound (message formatting plus a tokenizer encode); async callers
-        must off-load it to a worker thread.
-        """
-        request_kwargs = self._request_input_kwargs(
-            messages,
-            tools=tools,
-            response_format=response_format,
-            compress_tool_results=compress_tool_results,
-        )
-        if _request_requires_exact_count(request_kwargs):
-            return None
-        return approximate_o200k_tokens(stable_serialize(request_kwargs)) + count_schema_tokens(
-            response_format,
-            self.id,
-        )
-
-    async def _count_request_input_tokens(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[dict[str, Any]] | None,
-        response_format: dict[str, Any] | type[Any] | None,
-        compress_tool_results: bool,
-    ) -> int:
-        """Count the supported payload representation with Vertex's tokenizer."""
-        request_kwargs = await asyncio.to_thread(
-            self._request_input_kwargs,
-            messages,
-            tools=tools,
-            response_format=response_format,
-            compress_tool_results=compress_tool_results,
-        )
-        count_kwargs, reserve = _request_for_vertex_token_count(request_kwargs)
-        client = self.get_async_client()
-        response = await client.messages.count_tokens(**count_kwargs)
-        return response.input_tokens + reserve + count_schema_tokens(response_format, self.id)
-
-    @staticmethod
-    def _replay_trim_candidates(messages: list[Message]) -> list[int]:
-        """Return safe history-user cuts plus the drop-all-history cut."""
-        first_history_index = next(
-            (index for index, message in enumerate(messages) if message.from_history),
-            None,
-        )
-        if first_history_index is None:
-            return []
-        history_user_starts = [
-            index for index, message in enumerate(messages) if message.from_history and message.role == "user"
-        ]
-        return [cut for cut in [*history_user_starts, len(messages)] if cut > first_history_index]
-
-    @staticmethod
-    def _messages_after_history_cut(messages: list[Message], cut: int) -> list[Message]:
-        """Drop only replay messages older than one safe history boundary."""
-        return [message for index, message in enumerate(messages) if not message.from_history or index >= cut]
-
-    @staticmethod
-    async def _advisory_count(count: Awaitable[int], *, input_budget: int) -> int | None:
-        """Return an exact count, or None when the endpoint rejects the count payload.
-
-        The count only advises; generation still enforces the real limit.
-        """
-        try:
-            return await count
-        except BadRequestError as exc:
-            logger.warning("vertex_claude_token_count_rejected", input_budget=input_budget, error=str(exc.message))
-            return None
-
-    async def _fit_request_messages(
-        self,
-        messages: list[Message],
-        *,
-        tools: list[dict[str, Any]] | None,
-        response_format: dict[str, Any] | type[Any] | None,
-        compress_tool_results: bool,
-    ) -> list[Message]:
-        """Drop the oldest replay turns until the exact request fits."""
-        canonical_messages = messages
-        messages = _messages_with_replay_safe_reasoning(self.native_replay_messages(messages))
-        if self.context_window is None:
-            return messages
-        output_reserve = self.max_tokens or 0
-        input_budget = self.context_window - output_reserve
-        if input_budget <= 0:
-            msg = "Vertex Claude context window leaves no room for input after the configured output reserve."
-            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
-
-        estimated_tokens = await asyncio.to_thread(
-            self._estimate_request_input_tokens,
-            messages,
-            tools=tools,
-            response_format=response_format,
-            compress_tool_results=compress_tool_results,
-        )
-        if estimated_tokens is not None and estimated_tokens < input_budget * _EXACT_COUNT_THRESHOLD_RATIO:
-            return messages
-
-        async def _count(candidate: list[Message]) -> int:
-            return await self._count_request_input_tokens(
-                candidate,
-                tools=tools,
-                response_format=response_format,
-                compress_tool_results=compress_tool_results,
-            )
-
-        original_tokens = await self._advisory_count(_count(messages), input_budget=input_budget)
-        if original_tokens is None or original_tokens <= input_budget:
-            return messages
-
-        if self.native_compaction is not None:
-            # A native checkpoint represents the entire replaced prefix. The
-            # canonical guard owns any destructive request-local trimming.
-            self.configure_native_compaction(threshold=None)
-            return await self._fit_request_messages(
-                canonical_messages,
-                tools=tools,
-                response_format=response_format,
-                compress_tool_results=compress_tool_results,
-            )
-
-        replay_cuts = self._replay_trim_candidates(messages)
-        best_messages: list[Message] | None = None
-        best_tokens: int | None = None
-        low = 0
-        high = len(replay_cuts) - 1
-        while low <= high:
-            midpoint = (low + high) // 2
-            candidate = self._messages_after_history_cut(messages, replay_cuts[midpoint])
-            candidate_tokens = await _count(candidate)
-            if candidate_tokens <= input_budget:
-                best_messages = candidate
-                best_tokens = candidate_tokens
-                high = midpoint - 1
-            else:
-                low = midpoint + 1
-
-        if best_messages is None or best_tokens is None:
-            msg = f"Vertex Claude current turn uses more than the {input_budget}-token input limit."
-            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
-
-        logger.warning(
-            "vertex_claude_request_history_trimmed",
-            input_tokens=original_tokens,
-            fitted_input_tokens=best_tokens,
-            input_budget=input_budget,
-            dropped_message_count=len(messages) - len(best_messages),
-        )
-        return best_messages
+    def _request_messages(self, messages: list[Message]) -> list[Message]:
+        """Project the route's replay and drop reasoning that cannot replay as a signed thinking block."""
+        return _messages_with_replay_safe_reasoning(self.native_replay_messages(messages))
 
     async def ainvoke(
         self,
@@ -468,15 +77,9 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> ModelResponse:
-        """Fit every async request, including requests after tool results."""
-        fitted_messages = await self._fit_request_messages(
-            messages,
-            tools=tools,
-            response_format=response_format,
-            compress_tool_results=compress_tool_results,
-        )
+        """Replay only reasoning Vertex can verify, on every request including tool-loop requests."""
         return await super().ainvoke(
-            fitted_messages,
+            self._request_messages(messages),
             assistant_message,
             response_format=response_format,
             tools=tools,
@@ -495,15 +98,9 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> AsyncIterator[ModelResponse]:
-        """Fit every async streaming request, including tool-loop requests."""
-        fitted_messages = await self._fit_request_messages(
-            messages,
-            tools=tools,
-            response_format=response_format,
-            compress_tool_results=compress_tool_results,
-        )
+        """Replay only reasoning Vertex can verify, on every streaming request including tool-loop requests."""
         async for response in super().ainvoke_stream(
-            fitted_messages,
+            self._request_messages(messages),
             assistant_message,
             response_format=response_format,
             tools=tools,

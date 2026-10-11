@@ -28,7 +28,7 @@ from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history import archive
 from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.replay import estimate_prompt_visible_history_tokens
+from mindroom.history.replay import compaction_summary_message, estimate_prompt_visible_history_tokens
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
@@ -37,7 +37,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
@@ -1003,3 +1003,76 @@ def test_restore_portable_policy_requires_latest_provenance(provider_data: dict[
     else:
         assert request["previous_response_id"] == "resp_latest"
         assert model._format_messages(messages) == [{"role": "user", "content": "Continue"}]
+
+
+@pytest.mark.parametrize("summary", ["S1", ""])
+def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summary: str) -> None:
+    """A checkpoint recorded while the summary lived in the system prompt is not reused once it is a message."""
+    config, _paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+    )
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(),
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    session = _session("session", summary=SessionSummary(summary=summary) if summary else None)
+    configured = configure_native_history(
+        MindRoomOpenAIResponses(id="gpt-6-astra", store=False),
+        plan=resolved.execution_plan,
+        history_settings=resolved.history_settings,
+        session=session,
+        allowed=True,
+    )
+
+    def route_for(history_generation: str) -> str:
+        model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+        model.configure_native_compaction(threshold=120000, history_generation=history_generation)
+        assert model.native_compaction is not None
+        return model.native_compaction.route
+
+    assert configured is not None
+    assert configured.native_compaction is not None
+    rendered = str(compaction_summary_message(summary, from_history=True).content) if summary else ""
+    assert configured.native_compaction.route == route_for(rendered)
+    if summary:
+        assert configured.native_compaction.route != route_for(summary)
+
+
+def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> None:
+    """A checkpoint already covers the summary message before it, which the projection drops."""
+    route = "route-1"
+    checkpoint = Message(
+        role="assistant",
+        content="",
+        provider_data={
+            "mindroom_native_compaction": {
+                "route": route,
+                "threshold": 100,
+                "checkpoint_prefix": True,
+                "items": [{"type": "compaction", "content": "provider checkpoint"}],
+            },
+        },
+    )
+    runs = [_completed_run("run-1", messages=[Message(role="user", content="question"), checkpoint])]
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    _config_settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+
+    without_summary = estimate_prompt_visible_history_tokens(
+        session=_session("session", runs=runs),
+        scope=scope,
+        history_settings=_config_settings,
+        native_route=route,
+    )
+    with_summary = estimate_prompt_visible_history_tokens(
+        session=_session("session", runs=runs, summary=SessionSummary(summary="S" * 400)),
+        scope=scope,
+        history_settings=_config_settings,
+        native_route=route,
+    )
+
+    assert with_summary == without_summary

@@ -23,6 +23,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 from agno.db.sqlite import SqliteDb
 from agno.db.utils import deserialize_run, get_run_type
@@ -41,6 +42,18 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
 _ID_CHUNK_SIZE = 500
+_SNAPSHOT_SEPARATOR = ":compaction-snapshot:"
+
+
+def snapshot_run_id(origin_run_id: str) -> str:
+    """Return a fresh id for one archived snapshot of a run that is still in progress."""
+    return f"{origin_run_id}{_SNAPSHOT_SEPARATOR}{uuid4().hex}"
+
+
+def snapshot_origin(run_id: str) -> str | None:
+    """Return the run an archived snapshot was taken from, or None for an ordinary run."""
+    origin, separator, _suffix = run_id.partition(_SNAPSHOT_SEPARATOR)
+    return origin if separator else None
 
 
 @dataclass(frozen=True)
@@ -51,7 +64,7 @@ class _ArchivedGeneration:
 
 
 @dataclass(frozen=True)
-class _ArchiveHit:
+class ArchiveHit:
     """The first archived run of a scope that represents one Matrix event."""
 
     generation_id: int
@@ -278,7 +291,7 @@ def find_archived_event(
     session_id: str,
     scope_key: str,
     event_id: str,
-) -> _ArchiveHit | None:
+) -> ArchiveHit | None:
     """Return the first archived run of the scope that represents ``event_id``."""
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
@@ -292,7 +305,42 @@ def find_archived_event(
             "ORDER BY archived.id LIMIT 1",
             (session_id, scope_key, event_id),
         ).first()
-    return None if row is None else _ArchiveHit(generation_id=row[0], archived_row_id=row[1], run_id=row[2])
+    return None if row is None else ArchiveHit(generation_id=row[0], archived_row_id=row[1], run_id=row[2])
+
+
+def earliest_archived_run(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    scope_key: str,
+    run_ids: Collection[str],
+) -> ArchiveHit | None:
+    """Return the scope's first archived row that is one of ``run_ids`` or a snapshot of one."""
+    origins = sorted({run_id for run_id in run_ids if run_id})
+    if not origins:
+        return None
+    db = _sqlite(storage)
+    compactions, compacted_runs = _table_names(db)
+    best: ArchiveHit | None = None
+    with db.db_engine.begin() as connection:
+        _ensure_tables(connection, db)
+        for start in range(0, len(origins), _ID_CHUNK_SIZE):
+            chunk = origins[start : start + _ID_CHUNK_SIZE]
+            matches = " OR ".join("archived.run_id = ? OR substr(archived.run_id, 1, ?) = ?" for _ in chunk)
+            parameters: list[object] = [session_id, scope_key]
+            for origin in chunk:
+                prefix = f"{origin}{_SNAPSHOT_SEPARATOR}"
+                parameters.extend([origin, len(prefix), prefix])
+            row = connection.exec_driver_sql(
+                f"SELECT archived.compaction_id, archived.id, archived.run_id FROM {compacted_runs} AS archived "  # noqa: S608
+                f"JOIN {compactions} AS generation ON generation.id = archived.compaction_id "
+                f"WHERE generation.session_id = ? AND generation.scope_key = ? AND ({matches}) "
+                "ORDER BY archived.id LIMIT 1",
+                tuple(parameters),
+            ).first()
+            if row is not None and (best is None or row[1] < best.archived_row_id):
+                best = ArchiveHit(generation_id=row[0], archived_row_id=row[1], run_id=row[2])
+    return best
 
 
 def roll_back_to(
@@ -300,7 +348,7 @@ def roll_back_to(
     *,
     session_id: str,
     scope_key: str,
-    hit: _ArchiveHit,
+    hit: ArchiveHit,
     live_run_ids: Collection[str],
 ) -> None:
     """Undo compaction from the hit's generation onward, keeping everything before the hit run.
@@ -324,8 +372,8 @@ def roll_back_to(
             )
         ]
         # Member runs are archived with their team run and may precede it; the hit's own
-        # members go with the hit.
-        restored = runs_without(earlier, [hit.run_id])
+        # members go with the hit. A snapshot of a running turn never becomes a live run.
+        restored = [run for run in runs_without(earlier, [hit.run_id]) if snapshot_origin(run.run_id or "") is None]
         delete_run_subtrees(transaction, runs_table, sessions_table, live_run_ids)
         rolled_back = [
             generation_id

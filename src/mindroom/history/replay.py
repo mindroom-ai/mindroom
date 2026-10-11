@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast
 
+from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.agent import Agent
-    from agno.models.message import Message
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -38,8 +38,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class _HistorySummaryBudgetError(RuntimeError):
+class HistorySummaryBudgetError(RuntimeError):
     """The saved summary cannot fit in the current run's history budget."""
+
+    def __init__(self, *, summary_tokens: int, available_tokens: int) -> None:
+        super().__init__(
+            "Saved conversation summary exceeds the available history budget "
+            f"({summary_tokens} estimated tokens; {available_tokens} available). "
+            "Choose a model with a larger context window or reduce the current prompt.",
+        )
 
 
 def estimate_prompt_visible_history_tokens(
@@ -57,15 +64,47 @@ def estimate_prompt_visible_history_tokens(
         scope=scope,
         history_settings=history_settings,
     )
+    tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
+    # A checkpoint covers the summary message before it, which native projection drops.
+    return tokens if has_checkpoint else summary_tokens + tokens
+
+
+def _route_tokens(
+    messages: list[Message],
+    *,
+    replay_model: NativeCompactionModel | None,
+    native_route: str | None,
+) -> tuple[int, bool]:
+    """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
     checkpoint_tokens = 0
     if native_route is not None:
-        projected = native_replay_messages(history_messages, native_route)
-        history_messages = []
+        projected = native_replay_messages(messages, native_route)
+        messages = []
         for message in projected:
             if items := checkpoint_items(message, native_route):
                 checkpoint_tokens += checkpoint_estimated_tokens(items)
             else:
-                history_messages.append(message)
+                messages.append(message)
+    tokens = _estimate_messages_tokens(messages, replay_model=replay_model, native_route=native_route)
+    return checkpoint_tokens + tokens, checkpoint_tokens > 0
+
+
+def estimate_request_messages_tokens(
+    messages: Sequence[Message],
+    *,
+    replay_model: NativeCompactionModel | None,
+    native_route: str | None = None,
+) -> int:
+    """Estimate one provider request's messages the way replay planning estimates history."""
+    return _route_tokens(list(messages), replay_model=replay_model, native_route=native_route)[0]
+
+
+def _estimate_messages_tokens(
+    history_messages: list[Message],
+    *,
+    replay_model: NativeCompactionModel | None,
+    native_route: str | None,
+) -> int:
     uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
     estimation_messages = (
         history_messages
@@ -88,7 +127,7 @@ def estimate_prompt_visible_history_tokens(
         else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
     )
     image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
-    return summary_tokens + checkpoint_tokens + max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens
+    return max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens
 
 
 def _without_image_transport(message: Message, *, strip_content_blocks: bool) -> Message:
@@ -101,6 +140,36 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
     return message.model_copy(update=updates) if updates else message
 
 
+_COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"
+
+
+def compaction_summary_message(summary: str, *, from_history: bool) -> Message:
+    """Render one compaction summary as the user message that replaces the history it covers."""
+    return Message(
+        role="user",
+        content=(
+            "The earlier part of this conversation was compacted into this summary:\n\n"
+            f"<compacted_history>\n{summary}\n</compacted_history>\n\n"
+            "The conversation continues after this summary. If it records progress on the request that follows, "
+            "continue that work from its next steps instead of starting over."
+        ),
+        provider_data={_COMPACTION_SUMMARY_MARKER: True},
+        from_history=from_history,
+    )
+
+
+def compaction_summary_text(message: Message) -> str:
+    """Return the summary a rendered compaction summary message carries."""
+    content = str(message.content)
+    start = content.index("<compacted_history>\n") + len("<compacted_history>\n")
+    return content[start : content.rindex("\n</compacted_history>")]
+
+
+def is_compaction_summary(message: Message) -> bool:
+    """Return whether one message is a rendered compaction summary."""
+    return isinstance(message.provider_data, dict) and message.provider_data.get(_COMPACTION_SUMMARY_MARKER) is True
+
+
 def _estimate_session_summary_tokens(summary_text: str | None) -> int:
     """Estimate prompt-visible tokens contributed by one stored session summary."""
     if summary_text is None:
@@ -108,15 +177,7 @@ def _estimate_session_summary_tokens(summary_text: str | None) -> int:
     normalized_summary = summary_text.strip()
     if not normalized_summary:
         return 0
-    wrapper = (
-        "Here is a brief summary of your previous interactions:\n\n"
-        "<summary_of_previous_interactions>\n"
-        f"{normalized_summary}\n"
-        "</summary_of_previous_interactions>\n\n"
-        "Note: this information is from previous interactions and may be outdated. "
-        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
-    )
-    return estimate_text_tokens(wrapper)
+    return estimate_text_tokens(str(compaction_summary_message(normalized_summary, from_history=True).content))
 
 
 def _estimate_history_messages_tokens(messages: list[Message]) -> int:
@@ -265,12 +326,7 @@ def plan_replay_that_fits(
     """Return the safest persisted-replay plan that fits the current run budget."""
     summary_tokens = _session_summary_replay_tokens(session)
     if summary_tokens > available_history_budget:
-        msg = (
-            "Saved conversation summary exceeds the available history budget "
-            f"({summary_tokens} estimated tokens; {available_history_budget} available). "
-            "Choose a model with a larger context window or reduce the current prompt."
-        )
-        raise _HistorySummaryBudgetError(msg)
+        raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
     if current_history_tokens <= available_history_budget:
         return configured_replay_plan(
             history_settings=history_settings,
@@ -301,10 +357,12 @@ def plan_replay_that_fits(
             num_history_messages=num_history_messages,
         )
 
+    # Zero raw runs still replays history, which is what places the summary before the prompt.
     return ResolvedReplayPlan(
         mode="disabled",
         estimated_tokens=_session_summary_replay_tokens(session),
-        add_history_to_context=False,
+        add_history_to_context=True,
+        num_history_runs=0,
     )
 
 
@@ -457,7 +515,7 @@ def has_effective_persisted_replay(
     """Report whether a summary or permitted raw runs will reach the model."""
     if _session_has_summary_replay(session):
         return True
-    if not replay_plan.add_history_to_context:
+    if not replay_plan.add_history_to_context or replay_plan.num_history_runs == 0:
         return False
     return bool(scope_visible_runs(session, scope))
 

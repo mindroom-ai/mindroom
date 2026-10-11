@@ -781,7 +781,7 @@ def _prepared_history_with_scheduled_limit(
             replays_persisted_history=False,
         )
     plan = prepared_history.replay_plan
-    if plan is None or not plan.add_history_to_context:
+    if plan is None or not plan.add_history_to_context or plan.mode == "disabled":
         return prepared_history
     if plan.num_history_messages is not None and plan.num_history_messages <= max_persisted_messages:
         return prepared_history

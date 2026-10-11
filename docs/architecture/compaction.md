@@ -12,7 +12,8 @@ All paths below are relative to `src/mindroom/`.
 | `history/policy.py` | Resolving configuration and deciding whether compaction is available or needed. |
 | `history/runtime.py` | Preparing one response, model construction, compaction notices, failure handling, and applying the final replay decision. |
 | `history/session_context.py` | Canonical agent/team scope identity, opening the correct session store, and closing owned handles. |
-| `history/replay.py` | Materializing visible persisted history, estimating its cost, and fitting replay limits. |
+| `history/replay.py` | Materializing visible persisted history, rendering the compaction summary message, estimating history and request cost, and fitting replay limits. |
+| `history/mid_turn_compaction.py` | Sizing each model request of a reply, folding everything but the system prompt, current prompt, transient messages, and queued notices into a summary, and archiving a snapshot of the running turn. |
 | `history/compaction.py` | Selecting runs, executing summary chunks, switching fallback models, and committing chunk progress. |
 | `history/summary_input.py` | Serializing conversation and prior summary into bounded inputs; preserving a progress-making run envelope when shrinking. |
 | `history/message_content.py` | The shared text and media projection used by serialization and token estimation. |
@@ -21,12 +22,13 @@ All paths below are relative to `src/mindroom/`.
 | `history/archive.py` | The `<session_table>_compactions` and `<session_table>_compacted_runs` tables: summary generations and archived runs, moved in one transaction with the live run rows. |
 | `history/archive_schema.py` | The archive table layout, shared with the legacy migration. |
 | `history/legacy_compaction_state.py` | The one-time migration, run when a conversation database opens, that adopts scope state written when compaction deleted runs as content-free generations. |
+| `history/legacy_summary_system_prompt.py` | Recognizing and removing Agno's summary block in a system message a run paused with before the summary became a history message. |
 | `history/native.py` | Selecting and configuring native compaction for the resolved history route. |
 | `native_compaction.py` | Provider-neutral checkpoint and native replay data. |
 
 `SummaryModel` binds the serving model, its configured name, and its input budget.
 A fallback switch replaces that whole value, so later chunks cannot accidentally use the previous model's budget or identity.
-Persisted replay fitting and the Vertex full-request guard remain separate because they measure different inputs at different boundaries.
+Persisted replay fitting runs once before a reply; the mid-turn hook measures every model request of the reply, anchored on the latest response's provider usage when this loop received one.
 
 ## Compatibility code
 
@@ -36,7 +38,8 @@ The [Agno compatibility inventory](agno-compatibility.md) covers the full runtim
 
 | Module | Workaround and installation point |
 | --- | --- |
-| `history/agno_compat_message_builder.py` | Preserves roleful Team inputs and strips historical inline media in Agent/Team message builders; installed explicitly by `agents._initialize_agent_instance` and `teams._create_team_instance`. |
+| `history/agno_compat_message_builder.py` | Preserves roleful Team inputs, strips historical inline media, inserts the compaction summary before replayed history, and records each request's session in Agent/Team message builders; installed explicitly by `agents._initialize_agent_instance` and `teams._create_team_instance`. |
+| `agno_compat_model_hooks.py` `install_request_preparation` | Awaits the mid-turn compaction hook before every provider request of an Agent or Team model; installed by `history/mid_turn_compaction.install_mid_turn_compaction` from `create_agent` and team creation, before the model-call cap. |
 | `agno_compat_session_persistence.py` | Guards and adapts Agno's asynchronous persistence against the owned session store; installed by `agent_storage._create_sqlite_state_storage` before filesystem work. |
 | `agno_compat_prepared_tools.py` | Shares private Agent/Team tool preparation between RTC execution and prompt inspection; temporarily supplies Team tool instructions, restoring the original list even on failure. |
 | `tool_system/agno_compat_tool_hooks.py` | Adapts Agno's private sync/async hook chains to deferred results and owner-controlled synchronous execution; installed by `tool_system/tool_hooks.py`, which retains dispatch, approval, and cancellation ownership. |
@@ -50,6 +53,12 @@ When upgrading Agno or a provider SDK, inspect these compatibility modules first
 Mantle currently needs its existing HTTP transport passed explicitly when copying SDK client options.
 
 ## Invariants
+
+- The summary is never stored in a run: the builder derives it from the session's cached latest generation for every request that replays history, marks it `from_history`, and Agno drops it when it stores the run, so an approval resume rebuilds it with its history and later turns cannot replay it twice; Agno's own system-prompt summary is off for every Agent and Team.
+- A run-local summary (a request without persisted replay) is an ordinary run message and never suppresses the scope summary.
+- Mid-turn compaction of a scoped request archives every visible run and one snapshot of the running turn in the same generations, on the session object Agno writes when the run ends; the request is rewritten only when the snapshot committed, including when cancellation arrives after that commit.
+- Snapshot run ids start with the live run's id, are unique per snapshot, sit last in their generation, and never return as live runs; redaction that removes a run, or hits an archived row of it, rolls back to the earliest archived row of that run or any of its snapshots.
+- Folded assistant requests keep their usage in run metadata, which the usage projection merges ahead of the run's remaining requests.
 
 - Summary instructions occupy their own system message; serialized conversation and prior summary occupy the user message.
 - System/developer prompt roles and bulky request metadata are excluded from the portable conversation input.

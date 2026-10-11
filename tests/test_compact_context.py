@@ -29,6 +29,7 @@ from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import read_scope_state, set_force_compaction_state
 from mindroom.history.types import (
+    CompactionLifecycleFailure,
     CompactionLifecycleStart,
     CompactionOutcome,
     HistoryScope,
@@ -562,6 +563,49 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
     assert sent_content["body"] == ("\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget")
     assert sent_content["formatted_body"] == (
         "<em>\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget</em>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compaction_failure_notice_says_the_reply_continues_without_compaction(tmp_path: Path) -> None:
+    """A failed pre-reply or mid-turn compaction continues without compacting, not with trimmed history."""
+    config, runtime_paths = _make_config(tmp_path)
+    bot = make_test_agent_bot(
+        agent_user=AgentMatrixUser(
+            agent_name="test_agent",
+            password=TEST_PASSWORD,
+            display_name="Test Agent",
+            user_id="@mindroom_test_agent:localhost",
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!room:localhost"],
+    )
+    bot.client = AsyncMock()
+    install_runtime_journal_support(bot)
+    with patch(
+        "mindroom.delivery_gateway.edit_message_outcome",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
+    ) as mock_edit:
+        await bot._delivery_gateway._edit_compaction_lifecycle_failure(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            event=CompactionLifecycleFailure(
+                notice_event_id="$notice",
+                mode="auto",
+                session_id="session-1",
+                scope="agent:test_agent",
+                summary_model="summary-model",
+                status="failed",
+                duration_ms=5,
+                failure_reason="summary model unavailable",
+                history_budget_tokens=100_000,
+            ),
+        )
+
+    assert mock_edit.await_args is not None
+    assert mock_edit.await_args.args[3]["body"] == (
+        "Compaction failed; continuing without compaction. summary model unavailable"
     )
 
 

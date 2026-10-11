@@ -418,3 +418,102 @@ def test_refreshing_a_stale_summary_drops_the_stale_rows_seen_ids(storage: Sqlit
     stored = _stored(storage)
     assert _summary(stored) == "summary of r1"
     assert _seen(storage, stored) == {"$r1"}
+
+
+def _live_run_with(events: list[str], *, reply: str | None = None) -> RunOutput:
+    run = _run("x")
+    metadata = dict(run.metadata or {})
+    metadata[constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = events
+    if reply is not None:
+        metadata[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = reply
+    run.metadata = metadata
+    return run
+
+
+def _snapshot_of(run: RunOutput, events: list[str]) -> RunOutput:
+    snapshot = _run("x")
+    snapshot.run_id = archive.snapshot_run_id("x")
+    # The reply event is attached to the live run only after it finishes.
+    metadata = {
+        key: value
+        for key, value in (run.metadata or {}).items()
+        if key != constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+    }
+    snapshot.metadata = {**metadata, constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: events}
+    return snapshot
+
+
+def _seed_with_snapshots(storage: SqliteDb, *, snapshots: int) -> AgentSession:
+    """Archive r1 and r2 with one snapshot of the running x, then optionally a second snapshot of x."""
+    live = _live_run_with(["$x", "$mid", "$late"], reply="$reply")
+    session = seed_session(
+        storage,
+        AgentSession(session_id="session", agent_id="code", runs=[_run("r1"), _run("r2"), live]),
+    )
+    first = _snapshot_of(live, ["$x"])
+    archive_compaction_chunk(
+        storage=storage,
+        session=session,
+        scope=_SCOPE,
+        summary=SessionSummary(summary="r1, r2, and early x", updated_at=datetime.now(UTC)),
+        summary_model="summary-model",
+        archived_runs=[*(run for run in session.runs or [] if run.run_id in {"r1", "r2"}), first],
+    )
+    if snapshots == 2:
+        archive_compaction_chunk(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            summary=SessionSummary(summary="r1, r2, and more of x", updated_at=datetime.now(UTC)),
+            summary_model="summary-model",
+            archived_runs=[_snapshot_of(live, ["$x", "$mid"])],
+        )
+    return session
+
+
+@pytest.mark.parametrize("snapshots", [1, 2])
+@pytest.mark.parametrize("event_id", ["$x", "$mid", "$late", "$reply"])
+def test_redacting_any_event_of_a_run_that_compacted_mid_turn_rolls_back_before_it(
+    storage: SqliteDb,
+    snapshots: int,
+    event_id: str,
+) -> None:
+    """Events the run consumed before, between, or after its snapshots, and its reply, all reach its snapshots."""
+    session = _seed_with_snapshots(storage, snapshots=snapshots)
+
+    assert _remove_redacted_event_from_history(storage, session, _SCOPE, event_id=event_id) is True
+
+    stored = _stored(storage)
+    assert [run.run_id for run in stored.runs or []] == ["r1", "r2"]
+    assert stored.summary is None
+    assert all(archive.snapshot_origin(run.run_id or "") is None for run in stored.runs or [])
+
+
+def test_redacting_an_event_first_consumed_between_snapshots_after_the_run_was_archived(storage: SqliteDb) -> None:
+    """An archive hit on a later snapshot still rolls back to the run's first snapshot."""
+    session = _seed_with_snapshots(storage, snapshots=2)
+    archive_compaction_chunk(
+        storage=storage,
+        session=session,
+        scope=_SCOPE,
+        summary=SessionSummary(summary="everything through x", updated_at=datetime.now(UTC)),
+        summary_model="summary-model",
+        archived_runs=[run for run in session.runs or [] if run.run_id == "x"],
+    )
+
+    assert _remove_redacted_event_from_history(storage, session, _SCOPE, event_id="$mid") is True
+
+    stored = _stored(storage)
+    assert [run.run_id for run in stored.runs or []] == ["r1", "r2"]
+    assert stored.summary is None
+
+
+def test_redacting_an_earlier_run_still_rolls_back_to_that_run(storage: SqliteDb) -> None:
+    """Runs archived before a snapshot keep their own rollback point."""
+    session = _seed_with_snapshots(storage, snapshots=2)
+
+    assert _remove_redacted_event_from_history(storage, session, _SCOPE, event_id="$r2") is True
+
+    stored = _stored(storage)
+    assert [run.run_id for run in stored.runs or []] == ["r1"]
+    assert stored.summary is None

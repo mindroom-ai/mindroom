@@ -1,7 +1,8 @@
 """Shrinkable mixed-operation coverage for the compaction archive invariants.
 
 Each example drives one conversation through appends, compaction chunks, chunks
-interrupted after the archive commit, stale whole-row session writes, redactions,
+interrupted after the archive commit, mid-turn compactions that archive a snapshot
+of the newest run while it stays live, stale whole-row session writes, redactions,
 and reopens, starting from an empty or a pre-archive database. Summaries name the
 runs they cover, so after every step (and the reconcile the next run would do)
 the test can check exactly what replay represents.
@@ -87,6 +88,7 @@ class _Runner:
         operations = {
             "add": self._add,
             "compact": self._compact,
+            "midturn": self._midturn,
             "interrupt": self._interrupt,
             "snapshot": self._snapshot,
             "stale_write": self._stale_write,
@@ -173,6 +175,34 @@ class _Runner:
             summary=SessionSummary(summary=summary),
             summary_model="fuzz-model",
             archived_runs=runs,
+        )
+
+    def _midturn(self, _action: Action) -> None:
+        """Archive every earlier live run and a snapshot of the newest one, which stays live."""
+        session = self._load()
+        reconcile_compaction_state(self._storage, session, _SCOPE)
+        session = self._load()
+        live = [run for run in session.runs or [] if isinstance(run, RunOutput) and run.run_id]
+        if not live:
+            return
+        *prior, current = live
+        assert current.run_id is not None
+        snapshot = RunOutput(
+            run_id=archive.snapshot_run_id(current.run_id),
+            agent_id="code",
+            session_id=_SESSION,
+            status=RunStatus.completed,
+            messages=current.messages,
+            metadata=current.metadata,
+        )
+        self._ever_archived.update(run.run_id for run in prior if run.run_id)
+        archive_compaction_chunk(
+            storage=self._storage,
+            session=session,
+            scope=_SCOPE,
+            summary=SessionSummary(summary=_summary_of(_covered(session) | {run.run_id for run in live if run.run_id})),
+            summary_model="fuzz-model",
+            archived_runs=[*prior, snapshot],
         )
 
     def _interrupt(self, action: Action) -> None:
@@ -268,7 +298,7 @@ class _Runner:
             assert not lost
         elif redacted_event_id[1:] in self._created:
             first = self._created.index(redacted_event_id[1:])
-            assert all(self._created.index(run_id) >= first for run_id in lost)
+            assert all(self._created.index(archive.snapshot_origin(run_id) or run_id) >= first for run_id in lost)
         self._present = present
         # Seen ids are exactly the events replay represents, so nothing is repeated or dropped.
         expected_seen = {_event(run_id) for run_id in live | covered}
@@ -278,7 +308,19 @@ class _Runner:
 _ACTIONS = st.builds(
     Action,
     kind=st.sampled_from(
-        ("add", "add", "add", "compact", "interrupt", "snapshot", "stale_write", "resurrect", "redact", "reopen"),
+        (
+            "add",
+            "add",
+            "add",
+            "compact",
+            "midturn",
+            "interrupt",
+            "snapshot",
+            "stale_write",
+            "resurrect",
+            "redact",
+            "reopen",
+        ),
     ),
     count=st.integers(1, 3),
     index=st.integers(0, 30),
@@ -338,6 +380,19 @@ _ACTIONS = st.builds(
         Action("compact"),
         Action("redact", index=0),
         Action("resurrect"),
+    ],
+    legacy=False,
+)
+@example(
+    # A run that compacted mid-turn, then compacted again and finished, is redacted by an event only it carries.
+    actions=[
+        Action("add"),
+        Action("add"),
+        Action("midturn"),
+        Action("midturn"),
+        Action("add"),
+        Action("compact", count=2),
+        Action("redact", index=1),
     ],
     legacy=False,
 )

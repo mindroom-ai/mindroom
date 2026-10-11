@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom import model_loading
 from mindroom.agno_compat_provider_errors import is_provider_timeout
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.history.compaction import SummaryModel, compact_scope_history
+from mindroom.history.compaction import SummaryModel, compact_scope_history, summarize_runs
 from mindroom.history.native import configure_native_history, native_history_route
 from mindroom.history.policy import (
     classify_compaction_decision,
@@ -68,6 +68,9 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.models.base import Model
+    from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -188,7 +191,7 @@ def _clear_forced_compaction_after_failure(
 
 
 @dataclass(frozen=True)
-class _HistoryPreparationInputs:
+class HistoryPreparationInputs:
     """Fully resolved policy/model/token inputs for one history preparation."""
 
     history_settings: ResolvedHistorySettings
@@ -212,7 +215,7 @@ class PreparedScopeHistory:
 
     scope: HistoryScope | None
     session: AgentSession | TeamSession | None
-    resolved_inputs: _HistoryPreparationInputs
+    resolved_inputs: HistoryPreparationInputs
     compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
@@ -295,7 +298,7 @@ async def prepare_scope_history(
     *,
     agent: Agent,
     agent_name: str,
-    resolved_inputs: _HistoryPreparationInputs,
+    resolved_inputs: HistoryPreparationInputs,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None = None,
@@ -448,7 +451,7 @@ async def _run_scope_compaction_with_lifecycle(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
-    resolved_inputs: _HistoryPreparationInputs,
+    resolved_inputs: HistoryPreparationInputs,
     history_budget: int | None,
     current_history_tokens: int,
     runs_before: int,
@@ -456,6 +459,7 @@ async def _run_scope_compaction_with_lifecycle(
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
     replay_model: NativeCompactionModel | None = None,
+    in_progress: RunOutput | TeamRunOutput | None = None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -522,6 +526,7 @@ async def _run_scope_compaction_with_lifecycle(
             progress_callback=progress_callback,
             completion_callback=_complete,
             replay_model=replay_model,
+            in_progress=in_progress,
         )
     except asyncio.CancelledError as error:
         if not completed_successfully:
@@ -554,23 +559,15 @@ async def _run_scope_compaction_with_lifecycle(
     return _ScopeCompactionLifecycleResult(outcome=outcome, reply_outcome="success")
 
 
-async def _run_scope_compaction(
+def _load_summary_models(
+    execution_plan: ResolvedHistoryExecutionPlan,
     *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-    resolved_inputs: _HistoryPreparationInputs,
-    history_budget: int | None,
-    before_tokens: int,
     config: Config,
     runtime_paths: RuntimePaths,
-    lifecycle_notice_event_id: str | None = None,
-    progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
-    completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
-    replay_model: NativeCompactionModel | None = None,
-) -> CompactionOutcome | None:
-    execution_plan = resolved_inputs.execution_plan
+    session_id: str,
+    scope: HistoryScope,
+) -> tuple[SummaryModel, SummaryModel | None]:
+    """Load the summary model and, when distinct and loadable, its safeguard fallback."""
     assert execution_plan.summary_input_budget_tokens is not None
     summary_model = SummaryModel(
         model=_load_compaction_model(config, runtime_paths, execution_plan.compaction_model_name),
@@ -601,12 +598,75 @@ async def _run_scope_compaction(
         except Exception:
             logger.warning(
                 "Compaction fallback model failed to load; continuing without a fallback",
-                session_id=session.session_id,
+                session_id=session_id,
                 scope=scope.key,
                 compaction_model=execution_plan.compaction_model_name,
                 fallback_model=fallback_model_name,
                 exc_info=True,
             )
+    return summary_model, fallback_model
+
+
+async def summarize_run_locally(
+    *,
+    resolved_inputs: HistoryPreparationInputs,
+    previous_summary: str | None,
+    snapshot: RunOutput | TeamRunOutput,
+    scope: HistoryScope,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None,
+) -> str:
+    """Summarize one run's own folded messages with the scope's summary model, outside any archive."""
+    execution_plan = resolved_inputs.execution_plan
+    session_id = snapshot.session_id or ""
+    summary_model, fallback_model = _load_summary_models(
+        execution_plan,
+        config=config,
+        runtime_paths=runtime_paths,
+        session_id=session_id,
+        scope=scope,
+    )
+    return await summarize_runs(
+        summary_model=summary_model,
+        fallback_summary_model=fallback_model,
+        previous_summary=previous_summary,
+        runs=[snapshot],
+        session_id=session_id,
+        scope=scope,
+        # Replay limits trim history; the run's own tool results must all reach the summary.
+        history_settings=replace(resolved_inputs.history_settings, max_tool_calls_from_history=None),
+        summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
+        timeout_seconds=execution_plan.compaction_timeout_seconds,
+        on_response=on_response,
+    )
+
+
+async def _run_scope_compaction(
+    *,
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+    resolved_inputs: HistoryPreparationInputs,
+    history_budget: int | None,
+    before_tokens: int,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    lifecycle_notice_event_id: str | None = None,
+    progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
+    replay_model: NativeCompactionModel | None = None,
+    in_progress: RunOutput | TeamRunOutput | None = None,
+) -> CompactionOutcome | None:
+    execution_plan = resolved_inputs.execution_plan
+    summary_model, fallback_model = _load_summary_models(
+        execution_plan,
+        config=config,
+        runtime_paths=runtime_paths,
+        session_id=session.session_id,
+        scope=scope,
+    )
     return await compact_scope_history(
         storage=storage,
         replay_model=replay_model,
@@ -625,7 +685,45 @@ async def _run_scope_compaction(
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
         completion_callback=completion_callback,
+        in_progress=in_progress,
     )
+
+
+async def compact_scope_mid_turn(
+    *,
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    resolved_inputs: HistoryPreparationInputs,
+    snapshot: RunOutput | TeamRunOutput,
+    before_tokens: int,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    compaction_lifecycle: CompactionLifecycle | None,
+) -> CompactionOutcome | None:
+    """Fold the scope's visible runs and a snapshot of the running turn into a new generation."""
+    # Replay limits trim history; the running turn's own tool results must all reach the summary.
+    inputs = replace(
+        resolved_inputs,
+        history_settings=replace(resolved_inputs.history_settings, max_tool_calls_from_history=None),
+    )
+    result = await _run_scope_compaction_with_lifecycle(
+        mode="auto",
+        storage=storage,
+        session=session,
+        scope=scope,
+        # A manual request made during the turn still applies before the next reply.
+        state=HistoryScopeState(),
+        resolved_inputs=inputs,
+        history_budget=resolved_inputs.execution_plan.hard_replay_budget_tokens,
+        current_history_tokens=before_tokens,
+        runs_before=len(scope_visible_runs(session, scope)) + 1,
+        config=config,
+        runtime_paths=runtime_paths,
+        compaction_lifecycle=compaction_lifecycle,
+        in_progress=snapshot,
+    )
+    return result.outcome
 
 
 def finalize_history_preparation(
@@ -806,7 +904,7 @@ async def prepare_bound_scope_history(
             )
         )
     )
-    resolved_inputs = _resolve_entity_preparation_inputs(
+    resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name if team_name in config.teams else None,
         static_prompt_tokens=resolved_static_prompt_tokens,
@@ -866,7 +964,7 @@ def _history_settings_from_agent(agent: Agent) -> ResolvedHistorySettings:
     )
 
 
-def _resolve_entity_preparation_inputs(
+def resolve_entity_preparation_inputs(
     *,
     config: Config,
     entity_name: str | None,
@@ -877,7 +975,8 @@ def _resolve_entity_preparation_inputs(
     compaction_config: CompactionConfig | None = None,
     has_authored_compaction_config: bool | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
-) -> _HistoryPreparationInputs:
+) -> HistoryPreparationInputs:
+    """Resolve history settings, compaction config, runtime model, and plan for one agent or team scope."""
     resolved_entity = config.resolve_entity(entity_name)
     resolved_history_settings = history_settings
     if resolved_history_settings is None:
@@ -909,7 +1008,7 @@ def _resolve_entity_preparation_inputs(
         )
     )
 
-    return _HistoryPreparationInputs(
+    return HistoryPreparationInputs(
         history_settings=resolved_history_settings,
         compaction_config=resolved_compaction_config,
         has_authored_compaction_config=resolved_has_authored_compaction_config,
@@ -933,7 +1032,7 @@ def resolve_agent_preparation_inputs(
     active_context_window: int | None = None,
     static_prompt_tokens: int | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
-) -> _HistoryPreparationInputs:
+) -> HistoryPreparationInputs:
     """Resolve every history-preparation input for one agent run in one place.
 
     Explicitly provided values win; everything else falls back to the agent's
@@ -945,7 +1044,7 @@ def resolve_agent_preparation_inputs(
     resolved_history_settings = history_settings
     if resolved_history_settings is None and agent_name not in config.agents:
         resolved_history_settings = _history_settings_from_agent(agent)
-    return _resolve_entity_preparation_inputs(
+    return resolve_entity_preparation_inputs(
         config=config,
         entity_name=agent_name if agent_name in config.agents else None,
         static_prompt_tokens=resolved_static_prompt_tokens,

@@ -87,6 +87,7 @@ def save_compaction_usage(
     model_provider: str,
     model: str,
     metrics: Mapping[str, object],
+    initial_session: AgentSession | TeamSession | None = None,
 ) -> None:
     """Persist one incurred summary response independently of conversation changes."""
     created_at = time.time()
@@ -96,6 +97,7 @@ def save_compaction_usage(
         usage_id=f"compaction:{uuid4()}",
         kind="compaction_summary",
         requester_id=requester_id,
+        initial_session=initial_session,
         run={
             "model_provider": model_provider,
             "model": model,
