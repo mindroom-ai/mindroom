@@ -158,7 +158,8 @@ async def drain_agent_cancellation(
 # Upstream PR: None identified.
 # Remove when: Agno lets a caller await the save of a team run cancelled by cancelling its task.
 # Coverage: tests/test_team_member_usage.py::test_interrupted_turn_written_after_a_stop_is_not_overwritten;
-# tests/test_team_member_usage.py::test_interrupted_turn_waits_only_for_its_own_team_save.
+# tests/test_team_member_usage.py::test_interrupted_turn_waits_only_for_its_own_team_save;
+# tests/test_response_runner_team_streaming.py::test_interrupted_team_turn_is_written_after_agno_saves_the_stopped_run.
 _CANCELLED_TEAM_SAVES: dict[str, set[asyncio.Task[Any]]] = {}
 
 
