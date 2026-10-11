@@ -47,7 +47,7 @@ A pre-request hook on every model folds replayed history and the turn's model an
 
 **Interfaces:**
 - Produces: `COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"`, `compaction_summary_message(summary: str, *, from_history: bool) -> Message`, `is_compaction_summary(message: Message) -> bool` in `history/replay.py`.
-- Produces: `built_request_session(target: Agent | Team) -> AgentSession | TeamSession | None` in `history/agno_compat_message_builder.py`, backed by a `weakref.WeakKeyDictionary` filled by every wrapped builder.
+- Produces: `built_request_session(target: Agent | Team) -> AgentSession | TeamSession | None` in `history/agno_compat_message_builder.py`, backed by an `id(target)`-keyed dict of `(weakref, session)` (Agno's Agent and Team dataclasses are unhashable) filled by every wrapped builder.
 - Produces: `plan_replay_that_fits` returns `ResolvedReplayPlan(mode="disabled", add_history_to_context=True, num_history_runs=0, ...)` for summary-only replay; `has_effective_persisted_replay` treats `num_history_runs == 0` as no raw runs.
 
 - [ ] **Step 1: Write failing tests**
@@ -102,7 +102,7 @@ A pre-request hook on every model folds replayed history and the turn's model an
 - [ ] **Step 1: Write failing tests**
   - `test_request_preparation_runs_before_every_provider_request[stream]`: a `SyntheticModel` tool loop with two tool batches calls `prepare` three times, each time with the same list object Agno appends to, the formatted tool dicts, and the run's `run_response`; a mutation made in `prepare` is what the provider receives.
   - `test_tool_call_cap_installed_later_refuses_before_preparation`: with the cap installed after the hook, a refused request never reaches `prepare`.
-  - `test_response_context_tokens_adds_cache_tokens_only_where_reported_outside_input`: Anthropic-style counters `input=10, cache_read=90, cache_write=5` give `105`; OpenAI-style `input=100, cache_read=90` gives `100`; native `context_usage` wins over billed counters; missing counters give `None`.
+  - `test_response_context_tokens_adds_cache_tokens_only_where_reported_outside_input`: Anthropic-style counters `input=10, cache_read=90, cache_write=5` give `105`; OpenAI-style `input=100, cache_read=90` gives `100`; native `context_usage` wins over billed counters; a default `MessageMetrics()` (all zero) gives `None`.
 - [ ] **Step 2: Run; expect FAIL.**
 - [ ] **Step 3: Implement** with an `AGNO_COMPAT:` marker on the installer; the hook awaits `prepare` before delegating and leaves Agno's arguments unchanged.
 - [ ] **Step 4: Run; expect PASS, plus `tests/test_tool_call_budget.py`.**
@@ -140,6 +140,9 @@ A pre-request hook on every model folds replayed history and the turn's model an
   - `test_request_sizing_uses_the_latest_response_usage`: a response reporting usage above the limit triggers compaction even when the canonical estimate is below it.
   - `test_resumed_run_does_not_anchor_on_its_paused_response`: the first request of a continuation is sized by estimate even when the loaded assistant message reports usage above the limit.
   - `test_unseen_thread_context_is_folded_and_transient_context_kept`.
+  - `test_snapshot_summary_keeps_current_turn_tool_results_despite_history_limits[0|1]`: with `max_tool_calls_from_history` 0 and 1, a fact present only in an early current-turn tool result reaches the summary input.
+  - `test_run_local_summary_usage_is_recorded`: the summary call's usage lands as `compaction_summary` usage (target storage, else helper owner), including a refused primary and a successful fallback.
+  - `test_usage_less_server_never_anchors_sizing`: a provider leaving `MessageMetrics()` at zero across several tool batches is sized by full estimate.
   - `test_rewritten_request_over_the_limit_raises_the_summary_budget_error`.
 - [ ] **Step 2: Run; expect FAIL (module missing).**
 - [ ] **Step 3: Implement.** The hook skips a request whose run id is in the binding's failed set, resolves the plan through `resolve_entity_preparation_inputs(static_prompt_tokens=0)`, sizes the request (Task 3), and for unscoped runs builds an in-memory snapshot run of the folded messages, calls `summarize_run_locally`, rewrites the list in place to `[leading system/developer, compaction_summary_message(summary, from_history=False), current prompt, transient messages, queued notices]` in their original relative order, and appends the folded assistant requests to `run_response.metadata[COMPACTED_REQUESTS_METADATA_KEY]`.
@@ -172,6 +175,8 @@ A pre-request hook on every model folds replayed history and the turn's model an
   - `test_cancelled_mid_turn_compaction_keeps_committed_chunks` and `test_cancellation_after_the_snapshot_commit_still_rewrites_the_request`.
   - `test_failed_second_chunk_keeps_the_live_session_fresh`: after the terminal session write, the stored summary equals the latest generation and the scope's metadata seen ids are intact.
   - `test_force_flag_survives_mid_turn_compaction`.
+  - `test_legacy_resume_then_mid_turn_compaction_leaves_one_summary`: a resumed pre-release pause, after another tool result, compacts and its system message no longer embeds the legacy block.
+  - `test_in_memory_team_continuation_keeps_one_summary`: a delegation continuation handed the in-memory run carries exactly one summary.
   - `test_mid_turn_compaction_emits_compaction_hooks_and_notices`.
 - [ ] **Step 2: Run; expect FAIL.**
 - [ ] **Step 3: Implement.** Scoped iff the target replays history and has `db`; take `built_request_session(target)` (Agno's live session for this run), reconcile it in place, build the snapshot (scope id, `status=completed`, deep-copied live metadata, folded messages plus input, `run_id=snapshot_run_id(run_response.run_id)`), run `compact_scope_mid_turn` on that same session object with a no-force `HistoryScopeState()` (chunk persistence adopts the fresh row into it after every chunk), check `archive.archived_run_ids` for the snapshot, then rewrite with `compaction_summary_message(new_summary, from_history=True)` and carry usage as in Task 4; on `CancelledError`, perform the same check and rewrite before re-raising.
@@ -190,7 +195,7 @@ A pre-request hook on every model folds replayed history and the turn's model an
 - Produces: `earliest_archived_run(storage: BaseDb, *, session_id: str, scope_key: str, run_ids: Collection[str]) -> _ArchiveHit | None` (earliest row whose run id is in `run_ids` or is a snapshot of one).
 - Produces: `remove_run_by_event_id(...) -> list[str]`.
 
-- [ ] **Step 1: Write failing tests** for one and two mid-turn compactions, agent and team (with member runs): redacting an event consumed before the snapshot, an event added to the live run's metadata after it, and the reply event attached after the run, each rolls back to before the run, restores the earlier runs, and replays the previous generation's summary; redacting an earlier archived run's event still rolls back to that run; snapshots never return to the live table; fuzz generator adds mid-turn snapshots and checks the existing invariants.
+- [ ] **Step 1: Write failing tests** for one and two mid-turn compactions, agent and team (with member runs), including two snapshots with an event first consumed between them that is redacted after the origin run itself was archived (archive hits normalize through `snapshot_origin`): redacting an event consumed before the snapshot, an event added to the live run's metadata after it, and the reply event attached after the run, each rolls back to before the run, restores the earlier runs, and replays the previous generation's summary; redacting an earlier archived run's event still rolls back to that run; snapshots never return to the live table; fuzz generator adds mid-turn snapshots and checks the existing invariants.
 - [ ] **Step 2: Run; expect FAIL.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run `tests/test_compaction_redaction.py tests/test_compaction_fuzz.py tests/test_history_archive.py tests/test_turn_store.py`; expect PASS.**
@@ -204,7 +209,7 @@ A pre-request hook on every model folds replayed history and the turn's model an
 - Delete or rewrite: `tests/test_vertex_claude_context_guard.py`, counting cases in `tests/test_vertex_native_compaction_count.py`, `tests/test_claude_native_compaction.py:529`, `tests/test_claude_authored_compaction.py:75`, `tests/test_extra_kwargs.py:896`
 - Test: `tests/test_mid_turn_compaction.py`
 
-- [ ] **Step 1: Write failing tests**: `test_native_request_under_the_limit_never_text_compacts`; `test_oversized_native_request_turns_native_off_and_compacts_as_text[openai|claude]` (native projection sized from the latest `context_usage`; afterwards `model.native_compaction is None` for the rest of the run and the request is canonical `[system, summary, input]`); `test_vertex_requests_are_sent_without_trimming`.
+- [ ] **Step 1: Write failing tests**: `test_native_request_under_the_limit_never_text_compacts`; `test_openai_checkpoint_with_large_billed_input_keeps_native_replay` (large billed input, no `context_usage`, small projected request); `test_oversized_native_request_turns_native_off_and_compacts_as_text[openai|claude]` (native projection sized from the latest `context_usage`; afterwards `model.native_compaction is None` for the rest of the run and the request is canonical `[system, summary, input]`); `test_vertex_requests_are_sent_without_trimming`.
 - [ ] **Step 2: Run; expect FAIL.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run the native, Vertex, and Claude test files; expect PASS.**
