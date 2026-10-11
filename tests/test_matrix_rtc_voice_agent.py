@@ -604,7 +604,7 @@ def test_terminal_session_close_reports_api_retryability(api_error: object, retr
     assert callbacks == [retryable]
 
 
-def test_realtime_auth_error_reports_actionable_notice_once_without_secret() -> None:
+def test_realtime_auth_error_reports_actionable_notice_without_secret() -> None:
     """Provider auth failures explain the operator fix without echoing credentials."""
     notices: list[str] = []
     handlers: dict[str, object] = {}
@@ -626,7 +626,6 @@ def test_realtime_auth_error_reports_actionable_notice_once_without_secret() -> 
     event = SimpleNamespace(
         error=SimpleNamespace(type="realtime_model_error", error=error),
     )
-    handler(event)
     handler(event)
 
     assert len(notices) == 1
@@ -666,7 +665,7 @@ def test_realtime_tls_error_reports_ca_bundle_remediation() -> None:
     assert "Restart MindRoom" in notices[0]
 
 
-def test_stale_session_error_does_not_report_or_consume_dedupe() -> None:
+def test_stale_session_error_does_not_report() -> None:
     """An error from a replaced SDK session cannot affect the active call."""
     notices: list[str] = []
     handlers: dict[str, object] = {}
@@ -695,7 +694,6 @@ def test_stale_session_error_does_not_report_or_consume_dedupe() -> None:
     )
 
     assert notices == []
-    assert bridge._reported_error_notices == set()
 
 
 @pytest.mark.parametrize(

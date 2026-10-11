@@ -403,7 +403,6 @@ class RealtimeVoiceBridge:
         self._session: Any = None
         self._owned_speech_resource_closers: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._session_event_tasks: set[asyncio.Future[None]] = set()
-        self._reported_error_notices: set[str] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
 
@@ -575,11 +574,7 @@ class RealtimeVoiceBridge:
         def _on_error(event: ErrorEvent) -> None:
             if self._session is not session:
                 return
-            notice = _describe_voice_error(event)
-            if notice in self._reported_error_notices:
-                return
-            self._reported_error_notices.add(notice)
-            on_error(notice)
+            on_error(_describe_voice_error(event))
 
         session.on("error", _on_error)
 
