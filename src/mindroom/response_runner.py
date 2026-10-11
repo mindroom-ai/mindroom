@@ -3581,6 +3581,11 @@ class ResponseRunner:
         async def mark_claimed() -> None:
             claimed.set()
 
+        async def end_refused_wait() -> None:
+            # A wake refused before any claim, as one whose requester may no longer reach the reply's entities is,
+            # continues nothing: the wait ends with its answer, and the outcomes stay retrievable for a later reply.
+            await self.deps.delivery_gateway.end_wait(reply.reply_id)
+
         return ResponseRequest(
             thread_history=(),
             prompt=envelope.body,
@@ -3591,6 +3596,7 @@ class ResponseRunner:
             wake_reply_id=reply.reply_id,
             user_id=key.requester_id,
             on_reply_claimed=mark_claimed,
+            on_source_turn_suppressed=end_refused_wait,
             source_handoff=handoff,
         )
 

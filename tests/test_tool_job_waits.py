@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent
+    from mindroom.response_runner import ResponseRequest
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -685,6 +686,54 @@ async def test_a_wake_does_not_move_a_stops_cutoff_past_a_newer_message(tmp_path
         await coordinator._apply_job_stops()
 
         assert not user_stopped(runtime, "newer")
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_wake_its_requester_may_no_longer_reach_ends_the_wait(tmp_path: Path) -> None:
+    """A wake refused before any claim ends the wait with its answer, though the work it waits for still runs.
+
+    Otherwise every later pass would admit the same wake again, and the message would keep waiting until a Stop.
+    """
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    principal = bot.journal_principal()
+    reply = await _waiting_reply(principal, key)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
+    register_background_runtime(bot.runtime_paths, runtime)
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def refuse(request: ResponseRequest) -> None:
+        # The requester lost access to one of the reply's entities, so the locked admission refuses the turn.
+        assert request.on_source_turn_suppressed is not None
+        await request.on_source_turn_suppressed()
+
+    try:
+        await start_job(
+            runtime,
+            "work",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=_runner_owner(key),
+            operation=forever,
+        )
+        event = await _wake(principal, reply, "job-wake:1")
+        runner.generate_response = AsyncMock(side_effect=refuse)
+
+        await runner._run_job_wake(event)
+
+        assert not await principal.is_pending("job-wake:1")
+        ended = await principal.replies.load(reply.reply_id)
+        assert ended is not None
+        assert ended.state is rl.ReplyState.COMPLETED
+        [job] = await runtime.list_jobs(owner=_runner_owner(key), depth=0)
+        assert job.status == "running"
     finally:
         await runtime.shutdown()
 
