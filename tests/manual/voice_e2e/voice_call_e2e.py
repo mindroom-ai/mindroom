@@ -562,7 +562,7 @@ async def scenario_delegated_barge(s: Scenario) -> None:
     await s.wait_quiet("after_barge_in", quiet_s=2.0, timeout_s=60)
     s.recorder.mark("silent_watch_start")
     await asyncio.sleep(25)
-    s.recorder.mark("silent_watch_end", agent_voiced_ms=round(s.listener.voiced_ms))
+    s.recorder.mark("silent_watch_end")
     await s.say("closing", ["Okay, never mind. Thanks, bye."])
     await s.reply("closing", timeout_s=30)
 
@@ -621,7 +621,7 @@ async def scenario_stale_queue(s: Scenario) -> None:
     await s.wait_quiet("after_cancel", quiet_s=2.0, timeout_s=60)
     s.recorder.mark("silent_watch_start")
     await asyncio.sleep(30)
-    s.recorder.mark("silent_watch_end", agent_voiced_ms=round(s.listener.voiced_ms))
+    s.recorder.mark("silent_watch_end")
     await s.say("closing", ["Okay, bye."])
     await s.reply("closing", timeout_s=30)
 
