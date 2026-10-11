@@ -104,6 +104,7 @@ Matrix sync callback
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
+| `delegation/background.py` | A background subagent's job: native child admission, outcome, and cleanup inside the generic execution owner |
 | `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
 | `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting, published runtime, and parked work |
 | `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
@@ -117,7 +118,7 @@ Matrix sync callback
 | `tool_jobs/authorization.py` | Current local grants using shared construction policy |
 | `tool_jobs/execution_authority.py` | Application-entry authority checks |
 | `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
-| `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
+| `tool_jobs/control.py` | Queued-turn wait signals and cancellation checkpoints |
 | `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
 | `tool_jobs/completion.py` | The response boundary: ready job results a reply continues with, or the key of the work its answer waits for |
@@ -125,7 +126,7 @@ Matrix sync callback
 | `tool_jobs/wakes.py` | A waiting reply's wake: its journal source and identity, and the envelope of the turn that continues the reply |
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |
-| `custom_tools/job.py` | Reserved job discovery/control tool and native delegation-wait projection |
+| `custom_tools/job.py` | Reserved job discovery and control tool |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, recorded job Stops, card denial, wakes of waiting replies, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
