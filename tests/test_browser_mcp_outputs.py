@@ -1,6 +1,5 @@
 """Native output paths are confined before MCP startup or dispatch."""
 
-import asyncio
 import base64
 import json
 import os
@@ -77,31 +76,21 @@ async def test_inline_screenshot_preparation_does_not_block_browser_loop(
     )
     provider._session = session
     provider._ready = True
-    preparation_started = threading.Event()
-    release_preparation = threading.Event()
+    loop_thread = threading.get_ident()
+    preparation_threads: list[int] = []
 
     original_image_result = mcp_provider.image_result
 
-    def slow_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
-        preparation_started.set()
-        release_preparation.wait(timeout=1)
+    def recording_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
+        preparation_threads.append(threading.get_ident())
         return original_image_result(data, metadata=metadata)
 
-    monkeypatch.setattr(mcp_provider, "image_result", slow_image_result)
-    release_timer = threading.Timer(0.2, release_preparation.set)
-    release_timer.start()
-    try:
-        task = asyncio.create_task(provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"}))
-        await asyncio.sleep(0.05)
+    monkeypatch.setattr(mcp_provider, "image_result", recording_image_result)
 
-        assert preparation_started.is_set()
-        assert not release_preparation.is_set()
-        assert not task.done()
-        release_preparation.set()
-        await task
-    finally:
-        release_preparation.set()
-        release_timer.join(timeout=1)
+    await provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"})
+
+    assert preparation_threads
+    assert loop_thread not in preparation_threads
 
 
 @pytest.mark.asyncio
