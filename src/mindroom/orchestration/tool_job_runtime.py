@@ -31,7 +31,7 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     register_background_runtime,
 )
-from mindroom.tool_jobs.wakes import wake_event_id
+from mindroom.tool_jobs.wakes import is_wake, wake_event_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import EventJournalStore, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
     from mindroom.event_journal.reply_messages import JobStop
     from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -61,6 +61,20 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
     # Ad hoc teams use an ordinary agent's Matrix account. Their actual members
     # are materialized by the team driver; requester access is rechecked below.
     return recipient in config.agents and actor in config.agents
+
+
+async def _message_order(principal: PrincipalStore, started: JournalEvent) -> int:
+    """Return when the message a job's work answers arrived; a wake continues its reply's own messages."""
+    reply = await principal.replies.for_sources((started.event_id,)) if is_wake(started) else None
+    if reply is None:
+        return started.receipt_order
+    orders = []
+    for span in await principal.replies.spans(reply.reply_id):
+        for source in span.sources.logical_source_event_ids:
+            message = await principal.load_event(source)
+            if message is not None and not is_wake(message):
+                orders.append(message.receipt_order)
+    return max(orders, default=started.receipt_order)
 
 
 def _accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:
@@ -374,7 +388,7 @@ class ToolJobRuntimeCoordinator:
                 return False
             started = None if job.source_event_id is None else await principal.load_event(job.source_event_id)
             cutoff = stop.cutoff_receipt_order
-            return started is None or cutoff is None or started.receipt_order <= cutoff
+            return started is None or cutoff is None or await _message_order(principal, started) <= cutoff
 
         return matches
 

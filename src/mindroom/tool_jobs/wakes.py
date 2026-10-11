@@ -60,6 +60,11 @@ def wake_event(reply: Reply, wake_id: str, *, sender_id: str, now_ms: int) -> In
     )
 
 
+def is_wake(event: JournalEvent) -> bool:
+    """Whether an admitted event is a wake rather than a message."""
+    return event.kind is EventKind.JOB_WAKE
+
+
 def woken_reply_id(event: JournalEvent) -> str | None:
     """Return the reply a wake continues."""
     reply_id = event.source.get("reply_id")

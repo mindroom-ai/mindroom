@@ -712,3 +712,107 @@ async def test_a_wake_whose_ad_hoc_member_left_ends_the_wait(tmp_path: Path) -> 
     ended = await principal.replies.load(reply.reply_id)
     assert ended is not None
     assert ended.state is rl.ReplyState.COMPLETED
+
+
+def _rewait(key: HoldKey) -> rl.Decide:
+    def wait(reply: rl.Reply, span: rl.Span) -> rl.Transition:
+        shown = Presentation(
+            segments=(Segment(kind="answer", text="answer", span_id=span.span_id),),
+            trailing_note=note_segment(NoteKind.JOB_WAIT),
+        )
+        write = rl.TerminalWrite(
+            shown=encode_presentation(shown),
+            prepared_revision=reply.revision,
+            state=rl.ReplyState.WAITING,
+        )
+        return rl.wait(reply, span, write, hold_key=key.encode(), now_ns=60)
+
+    return wait
+
+
+def _claim_request(key: HoldKey, span_id: str, source: str, **changes: object) -> rl.ClaimRequest:
+    request = rl.ClaimRequest(
+        span_id=span_id,
+        delivery_id=source,
+        sources=ResponseSources((source,), (source,)),
+        bot_generation="gen-1",
+        now_ns=40,
+        new_reply_id=f"reply-{source}",
+        entity_name=key.recipient,
+        room_id=key.room_id,
+        thread_id=key.thread_id,
+        membership_epoch=0,
+        empty_presentation=encode_presentation(Presentation()),
+    )
+    return replace(request, **changes)
+
+
+async def test_a_stop_of_the_reply_that_took_work_over_cancels_what_an_older_replys_wake_started(
+    tmp_path: Path,
+) -> None:
+    """Work a wake started continues its reply's own messages, so a newer message's later Stop reaches it."""
+    owner = job_owner()
+    runtime = await tool_job_runtime(tmp_path)
+    coordinator = _coordinator(tmp_path, runtime, MagicMock())
+    journal = coordinator._journal
+    assert journal is not None
+    principal = journal.principal(_PRINCIPAL)
+    key = _key(owner)
+    older = await _waiting_reply(principal, key)
+    # A newer message arrives, then the older reply's work becomes ready and its wake takes the lock first.
+    await principal.admit(
+        InboundEvent(
+            "$newer",
+            key.room_id,
+            key.thread_id,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            key.requester_id,
+            2,
+            {},
+        ),
+    )
+    await principal.admit(wake_event(older, "job-wake:w", sender_id=_PRINCIPAL, now_ms=3))
+    wake = _claim_request(
+        key,
+        "span-wake",
+        "job-wake:w",
+        sources=ResponseSources(("job-wake:w",), ("$turn",)),
+        new_reply_id="unused",
+        wake_reply_id=older.reply_id,
+    )
+    woken = (await principal.replies.claim(wake)).transition
+    assert woken.claimed is not None
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        # The wake starts new work and waits again; the newer message's reply then takes that work over.
+        await start_job(
+            runtime,
+            "wake-work",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            source_event_id="job-wake:w",
+            operation=forever,
+        )
+        await principal.replies.decide(reply_id=older.reply_id, span_id=woken.claimed.span_id, decide=_rewait(key))
+        newer = (await principal.replies.claim(_claim_request(key, "span-newer", "$newer"))).transition
+        assert newer.claimed is not None
+        await principal.replies.decide(reply_id="reply-$newer", span_id="span-newer", decide=_rewait(key))
+        taken = await principal.replies.load("reply-$newer")
+        assert taken is not None
+        assert taken.state is rl.ReplyState.WAITING
+
+        stop = rl.stop(taken, None, rl.StopFacts(receipt_order=10, span_live=False), now_ns=80)
+        await principal.replies.update(taken.reply_id, lambda _current: stop)
+        # A job-gated call of that work sees the recorded Stop, and applying it stops the work.
+        assert await coordinator._stop_recorded(runtime._entries["wake-work"].job)
+        await coordinator._apply_job_stops()
+        assert user_stopped(runtime, "wake-work")
+    finally:
+        await runtime.shutdown()
