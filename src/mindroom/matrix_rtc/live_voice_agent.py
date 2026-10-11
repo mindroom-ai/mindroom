@@ -21,7 +21,7 @@ from mindroom.matrix_rtc.voice_agent import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from livekit.agents import Agent, AgentSession
+    from livekit.agents import Agent
     from livekit.agents.llm import ChatContext, RealtimeSessionReconnectedEvent
     from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 
@@ -51,24 +51,6 @@ def _commentary_chunks(text: str) -> Iterator[str]:
         size += character_size
     if start < len(text):
         yield text[start:]
-
-
-def _greet_when_subscribed(session: AgentSession, instructions: str) -> None:
-    """Ask GPT-Live for the greeting once the caller subscribes to the agent's audio.
-
-    RoomIO holds agent audio until the caller subscribes; a greeting generated earlier would
-    then arrive all at once and the live output lag bound would trim it as late speech.
-    """
-    subscribed = session.room_io.subscribed_fut
-    if subscribed is None or subscribed.done():
-        session.generate_reply(instructions=instructions)
-        return
-
-    def greet(future: asyncio.Future[None]) -> None:
-        if not future.cancelled():
-            session.generate_reply(instructions=instructions)
-
-    subscribed.add_done_callback(greet)
 
 
 class _LiveDelegationRunner:
@@ -345,7 +327,7 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         self._live_agent = _build_live_agent(options, instructions)
         await self._start_session(session, self._live_agent, options, rtc_module=rtc, room_io_module=room_io)
         if options.greeting_instructions:
-            _greet_when_subscribed(session, options.greeting_instructions)
+            session.generate_reply(instructions=options.greeting_instructions)
 
     async def aclose(self) -> None:
         """Settle delegates before the parent closes the normal agent cache."""
