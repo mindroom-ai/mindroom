@@ -170,7 +170,7 @@ function SettingsCard({
                   }
                 />
                 <span className="block text-xs font-normal text-muted-foreground">
-                  Leave blank to cap only the users listed below.
+                  Leave blank to cap only users with a cap of their own.
                 </span>
               </label>
               <div className="space-y-1.5 text-sm font-medium">

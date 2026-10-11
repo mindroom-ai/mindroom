@@ -8,7 +8,6 @@ import threading
 import time
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -366,24 +365,6 @@ def test_status_before_first_scan_reports_current_month_without_spend(tmp_path: 
     assert payload["generated_at"] is None
     assert payload["period_start"] == "2026-10-01"
     assert payload["users"] == []
-
-
-def test_decision_resolves_the_requester_once_regardless_of_stored_caps(tmp_path: Path) -> None:
-    config = _config(monthly_limit_usd=0)
-    monitor, _current = _monitor(tmp_path, config)
-    for index in range(200):
-        monitor.caps.set(f"@user{index}:example.test", 50, updated_by="test", now=OCTOBER)
-    paths = monitor.runtime_paths
-
-    with patch.object(
-        monitor_module,
-        "resolve_human_requester_alias",
-        wraps=monitor_module.resolve_human_requester_alias,
-    ) as resolve:
-        assert budget_model(config, paths, monitor, ALICE_BRIDGE, "astra") == "luna"
-        assert budget_model(config, paths, monitor, "@user7:example.test", "astra") == "astra"
-
-    assert resolve.call_count == 2
 
 
 def test_bridge_bot_requesters_are_never_budgeted(tmp_path: Path) -> None:

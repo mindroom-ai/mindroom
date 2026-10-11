@@ -50,7 +50,6 @@ Changes to caps, prices, and the fallback model apply without a restart.
 A user's own cap replaces `monthly_limit_usd` for that user.
 Set it on the [Budgets page](#dashboard-budgets-page) or through the [Budget API](#budget-api), including for users who have not used MindRoom yet.
 Per-user caps are not part of `config.yaml`: they survive restarts, and config edits or redeploys leave them unchanged.
-A cap set for a bridge alias belongs to its canonical user.
 Only people have caps; agents, bot accounts, and MindRoom's internal user cannot get one.
 Caps can be set only while budgets are on, and they stay stored if budgets are turned off.
 
