@@ -17,6 +17,7 @@ from mindroom.delegation.personas import (
     _InvalidPersonaProfile,
     _parse_profile,
     _PersonaProfile,
+    _PersonaToolPolicy,
     inline_persona,
     list_profiles,
     load_profile,
@@ -97,8 +98,8 @@ def test_empty_tool_list_means_no_tools() -> None:
     persona = inline_persona("P", [])
     assert persona.tools == ()
     assert not persona_allows((), "file", "read_file")
-    _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None, frozenset())
-    assert disabled == frozenset({"file", "shell", "dynamic_tools"})
+    policy = persona_tool_policy(persona, lambda: ["file", "shell"], None, frozenset())
+    assert policy.disabled_tool_names == frozenset({"file", "shell", "dynamic_tools"})
 
 
 def test_parse_profile_reads_frontmatter_and_body() -> None:
@@ -377,24 +378,46 @@ def test_persona_allows_whole_toolkits_and_single_functions() -> None:
 
 
 def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
-    """An explicit list hides generated functions, keeps the caller's filter, and skips unnamed toolkits."""
+    """An explicit list hides generated functions, keeps the caller's filter, skips unnamed toolkits, and loads eagerly."""
 
     def caller_filter(function: Function) -> bool:
         return function.name != "write_file"
 
-    visible, disabled = persona_tool_policy(
-        ("gmail.search_emails", "file"),
+    policy = persona_tool_policy(
+        inline_persona("P", ["gmail.search_emails", "file"]),
         lambda: ["file", "gmail", "shell"],
         caller_filter,
         frozenset({"memory"}),
     )
 
+    visible = policy.tool_function_filter
     assert visible is not None
     assert visible(_function("read_file", "file"))
     assert not visible(_function("write_file", "file"))
     assert not visible(_function("generated", None))
-    assert disabled == frozenset({"memory", "shell", "dynamic_tools"})
-    assert persona_tool_policy(None, lambda: ["file"], caller_filter, frozenset()) == (caller_filter, frozenset())
+    assert policy.disabled_tool_names == frozenset({"memory", "shell", "dynamic_tools"})
+    assert policy.named_tools == ("gmail.search_emails", "file")
+    assert policy.loads_named_tools_eagerly
+    assert not policy.offers_generated_functions
+    assert not policy.offers_skills
+
+
+def test_persona_tool_policy_leaves_unauthored_agents_unchanged() -> None:
+    """Without a persona the caller's own filter applies; an inheriting persona keeps generated functions but no skills."""
+
+    def caller_filter(function: Function) -> bool:
+        return function.name != "write_file"
+
+    unauthored = persona_tool_policy(None, lambda: ["file"], caller_filter, frozenset())
+    inheriting = persona_tool_policy(inline_persona("P", None), lambda: ["file"], caller_filter, frozenset())
+
+    assert unauthored == _PersonaToolPolicy(tool_function_filter=caller_filter, disabled_tool_names=frozenset())
+    assert unauthored.offers_skills
+    assert unauthored.offers_generated_functions
+    assert not unauthored.loads_named_tools_eagerly
+    assert inheriting.tool_function_filter is caller_filter
+    assert inheriting.offers_generated_functions
+    assert not inheriting.offers_skills
 
 
 def test_function_level_cap_admits_only_named_functions() -> None:

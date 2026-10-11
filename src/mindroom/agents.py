@@ -724,12 +724,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
     persona_tools: tuple[str, ...] | None = None,
-    authored: bool = False,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
     ``persona_tools`` holds an authored subagent's tools; its ``delegate`` toolkit
-    keeps the copies it authors within them. ``authored`` marks any authored subagent.
+    keeps the copies it authors within them.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
@@ -804,7 +803,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 refresh_scheduler=refresh_scheduler,
                 workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
                 persona_tools=persona_tools,
-                authored=authored,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -1481,7 +1479,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
     persona_tools: tuple[str, ...] | None = None,
-    authored: bool = False,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1588,7 +1585,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=dynamic_tool_continuation,
                 persona_tools=persona_tools,
-                authored=authored,
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
@@ -1720,41 +1716,17 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
-    persona: SubagentPersona | None = None,
+    include_identity: bool = True,
 ) -> _AgentRoleContext:
-    """Resolve the model name and render shared identity and preload context into the role.
+    """Resolve the model name and render the runtime facts, the identity, and preload context into the role.
 
-    An authored ``persona`` replaces the identity, context files, and configured role; the runtime facts stay.
+    Without ``include_identity``, as for an authored subagent whose prompt replaces it, the role holds only the
+    runtime facts.
     """
-    # Get model config for identity context
     model_name = active_model_name or agent_config.model or "default"
-    if model_name in config.models:
-        model_config = config.models[model_name]
-        model_provider = model_config.provider.title()  # Capitalize provider name
-        model_id = model_config.id
-    else:
-        # Fallback if model not found
-        model_provider = "AI"
-        model_id = model_name
-
-    identity_context = ""
-    if persona is None:
-        with _agent_create_timing("identity_context"):
-            identity_context = _render_agent_identity_context(
-                agent_name,
-                agent_config.display_name,
-                config,
-                runtime_paths,
-                model_provider=model_provider,
-                model_id=model_id,
-                include_openai_compat_guidance=include_openai_compat_guidance,
-            )
-
-    full_context = identity_context + _get_mind_runtime_context(agent_name, runtime_paths)
-    context_documents: list[_AdditionalContextChunk] = []
-
+    runtime_facts = _get_mind_runtime_context(agent_name, runtime_paths)
     if not disable_runtime_capabilities:
-        full_context += "\n\n" + _render_tool_execution_environment(
+        runtime_facts += "\n\n" + _render_tool_execution_environment(
             runtime_paths=runtime_paths,
             local_tool_names=local_tool_names,
             worker_routed_tool_names=worker_routed_tool_names,
@@ -1769,7 +1741,33 @@ def _build_agent_role_context(
                 requires_primary_runtime=True,
             ),
         )
-    if not disable_runtime_capabilities and persona is None:
+    if not include_identity:
+        return _AgentRoleContext(model_name=model_name, role=runtime_facts.lstrip(), context_documents=())
+
+    # Get model config for identity context
+    if model_name in config.models:
+        model_config = config.models[model_name]
+        model_provider = model_config.provider.title()  # Capitalize provider name
+        model_id = model_config.id
+    else:
+        # Fallback if model not found
+        model_provider = "AI"
+        model_id = model_name
+
+    with _agent_create_timing("identity_context"):
+        identity_context = _render_agent_identity_context(
+            agent_name,
+            agent_config.display_name,
+            config,
+            runtime_paths,
+            model_provider=model_provider,
+            model_id=model_id,
+            include_openai_compat_guidance=include_openai_compat_guidance,
+        )
+
+    full_context = identity_context + runtime_facts
+    context_documents: list[_AdditionalContextChunk] = []
+    if not disable_runtime_capabilities:
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
             agent_name,
@@ -1787,7 +1785,7 @@ def _build_agent_role_context(
 
     return _AgentRoleContext(
         model_name=model_name,
-        role=full_context.lstrip() if persona is not None else full_context + agent_config.role,
+        role=full_context + agent_config.role,
         context_documents=tuple(context_documents),
     )
 
@@ -1806,11 +1804,11 @@ def _build_agent_instructions(
     loaded_tools: tuple[str, ...],
     native_deferred_tool_names: tuple[str, ...],
     all_deferred_tools_eager: bool,
-    authored: bool,
+    skill_authoring: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance.
 
-    An ``authored`` subagent gets no skills, so it gets no skill-authoring guidance.
+    ``skill_authoring`` adds the note on writing workspace skills, for agents that can use skills.
     """
     instructions = list(configured_instructions)
 
@@ -1841,7 +1839,7 @@ def _build_agent_instructions(
     if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
         # A conditional expression keeps this builder within the complexity limit.
-        instructions.extend(() if authored else (config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),))
+        instructions.extend((config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),) if skill_authoring else ())
 
     file_mode_knowledge_instruction = (
         None
@@ -1974,13 +1972,18 @@ def create_agent(
     # Gate on this agent's resolved runtime model (thread overrides and team
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
-    # An explicit persona tool list is small and must be present from the first request,
-    # so every toolkit it names, deferred ones and preset members included, loads eagerly.
-    persona_tools = persona.tools if persona is not None else None
-    eager_deferred_tools = eager_deferred_tools or persona_tools is not None
+    # An authored persona's prompt replaces the agent's identity; its tool policy narrows the agent's own tools.
+    persona_prompt = persona.system_prompt if persona is not None else None
+    policy = persona_tool_policy(
+        persona,
+        lambda: caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth),
+        tool_function_filter,
+        disabled_tool_names,
+    )
+    eager_deferred_tools = eager_deferred_tools or policy.loads_named_tools_eagerly
     native_deferred_tools = (
         agent_mode == "standard"
-        and persona_tools is None
+        and not policy.loads_named_tools_eagerly
         and runtime_model_config is not None
         and (
             native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
@@ -1996,12 +1999,6 @@ def create_agent(
         )
     )
 
-    tool_function_filter, disabled_tool_names = persona_tool_policy(
-        persona_tools,
-        lambda: caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth),
-        tool_function_filter,
-        disabled_tool_names,
-    )
     tool_assembly = _assemble_agent_toolkits(
         agent_name,
         config,
@@ -2011,8 +2008,8 @@ def create_agent(
         session_id=session_id,
         hook_registry=hook_registry,
         disable_runtime_capabilities=disable_runtime_capabilities,
-        disabled_tool_names=disabled_tool_names,
-        tool_function_filter=tool_function_filter,
+        disabled_tool_names=policy.disabled_tool_names,
+        tool_function_filter=policy.tool_function_filter,
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=dynamic_tool_continuation,
@@ -2021,8 +2018,7 @@ def create_agent(
         eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
-        persona_tools=persona_tools,
-        authored=persona is not None,
+        persona_tools=policy.named_tools,
     )
     storage = _open_agent_session_storage(
         agent_name,
@@ -2030,6 +2026,8 @@ def create_agent(
         history_storage=history_storage,
         persist_runtime_state=persist_runtime_state,
     )
+    # An authored subagent keeps no learning of its own.
+    learns = persist_runtime_state and not policy.authored
     learning_storage = (
         agent_storage.create_state_storage(
             storage_name=agent_name,
@@ -2037,7 +2035,7 @@ def create_agent(
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if persist_runtime_state and persona is None and _is_learning_enabled(agent_config, defaults)
+        if learns and _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -2052,7 +2050,7 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         local_tool_names=tool_assembly.local_tool_names,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
-        persona=persona,
+        include_identity=not policy.authored,
     )
 
     # Create agent with defaults applied
@@ -2076,10 +2074,9 @@ def create_agent(
     )
 
     workspace = agent_runtime.workspace
-    # An authored subagent gets no skills until it can choose them like its tools.
     skills = (
         None
-        if disable_runtime_capabilities or persona is not None
+        if disable_runtime_capabilities or not policy.offers_skills
         else _load_agent_skills(
             agent_name,
             config,
@@ -2099,7 +2096,7 @@ def create_agent(
     prompt_skills = None if skill_functions_hidden else skills
     instructions = _build_agent_instructions(
         agent_name,
-        agent_config.instructions if persona is None else (),
+        agent_config.instructions if not policy.authored else (),
         config,
         agent_runtime,
         skills=prompt_skills,
@@ -2110,7 +2107,7 @@ def create_agent(
         loaded_tools=tool_assembly.loaded_tools,
         native_deferred_tool_names=tool_assembly.deferred_tool_names,
         all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools,
-        authored=persona is not None,
+        skill_authoring=policy.offers_skills,
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
@@ -2126,11 +2123,10 @@ def create_agent(
         instructions = [*instructions, STANDARD_CLI_NOTE]
 
     entity_view = config.resolve_entity(agent_name)
-    # An explicit persona tool list hides knowledge search, which has no owning toolkit to name.
     knowledge_enabled = (
         not disable_runtime_capabilities
         and knowledge is not None
-        and persona_tools is None
+        and policy.offers_generated_functions
         and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
     )
     knowledge_sources = (
@@ -2153,8 +2149,8 @@ def create_agent(
         name=agent_config.display_name,
         id=agent_name,
         # An authored prompt leads the system message in place of the agent's identity, never substituted.
-        description=persona.system_prompt if persona is not None else None,
-        resolve_in_context=persona is None,
+        description=persona_prompt,
+        resolve_in_context=persona_prompt is None,
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,
@@ -2168,9 +2164,7 @@ def create_agent(
             ),
         ),
         db=storage,
-        learning=_resolve_agent_learning(agent_config, defaults, learning_storage)
-        if persist_runtime_state and persona is None
-        else False,
+        learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if learns else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
@@ -2198,10 +2192,10 @@ def create_agent(
             deferred_toolkits=tool_assembly.cli_deferred,
             # A persona's roster names the toolkits it actually built, deferred ones it named included.
             toolkit_names=get_agent_toolkit_names(agent_name, config)
-            if persona is None
+            if not policy.authored
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names],
-            identity=persona.system_prompt if persona is not None else None,
-            minimal_instructions=agent_config.minimal_instructions if persona is None else (),
+            identity=persona_prompt,
+            minimal_instructions=agent_config.minimal_instructions if not policy.authored else (),
             context_files=role_context.workspace_context_files(agent_runtime.tool_base_dir),
             memory_root=(
                 agent_runtime.file_memory_root.relative_to(agent_runtime.tool_base_dir)

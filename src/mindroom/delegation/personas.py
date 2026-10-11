@@ -443,24 +443,49 @@ def _capped_persona(
     return persona
 
 
+@dataclass(frozen=True)
+class _PersonaToolPolicy:
+    """The tools one agent instance offers once an authored persona, if any, narrows its own."""
+
+    tool_function_filter: Callable[[Function], bool] | None
+    disabled_tool_names: frozenset[str]
+    named_tools: tuple[str, ...] | None = None
+    authored: bool = False
+
+    @property
+    def loads_named_tools_eagerly(self) -> bool:
+        """An explicit list must be present from the first request, so every toolkit it names loads up front."""
+        return self.named_tools is not None
+
+    @property
+    def offers_generated_functions(self) -> bool:
+        """Skill and knowledge-search functions have no toolkit an explicit list could name, so it hides them."""
+        return self.named_tools is None
+
+    @property
+    def offers_skills(self) -> bool:
+        """An authored subagent gets no skills until it can choose them like its tools."""
+        return not self.authored
+
+
 def persona_tool_policy(
-    persona_tools: tuple[str, ...] | None,
+    persona: SubagentPersona | None,
     available_toolkits: Callable[[], Sequence[str]],
     tool_function_filter: Callable[[Function], bool] | None,
     disabled_tool_names: frozenset[str],
-) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
+) -> _PersonaToolPolicy:
     """Narrow an agent's own tools to an authored persona's explicit list; its principal is unchanged.
 
     Toolkits the list never names are not built, nor is the deferred-tool manager, since a persona
     loads every toolkit it names. Generated functions such as skills and knowledge search stay hidden;
     toolkit functions are narrowed by concrete toolkit name while the toolkits are built.
     """
-    if persona_tools is None:
-        return tool_function_filter, disabled_tool_names
-    named = {entry.partition(".")[0] for entry in persona_tools}
+    if persona is None or persona.tools is None:
+        return _PersonaToolPolicy(tool_function_filter, disabled_tool_names, authored=persona is not None)
+    named = {entry.partition(".")[0] for entry in persona.tools}
     unused = {toolkit for toolkit in available_toolkits() if toolkit not in named}
 
     def visible(function: Function) -> bool:
         return function.owning_toolkit is not None and (tool_function_filter is None or tool_function_filter(function))
 
-    return visible, disabled_tool_names | unused | {"dynamic_tools"}
+    return _PersonaToolPolicy(visible, disabled_tool_names | unused | {"dynamic_tools"}, persona.tools, authored=True)

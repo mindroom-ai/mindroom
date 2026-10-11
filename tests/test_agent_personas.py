@@ -21,6 +21,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.models import ModelConfig
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
 from mindroom.history.archive import archive_runs
 from mindroom.history.session_context import open_resolved_scope_session_context
@@ -265,23 +266,14 @@ def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path)
     assert "Yourself, run as a fresh copy." in documents
 
 
-def test_configured_minimal_agent_keeps_its_own_delegate_description(tmp_path: Path) -> None:
-    """Only an authored copy hides its configured role; a configured agent's delegate guidance is unchanged."""
-    runtime = _runtime(tmp_path, tools=["shell", "delegate"], delegate_to=["helper"])
+def test_delegate_lists_its_caller_as_a_fresh_copy(tmp_path: Path) -> None:
+    """Every caller's own delegate entry reads as a fresh copy and never repeats its configured role."""
+    runtime = _runtime(tmp_path, tools=["delegate"], delegate_to=["helper"])
 
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        agent_mode="minimal",
-    )
+    toolkit = DelegateTools("helper", ["helper"], runtime.runtime_paths, runtime.config)
 
-    assert isinstance(agent, MinimalAgent)
-    documents = "\n".join(agent.context_documents.values())
-    assert "Yourself, run as a fresh copy." not in documents
-    assert "- Configured role" in documents
+    assert "helper\n  - Yourself, run as a fresh copy." in str(toolkit.instructions)
+    assert "Configured role" not in str(toolkit.instructions)
 
 
 def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(tmp_path: Path) -> None:
