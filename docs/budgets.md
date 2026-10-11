@@ -105,7 +105,7 @@ The dashboard routes use standard dashboard authentication, and the same routes 
 URL-encode `user_id` in the path, for example `/api/budgets/users/%40alice%3Aexample.com`.
 `limit_usd` is a JSON number of at least `0`; no other body fields are accepted.
 `PUT` returns `user_id`, `limit_usd`, `updated_at`, and `updated_by`, where `user_id` is the canonical user the cap belongs to.
-`updated_by` is the dashboard user's ID, or `budget-service` for the budget service.
+`updated_by` is `dashboard` for a cap set on the Budgets page or its routes, and `budget-service` for the budget service.
 
 `GET` returns these fields:
 

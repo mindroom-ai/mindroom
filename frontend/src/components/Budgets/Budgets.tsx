@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Save, Wallet } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -213,12 +213,9 @@ function CapInput({
 }) {
   const shown = value == null ? "" : String(value);
   const [text, setText] = useState(shown);
-  // The text a save is already running for, so Enter followed by leaving the field saves once.
-  const saving = useRef<string | null>(null);
-  useEffect(() => {
-    setText(shown);
-    saving.current = null;
-  }, [shown]);
+  // The field is read-only while saving, so a later edit cannot be overwritten by this save.
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setText(shown), [shown]);
   const invalid = parseUsd(text) === null;
   const save = async () => {
     const parsed = parseUsd(text);
@@ -226,12 +223,11 @@ function CapInput({
       setText(shown);
       return;
     }
-    if (parsed === value || saving.current === text) return;
-    saving.current = text;
-    if (!(await onSave(parsed))) {
-      saving.current = null;
-      setText(shown);
-    }
+    if (saving || parsed === value) return;
+    setSaving(true);
+    const saved = await onSave(parsed);
+    setSaving(false);
+    if (!saved) setText(shown);
   };
   return (
     <Input
@@ -240,6 +236,7 @@ function CapInput({
       aria-invalid={invalid}
       value={text}
       placeholder={placeholder}
+      readOnly={saving}
       className="w-40 aria-invalid:border-destructive"
       onChange={(event) => setText(event.target.value)}
       onBlur={() => void save()}
@@ -562,6 +559,7 @@ export function Budgets() {
   const { config, isDirty, isLoading, saveConfig, updateConfigValue } =
     useConfigStore();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["budgets"],
     queryFn: ({ signal }) => fetchBudgets(signal),
@@ -586,6 +584,7 @@ export function Budgets() {
       title: "Budgets Saved",
       description: "New caps and prices apply from the next spend refresh.",
     });
+    void queryClient.invalidateQueries({ queryKey: ["budgets"] });
   };
 
   return (
@@ -620,8 +619,8 @@ export function Budgets() {
             updateConfigValue={updateConfigValue}
           />
           {budgets != null &&
-            // Caps are stored by the running server, which accepts them only once budgets are saved on.
-            (query.data?.enabled === false ? (
+            // The server accepts per-user caps only once budgets are saved on.
+            (isDirty && query.data?.enabled === false ? (
               <Card>
                 <CardHeader>
                   <CardTitle>Users</CardTitle>

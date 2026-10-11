@@ -1,4 +1,4 @@
-"""Dashboard budget status route."""
+"""Budget status and per-user cap routes for the dashboard and the budget service."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -151,13 +151,13 @@ def test_dashboard_sets_a_cap_for_a_user_without_spend(budget_client: tuple[Test
     body = response.json()
     assert body["user_id"] == ALICE
     assert body["limit_usd"] == 50.0
-    assert body["updated_by"] == "standalone"
+    assert body["updated_by"] == "dashboard"
     row = _row(client, ALICE)
     assert row is not None
     assert row["spend_usd"] == 0.0
     assert row["limit_usd"] == 50.0
     assert row["override_usd"] == 50.0
-    assert row["updated_by"] == "standalone"
+    assert row["updated_by"] == "dashboard"
     assert row["updated_at"] == body["updated_at"]
 
 

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from mindroom import constants
+from mindroom.durable_write import write_json_file_durable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -71,7 +71,7 @@ class BudgetCaps:
 
     def set(self, user_id: str, limit_usd: float, *, updated_by: str, now: datetime) -> UserCap:
         """Create or replace one user's cap."""
-        cap = UserCap(limit_usd=float(limit_usd), updated_at=now, updated_by=updated_by)
+        cap = UserCap(limit_usd=limit_usd, updated_at=now, updated_by=updated_by)
         with self._lock:
             self._write({**self._entries, user_id: cap})
         return cap
@@ -84,8 +84,5 @@ class BudgetCaps:
 
     def _write(self, users: dict[str, UserCap]) -> None:
         """Persist ``users`` first, so memory never holds caps a restart would lose."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f"{self.path.name}.tmp")
-        tmp_path.write_text(_CapsFile(users=users).model_dump_json(indent=2), encoding="utf-8")
-        constants.safe_replace(tmp_path, self.path)
+        write_json_file_durable(self.path, _CapsFile(users=users).model_dump(mode="json"), indent=2)
         self._entries = MappingProxyType(users)

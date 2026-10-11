@@ -78,10 +78,10 @@ function budgetConfig(overrides: Partial<Config> = {}): Config {
   } as Config;
 }
 
-function setStore(config: Config | null) {
+function setStore(config: Config | null, isDirty = true) {
   vi.mocked(useConfigStore).mockReturnValue({
     config,
-    isDirty: true,
+    isDirty,
     isLoading: false,
     saveConfig: mockSaveConfig,
     updateConfigValue: mockUpdateConfigValue,
@@ -127,7 +127,7 @@ function renderBudgets() {
   );
   const result = render(page());
   // The mocked store is not reactive; rerender to show a draft edit.
-  return { ...result, rerenderPage: () => result.rerender(page()) };
+  return { ...result, client, rerenderPage: () => result.rerender(page()) };
 }
 
 beforeEach(() => {
@@ -390,6 +390,50 @@ describe("Budgets", () => {
     expect(within(bob).getByText("Waiting for spend")).toBeInTheDocument();
   });
 
+  it("ignores edits to a cap while it is saving", async () => {
+    let finishPut: (response: Response) => void = () => {};
+    routeFetch(status, () => respond({}));
+    vi.mocked(fetch).mockImplementation(async (_input, init) =>
+      init?.method === "PUT"
+        ? new Promise<Response>((resolve) => {
+            finishPut = resolve;
+          })
+        : respond(status),
+    );
+    renderBudgets();
+    const bobCap = await screen.findByRole("textbox", {
+      name: "Monthly cap for @bob:example.org",
+    });
+
+    fireEvent.change(bobCap, { target: { value: "50" } });
+    fireEvent.keyDown(bobCap, { key: "Enter" });
+    await waitFor(() => expect(bobCap).toHaveAttribute("readonly"));
+    fireEvent.blur(bobCap);
+
+    expect(writes()).toEqual([
+      [
+        "/api/budgets/users/%40bob%3Aexample.org",
+        "PUT",
+        JSON.stringify({ limit_usd: 50 }),
+      ],
+    ]);
+    finishPut(respond({}));
+    await waitFor(() => expect(bobCap).not.toHaveAttribute("readonly"));
+  });
+
+  it("lists per-user caps once budgets are saved, before the runtime reports them", async () => {
+    setStore(budgetConfig(), false);
+    vi.mocked(fetch).mockResolvedValue(respond({ enabled: false }));
+    const { client } = renderBudgets();
+
+    await waitFor(() =>
+      expect(client.getQueryData(["budgets"])).toEqual({ enabled: false }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Add user" }),
+    ).toBeInTheDocument();
+  });
+
   it("asks to save budgets before per-user caps can be set", async () => {
     vi.mocked(fetch).mockResolvedValue(respond({ enabled: false }));
     renderBudgets();
@@ -529,13 +573,14 @@ describe("Budgets", () => {
     ).toHaveValue("20");
   });
 
-  it("saves the draft config", async () => {
+  it("saves the draft config and refreshes budget status", async () => {
     mockSaveConfig.mockResolvedValue({ status: "saved" });
-    vi.mocked(fetch).mockResolvedValue(respond(status));
+    routeFetch();
     renderBudgets();
 
     fireEvent.click(await screen.findByRole("button", { name: "Save" }));
 
     expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   });
 });

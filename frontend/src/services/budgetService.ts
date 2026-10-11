@@ -1,4 +1,4 @@
-import { API_BASE_URL } from "@/lib/api";
+import { API_BASE_URL, fetchJSON } from "@/lib/api";
 import type { BudgetStatus } from "@/types/budgets";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -64,44 +64,22 @@ export async function fetchBudgets(
   return payload;
 }
 
+function userCapUrl(userId: string): string {
+  return `${API_BASE_URL}/api/budgets/users/${encodeURIComponent(userId)}`;
+}
+
 /** Create or replace one user's monthly cap. */
 export async function setUserCap(
   userId: string,
   limitUsd: number,
 ): Promise<void> {
-  await writeUserCap(userId, {
+  await fetchJSON<void>(userCapUrl(userId), {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ limit_usd: limitUsd }),
   });
 }
 
 /** Remove one user's cap, so the default cap applies to them. */
 export async function clearUserCap(userId: string): Promise<void> {
-  await writeUserCap(userId, { method: "DELETE" });
-}
-
-async function writeUserCap(userId: string, init: RequestInit): Promise<void> {
-  let response: Response;
-  try {
-    response = await fetch(
-      `${API_BASE_URL}/api/budgets/users/${encodeURIComponent(userId)}`,
-      {
-        ...init,
-        credentials: "same-origin",
-      },
-    );
-  } catch {
-    throw new Error("Could not reach the server. Try again.");
-  }
-  if (response.ok) return;
-  let detail: unknown;
-  try {
-    detail = ((await response.json()) as { detail?: unknown }).detail;
-  } catch {
-    // Fall through to the generic message.
-  }
-  throw new Error(
-    typeof detail === "string" ? detail : "Could not save the cap. Try again.",
-  );
+  await fetchJSON<void>(userCapUrl(userId), { method: "DELETE" });
 }

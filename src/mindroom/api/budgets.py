@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_budget_service, verify_user
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
+from mindroom.matrix_identifiers import is_concrete_matrix_user_id
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
 router = APIRouter(prefix="/api/budgets", tags=["budgets"])
 
 _NO_STORE = {"Cache-Control": "no-store"}
+_DASHBOARD_UPDATED_BY = "dashboard"
 _SERVICE_UPDATED_BY = "budget-service"
 
 
@@ -61,30 +62,25 @@ def get_service_budgets(request: Request) -> JSONResponse:
     return get_budgets(request)
 
 
-@router.put("/users/{user_id:path}", response_model=None)
-def set_user_cap(
-    request: Request,
-    user_id: str,
-    body: Annotated[dict[str, Any], Body()],
-    auth_user: Annotated[dict[str, Any], Depends(verify_user)],
-) -> JSONResponse:
+@router.put("/users/{user_id}", dependencies=[Depends(verify_user)], response_model=None)
+def set_user_cap(request: Request, user_id: str, body: Annotated[dict[str, Any], Body()]) -> JSONResponse:
     """Create or replace one user's cap from the dashboard."""
-    return _set_cap(request, user_id, _cap_amount(body), updated_by=auth_user["user_id"])
+    return _set_cap(request, user_id, _cap_amount(body), updated_by=_DASHBOARD_UPDATED_BY)
 
 
-@router.put("/service/users/{user_id:path}", dependencies=[Depends(require_budget_service)], response_model=None)
+@router.put("/service/users/{user_id}", dependencies=[Depends(require_budget_service)], response_model=None)
 def set_service_user_cap(request: Request, user_id: str, body: Annotated[dict[str, Any], Body()]) -> JSONResponse:
     """Create or replace one user's cap for the budget service."""
     return _set_cap(request, user_id, _cap_amount(body), updated_by=_SERVICE_UPDATED_BY)
 
 
-@router.delete("/users/{user_id:path}", dependencies=[Depends(verify_user)], response_model=None)
+@router.delete("/users/{user_id}", dependencies=[Depends(verify_user)], response_model=None)
 def clear_user_cap(request: Request, user_id: str) -> Response:
     """Remove one user's cap from the dashboard, so the default cap applies."""
     return _clear_cap(request, user_id)
 
 
-@router.delete("/service/users/{user_id:path}", dependencies=[Depends(require_budget_service)], response_model=None)
+@router.delete("/service/users/{user_id}", dependencies=[Depends(require_budget_service)], response_model=None)
 def clear_service_user_cap(request: Request, user_id: str) -> Response:
     """Remove one user's cap for the budget service, so the default cap applies."""
     return _clear_cap(request, user_id)
@@ -103,7 +99,7 @@ def _cap_target(request: Request, user_id: str) -> tuple[BudgetMonitor, str]:
     config = monitor.config_provider()
     if config is None or config.budgets is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Budgets are off", headers=_NO_STORE)
-    if not split_concrete_matrix_user_ids([user_id])[0]:
+    if not is_concrete_matrix_user_id(user_id):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "User ID must be a concrete Matrix user ID",

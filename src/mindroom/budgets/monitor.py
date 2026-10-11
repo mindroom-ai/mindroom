@@ -61,7 +61,7 @@ def budget_model(
     """Return the model a reply for this requester should use under their budget.
 
     ``config`` is the snapshot ``model_name`` was resolved from, so the fallback names a model it defines.
-    Without a monitor no spend or per-user cap is known, as before the first scan.
+    Without a monitor neither spend nor per-user caps are known, so the default cap applies against zero spend.
     Callers that only check, without choosing a reply model, pass ``log_fallback=False``.
     """
     budgets = config.budgets
