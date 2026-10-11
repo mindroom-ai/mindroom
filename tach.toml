@@ -958,6 +958,7 @@ path = "mindroom.helper_usage"
 depends_on = ["mindroom.agent_storage", "mindroom.constants", "mindroom.history.storage", "mindroom.logging_config", "mindroom.usage_storage"]
 visibility = [
     "mindroom.response_turn",
+    "mindroom.api.openai_compat",
     "mindroom.memory.auto_flush",
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.approval_execution",
@@ -1637,6 +1638,7 @@ depends_on = [
     "mindroom.api.response_activity",
     "mindroom.constants",
     "mindroom.execution_preparation",
+    "mindroom.helper_usage",
     "mindroom.history.session_context",
     "mindroom.knowledge.utils",
     "mindroom.logging_config",
