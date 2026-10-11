@@ -5996,6 +5996,7 @@ Changes to caps, prices, and the fallback model apply without a restart.
 Spend is the cost of the user's [recorded token usage](https://docs.mindroom.chat/usage/#token-usage) since the first day of the current month in UTC, at the configured prices.
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
+`claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
