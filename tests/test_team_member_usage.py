@@ -23,8 +23,9 @@ from agno.team import Team
 from agno.team import _run as team_run
 from agno.tools.function import Function
 
+from mindroom import agno_compat_session_persistence
 from mindroom.agent_storage import create_state_storage, save_runs
-from mindroom.agno_compat_session_persistence import drain_cancelled_team_saves
+from mindroom.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -336,7 +337,7 @@ async def test_interrupted_turn_written_after_a_stop_is_not_overwritten(tmp_path
     with pytest.raises(asyncio.CancelledError):
         await reply
 
-    await drain_cancelled_team_saves()
+    await drain_cancelled_team_save("team-run")
     interrupted = TeamRunOutput(
         run_id="team-run",
         team_id="squad",
@@ -354,3 +355,29 @@ async def test_interrupted_turn_written_after_a_stop_is_not_overwritten(tmp_path
     assert run is not None
     assert run.status == RunStatus.completed
     assert squad.model_tokens()["member-model"] == 1100
+
+
+@pytest.mark.asyncio
+async def test_interrupted_turn_waits_only_for_its_own_team_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stopping one team reply never waits for another conversation's stopped team to finish saving."""
+    agno_compat_session_persistence.install_patch()
+    released = asyncio.Event()
+
+    def schedule_slow_save(*_args: object) -> None:
+        team_run._background_tasks.add(asyncio.create_task(released.wait()))
+
+    monkeypatch.setattr(agno_compat_session_persistence, "_ORIGINAL_CANCELLED_TEAM_RUN_PERSIST", schedule_slow_save)
+    team = Team(id="squad", members=[], telemetry=False)
+    team_run._persist_cancelled_team_run_in_background(
+        team,
+        TeamRunOutput(run_id="other-run", team_id="squad", session_id="other"),
+        TeamSession(session_id="other", team_id="squad"),
+    )
+    try:
+        async with asyncio.timeout(5):
+            await drain_cancelled_team_save("team-run")
+        assert "other-run" in agno_compat_session_persistence._CANCELLED_TEAM_SAVES
+    finally:
+        released.set()
+        await _finish_detached_saves()
+    assert "other-run" not in agno_compat_session_persistence._CANCELLED_TEAM_SAVES

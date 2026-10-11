@@ -66,6 +66,7 @@ _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session
 _ORIGINAL_AGENT_ASAVE_RUN = agent_session.asave_run
 _ORIGINAL_AGENT_SAVE_RUN = agent_session.save_run
 _ORIGINAL_CANCELLED_RUN_PERSIST = agent_run._persist_cancelled_run_in_background
+_ORIGINAL_CANCELLED_TEAM_RUN_PERSIST = team_run._persist_cancelled_team_run_in_background
 _ORIGINAL_TEAM_AGET_SESSION = team_session.aget_session
 _ORIGINAL_TEAM_GET_SESSION = team_session.get_session
 _ORIGINAL_TEAM_ASAVE_SESSION = team_session.asave_session
@@ -151,16 +152,46 @@ async def drain_agent_cancellation(
 # while MindRoom writes its own record of the interrupted turn for the same run id right
 # after the cancellation. Whichever write lands last wins, so a slow Agno save, such as
 # one that first waits for stopped members, replaces MindRoom's record with the cancelled
-# run, which history replay skips. This reads Agno's private background task set, as the
-# agent cancellation drain above does.
+# run, which history replay skips. The save task is found in Agno's private background
+# task set, as the agent cancellation drain above finds its own.
 # Upstream issue: No matching issue identified; awaiting a cancelled team run's save is untracked.
 # Upstream PR: None identified.
 # Remove when: Agno lets a caller await the save of a team run cancelled by cancelling its task.
-# Coverage: tests/test_team_member_usage.py::test_interrupted_turn_written_after_a_stop_is_not_overwritten.
-async def drain_cancelled_team_saves() -> None:
-    """Finish Agno's detached saves of stopped team runs before the caller writes canonical history."""
-    loop = asyncio.get_running_loop()
-    pending = [task for task in team_run._background_tasks if not task.done() and task.get_loop() is loop]
+# Coverage: tests/test_team_member_usage.py::test_interrupted_turn_written_after_a_stop_is_not_overwritten;
+# tests/test_team_member_usage.py::test_interrupted_turn_waits_only_for_its_own_team_save.
+_CANCELLED_TEAM_SAVES: dict[str, set[asyncio.Task[Any]]] = {}
+
+
+def _persist_cancelled_team_run_in_background(
+    team: Team,
+    run_response: TeamRunOutput,
+    session: TeamSession,
+    run_context: RunContext | None = None,
+) -> None:
+    """Remember the save task Agno schedules for one stopped team run."""
+    before = set(team_run._background_tasks)
+    try:
+        _ORIGINAL_CANCELLED_TEAM_RUN_PERSIST(team, run_response, session, run_context)
+    finally:
+        loop = asyncio.get_running_loop()
+        run_id = run_response.run_id
+        for task in team_run._background_tasks - before:
+            if run_id is not None and task.get_loop() is loop:
+                _CANCELLED_TEAM_SAVES.setdefault(run_id, set()).add(task)
+                task.add_done_callback(partial(_forget_cancelled_team_save, run_id))
+
+
+def _forget_cancelled_team_save(run_id: str, task: asyncio.Task[Any]) -> None:
+    tasks = _CANCELLED_TEAM_SAVES.get(run_id)
+    if tasks is not None:
+        tasks.discard(task)
+        if not tasks:
+            del _CANCELLED_TEAM_SAVES[run_id]
+
+
+async def drain_cancelled_team_save(run_id: str | None) -> None:
+    """Finish Agno's detached save of one stopped team run before the caller writes canonical history."""
+    pending = [task for task in _CANCELLED_TEAM_SAVES.get(run_id, set()) if not task.done()] if run_id else []
     if pending:
         await wait_for_future_until_complete(asyncio.gather(*pending, return_exceptions=True))
 
@@ -377,6 +408,7 @@ def _is_applied() -> bool:
         and agent_session.asave_session is _agent_asave_session
         and agent_session.asave_run is _agent_asave_run
         and agent_run._persist_cancelled_run_in_background is _persist_cancelled_run_in_background
+        and team_run._persist_cancelled_team_run_in_background is _persist_cancelled_team_run_in_background
         and team_session.aget_session is _team_aget_session
         and team_session.asave_session is _team_asave_session
         and team_session.asave_run is _team_asave_run
@@ -398,6 +430,7 @@ def _apply_patch() -> bool:
             or agent_session.asave_session is not _ORIGINAL_AGENT_ASAVE_SESSION
             or agent_session.asave_run is not _ORIGINAL_AGENT_ASAVE_RUN
             or agent_run._persist_cancelled_run_in_background is not _ORIGINAL_CANCELLED_RUN_PERSIST
+            or team_run._persist_cancelled_team_run_in_background is not _ORIGINAL_CANCELLED_TEAM_RUN_PERSIST
             or team_session.aget_session is not _ORIGINAL_TEAM_AGET_SESSION
             or team_session.asave_session is not _ORIGINAL_TEAM_ASAVE_SESSION
             or team_session.asave_run is not _ORIGINAL_TEAM_ASAVE_RUN
@@ -407,6 +440,7 @@ def _apply_patch() -> bool:
         agent_session.asave_session = cast("Any", _agent_asave_session)
         agent_session.asave_run = cast("Any", _agent_asave_run)
         agent_run._persist_cancelled_run_in_background = cast("Any", _persist_cancelled_run_in_background)
+        team_run._persist_cancelled_team_run_in_background = cast("Any", _persist_cancelled_team_run_in_background)
         team_session.aget_session = cast("Any", _team_aget_session)
         team_session.asave_session = cast("Any", _team_asave_session)
         team_session.asave_run = cast("Any", _team_asave_run)
