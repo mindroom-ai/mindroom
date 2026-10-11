@@ -64,10 +64,10 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 
 ## Research check plugin
 
-MindRoom ships the `research_check` plugin, which catches replies that recommend or state specific real-world things, such as places, businesses, products, prices, or opening hours, without having looked them up.
+MindRoom ships the `research_check` plugin, which catches replies that state specific facts a person would act on without having looked them up, such as figures a company reported, what a document, law, or study says, or where a place is and when it is open.
 After each reply, a judgment backend reads the person's message, the tool calls made for that reply with shortened, redacted argument and result previews, and the reply itself.
 Opinions, descriptions of quality, and general suggestions do not count.
-When it finds claims that no lookup supported, the agent gets a visible follow-up in the same conversation asking it to verify each claim with its search or browsing tools, correct anything that does not hold up, and name its sources.
+When it finds claims that no lookup supported, the agent gets a visible follow-up in the same conversation asking it to verify each claim with its tools, correct anything that does not hold up, and name its sources.
 
 Enable it with its `python:` spec; nothing needs installing:
 
@@ -91,7 +91,7 @@ plugins:
 - Searches a model runs on the provider's side, such as OpenRouter web search or OpenAI search models, are not tool calls, so those replies look unresearched; leave such agents out of `agents`.
 - The check sees only the current reply's tool calls, so a reply that relies on research from an earlier message can still get a follow-up.
 - Each checked reply costs one judgment request; use `agents` to limit which agents are checked.
-- The follow-up asks an agent without search or browsing tools to say which claims remain unverified.
+- The follow-up asks an agent without tools that can look the claims up to say which claims remain unverified.
 - A reply gets no follow-up when the backend fails, times out, or has no credential, when the message and reply are too long for one judgment request, which can happen past about 8,000 characters, or when either contains a credential, which is never sent to the backend; a long tool-call list is shortened instead.
 - Invalid settings, or an `llm` judgment `model` that is not a configured alias, make every check fail with `Hook execution failed` in the logs for plugin `research_check`.
 

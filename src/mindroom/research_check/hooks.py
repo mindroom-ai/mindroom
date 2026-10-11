@@ -31,21 +31,24 @@ _RESEARCH_CHECK_QUESTION = JudgmentQuestion(
         "The assistant message that lists tool calls shows every lookup made for this reply."
     ),
     when_true=(
-        "The reply states checkable facts a person would act on about specific real-world places, businesses, products, "
-        "or events, such as that they exist, where they are, when they are open or happening, what they cost, or whether "
-        "they are available, and the listed tool calls did not look those facts up or their results do not support them."
+        "The reply states checkable facts a person would act on about specific real-world things, such as places, "
+        "businesses, products, events, companies, documents, laws, or studies, for example that they exist, where they "
+        "are, when they are open or happening, what they cost, whether they are available, what they say, or what "
+        "figures they report, and the listed tool calls did not look those facts up or their results do not support them."
     ),
     when_false=(
-        "The reply makes no such factual claims, the listed tool results support them, the person supplied them, they are "
-        "stable common knowledge, or the only unsupported parts are opinions, descriptions of quality, or general suggestions."
+        "The reply makes no such factual claims, the listed tool results support them, the person supplied them or "
+        "named the thing themselves and the reply only gives general advice about it, they are stable common knowledge, "
+        "or the only unsupported parts are opinions, descriptions of quality, general suggestions, or pointers to where "
+        "the information can be found."
     ),
 )
 
 _FOLLOW_UP = (
-    'Research check on your reply that starts "{opening}": it recommends or states specific things that no lookup '
-    "for that reply verified. Check each one now with your search or browsing tools, correct or withdraw anything "
-    "that does not hold up, and name the sources you checked. If you cannot look them up, say which ones remain "
-    "unverified."
+    'Research check on your reply that starts "{opening}": it states specific facts that no lookup for that reply '
+    "verified. Check each one now with your tools, such as search, browsing, or documents you can read, correct or "
+    "withdraw anything that does not hold up, and name the sources you checked. If you cannot look them up, say which "
+    "ones remain unverified."
 )
 # Enough of the reply to name it when newer replies follow it in the conversation.
 _OPENING_CHARS = 80
