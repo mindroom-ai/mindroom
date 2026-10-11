@@ -12364,7 +12364,7 @@ The same execution continues across subsequent parent turns, and its result rema
 Pressing **Stop** cancels the reply and requests cancellation of the managed jobs it started; on a message that waits for background work, it also cancels the work it waits for, including jobs from earlier follow-ups it took over.
 Their outcomes are no longer offered to later replies, and a restart does not resume them.
 Jobs belonging to other requesters, conversations, agents, or newer messages remain unaffected.
-Deleting the message a reply answers cancels that reply's jobs the same way, and editing your message stops its reply the same way and answers the edit in its place.
+Deleting the message a reply answers cancels that reply's jobs the same way, and editing your message while its reply is still running or waiting stops that reply the same way and answers the edit in its place.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
 Saved results remain available for explicit retrieval.
 Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
