@@ -724,11 +724,12 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
     persona_tools: tuple[str, ...] | None = None,
+    authored: bool = False,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
     ``persona_tools`` holds an authored subagent's tools; its ``delegate`` toolkit
-    keeps the copies it authors within them.
+    keeps the copies it authors within them. ``authored`` marks any authored subagent.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
@@ -803,6 +804,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 refresh_scheduler=refresh_scheduler,
                 workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
                 persona_tools=persona_tools,
+                authored=authored,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -1479,6 +1481,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
     persona_tools: tuple[str, ...] | None = None,
+    authored: bool = False,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1585,6 +1588,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=dynamic_tool_continuation,
                 persona_tools=persona_tools,
+                authored=authored,
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
@@ -1802,8 +1806,14 @@ def _build_agent_instructions(
     loaded_tools: tuple[str, ...],
     native_deferred_tool_names: tuple[str, ...],
     all_deferred_tools_eager: bool,
+    persona_tools: tuple[str, ...] | None,
+    authored: bool,
 ) -> list[str]:
-    """Accumulate the configured and runtime instruction blocks for one agent instance."""
+    """Accumulate the configured and runtime instruction blocks for one agent instance.
+
+    An ``authored`` subagent gets no skills, and one with ``persona_tools`` has no knowledge search,
+    so neither gets guidance for them.
+    """
     instructions = list(configured_instructions)
 
     if skills and skills.get_skill_names():
@@ -1832,11 +1842,11 @@ def _build_agent_instructions(
 
     if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
-        instructions.append(config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"))
+        instructions.extend(() if authored else (config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),))
 
     file_mode_knowledge_instruction = (
         None
-        if disable_runtime_capabilities
+        if disable_runtime_capabilities or persona_tools is not None
         else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
     )
     if file_mode_knowledge_instruction is not None:
@@ -2012,6 +2022,7 @@ def create_agent(
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
         persona_tools=persona_tools,
+        authored=persona is not None,
     )
     storage = _open_agent_session_storage(
         agent_name,
@@ -2100,6 +2111,8 @@ def create_agent(
         native_deferred_tool_names=tool_assembly.deferred_tool_names,
         # An explicit persona tool list loads every toolkit it names, so no deferred-loading guidance applies.
         all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools or persona_tools is not None,
+        persona_tools=persona_tools,
+        authored=persona is not None,
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
@@ -2115,9 +2128,11 @@ def create_agent(
         instructions = [*instructions, STANDARD_CLI_NOTE]
 
     entity_view = config.resolve_entity(agent_name)
+    # An explicit persona tool list hides knowledge search, which has no owning toolkit to name.
     knowledge_enabled = (
         not disable_runtime_capabilities
         and knowledge is not None
+        and persona_tools is None
         and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
     )
     knowledge_sources = (
@@ -2185,7 +2200,7 @@ def create_agent(
             deferred_toolkits=tool_assembly.cli_deferred,
             # A persona's roster names the toolkits it actually built, deferred ones it named included.
             toolkit_names=get_agent_toolkit_names(agent_name, config)
-            if persona_tools is None
+            if persona is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names],
             identity=persona.system_prompt if persona is not None else None,
             minimal_instructions=agent_config.minimal_instructions if persona is None else (),

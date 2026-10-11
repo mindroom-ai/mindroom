@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.knowledge.knowledge import Knowledge
 from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
@@ -17,6 +18,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents, ai
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.models import ModelConfig
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
@@ -260,6 +262,53 @@ def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path)
     documents = "\n".join(agent.context_documents.values())
     assert "Configured role" not in documents
     assert "Yourself, run as a fresh copy." in documents
+
+
+def test_configured_minimal_agent_keeps_its_own_delegate_description(tmp_path: Path) -> None:
+    """Only an authored copy hides its configured role; a configured agent's delegate guidance is unchanged."""
+    runtime = _runtime(tmp_path, tools=["shell", "delegate"], delegate_to=["helper"])
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        agent_mode="minimal",
+    )
+
+    assert isinstance(agent, MinimalAgent)
+    documents = "\n".join(agent.context_documents.values())
+    assert "Yourself, run as a fresh copy." not in documents
+    assert "- Configured role" in documents
+
+
+def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(tmp_path: Path) -> None:
+    """A persona that inherits its caller's tools lists only the toolkits that survived approval filtering."""
+    runtime = _runtime(tmp_path, tools=["shell", {"file": {"include_tools": ["save_file"]}}])
+    runtime.config.tool_approval.rules.append(ApprovalRuleConfig(match="save_file", action="require_approval"))
+
+    agent = _child(runtime, None, agent_mode="minimal")
+
+    assert isinstance(agent, MinimalAgent)
+    [roster] = [line for line in agent.system_message.splitlines() if line.startswith("Toolkits callable")]
+    assert "file" not in roster
+
+
+@pytest.mark.asyncio
+async def test_persona_with_tools_never_advertises_unreachable_knowledge_or_skills(tmp_path: Path) -> None:
+    """A tool list hides knowledge search and skills, so the prompt never points at them."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    agent = _child(runtime, ["file"], knowledge=Knowledge(name="docs"))
+    session = AgentSession(session_id="session-1")
+    tools = await agent.aget_tools(RunOutput(run_id="run-1"), _run_context(), session)
+
+    message = await agent.aget_system_message(session, _run_context(), [t for t in tools if isinstance(t, Function)])
+
+    assert message is not None
+    content = str(message.content)
+    assert "search_knowledge_base" not in content
+    assert "skills/<skill-name>/" not in content
 
 
 def test_persona_with_tools_gets_no_deferred_loading_guidance(tmp_path: Path) -> None:

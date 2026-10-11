@@ -121,7 +121,7 @@ An agent whose own name is in `delegate_to` can write the prompt of a fresh copy
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
-The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories and skills are left out.
+The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories and skills are left out; a child with a `tools` list also cannot search the agent's knowledge bases.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](../configuration/history.md), the summary of its earlier turns.
 [Minimal subagents](agent-cli.md#minimal-subagents) describes what a minimal authored subagent, started with `minimal=True` or a profile's `mode: minimal`, needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
