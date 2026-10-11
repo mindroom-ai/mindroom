@@ -4132,6 +4132,7 @@ path = "mindroom.matrix_rtc.live_voice_agent"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.logging_config",
+    "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
 ]
 

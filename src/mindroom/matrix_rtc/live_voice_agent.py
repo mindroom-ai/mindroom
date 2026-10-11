@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
+from mindroom.matrix_rtc.transcript import merge_spoken_turns
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     LiveVoiceAgentOptions,
@@ -85,27 +86,27 @@ class _LiveDelegationRunner:
 
     def _prompt(self, messages: tuple[tuple[str, str, str], ...], pending: str) -> tuple[str, str]:
         """Compute a delta against requests already dispatched to the delegate."""
-        lines: list[str] = []
+        turns: list[tuple[str, str]] = []
         previous_pending = self._pending_transcript
         for identifier, role, content in messages:
             if identifier in self._message_ids:
                 continue
-            text = content
+            text = " ".join(content.split())
             if role == "user" and previous_pending and text.startswith(previous_pending):
                 text = text[len(previous_pending) :].strip()
                 previous_pending = ""
             if text:
-                lines.append(f"{role}: {text}")
+                turns.append((role, text))
         new_pending = pending
         if previous_pending and new_pending.startswith(previous_pending):
             new_pending = new_pending[len(previous_pending) :].strip()
-        if new_pending and (not lines or lines[-1] != f"user: {new_pending}"):
-            lines.append(f"user: {new_pending}")
+        if new_pending and (not turns or turns[-1] != ("user", new_pending)):
+            turns.append(("user", new_pending))
         prompt = (
             "Handle the current voice request using your normal instructions and tools. "
             "The following is new conversation context since the previous delegation; "
             "earlier context is already in this call's history. Return a concise result for the voice assistant.\n\n"
-            + "\n".join(lines)
+            + "\n".join(f"{role}: {text}" for role, text in merge_spoken_turns(turns))
         )
         return prompt, pending or previous_pending
 
@@ -118,7 +119,7 @@ class _LiveDelegationRunner:
         async with self._lock:
             if self._closed or generation != self._generation:
                 return
-            prompt, pending = self._prompt(messages, delegation.pending_transcript.strip())
+            prompt, pending = self._prompt(messages, " ".join(delegation.pending_transcript.split()))
             # An attempted request can complete tools without returning text,
             # or fail after side effects. Never label it as new context again.
             self._message_ids.update(identifier for identifier, _, _ in messages)

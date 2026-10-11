@@ -211,6 +211,42 @@ async def test_live_reconnect_retains_context_from_cancelled_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_delegation_joins_split_speech_into_one_turn() -> None:
+    """Fragments of one utterance reach the delegate as a single line per speaker."""
+    respond = AsyncMock(return_value=CallAgentResponse("Done."))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    context = ChatContext.empty()
+    context.add_message(role="assistant", content=" Sure, one moment.")
+    context.add_message(role="assistant", content=" I am checking.")
+    context.add_message(role="user", content=" Wait")
+    context.add_message(role="user", content=", can you check")
+    runner.submit(GPTLiveDelegation("one", ". Can you check whether the bakery opens early?"), context)
+    await asyncio.gather(*runner._tasks)
+
+    assert respond.await_args.args[0].endswith(
+        "\n\nassistant: Sure, one moment. I am checking.\n"
+        "user: Wait, can you check. Can you check whether the bakery opens early?",
+    )
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_finalized_speech_with_leading_space_does_not_repeat_dispatched_words() -> None:
+    """Provider transcripts keep a leading space that the stripped pending text lacks."""
+    respond = AsyncMock(return_value=CallAgentResponse("Done."))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    context = ChatContext.empty()
+    runner.submit(GPTLiveDelegation("one", " Check weather"), context)
+    await asyncio.gather(*runner._tasks)
+    context.add_message(role="user", content=" Check weather and trains")
+    runner.submit(GPTLiveDelegation("two", ""), context)
+    await asyncio.gather(*runner._tasks)
+
+    assert respond.await_args.args[0].endswith("\n\nuser: and trains")
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
 async def test_live_splits_large_unicode_results_without_losing_content() -> None:
     """Provider commentary stays below the per-append token cap."""
     result = "Status: 晴れです。 " * 200
