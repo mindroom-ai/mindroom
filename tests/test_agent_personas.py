@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.knowledge.knowledge import Knowledge
 from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
@@ -17,6 +18,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents, ai
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.models import ModelConfig
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
@@ -26,6 +28,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import seed_session
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_dynamic_toolkits import _base_config_data, _validated_config
@@ -38,8 +41,6 @@ if TYPE_CHECKING:
 
     from mindroom.delegation.state import SubagentPersona
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-
-_BASH_HINT = "MindRoom tools are callable from Bash through mindroom-agent; run mindroom-agent --help to list them."
 
 
 def _runtime(tmp_path: Path, **agent_fields: object) -> ToolRuntimeContext:
@@ -97,21 +98,30 @@ async def _prepare(runtime: ToolRuntimeContext, persona: SubagentPersona, prompt
 
 
 @pytest.mark.asyncio
-async def test_persona_system_message_is_verbatim(tmp_path: Path) -> None:
-    """The model receives the authored prompt byte for byte, with no MindRoom framing or state substitution."""
-    runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
-    prompt = "Plain {not_a_var} text\n"
+async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_path: Path) -> None:
+    """The authored prompt leads in place of the agent's identity, and runtime sections stay as for every agent."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="none", context_files=["SOUL.md"])
+    workspace = runtime.runtime_paths.storage_root / "agents" / "helper" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "SOUL.md").write_text("Configured personality")
+    prompt = "Plain {not_a_var} text"
+    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
+    assert "Configured personality" in str(configured.role)
     prepared = await _prepare(runtime, inline_persona(prompt, None), "task")
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
 
     assert message is not None
-    assert message.content == prompt
+    content = str(message.content)
+    assert content.startswith(f"{prompt}\n")
+    for identity in ("Configured role", "Configured rule", "Configured personality", "Helper"):
+        assert identity not in content
+    assert "## Tool Execution Environment" in content
 
 
 @pytest.mark.asyncio
 async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> None:
-    """A compacted session's summary follows an authored child's verbatim prompt, as Agno adds it for configured agents."""
+    """A compacted session's summary reaches an authored child through the same prompt builder as every agent."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
     identity = build_execution_identity_from_runtime_context(runtime)
     old_run = RunOutput(
@@ -145,24 +155,21 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
         runtime_paths=runtime.runtime_paths,
         execution_identity=identity,
     ) as scope_context:
-        turn = replace(_turn_context(), persona=inline_persona("P", None))
-        options = {"runtime_paths": runtime.runtime_paths, "config": runtime.config, "execution_identity": identity}
-        prepared = await ai._prepare_agent_and_prompt(turn, prompt="task", scope_context=scope_context, **options)
-        # A retried turn reuses the agent its first attempt prepared.
-        retried = await ai._prepare_agent_and_prompt(
-            turn,
+        assert scope_context is not None
+        prepared = await ai._prepare_agent_and_prompt(
+            replace(_turn_context(), persona=inline_persona("P", None)),
             prompt="task",
+            runtime_paths=runtime.runtime_paths,
+            config=runtime.config,
+            execution_identity=identity,
             scope_context=scope_context,
-            reusable_agent=prepared.agent,
-            **options,
         )
+        message = await prepared.agent.aget_system_message(scope_context.session, _run_context(), [])
 
-    message = await retried.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
     assert message is not None
     content = str(message.content)
-    assert content.startswith("P\n\n")
+    assert content.startswith("P\n")
     assert content.count("<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>") == 1
-    assert retried.prepared_history.prepared_context_tokens == prepared.prepared_history.prepared_context_tokens
 
 
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
@@ -244,6 +251,115 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path, monkeypatch: pyte
     # Only the configured agent defers its toolkit; the persona's build installs no tool search.
     [configured] = deferred
     assert "read_file" in configured
+
+
+def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path) -> None:
+    """A minimal copy that keeps delegate sees itself listed as a target without its configured role."""
+    runtime = _runtime(tmp_path, tools=["shell", "delegate"], delegate_to=["helper"])
+
+    agent = _child(runtime, ["shell", "delegate"], agent_mode="minimal")
+
+    assert isinstance(agent, MinimalAgent)
+    documents = "\n".join(agent.context_documents.values())
+    assert "Configured role" not in documents
+    assert "Yourself, run as a fresh copy." in documents
+
+
+def test_configured_minimal_agent_keeps_its_own_delegate_description(tmp_path: Path) -> None:
+    """Only an authored copy hides its configured role; a configured agent's delegate guidance is unchanged."""
+    runtime = _runtime(tmp_path, tools=["shell", "delegate"], delegate_to=["helper"])
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        agent_mode="minimal",
+    )
+
+    assert isinstance(agent, MinimalAgent)
+    documents = "\n".join(agent.context_documents.values())
+    assert "Yourself, run as a fresh copy." not in documents
+    assert "- Configured role" in documents
+
+
+def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(tmp_path: Path) -> None:
+    """A persona that inherits its caller's tools lists only the toolkits that survived approval filtering."""
+    runtime = _runtime(tmp_path, tools=["shell", {"file": {"include_tools": ["save_file"]}}])
+    runtime.config.tool_approval.rules.append(ApprovalRuleConfig(match="save_file", action="require_approval"))
+
+    agent = _child(runtime, None, agent_mode="minimal")
+
+    assert isinstance(agent, MinimalAgent)
+    [roster] = [line for line in agent.system_message.splitlines() if line.startswith("Toolkits callable")]
+    assert "file" not in roster
+
+
+@pytest.mark.asyncio
+async def test_persona_with_tools_never_advertises_knowledge_search(tmp_path: Path) -> None:
+    """A tool list hides knowledge search, so the prompt never points at it."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    agent = _child(runtime, ["file"], knowledge=Knowledge(name="docs"))
+    session = AgentSession(session_id="session-1")
+    tools = await agent.aget_tools(RunOutput(run_id="run-1"), _run_context(), session)
+
+    message = await agent.aget_system_message(session, _run_context(), [t for t in tools if isinstance(t, Function)])
+
+    assert message is not None
+    content = str(message.content)
+    assert "search_knowledge_base" not in content
+
+
+async def _system_prompt(agent: Agent) -> str:
+    session = AgentSession(session_id="session-1")
+    tools = await agent.aget_tools(RunOutput(run_id="run-1"), _run_context(), session)
+    message = await agent.aget_system_message(session, _run_context(), [t for t in tools if isinstance(t, Function)])
+    assert message is not None
+    return str(message.content)
+
+
+@pytest.mark.asyncio
+async def test_persona_gets_no_skills_or_skill_authoring_note(tmp_path: Path) -> None:
+    """A configured agent lists its workspace skills and the authoring note; an authored subagent gets neither."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    skill = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "scripted"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: scripted\ndescription: Scripted skill\n---\n\nSKILL BODY\n")
+    options = {"persist_runtime_state": False}
+
+    configured = await _system_prompt(
+        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+    )
+    authored = await _system_prompt(_child(runtime, None, execution_identity=identity))
+
+    for marker in ("skills/<skill-name>/", "scripted"):
+        assert marker in configured
+        assert marker not in authored
+
+
+def test_persona_with_tools_gets_no_deferred_loading_guidance(tmp_path: Path) -> None:
+    """An explicit tool list loads its toolkits up front, so the prompt never points at load_tool."""
+    runtime = _runtime(tmp_path, tools=["file", {"calculator": {"defer": True}}])
+
+    agent = _child(runtime, ["file"], session_id="session-1")
+
+    instructions = "\n".join(str(item) for item in agent.instructions or [])
+    assert "load_tool" not in instructions
+    assert "calculator" not in instructions
+
+
+def test_minimal_persona_roster_lists_the_toolkits_it_built(tmp_path: Path) -> None:
+    """A minimal persona's bootstrap lists the toolkits it can call, deferred ones it named included."""
+    runtime = _runtime(tmp_path, tools=["shell", "file", {"calculator": {"defer": True}}])
+
+    agent = _child(runtime, ["shell", "calculator"], session_id="session-1", agent_mode="minimal")
+
+    assert isinstance(agent, MinimalAgent)
+    [roster] = [line for line in agent.system_message.splitlines() if line.startswith("Toolkits callable")]
+    assert "calculator" in roster
+    assert "file" not in roster
 
 
 def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
@@ -350,19 +466,21 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
     assert "the task" in prepared.prompt_text
 
 
-def test_minimal_persona_uses_authored_prompt_and_bash_hint(tmp_path: Path) -> None:
-    """A minimal persona presents the authored prompt and tells the model where its tools are."""
+def test_minimal_persona_prompt_replaces_only_the_bootstrap_identity(tmp_path: Path) -> None:
+    """A minimal persona's authored prompt replaces the bootstrap's identity line and keeps its runtime lines."""
     runtime = _runtime(tmp_path, tools=["shell"])
     agent = _child(runtime, None, prompt="Authored minimal prompt", agent_mode="minimal")
     assert isinstance(agent, MinimalAgent)
-    assert agent.bootstrap_message == "Authored minimal prompt"
-    assert agent.system_message == "Authored minimal prompt"
-    [bash] = agent.get_tools(RunOutput(run_id="run-1"), _run_context(), AgentSession(session_id="session-1"))
-    assert bash.get_async_functions()["bash"].description.endswith(_BASH_HINT)
+    assert agent.system_message == agent.bootstrap_message
+    assert agent.system_message.startswith("Authored minimal prompt\n")
+    assert "You are Helper" not in agent.system_message
+    assert "mindroom-agent --help" in agent.system_message
+    assert "Configured role" not in "\n".join(agent.context_documents.values())
+    assert "Configured rule" not in "\n".join(agent.context_documents.values())
 
 
 def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
-    """Configured agents keep their built prompt and the plain Bash description."""
+    """Configured agents keep their built prompt and their own minimal identity line."""
     runtime = _runtime(tmp_path, tools=["shell"])
     standard = agents.create_agent(
         "helper",
@@ -382,11 +500,10 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persona=None,
     )
     assert standard.system_message is None
+    assert standard.description is None
     assert standard.resolve_in_context
     assert isinstance(minimal, MinimalAgent)
     assert minimal.system_message.startswith("You are Helper (helper) in minimal mode.")
-    [bash] = minimal.get_tools(RunOutput(run_id="run-1"), _run_context(), AgentSession(session_id="session-1"))
-    assert _BASH_HINT not in bash.get_async_functions()["bash"].description
 
 
 @pytest.mark.asyncio

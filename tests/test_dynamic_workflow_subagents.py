@@ -143,7 +143,7 @@ async def test_participant_steps_write_delegation_records(tmp_path: Path, monkey
     run = await workflow.run(_spec([{"id": "critic", "system_prompt": "Critic prompt", "tools": []}], steps=2))
 
     assert run["status"] == "completed", run
-    assert workflow.model.system_prompts == ["Critic prompt", "Critic prompt"]
+    assert workflow.model.authored_prompts == ["Critic prompt", "Critic prompt"]
     with workflow.context():
         stored = json.loads(await workflow.tools.aget_workflow_run(workflow_id="review", run_id=run["run_id"]))
     delegation_ids = [step["delegation_id"] for step in stored["steps"]]
@@ -180,7 +180,7 @@ async def test_unapproved_gated_participant_tool_is_rejected(tmp_path: Path, mon
 
     assert run["status"] == "failed"
     assert "tool 'calculator' is not pre-approved" in run["error"]
-    assert workflow.model.system_prompts == []
+    assert workflow.model.authored_prompts == []
 
 
 @pytest.mark.asyncio
@@ -204,7 +204,7 @@ async def test_profile_participant_runs_workspace_profile(tmp_path: Path, monkey
     run = await workflow.run(_spec([{"id": "critic", "profile": "critic"}]))
 
     assert run["status"] == "completed", run
-    assert workflow.model.system_prompts == ["You criticize."]
+    assert workflow.model.authored_prompts == ["You criticize."]
 
 
 @pytest.mark.asyncio
@@ -250,7 +250,7 @@ async def test_participant_cannot_be_continued_outside_its_workflow(
         result = await toolkit.continue_subagent(subagent_id=subagent_id, message="Again")
 
     assert "belongs to a Dynamic Workflow run" in result
-    assert workflow.model.system_prompts == ["Add."]
+    assert workflow.model.authored_prompts == ["Add."]
 
 
 def _write_legacy_revision(tmp_path: Path) -> DynamicWorkflowStore:
@@ -313,7 +313,7 @@ async def test_legacy_revision_runs_as_subagent(tmp_path: Path, monkeypatch: pyt
         run = json.loads(await workflow.tools.arun_workflow(workflow_id="review", input={}))
 
     assert run["status"] == "completed", run
-    assert workflow.model.system_prompts == ["You are Writer.\n\nWrites\n\n- Cite sources"]
+    assert workflow.model.authored_prompts == ["You are Writer.\n\nWrites\n\n- Cite sources"]
     assert workflow.models_loaded == ["haiku"]
 
 
@@ -381,7 +381,7 @@ async def test_participant_runs_the_profile_validated_at_run_start(
 
     assert run["status"] == "completed", run
     assert profile.read_text() == rewritten
-    assert workflow.model.system_prompts[-1] == "Original prompt."
+    assert workflow.model.authored_prompts[-1] == "Original prompt."
     assert workflow.models_loaded[-1] == "default"
 
 
@@ -473,7 +473,7 @@ async def test_participant_naming_a_filtered_function_fails_its_step(
 
     assert run["status"] == "failed", run
     assert "'file.save_file' is not available to you" in run["error"]
-    assert workflow.model.system_prompts == []
+    assert workflow.model.authored_prompts == []
 
 
 @pytest.mark.asyncio
@@ -502,7 +502,7 @@ def test_sync_run_executes_a_subagent_participant(tmp_path: Path, monkeypatch: p
 
     assert created["status"] == "ok", created
     assert run["status"] == "completed", run
-    assert workflow.model.system_prompts == ["Critic prompt"]
+    assert workflow.model.authored_prompts == ["Critic prompt"]
 
 
 @pytest.mark.asyncio

@@ -21,7 +21,7 @@ _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
 
 @dataclass(frozen=True)
 class SubagentPersona:
-    """The authored presentation of one child: its whole system prompt and optional tool subset."""
+    """The authored presentation of one child: its authored prompt and optional tool subset."""
 
     source_kind: PersonaSourceKind
     source_name: str
