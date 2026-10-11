@@ -21,6 +21,7 @@ from agno.agent import _session as agent_session
 from agno.agent import _storage as agent_storage
 from agno.db.base import SessionType
 from agno.session import AgentSession, TeamSession, WorkflowSession
+from agno.team import _run as team_run
 from agno.team import _session as team_session
 
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
@@ -143,6 +144,25 @@ async def drain_agent_cancellation(
     finally:
         if owner.tasks:
             await wait_for_future_until_complete(asyncio.gather(*owner.tasks))
+
+
+# AGNO_COMPAT: A stopped team run is saved on a detached task nobody waits for.
+# Reason: Agno persists a team run cancelled by cancelling its task on a background task,
+# while MindRoom writes its own record of the interrupted turn for the same run id right
+# after the cancellation. Whichever write lands last wins, so a slow Agno save, such as
+# one that first waits for stopped members, replaces MindRoom's record with the cancelled
+# run, which history replay skips. This reads Agno's private background task set, as the
+# agent cancellation drain above does.
+# Upstream issue: No matching issue identified; awaiting a cancelled team run's save is untracked.
+# Upstream PR: None identified.
+# Remove when: Agno lets a caller await the save of a team run cancelled by cancelling its task.
+# Coverage: tests/test_team_member_usage.py::test_interrupted_turn_written_after_a_stop_is_not_overwritten.
+async def drain_cancelled_team_saves() -> None:
+    """Finish Agno's detached saves of stopped team runs before the caller writes canonical history."""
+    loop = asyncio.get_running_loop()
+    pending = [task for task in team_run._background_tasks if not task.done() and task.get_loop() is loop]
+    if pending:
+        await wait_for_future_until_complete(asyncio.gather(*pending, return_exceptions=True))
 
 
 def _persist_cancelled_run_in_background(

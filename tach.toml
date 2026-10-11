@@ -1028,7 +1028,7 @@ visibility = ["mindroom.approval_events"]
 [[modules]]
 path = "mindroom.agno_compat_session_persistence"
 depends_on = ["mindroom.background_tasks"]
-visibility = ["mindroom.agent_storage", "mindroom.ai"]
+visibility = ["mindroom.agent_storage", "mindroom.ai", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.agno_compat_session_metrics"
@@ -2792,6 +2792,7 @@ depends_on = [
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
+    "mindroom.agno_compat_session_persistence",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.reply_scope",
