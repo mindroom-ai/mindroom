@@ -223,7 +223,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
             while not selected.exists():  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
                 await asyncio.sleep(0.01)
         assert selected.read_text() == proxy.collection_name
-        [reader] = [process for process in processes if process is not read_process._warm_reader]
+        [reader] = processes
         refresh_task = asyncio.create_task(
             asyncio.to_thread(collections._delete_collection_sync, space, proxy.collection_name)
             if direct_delete
