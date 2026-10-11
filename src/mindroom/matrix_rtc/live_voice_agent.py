@@ -114,7 +114,7 @@ class _LiveDelegationRunner:
         prompt = (
             "Handle the current voice request using your normal instructions and tools. "
             "The following is new conversation context since the previous delegation; "
-            "earlier context is already in this call's history. Return a concise result for the voice assistant.\n\n"
+            "earlier context is already in this call's history.\n\n"
             + "\n".join(f"{role}: {text}" for role, text in merge_spoken_turns(turns))
         )
         return prompt, pending or previous_pending

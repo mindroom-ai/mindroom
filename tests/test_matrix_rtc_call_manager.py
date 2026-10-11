@@ -850,6 +850,8 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(  # noqa:
     assert tooling_kwargs["enable_responder"] is True
     assert tooling_kwargs["active_model_name"] == agent_model
     assert tooling_kwargs["reconcile_spoken_response"] is False
+    # The delegate's own system prompt carries the spoken-answer length and format rules.
+    assert tooling_kwargs["voice_instructions"] == _VOICE_STYLE_ADDENDUM
     assert str(tooling_kwargs["session_id"]).startswith(f"{ROOM_ID}:call:")
     assert tooling_kwargs["requester_id"] == "@alice:example.org"
     assert callable(tooling_kwargs["authorize_operation"])
@@ -2526,8 +2528,7 @@ async def test_realtime_call_instructions_include_validated_origin_brief(
     instructions = bridge.agent_options.instructions
     assert instructions.startswith("You are Helper.")
     assert "Book the 9am train" in instructions
-    assert instructions.endswith("lists, or other written formatting.")
-    assert "never use markdown" in instructions
+    assert instructions.endswith(_VOICE_STYLE_ADDENDUM)
     assert "Starting work from this call" not in instructions
     resolver.assert_awaited_once()
     assert resolver.await_args.args == (CallOrigin(room_id="!origin:example.org", thread_id="$root"),)
