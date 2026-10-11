@@ -14,7 +14,7 @@ from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases, resolve_room_id
 from mindroom.matrix.users import create_agent_http_client
-from mindroom.scheduling import (
+from mindroom.scheduling.tasks import (
     ScheduledTaskReadModel,
     ScheduledTaskRecord,
     build_edited_scheduled_workflow,

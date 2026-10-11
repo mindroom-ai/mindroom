@@ -11,7 +11,7 @@ from mindroom import constants
 from mindroom.api import main, provider_setup
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 
 _OPENROUTER_KEY = "sk-or-v1-secret-test-key"
 

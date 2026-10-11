@@ -11,9 +11,9 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
-from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.file_memory_knowledge import resolve_agent_file_memory_knowledge
+from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
 from mindroom.knowledge.refresh_policy import (
     RefreshCooldownKey,
     cooldown_elapsed,
@@ -22,7 +22,7 @@ from mindroom.knowledge.refresh_policy import (
     refresh_trigger,
 )
 from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
-from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
+from mindroom.knowledge.source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 

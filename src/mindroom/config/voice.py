@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.credentials import validate_service_name
+from mindroom.credentials.manager import validate_service_name
 from mindroom.model_defaults import OPENAI_TRANSCRIPTION
 
 _RESERVED_SPEECH_OPTION_NAMES = frozenset({"api_key", "base_url", "client", "model"})

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from google.api_core.exceptions import BadRequest, GoogleAPIError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
 

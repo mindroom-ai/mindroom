@@ -10,11 +10,11 @@ import nio
 import pytest
 from agno.models.response import ToolExecution
 
-from mindroom.approval_inbound import parse_approval_response_event
-from mindroom.approval_manager import ApprovalActionResult, ApprovalManager
-from mindroom.approval_receipt import build_approval_receipt
-from mindroom.approval_response import ApprovalResponseCoordinator
-from mindroom.approval_transport import ApprovalMatrixTransport, _approval_delivery_content
+from mindroom.approval.inbound import parse_approval_response_event
+from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
+from mindroom.approval.receipt import build_approval_receipt
+from mindroom.approval.response import ApprovalResponseCoordinator
+from mindroom.approval.transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
@@ -133,7 +133,7 @@ async def test_only_policy_pause_offers_timed_approval(
     """Native confirmation remains per-call through the actual pause publisher."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    monkeypatch.setattr("mindroom.approval_manager._MANAGER", manager)
+    monkeypatch.setattr("mindroom.approval.manager._MANAGER", manager)
     responder = journal.principal("agent@code")
     config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
     coordinator = ApprovalResponseCoordinator(
@@ -221,7 +221,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
     """A reused human grant must not tell the model that another card was shown."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    monkeypatch.setattr("mindroom.approval_manager._MANAGER", manager)
+    monkeypatch.setattr("mindroom.approval.manager._MANAGER", manager)
     responder = journal.principal("agent@code")
     config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
     coordinator = ApprovalResponseCoordinator(

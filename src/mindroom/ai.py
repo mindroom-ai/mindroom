@@ -26,8 +26,10 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
+from mindroom.agent_cli.cli_shell_agent import CliShellAgent
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_executions
+from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.agno_compat_session_persistence import drain_agent_cancellation
@@ -39,10 +41,8 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.claude_prompt_cache import aclose_anthropic_async_client
-from mindroom.cli_shell_agent import CliShellAgent
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -86,13 +86,13 @@ from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.minimal_agent import MinimalAgent
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
     close_unreturned_agent,
     prepare_prompt_branches,
     prewarm_agent_model_client,
 )
+from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,

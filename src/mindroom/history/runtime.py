@@ -8,8 +8,6 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-from mindroom import model_loading
-from mindroom.agno_compat_provider_errors import is_provider_timeout
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.compaction import SummaryModel, compact_scope_history
 from mindroom.history.native import configure_native_history, native_history_route
@@ -43,6 +41,7 @@ from mindroom.history.storage import (
     set_force_compaction_state,
     update_scope_state_on_latest,
 )
+from mindroom.history.team_scope import ad_hoc_team_has_private_member
 from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycleFailure,
@@ -57,8 +56,9 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.logging_config import get_logger
+from mindroom.providers import model_loading
+from mindroom.providers.agno_compat_provider_errors import is_provider_timeout
 from mindroom.redaction import redact_sensitive_text
-from mindroom.team_scope import ad_hoc_team_has_private_member
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
 

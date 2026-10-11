@@ -11,7 +11,7 @@ import pytest
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.oauth.google import GOOGLE_IDENTITY_SCOPES
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider

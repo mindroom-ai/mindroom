@@ -14,7 +14,7 @@ from agno.tools.function import ToolResult
 from mcp import StdioServerParameters
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
-from mindroom.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer import mcp_provider
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.credential_policy import (
+from mindroom.credentials.policy import (
     _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     OAUTH_CREDENTIAL_FIELDS,
     credential_service_policy,

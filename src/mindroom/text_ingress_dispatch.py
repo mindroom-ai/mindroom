@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.commands.parsing import Command
     from mindroom.dispatch_handoff import (
         DispatchEvent,

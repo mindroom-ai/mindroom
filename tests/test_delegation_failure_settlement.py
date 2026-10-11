@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.approval_recovery import ApprovalRecovery
-from mindroom.approval_response import ApprovalResponseCoordinator
+from mindroom.approval.recovery import ApprovalRecovery
+from mindroom.approval.response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
@@ -61,9 +61,9 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
-        patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
+        patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
         patch(
-            "mindroom.approval_response.cancel_approval_delegations",
+            "mindroom.approval.response.cancel_approval_delegations",
             new=AsyncMock(side_effect=cancel),
         ) as cancel_children,
     ):
@@ -101,8 +101,8 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
-        patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
-        patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
+        patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
+        patch("mindroom.approval.response.cancel_approval_delegations", new=AsyncMock()),
     ):
         assert await coordinator.settle_failure(continuation, reason)
 
@@ -136,8 +136,8 @@ async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, 
     )
     with (
         patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
-        patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
-        patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
+        patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
+        patch("mindroom.approval.response.cancel_approval_delegations", new=AsyncMock()),
     ):
         assert await coordinator.settle_failure(continuation, reason)
 
@@ -170,7 +170,7 @@ async def test_unavailable_owner_cancels_children_before_discarding() -> None:
         journal_provider=lambda: journal,
     )
     recovery.cancel_delegations = AsyncMock(side_effect=cancel)
-    with patch("mindroom.approval_recovery.prepare_approval_failure", new=AsyncMock(return_value=continuation)):
+    with patch("mindroom.approval.recovery.prepare_approval_failure", new=AsyncMock(return_value=continuation)):
         assert await recovery._discard_unavailable("leader@test", continuation, "owner removed")
 
     assert order == ["children", "source"]

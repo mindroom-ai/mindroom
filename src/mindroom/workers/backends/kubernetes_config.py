@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
-from mindroom.private_instance_identity_store import (
+from mindroom.private_storage.private_instance_identity_store import (
     PrivateInstanceIdentityError,
     reconstruct_private_instance_worker_key,
 )

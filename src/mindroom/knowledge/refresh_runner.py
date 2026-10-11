@@ -28,15 +28,15 @@ from mindroom.constants import (
     resolve_runtime_paths,
     runtime_env_values,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.embedder_health import (
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
     capture_embedder_health_recorder,
     check_embedder_health,
     embedder_in_use,
     get_embedder_failure,
 )
-from mindroom.embedding_errors import extract_classified_embedder_detail
+from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.github_app_auth import (
     GitHubAppTokenBinding,
@@ -341,7 +341,7 @@ async def _refresh_index_in_subprocess(  # noqa: PLR0915 - Keep process and resu
                 process = await asyncio.create_subprocess_exec(
                     sys.executable,
                     "-m",
-                    "mindroom.knowledge_refresh_runner",
+                    "mindroom.knowledge.refresh_entrypoint",
                     stdin=asyncio.subprocess.PIPE,
                     stdout=output,
                     env=env,

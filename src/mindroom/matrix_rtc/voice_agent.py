@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
         ConversationItemAddedEvent,
         ErrorEvent,
         FunctionToolsExecutedEvent,
+        SessionUsageUpdatedEvent,
         SpeechCreatedEvent,
     )
     from livekit.agents.voice.io import AudioInput
@@ -331,6 +334,8 @@ class VoiceAgentOptions:
     on_session_terminated: Callable[[bool], None] | None = None
     #: Called with a safe, actionable user-facing description of a runtime failure.
     on_session_error: Callable[[str], None] | None = None
+    #: Saves the speech model's cumulative token usage for the call after each update.
+    record_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -372,6 +377,30 @@ class LiveVoiceUsage:
 
 
 @dataclass(frozen=True)
+class _RealtimeResponseUsage:
+    """Token usage of one realtime speech-model response."""
+
+    created_at: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    reasoning_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class RealtimeCallUsage:
+    """Every response's token usage so far in one realtime call."""
+
+    usage_id: str
+    model: str
+    created_at: float
+    responses: tuple[_RealtimeResponseUsage, ...]
+
+
+@dataclass(frozen=True)
 class LiveVoiceAgentOptions:
     """GPT-Live speech with delegation to the normal MindRoom agent."""
 
@@ -403,6 +432,10 @@ class RealtimeVoiceBridge:
         self._session: Any = None
         self._owned_speech_resource_closers: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._session_event_tasks: set[asyncio.Future[None]] = set()
+        self._usage_lock = asyncio.Lock()
+        self._realtime_usage: RealtimeCallUsage | None = None
+        self._saved_realtime_usage: RealtimeCallUsage | None = None
+        self._record_realtime_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
         self._reported_error_notices: set[str] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
@@ -565,6 +598,69 @@ class RealtimeVoiceBridge:
 
         self._register_termination_listener(session, options)
         self._register_error_listener(session, options)
+        if isinstance(options, VoiceAgentOptions) and options.record_usage is not None:
+            self._register_usage_listener(session, options.model, options.record_usage)
+
+    def _register_usage_listener(
+        self,
+        session: AgentSession,
+        model: str,
+        record_usage: Callable[[RealtimeCallUsage], Awaitable[None]],
+    ) -> None:
+        """Keep the realtime speech model's cumulative token usage saved for the call."""
+        from livekit.agents.metrics.usage import LLMModelUsage  # noqa: PLC0415
+
+        usage_id = uuid4().hex
+        created_at = time.time()
+        self._record_realtime_usage = record_usage
+
+        totals = (0, 0, 0, 0, 0, 0, 0)
+        responses: list[_RealtimeResponseUsage] = []
+
+        def _on_usage(event: SessionUsageUpdatedEvent) -> None:
+            nonlocal totals
+            # Accept updates while the session drains at hang-up; teardown awaits their saves.
+            llm_usage = [entry for entry in event.usage.model_usage if isinstance(entry, LLMModelUsage)]
+            if not llm_usage:
+                return
+            # LiveKit reports running totals after each response, so the increase is that response's usage.
+            current = (
+                sum(entry.input_tokens for entry in llm_usage),
+                sum(entry.output_tokens for entry in llm_usage),
+                sum(entry.input_cached_tokens for entry in llm_usage),
+                sum(entry.input_cache_creation_tokens for entry in llm_usage),
+                sum(entry.input_audio_tokens for entry in llm_usage),
+                sum(entry.output_audio_tokens for entry in llm_usage),
+                sum(entry.output_reasoning_tokens for entry in llm_usage),
+            )
+            increase = [now - then for now, then in zip(current, totals, strict=True)]
+            totals = current
+            if not any(increase):
+                return
+            responses.append(_RealtimeResponseUsage(time.time(), *increase))
+            self._realtime_usage = RealtimeCallUsage(
+                usage_id=usage_id,
+                model=model,
+                created_at=created_at,
+                responses=tuple(responses),
+            )
+            self._schedule_session_event(self._save_realtime_usage())
+
+        session.on("session_usage_updated", _on_usage)
+
+    async def _save_realtime_usage(self) -> None:
+        # Saves run one at a time and write the newest totals, so a slow save cannot overwrite newer ones.
+        async with self._usage_lock:
+            usage = self._realtime_usage
+            record_usage = self._record_realtime_usage
+            if usage is None or record_usage is None or usage is self._saved_realtime_usage:
+                return
+            try:
+                await record_usage(usage)
+            except Exception as error:
+                logger.warning("call_realtime_usage_save_failed", error_type=type(error).__name__)
+            else:
+                self._saved_realtime_usage = usage
 
     def _register_error_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         """Turn provider/runtime failures into safe, actionable call notices."""
@@ -689,6 +785,11 @@ class RealtimeVoiceBridge:
             try:
                 if self._session_event_tasks:
                     await asyncio.gather(*self._session_event_tasks, return_exceptions=True)
+                if self._record_realtime_usage is not None:
+                    # Retry the call's latest total once if its last save failed.
+                    await self._save_realtime_usage()
+                    if self._realtime_usage is not self._saved_realtime_usage:
+                        logger.error("call_realtime_usage_unpersisted")
             finally:
                 try:
                     await _close_speech_resources(speech_resource_closers)

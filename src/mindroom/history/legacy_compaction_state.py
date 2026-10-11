@@ -11,7 +11,7 @@ from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX
 from mindroom.history.archive_schema import archive_schema_sql, archive_table_names
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_session_storage import decode_persisted_session_json
-from mindroom.usage_storage import quote_identifier
+from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Collection

@@ -13,12 +13,13 @@ from agno.run.agent import RunOutput
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom import model_loading, routing
+from mindroom import routing
 from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.providers import model_loading
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:

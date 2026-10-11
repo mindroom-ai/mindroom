@@ -33,10 +33,10 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 
-from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     _InMemoryTextReader,
