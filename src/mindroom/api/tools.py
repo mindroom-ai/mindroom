@@ -17,12 +17,12 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_execution_scope_override,
 )
 from mindroom.config.main import Config
-from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
@@ -45,7 +45,7 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 

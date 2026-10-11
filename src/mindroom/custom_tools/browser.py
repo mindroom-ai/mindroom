@@ -27,8 +27,8 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
-from mindroom.browser_profile import clear_stale_singleton_locks
+from mindroom.browser.fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
+from mindroom.browser.profile_locks import clear_stale_singleton_locks
 from mindroom.custom_tools.attachments import resolve_context_attachment_path
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,

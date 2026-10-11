@@ -12,7 +12,7 @@ import pytest
 import mindroom.orchestration.config_lifecycle as lifecycle_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, load_config
-from mindroom.config_reload import ConfigReloadStatus
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, _ReplacementDrainState
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.runtime import create_logged_task

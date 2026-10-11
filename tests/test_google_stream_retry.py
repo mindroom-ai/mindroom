@@ -11,10 +11,10 @@ from agno.exceptions import ModelProviderError
 from agno.models.message import Message
 from openai import APIStatusError
 
-from mindroom import provider_stream_retry
-from mindroom.agno_compat_provider_errors import is_transient_stream_error
-from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.provider_stream_retry import install_provider_stream_retry_hook
+from mindroom.providers import stream_retry as provider_stream_retry
+from mindroom.providers.agno_compat_provider_errors import is_transient_stream_error
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.stream_retry import install_provider_stream_retry_hook
 from tests.gemini_helpers import gemini_client
 
 

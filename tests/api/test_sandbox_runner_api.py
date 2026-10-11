@@ -53,7 +53,7 @@ from mindroom.constants import (
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     CredentialsManager,
     _reset_credentials_manager_cache,
     get_runtime_credentials_manager,
@@ -61,7 +61,7 @@ from mindroom.credentials import (
     sync_shared_credentials_to_worker,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded

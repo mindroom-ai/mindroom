@@ -21,7 +21,7 @@ from agno.tools.function import UserInputField
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -121,7 +121,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
         "mindroom.agents._load_agent_model_instance",
         lambda _config, _paths, _name, owner: parent_model if owner.session_id == identity.session_id else child_model,
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
     executed = []
     original_add = CalculatorTools.add
 
@@ -308,7 +308,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
                         "resolve_for_agent_async",
                         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
                     )
-                    monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
+                    monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
                     continuation = approval_continuation(
                         approval_id="saved-child-approval",
                         run_id=paused.run_id,
@@ -420,7 +420,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
         "mindroom.agents._load_agent_model_instance",
         lambda _config, _paths, _name, owner: parent_model if owner.session_id == identity.session_id else child_model,
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
     executed = []
     original_add = CalculatorTools.add
 
@@ -504,7 +504,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
         "resolve_for_agent_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
-    monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
+    monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
     cards = []
     for _ in range(3):
         if not isinstance(result, PausedAttempt):

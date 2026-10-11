@@ -29,7 +29,7 @@ from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.voice import normalize_speech_base_url
-from mindroom.credentials_sync import get_api_key_for_service
+from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
@@ -58,6 +58,7 @@ from mindroom.matrix_rtc.call_tools import (
     CallAgentTooling,
     build_call_tools,
     matrix_message_available_during_call,
+    record_call_token_usage,
     record_call_voice_usage,
 )
 from mindroom.matrix_rtc.call_writeback import format_call_writeback, post_call_writeback
@@ -1486,6 +1487,12 @@ class CallManager:
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,
                 on_session_error=on_session_error,
+                record_usage=partial(
+                    record_call_token_usage,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                ),
             )
         if self._call_config.backend == "live":
             live_config = cast("LiveCallProfile", self._call_config)

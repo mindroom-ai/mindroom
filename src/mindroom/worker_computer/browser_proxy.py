@@ -11,7 +11,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from mindroom.browser_fetch_guard import run_browser_dns_lookup
+from mindroom.browser.fetch_guard import run_browser_dns_lookup
 from mindroom.logging_config import get_logger
 from mindroom.server_fetch_url import validated_connect_addresses
 

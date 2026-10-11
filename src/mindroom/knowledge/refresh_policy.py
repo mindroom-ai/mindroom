@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (

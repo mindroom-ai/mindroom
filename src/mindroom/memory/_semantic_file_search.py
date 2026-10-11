@@ -6,10 +6,10 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import list_knowledge_files
+from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger

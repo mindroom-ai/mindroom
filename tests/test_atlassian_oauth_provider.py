@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.atlassian import AtlassianProduct, atlassian_oauth_provider
 from mindroom.oauth.registry import load_oauth_providers
 from tests.oauth_test_utils import oauth_authorization_url

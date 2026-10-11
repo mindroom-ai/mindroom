@@ -20,9 +20,9 @@ from mindroom.agent_storage import (
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
-from mindroom.team_scope import ad_hoc_team_scope_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -15,16 +15,16 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from groq import AsyncGroq
 
-from mindroom import model_loading
 from mindroom.agno_participation import participation_model
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
-from mindroom.groq_model import MindRoomGroq
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.participation import ParticipationGate
 from mindroom.participation_judgment import create_participation_decider
+from mindroom.providers import model_loading
+from mindroom.providers.groq_model import MindRoomGroq
 from tests.conftest import test_runtime_paths
 from tests.participation_helpers import ParticipationModel
 

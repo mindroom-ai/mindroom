@@ -1592,7 +1592,7 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.config.main.load_config")
     @patch("mindroom.teams.resolve_agent_knowledge_access")
     @patch("mindroom.teams.create_agent")
-    @patch("mindroom.model_loading.get_model_instance")
+    @patch("mindroom.providers.model_loading.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")

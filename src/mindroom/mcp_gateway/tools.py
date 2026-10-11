@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.function import FunctionCall
 
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.hooks import HookRegistry
 from mindroom.mcp_gateway.execution import run_gateway_sync
 from mindroom.mcp_gateway.toolkits import run_toolkit_operation
@@ -28,7 +29,6 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.plugins import load_plugins

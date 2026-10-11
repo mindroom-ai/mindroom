@@ -15,7 +15,7 @@ from httplib2 import Response
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired

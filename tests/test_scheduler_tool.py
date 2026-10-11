@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.message_target import MessageTarget
-from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
+from mindroom.scheduling.tasks import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,

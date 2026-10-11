@@ -35,9 +35,9 @@ from mindroom.api import workers as workers_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config, dashboard_config_schema
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
-from mindroom.embedder_health import capture_embedder_health_recorder
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState

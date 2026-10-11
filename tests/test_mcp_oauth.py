@@ -14,13 +14,17 @@ from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import (
+from mindroom.credentials.manager import (
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
+from mindroom.credentials.policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     credential_service_policy,
 )
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials, scoped_credentials_path
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
     _mcp_oauth_provider_is_configured,

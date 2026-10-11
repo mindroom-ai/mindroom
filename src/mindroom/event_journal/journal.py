@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
-from mindroom.history_recovery import (
+from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
     RoomHistoryRecovery,

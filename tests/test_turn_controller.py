@@ -11,17 +11,17 @@ import nio
 import pytest
 
 from mindroom import interactive
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
+from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
+from mindroom.coalescing.prompt_ingress_reservation import PromptIngressReservationOwner
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
 from mindroom.streaming import send_streaming_response
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (

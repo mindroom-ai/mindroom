@@ -12,13 +12,13 @@ from agno.tools import Toolkit
 
 import mindroom.agents as agents_module
 from mindroom.agents import apply_tool_approval_capability, create_agent
+from mindroom.approval.tool_approval import evaluate_tool_approval, tool_may_require_approval
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.custom_tools.invite_router import InviteRouterTools
 from mindroom.history.prompt_tokens import _prompt_tool_surface_for_tools
 from mindroom.message_target import MessageTarget
-from mindroom.tool_approval import evaluate_tool_approval, tool_may_require_approval
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_tool_runtime_context

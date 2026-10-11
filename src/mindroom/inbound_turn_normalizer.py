@@ -35,7 +35,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
-from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
+from mindroom.voice.handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
 if TYPE_CHECKING:
     from pathlib import Path

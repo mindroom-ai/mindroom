@@ -14,13 +14,13 @@ from mindroom.cli.api import get_api_response
 from mindroom.cli.config import CONFIG_PATH_OPTION, activate_cli_runtime
 
 if TYPE_CHECKING:
-    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.constants import RuntimePaths
 
 
 def request_reload_status(runtime_paths: RuntimePaths, url: str | None, timeout: float) -> ConfigReloadStatus:
     """Read the latest runtime reload result, rejecting malformed or conflicting responses."""
-    from mindroom.config_reload import ConfigReloadStatus  # noqa: PLC0415
+    from mindroom.config.reload_status import ConfigReloadStatus  # noqa: PLC0415
 
     response = get_api_response(runtime_paths, url, "/api/config/reload-status", timeout, require_key=True)
     if response.status_code not in {200, 503}:
@@ -45,7 +45,7 @@ def wait_for_applied(
     timeout: float,
 ) -> ConfigReloadStatus:
     """Poll until the runtime settles the expected fingerprint; other fingerprints read as pending."""
-    from mindroom.config_reload import ConfigReloadStatus  # noqa: PLC0415
+    from mindroom.config.reload_status import ConfigReloadStatus  # noqa: PLC0415
 
     for name, value in (("wait", wait), ("timeout", timeout)):
         if not math.isfinite(value):

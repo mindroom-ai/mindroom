@@ -21,6 +21,7 @@ from httpx import ASGITransport, AsyncClient
 import mindroom.workers.runtime as workers_runtime_module
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -56,7 +57,6 @@ from mindroom.script_runs.worker_client import (
     WorkerScriptCancel,
     WorkerScriptStatus,
 )
-from mindroom.tool_approval import BackgroundScriptToolOrigin
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     build_tool_execution_identity,

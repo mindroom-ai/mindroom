@@ -13,13 +13,15 @@ from unittest.mock import AsyncMock, Mock
 import nio
 import pytest
 
-from mindroom import recurring_schedule, scheduling, scheduling_executor
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
 from mindroom.matrix import client_delivery
 from mindroom.matrix.large_messages import MatrixEventTooLargeError
-from mindroom.scheduling import CronSchedule, ScheduledWorkflow
+from mindroom.scheduling import executor as scheduling_executor
+from mindroom.scheduling import recurring_schedule
+from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
 from tests.scheduling_helpers import persist_schedule_writer, serve_task_state_events
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.hooks import HookCallback
-    from mindroom.recurring_schedule import RecurringOccurrence
+    from mindroom.scheduling.recurring_schedule import RecurringOccurrence
 
 
 def install_schedule_hook(monkeypatch: pytest.MonkeyPatch, callback: HookCallback) -> None:

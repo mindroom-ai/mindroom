@@ -78,7 +78,7 @@ def test_agent_prompt_includes_datetime() -> None:
 
     with (
         patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
         agent = create_agent("general", config, runtime_paths, execution_identity=None)
@@ -109,7 +109,7 @@ def test_agent_prompt_datetime_changes_with_timezone() -> None:
 
     with (
         patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
         config.timezone = "America/New_York"
@@ -134,7 +134,7 @@ def test_agent_prompt_datetime_stable_within_same_day() -> None:
 
     with (
         patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
     ):
         mock_datetime.now.side_effect = [
             datetime(2026, 3, 20, 0, 1, tzinfo=ZoneInfo("UTC")),
@@ -156,7 +156,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles() -> None:
     runtime_paths = runtime_paths_for(config)
     with (
         patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
     ):
         mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
         member = create_agent("general", config, runtime_paths, execution_identity=None)

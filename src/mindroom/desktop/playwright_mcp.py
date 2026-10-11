@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
     from mcp.types import CallToolResult
 
-from mindroom.playwright_mcp_session import PLAYWRIGHT_MCP_PACKAGE, PlaywrightMCPSession
+from mindroom.browser.playwright_mcp_session import PLAYWRIGHT_MCP_PACKAGE, PlaywrightMCPSession
 
 _MAX_RESULT_CHARS = 32_000
 _MAX_RESULT_JSON_BYTES = 24_000

@@ -26,7 +26,7 @@ from agno.skills import LocalSkills, Skills
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
-from mindroom import agents, ai, provider_stream_retry
+from mindroom import agents, ai
 from mindroom.agent_cli.protocol import (
     ContextReadOperation,
     ToolCallOperation,
@@ -40,7 +40,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.mcp.config import MCPServerConfig
@@ -48,6 +48,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
+from mindroom.providers import stream_retry as provider_stream_retry
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.events import CollectedStreamPresentation
