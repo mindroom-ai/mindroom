@@ -90,10 +90,11 @@ plugins:
 | `instructions` | string | `""` | Extra guidance for the decision, such as which kinds of claims matter to you |
 | `agents` | list of strings | all agents | Agents whose replies are checked |
 
-- Only an agent's replies to messages people send are checked, and each gets at most one follow-up; replies to messages with attached files, team replies, scheduled tasks, external triggers, turns started by other agents, plugins, or automations, and the verification reply itself are not checked.
+- Only an agent's replies to messages people send are checked, and each gets at most one follow-up; team replies, scheduled tasks, external triggers, turns started by other agents, plugins, or automations, and the verification reply itself are not checked.
+- Files and images shared in the conversation count as the person's own information: the judge sees their names, so facts taken from them do not trigger a follow-up.
 - Agents with `show_tool_calls: false` are not checked, because their tool calls are not recorded with the reply.
 - Searches a model runs on the provider's side, such as OpenRouter web search or OpenAI search models, are not tool calls, so those replies look unresearched; leave such agents out of `agents`.
-- The check sees only the current reply's tool calls, so a reply that relies on research or files from an earlier message can still get a follow-up.
+- The check sees only the current reply's tool calls, so a reply that relies on research from an earlier message can still get a follow-up.
 - Each checked reply costs one judgment request; use `agents` to limit which agents are checked.
 - The follow-up asks an agent without tools that can look the claims up to say which claims remain unverified.
 - A reply gets no follow-up when the backend fails, times out, or has no credential, when the message and reply are too long for one judgment request, which can happen past about 8,000 characters, or when either contains a credential, which is never sent to the backend; a long tool-call list is shortened instead.

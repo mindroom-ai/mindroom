@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.agents import show_tool_calls_for_agent
+from mindroom.attachments import resolve_attachments
 from mindroom.config.judgment import JudgmentConfig, LLMJudgmentConfig
 from mindroom.hooks import EVENT_MESSAGE_AFTER_RESPONSE, AfterResponseContext, hook
 from mindroom.judgment.evaluator import create_judgment_evaluator
@@ -16,6 +18,7 @@ from mindroom.tool_system.events import is_visible_tool_marker_line
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -37,8 +40,9 @@ _RESEARCH_CHECK_QUESTION = JudgmentQuestion(
         "figures they report, and the listed tool calls did not look those facts up or their results do not support them."
     ),
     when_false=(
-        "The reply makes no such factual claims, the listed tool results support them, the person supplied them or "
-        "named the thing themselves and the reply only gives general advice about it, they are stable common knowledge, "
+        "The reply makes no such factual claims, the listed tool results support them, the person supplied them, "
+        "directly or in files they shared, or named the thing themselves and the reply only gives general advice about "
+        "it, they are stable common knowledge, "
         "or the only unsupported parts are opinions, descriptions of quality, general suggestions, or pointers to where "
         "the information can be found."
     ),
@@ -106,6 +110,12 @@ def _research_check_messages(
     )
 
 
+def _shared_file_names(storage_root: Path, attachment_ids: Sequence[str]) -> list[str]:
+    # Files reach the model without a tool call; voice audio is already transcribed into the message.
+    records = resolve_attachments(storage_root, list(attachment_ids))
+    return [record.filename or record.kind for record in records if record.kind != "audio"]
+
+
 def _reply_opening(reply: str) -> str:
     # Without "@", a mention in the quote cannot tag another agent or person in the follow-up.
     text = " ".join(line for line in reply.splitlines() if not is_visible_tool_marker_line(line)).replace("@", "")
@@ -118,13 +128,11 @@ async def check_research(ctx: AfterResponseContext) -> None:
     result = ctx.result
     envelope = result.envelope
     # Only an agent's reply to a person's own request: never this plugin's follow-ups, other agents, automations,
-    # schedules, or webhooks. Team replies and hidden tool calls carry no tool trace, and attached files reach the
-    # model without a tool call, so in each case the judge would see no lookups.
+    # schedules, or webhooks. Team replies and hidden tool calls carry no tool trace, so the judge would see no lookups.
     if (
         result.response_kind != "ai"
         or not envelope.origin.may_answer_interactive_prompt
         or not show_tool_calls_for_agent(ctx.config, envelope.agent_name)
-        or envelope.attachment_ids
     ):
         return
     settings = ResearchCheckSettings.model_validate(ctx.settings)
@@ -143,9 +151,17 @@ async def check_research(ctx: AfterResponseContext) -> None:
     )
     if evaluate is None:
         return
+    files = (
+        await asyncio.to_thread(_shared_file_names, ctx.runtime_paths.storage_root, envelope.attachment_ids)
+        if envelope.attachment_ids
+        else []
+    )
+    question = envelope.body
+    if files:
+        question += f"\n[Files shared in this conversation that the assistant could read: {', '.join(files)}]"
     request = build_judgment_request(
         _RESEARCH_CHECK_QUESTION,
-        _research_check_messages(envelope.body, result.tool_trace, result.response_text),
+        _research_check_messages(question, result.tool_trace, result.response_text),
         instructions=settings.instructions,
     )
     if (await evaluate(request)).decision is not True:

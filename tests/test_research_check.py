@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pydantic import ValidationError
 
+from mindroom.attachments import register_bytes_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -233,7 +234,6 @@ async def test_false_abstain_and_failure_send_nothing(
         {"envelope": _dispatched_envelope("scheduled")},
         {"envelope": _dispatched_envelope("external_trigger")},
         {"response_kind": "team"},
-        {"envelope": _envelope(body="Q3-results.pdf", attachment_ids=("att_q3",))},
         {"settings": _SETTINGS | {"agents": ["other"]}},
     ],
     ids=[
@@ -242,7 +242,6 @@ async def test_false_abstain_and_failure_send_nothing(
         "scheduled",
         "external-trigger",
         "team-reply",
-        "attached-file",
         "filtered-agent",
     ],
 )
@@ -421,6 +420,48 @@ async def test_follow_up_quote_mentions_no_one(harness: _Harness) -> None:
     [sent] = harness.sent
     assert sent.body.count("@") == 1
     assert sent.body.startswith("@code ")
+
+
+def _register(harness: _Harness, attachment_id: str, *, kind: str, filename: str, mime_type: str) -> None:
+    register_bytes_attachment(
+        runtime_paths_for(_config(harness.tmp_path)).storage_root,
+        b"payload",
+        kind=kind,
+        mime_type=mime_type,
+        attachment_id=attachment_id,
+        filename=filename,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        sender="@user:localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_judge_is_told_which_files_the_person_shared(harness: _Harness) -> None:
+    """Facts from a shared file count as supplied by the person, so the judge sees its name; voice audio is not a source."""
+    _register(harness, "att_q3", kind="file", filename="Q3-results.pdf", mime_type="application/pdf")
+    _register(harness, "att_voice", kind="audio", filename="voice-note.ogg", mime_type="audio/ogg")
+    envelope = _envelope(body="Summarize the key numbers.", attachment_ids=("att_q3", "att_voice", "att_missing"))
+
+    await research_check.check_research(harness.context(envelope=envelope))
+
+    [request] = harness.requests
+    question = _conversation(request)[0]["text"]
+    assert question.startswith("Summarize the key numbers.")
+    assert "Q3-results.pdf" in question
+    assert "voice-note.ogg" not in question
+
+
+@pytest.mark.asyncio
+async def test_voice_messages_are_still_checked_without_a_file_note(harness: _Harness) -> None:
+    """A transcribed voice message carries its audio as an attachment, which is not a source of facts."""
+    _register(harness, "att_voice", kind="audio", filename="voice-note.ogg", mime_type="audio/ogg")
+
+    await research_check.check_research(harness.context(envelope=_envelope(attachment_ids=("att_voice",))))
+
+    [request] = harness.requests
+    assert _conversation(request)[0]["text"] == "Where can I get good coffee in Utrecht?"
+    assert len(harness.sent) == 1
 
 
 @pytest.mark.asyncio
