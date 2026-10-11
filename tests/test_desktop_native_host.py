@@ -59,6 +59,8 @@ from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session,
 from mindroom.desktop.shell import DesktopShell, DesktopShellRequest
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.matrix.olm_to_device import OlmToDeviceError
+from mindroom.shell import execution as shell_execution
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.test_desktop_bridge import _wait_until_gone
 
 if TYPE_CHECKING:
@@ -891,12 +893,15 @@ class _RecordingOutput(io.BytesIO):
         super().__init__()
         self.shell = shell
         self.responses: list[tuple[dict[str, object], object]] = []
+        self.two_replies_written = asyncio.Event()
 
     def write(self, data: Buffer, /) -> int:
         for line in bytes(data).splitlines():
             message = json.loads(line)
             if message["type"] == "response":
                 self.responses.append((message, self.shell.status()["active_request_id"]))
+                if len(self.responses) == 2:
+                    self.two_replies_written.set()
         return super().write(data)
 
 
@@ -904,6 +909,7 @@ class _RecordingOutput(io.BytesIO):
 async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
     bridge_transport: AsyncMock,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     host = await _shell_host(tmp_path)
     runtime = _attach_shell_runtime(host, tmp_path)
@@ -920,22 +926,29 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
     await bridge.on_to_device_event(event)
     execution = asyncio.create_task(bridge.execute_pending(shell_starts=True))
     pid_file = tmp_path / "child.pid"
+    output = _RecordingOutput(shell)
+    terminate = shell_execution._terminate_process_group
+
+    async def terminate_after_two_replies(process: asyncio.subprocess.Process) -> None:
+        # Termination may only finish once revoke and status replied, however slowly they are written.
+        await output.two_replies_written.wait()
+        await terminate(process)
+
+    monkeypatch.setattr(shell_execution, "_terminate_process_group", terminate_after_two_replies)
     try:
-        for _ in range(400):
-            if pid_file.exists() and pid_file.read_text():
-                break
-            await asyncio.sleep(0.005)
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not (pid_file.exists() and pid_file.read_text()):  # noqa: ASYNC110 - a real child writes it
+                await asyncio.sleep(0.005)
         child = int(pid_file.read_text())
-        output = _RecordingOutput(shell)
         records = b"".join(
             json.dumps({"v": 1, "request_id": str(uuid4()), "action": action, "parameters": {}}).encode() + b"\n"
             for action in ("revoke_shell", "status", "stop")
         )
         await asyncio.wait_for(
             serve_native_stream(host, input_stream=io.BytesIO(records), output_stream=output),
-            timeout=5,
+            timeout=SETTLE_TIMEOUT_SECONDS,
         )
-        await asyncio.wait_for(execution, timeout=1)
+        await asyncio.wait_for(execution, timeout=SETTLE_TIMEOUT_SECONDS)
         (revoked, revoke_active), (status, status_active), (stopped, _) = output.responses
         # Both replies precede the end of termination: the TERM-resistant child still holds the command open.
         assert (revoke_active, status_active) == ("shell-1", "shell-1")
