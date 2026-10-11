@@ -70,6 +70,7 @@ Once a user reaches their cap, replies that would use a priced model use `fallba
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
 The speech model of a realtime or live call profile is not priced or swapped.
 Models without prices keep running, because they add no spend.
+A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
 Requests without a human requester, such as unauthenticated OpenAI-compatible calls, are never budgeted.
 Users get no chat message when the fallback applies; the Budgets page shows who is over budget.
