@@ -514,6 +514,7 @@ visibility = [
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
     "mindroom.cli_approval_waits",
+    "mindroom.tool_jobs.approvals",
 ]
 
 [[modules]]
@@ -797,6 +798,7 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.cli_approval_waits",
     "mindroom.custom_tools.dynamic_workflow",
+    "mindroom.delegation.job_approvals",
 ]
 
 [[modules]]
@@ -1183,6 +1185,7 @@ visibility = [
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_approval",
+    "mindroom.tool_jobs.approvals",
 ]
 
 [[modules]]
@@ -1293,7 +1296,7 @@ depends_on = [
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.response_runner"]
+visibility = ["mindroom.response_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
 
 [[modules]]
 path = "mindroom.approval_inbound"
@@ -1337,6 +1340,7 @@ visibility = [
     "mindroom.cli_shell_agent",
     "mindroom.skill_learning.reviewer",
     "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.approvals",
 ]
 
 [[modules]]
@@ -7044,6 +7048,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.delegation.job_approvals",
     "mindroom.cancellation",
     "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
@@ -7878,6 +7883,8 @@ visibility = [
     "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.execution_authority",
+    "mindroom.delegation.job_approvals",
+    "mindroom.tool_jobs.approvals",
 ]
 
 [[modules]]
@@ -7902,11 +7909,13 @@ visibility = [
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.approvals",
 ]
 
 [[modules]]
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
+    "mindroom.tool_jobs.approvals",
     "mindroom.approval_manager",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",
@@ -8206,6 +8215,34 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.agno_execution",
 ]
+
+[[modules]]
+path = "mindroom.tool_jobs.approvals"
+depends_on = [
+    "mindroom.approval_manager",
+    "mindroom.approval_response",
+    "mindroom.background_tasks",
+    "mindroom.event_journal",
+    "mindroom.logging_config",
+    "mindroom.tool_approval",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.runtime",
+]
+visibility = [
+    "mindroom.delegation.job_approvals",
+    "mindroom.orchestration.tool_job_runtime",
+    "mindroom.tool_jobs.agno_execution",
+]
+
+[[modules]]
+path = "mindroom.delegation.job_approvals"
+depends_on = [
+    "mindroom.approval_response",
+    "mindroom.response_turn",
+    "mindroom.tool_jobs.approvals",
+    "mindroom.tool_jobs.runtime",
+]
+visibility = ["mindroom.delegation.execution"]
 
 [[modules]]
 path = "mindroom.tool_jobs.wakes"
