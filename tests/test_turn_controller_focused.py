@@ -33,8 +33,7 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import (
+from mindroom.coalescing.batch import (
     CoalescingKey,
     PendingEvent,
     PreparedTurn,
@@ -42,6 +41,7 @@ from mindroom.coalescing_batch import (
     active_follow_up_coalescing_key,
     build_prepared_turn,
 )
+from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.access import ResponderAccessConfig
@@ -53,7 +53,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.credentials import load_desktop_credentials, save_desktop_credentials
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import (
@@ -78,8 +78,8 @@ from mindroom.event_journal import (
     PrincipalStore,
     VisibleMessage,
 )
+from mindroom.event_journal.opening import open_event_journal
 from mindroom.event_journal.store import TurnRecordStore
-from mindroom.event_journal_open import open_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
@@ -108,8 +108,8 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs, Respons
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.scheduling import ScheduledWorkflow
-from mindroom.scheduling_executor import _prepare_scheduled_trigger
+from mindroom.scheduling.executor import _prepare_scheduled_trigger
+from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
@@ -118,7 +118,7 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
-from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from mindroom.voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,

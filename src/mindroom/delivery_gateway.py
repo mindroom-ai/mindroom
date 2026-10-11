@@ -32,6 +32,16 @@ from mindroom.event_journal import (
     replacement_target,
     thread_root,
 )
+from mindroom.event_journal.matrix_delivery import (
+    DeliveryStage,
+    MatrixDeliveryWorker,
+    PermanentDeliveryError,
+    RecoveryOutcome,
+    ReplyRowDelivery,
+    ReplyRowEnqueuer,
+    SendDelivery,
+    TurnHandoff,
+)
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.replies import (
     AppliedTransition,
@@ -79,16 +89,6 @@ from mindroom.matrix.room_history_reads import (
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
 from mindroom.matrix.segmented_messages import segment_matrix_content
-from mindroom.matrix_delivery import (
-    DeliveryStage,
-    MatrixDeliveryWorker,
-    PermanentDeliveryError,
-    RecoveryOutcome,
-    ReplyRowDelivery,
-    ReplyRowEnqueuer,
-    SendDelivery,
-    TurnHandoff,
-)
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import Outcome as ReplyOutcome
 from mindroom.reply_lifecycle import ProgressConfirmation as ReplyProgressConfirmation
@@ -122,7 +122,7 @@ from mindroom.reply_scope import (
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
+from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.stop import send_stop_button
 from mindroom.streaming import (
     USER_STOP_CANCEL_MSG,

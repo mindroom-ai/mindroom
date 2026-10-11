@@ -16,9 +16,9 @@ from agno.tools.function import Function, FunctionCall
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
 import mindroom.tool_system.metadata as metadata_module
-from mindroom import approval_manager
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
+from mindroom.approval import manager as approval_manager
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry

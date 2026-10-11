@@ -8,9 +8,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.config.main import failed_config_source_fingerprint, load_config
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.config.yaml_includes import partial_source_files
-from mindroom.config_reload import ConfigReloadStatus
-from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
+from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import (
     build_config_update_plan,

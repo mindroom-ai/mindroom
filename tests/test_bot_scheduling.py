@@ -10,9 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import scheduling
 from mindroom.authorization import ResponderCandidatePermissions
-from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -27,6 +26,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.scheduling import tasks as scheduling
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent

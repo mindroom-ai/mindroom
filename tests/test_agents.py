@@ -44,6 +44,7 @@ from mindroom.agents import (
     create_agent,
     get_agent_toolkit_names,
 )
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -56,7 +57,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history.session_context import close_team_runtime_state_dbs
@@ -64,7 +65,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.matrix.state import MatrixState
-from mindroom.private_instance_identity import (
+from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
 )
@@ -81,7 +82,6 @@ from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
 from mindroom.teams import materialize_exact_team_members
-from mindroom.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT

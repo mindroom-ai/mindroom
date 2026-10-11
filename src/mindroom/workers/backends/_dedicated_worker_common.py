@@ -11,7 +11,7 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
-from mindroom.private_storage_paths import private_scope_alias_paths
+from mindroom.private_storage.alias_paths import private_scope_alias_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,

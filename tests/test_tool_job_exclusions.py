@@ -19,7 +19,7 @@ from agno.team import Team
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.shell_execution import discard_background_record
+from mindroom.shell.execution import discard_background_record
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context

@@ -29,7 +29,7 @@ from mindroom.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator

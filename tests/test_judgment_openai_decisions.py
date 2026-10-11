@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.evaluator import create_choice_evaluator, create_judgment_evaluator
 from mindroom.judgment.openai_decisions import _ENDPOINT, OPENAI_DECISIONS

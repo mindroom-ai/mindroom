@@ -14,7 +14,8 @@ from agno.models.response import ToolExecution
 from agno.run.requirement import RunRequirement
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval_manager import initialize_approval_store
+from mindroom.approval.manager import initialize_approval_store
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
@@ -30,7 +31,6 @@ from mindroom.reply_presentation import (
     render_body,
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.tool_jobs.disabled import ParkedWork
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
@@ -101,7 +101,7 @@ async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterato
     )
     try:
         with patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             AsyncMock(return_value=(requires_human, 60.0)),
         ):
             yield bot

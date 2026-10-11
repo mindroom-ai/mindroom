@@ -38,7 +38,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState

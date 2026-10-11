@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfoNotFoundError
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.scheduling import _format_scheduled_time
+from mindroom.scheduling.tasks import _format_scheduled_time
 
 
 def test_format_scheduled_time_utc() -> None:

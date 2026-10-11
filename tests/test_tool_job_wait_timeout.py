@@ -19,7 +19,7 @@ from agno.run.base import RunStatus
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, ToolResult
 
-from mindroom.agno_compat_cli_checkpoint import inner_cli_dispatch
+from mindroom.agent_cli.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools

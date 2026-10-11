@@ -15,8 +15,8 @@ from agno.run.base import RunStatus
 from agno.team import Team
 from agno.tools import Toolkit
 
-from mindroom import approval_manager
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
     from agno.run.agent import RunOutput
 
-    from mindroom.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 

@@ -19,8 +19,8 @@ from agno.tools.function import Function
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
-from mindroom.approval_execution import _continue_persisted_agent
-from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.approval.execution import _continue_persisted_agent
+from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig

@@ -33,7 +33,7 @@ from agno.team import Team
 from agno.utils.string import url_safe_string
 from pydantic import BaseModel, Field
 
-from mindroom import ai_runtime, model_loading
+from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent, enable_all_history_replay
@@ -44,8 +44,8 @@ from mindroom.ai_run_metadata import (
     build_model_request_metrics_fallback,
     build_prepared_history_metadata_content,
 )
-from mindroom.approval_receipt import install_approval_receipt_hooks
-from mindroom.approval_tools import (
+from mindroom.approval.receipt import install_approval_receipt_hooks
+from mindroom.approval.tool_owners import (
     approval_denial_context,
     record_approval_denials,
     required_approval_tool_names,
@@ -84,6 +84,7 @@ from mindroom.history.session_context import (
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import update_scope_seen_event_ids
+from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
@@ -97,6 +98,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.providers import model_loading
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -126,7 +128,6 @@ from mindroom.team_exact_members import (
     resolve_live_shared_agent_names,
     resolve_team_materializable_agent_names,
 )
-from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap

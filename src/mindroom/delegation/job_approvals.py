@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.approval_response import identify_approval_tools, plan_approval_calls
+from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.delegation.lifecycle import live_delegation_config
 from mindroom.tool_jobs.approvals import STOPPED_BEFORE_APPROVED_CALL, ask_job_approvals
 from mindroom.tool_jobs.runtime import get_background_runtime

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from agno.tools import Toolkit
     from agno.tools.function import Function
 
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import (
@@ -57,7 +58,6 @@ if TYPE_CHECKING:
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
-    from mindroom.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 _DECLINED_RESULT_TEMPLATE = (

@@ -26,7 +26,7 @@ import yaml
 
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.event_journal_open import (
+from mindroom.event_journal.opening import (
     bind_event_journal,
     event_journal_binding_path,
     open_event_journal,

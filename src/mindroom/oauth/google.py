@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.matrix.provisioning_env import local_client_headers
 from mindroom.oauth.providers import (

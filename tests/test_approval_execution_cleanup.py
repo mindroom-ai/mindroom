@@ -16,7 +16,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.approval_execution import AgentApprovalExecution
+from mindroom.approval.execution import AgentApprovalExecution
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalContinuation
@@ -105,10 +105,10 @@ async def test_agent_approval_closes_storage_after_consumption_finalization_erro
         state="claimed",
     )
     with (
-        patch("mindroom.approval_execution.create_session_storage", return_value=history_storage),
-        patch("mindroom.approval_execution.create_agent", return_value=agent),
-        patch("mindroom.approval_execution.restore_native_history", side_effect=RuntimeError("continuation failed")),
-        patch("mindroom.approval_execution.finalize_consumption", new=fail_finalization),
+        patch("mindroom.approval.execution.create_session_storage", return_value=history_storage),
+        patch("mindroom.approval.execution.create_agent", return_value=agent),
+        patch("mindroom.approval.execution.restore_native_history", side_effect=RuntimeError("continuation failed")),
+        patch("mindroom.approval.execution.finalize_consumption", new=fail_finalization),
         pytest.raises(RuntimeError, match="consumption finalization failed"),
     ):
         await execution.continue_run(

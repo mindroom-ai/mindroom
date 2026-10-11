@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import inbound_turn_normalizer, interactive, voice_handler
+from mindroom import inbound_turn_normalizer, interactive
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
+from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -25,11 +26,11 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.voice import handler as voice_handler
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     make_pending_event,
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
 
@@ -269,7 +270,7 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
     )
 
     busy["value"] = False
-    with patch("mindroom.coalescing.logger") as logger_mock:
+    with patch("mindroom.coalescing.gate.logger") as logger_mock:
         release_ready.set()
         await _wait_for(lambda: slot.settled.is_set())
 
@@ -301,7 +302,7 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
     key = CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost"))
 
     slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
-    with patch("mindroom.coalescing.logger") as logger_mock:
+    with patch("mindroom.coalescing.gate.logger") as logger_mock:
         gate.submit_lane_slot(
             slot,
             key=key,
@@ -988,7 +989,7 @@ async def test_hung_voice_download_fallback_releases_later_sender_slot(
     monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS", 0.05)
     try:
         with (
-            patch("mindroom.voice_handler._download_audio", side_effect=hung_download),
+            patch("mindroom.voice.handler._download_audio", side_effect=hung_download),
             patch(
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),

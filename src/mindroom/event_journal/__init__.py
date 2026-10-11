@@ -7,7 +7,7 @@ Three facts live here, each with exactly one owner:
 - what MindRoom intends to send and whether it landed (the outbox).
 """
 
-from mindroom.history_recovery import (
+from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
     RoomHistoryRecovery,

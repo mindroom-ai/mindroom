@@ -13,9 +13,9 @@ from unittest.mock import Mock
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import _reset_credentials_manager_cache, get_runtime_credentials_manager
+from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
+from mindroom.credentials.manager import _reset_credentials_manager_cache, get_runtime_credentials_manager
 from mindroom.file_locks import advisory_file_lock
-from mindroom.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 
 if TYPE_CHECKING:

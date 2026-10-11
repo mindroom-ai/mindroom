@@ -38,7 +38,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     )
     from mindroom.tool_jobs.provenance import function_provenance
     from mindroom.event_journal import EventJournalStore
-    from mindroom.event_journal_open import event_journal_sqlite_path
+    from mindroom.event_journal.opening import event_journal_sqlite_path
     from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
     from mindroom.tool_system.construction import get_toolkit_construction
     from mindroom.tool_system.metadata import get_tool_by_name

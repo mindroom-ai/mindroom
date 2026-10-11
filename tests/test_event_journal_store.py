@@ -65,6 +65,7 @@ from mindroom.event_journal import (
     sqlite_backend,
     turn_records,
 )
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
 from mindroom.event_journal.replies import ApprovalEnded
@@ -77,7 +78,6 @@ from mindroom.event_journal.schema import (
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.interactive_models import InteractivePrompt
-from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
@@ -98,9 +98,9 @@ if TYPE_CHECKING:
         TurnRecordStore,
     )
     from mindroom.event_journal.backend import Backend, Operation, Transaction
+    from mindroom.event_journal.history_recovery import RoomHistoryRecovery
     from mindroom.event_journal.postgres_backend import PostgresBackend
     from mindroom.event_journal.write_queue import WriteOutcome
-    from mindroom.history_recovery import RoomHistoryRecovery
 
 pytestmark = pytest.mark.asyncio
 

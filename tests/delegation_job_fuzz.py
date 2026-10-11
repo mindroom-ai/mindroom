@@ -20,10 +20,10 @@ from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom import agno_compat_session_persistence as session_persistence
-from mindroom import approval_manager
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -52,9 +52,9 @@ if TYPE_CHECKING:
     import pytest
     from agno.db.base import BaseDb
 
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
-    from mindroom.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
     from tests.tool_job_helpers import ProcessRuntime
 

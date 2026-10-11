@@ -18,8 +18,8 @@ from agno.run.team import TeamRunOutput
 from agno.team import _default_tools as team_tools
 from agno.team import _run as team_run
 
-from mindroom.agno_compat_claude import ClaudeProviderSDKCompat
-from mindroom.usage_storage import has_token_usage
+from mindroom.providers.agno_compat_claude import ClaudeProviderSDKCompat
+from mindroom.usage.storage import has_token_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator

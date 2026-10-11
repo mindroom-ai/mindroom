@@ -22,8 +22,8 @@ from chromadb.errors import InternalError, NotFoundError
 from mindroom.knowledge.chroma_client import ChromaDb
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
+from mindroom.knowledge.strict_knowledge import StrictInsertKnowledge as Knowledge
 from mindroom.logging_config import get_logger
-from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

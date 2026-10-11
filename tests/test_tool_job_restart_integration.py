@@ -413,11 +413,11 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         )
         with (
             patch(
-                "mindroom.approval_response.resolve_tool_approval_approver",
+                "mindroom.approval.response.resolve_tool_approval_approver",
                 return_value=owner.requester_id,
             ),
             patch(
-                "mindroom.approval_response.evaluate_tool_approval",
+                "mindroom.approval.response.evaluate_tool_approval",
                 new=AsyncMock(return_value=(True, 60.0)),
             ),
             patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),

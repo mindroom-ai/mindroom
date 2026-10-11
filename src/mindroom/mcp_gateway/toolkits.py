@@ -10,7 +10,7 @@ from contextvars import copy_context
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync

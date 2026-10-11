@@ -27,7 +27,7 @@ from mindroom.matrix.media import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.coalescing_batch import CoalescingKey
+    from mindroom.coalescing.batch import CoalescingKey
     from mindroom.message_target import ResponseLifecycleKey
 
 

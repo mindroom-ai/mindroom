@@ -79,7 +79,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
         ],
     )
     monkeypatch.setattr(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         lambda *_args, **_kwargs: child_model,
     )
     outer = DelegationModel(id="test")
@@ -145,7 +145,7 @@ async def test_workflow_participant_tools_run_under_their_own_grants(
         ],
     )
     monkeypatch.setattr(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         lambda *_args, **_kwargs: child_model,
     )
     outer = DelegationModel(id="test")
@@ -296,7 +296,7 @@ async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorizatio
             ModelResponse(content="workflow done"),
         ],
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: child_model)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: child_model)
     outer = DelegationModel(id="test")
     install_tool_job_execution(outer)
     entry = context.config.agents["general"].tools[0]

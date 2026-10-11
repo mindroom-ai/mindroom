@@ -21,18 +21,18 @@ from agno.run.agent import RunOutput
 from agno.tools.function import Function
 from pydantic import validate_call
 
-from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage, load_agent_session
 from mindroom.agno_compat_model_hooks import install_response_request_gate
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.providers import model_loading
+from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
-from mindroom.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.tool_call_budget import install_model_call_cap
 
 if TYPE_CHECKING:

@@ -15,7 +15,7 @@ from mindroom.api.usage_export import (
     context_is_current,
     usage_export_runner,
 )
-from mindroom.usage_stats import UsageReport, collect_admin_usage, collect_private_usage
+from mindroom.usage.stats import UsageReport, collect_admin_usage, collect_private_usage
 
 __all__ = ["get_private_usage", "get_usage", "get_usage_export", "router"]
 

@@ -19,7 +19,7 @@ from mindroom.config.main import (
     redact_authored_config,
 )
 from mindroom.config.schema_hints import redaction_marker_location
-from mindroom.event_journal_open import describe_in_force_event_journal, pending_event_journal_restart
+from mindroom.event_journal.opening import describe_in_force_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.redaction import MAX_CANONICAL_JSON_INTEGER, REDACTED
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart

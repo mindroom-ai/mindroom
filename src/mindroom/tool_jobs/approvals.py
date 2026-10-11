@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING
 
 from agno.models.response import ToolExecution
 
-from mindroom import approval_manager
-from mindroom.approval_response import plan_approval_calls
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.response import plan_approval_calls
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, resolve_tool_approval_approver
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import ApprovalDecision
 from mindroom.logging_config import get_logger
-from mindroom.tool_approval import BackgroundScriptToolOrigin, resolve_tool_approval_approver
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 

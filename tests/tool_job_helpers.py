@@ -23,7 +23,7 @@ from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import EventJournalStore, ToolJobStore
 from mindroom.event_journal.offloading import ThreadOffload
-from mindroom.event_journal_open import event_journal_sqlite_path
+from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.tool_jobs.runtime import (

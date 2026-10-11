@@ -25,7 +25,7 @@ from mindroom.teams import (
     decide_team_formation,
     select_ad_hoc_team_mode,
 )
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
@@ -156,7 +156,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_coordinate(self, mock_config):
         """Test AI correctly identifies coordination tasks (different subtasks)."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_agent.arun.return_value = RunOutput(
@@ -176,7 +176,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_collaborate(self, mock_config):
         """Test AI correctly identifies collaboration tasks (same task for all)."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_agent.arun.return_value = RunOutput(
@@ -199,7 +199,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_fallback_on_error(self, mock_config):
         """Test fallback to collaborate mode on AI error."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent to raise an error
             mock_agent = AsyncMock()
             mock_agent.arun.side_effect = Exception("AI service unavailable")
@@ -222,7 +222,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_unexpected_response(self, mock_config):
         """Test fallback when AI returns unexpected response type."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response with wrong type
             mock_agent = AsyncMock()
             mock_agent.arun.return_value = RunOutput(content="Just a string, not TeamModeDecision")
@@ -248,7 +248,10 @@ class TestSelectAdHocTeamMode:
             model_provider="OpenAI",
             metrics=RunMetrics(input_tokens=600, output_tokens=20, total_tokens=620),
         )
-        with patch("mindroom.model_loading.get_model_instance"), patch("mindroom.teams.Agent", return_value=mock_agent):
+        with (
+            patch("mindroom.providers.model_loading.get_model_instance"),
+            patch("mindroom.teams.Agent", return_value=mock_agent),
+        ):
             result = await _select_team_mode_for_test("Send me an email then call me", ["email", "phone"], mock_config)
 
         assert result == TeamMode.COORDINATE
@@ -371,7 +374,7 @@ class TestIntegrationScenarios:
         assert result.outcome is TeamOutcome.TEAM
         assert set(_agent_names(result.eligible_members, mock_config)) == {"email", "phone"}
 
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI to recognize different subtasks
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -407,7 +410,7 @@ class TestIntegrationScenarios:
         assert result.outcome is TeamOutcome.TEAM
         assert set(_agent_names(result.eligible_members, mock_config)) == {"research", "analyst"}
 
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI to recognize same task for all
             mock_agent = AsyncMock()
             mock_response = MagicMock()

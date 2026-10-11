@@ -43,7 +43,7 @@ Use the test-driven-development and verification-before-completion skills, with 
 - [x] Inspect current preparation, source ownership, grouping, and shutdown paths; establish the existing coalescing test baseline.
 - [x] Add a failing real-gate test that blocks root A's preparation and observes independent root B starting with its original semantic key and target.
 - [x] Add bounded-concurrency, source-ownership, failure/retry, graceful drain, bounded cancellation, and metadata-cleanup regressions in `tests/test_root_preparation_scheduling.py`.
-- [x] Update `src/mindroom/coalescing.py` to register bounded detached root claims and include them in existing ownership and drain traversal.
+- [x] Update `src/mindroom/coalescing/gate.py` to register bounded detached root claims and include them in existing ownership and drain traversal.
 - [x] Preserve explicit-thread and room-mode ordering, media/caption grouping, readiness, and bypass barriers; run the owning-seam and integration tests.
 - [x] Compare serial and concurrent preparation with a controlled real-gate benchmark, then run the unchanged real Tuwunel and Synapse 200-conversation controls on verified source. Preserve failed acceptance results.
 - [x] Run the full scheduling test suite: 15,850 passed, 22 skipped (16 warnings), including all 12 new scheduling cases.
@@ -56,7 +56,7 @@ Baseline: 53 existing coalescing tests pass before the change.
 Both the real-gate and real-controller regression fail against the published baseline because root B cannot begin while root A awaits context preparation.
 The new scheduling suite passes 12 cases, including a zero-budget drain with eight active roots and a ninth waiting for capacity.
 The broader coalescing and live integration group passes 241 cases before that final added test; all repository hooks pass.
-The production change adds 63 net lines in `coalescing.py`.
+The production change adds 63 net lines in `coalescing/gate.py`.
 
 Two existing cancellation tests now use explicit-thread events and keys because they test cancellation of an active serial conversation queue.
 Their former root fixtures assumed independent roots shared that queue; new root-specific tests separately verify the changed ownership and cancellation behavior.
@@ -68,7 +68,7 @@ The probe also preserves configured room-mode ordering, explicit-thread ordering
 This measures scheduler overlap under controlled asynchronous work, not application reply latency.
 The real 200-conversation comparison uses frozen production source and unchanged health, overlap, deadline, exact-reply, fence, drain, and shutdown predicates.
 
-One sequential frozen-source Tuwunel pair used published Nio `09d5a25` and MindRoom `b45966053`; the candidate differed only in `coalescing.py`.
+One sequential frozen-source Tuwunel pair used published Nio `09d5a25` and MindRoom `b45966053`; the candidate differed only in `coalescing/gate.py`.
 All source hashes and loaded module paths matched their manifests throughout both runs.
 
 | Measure | Serial | Eight preparations |

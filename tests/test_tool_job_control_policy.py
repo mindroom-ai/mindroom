@@ -11,7 +11,7 @@ from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
 from mindroom.agents import create_agent
-from mindroom.approval_tools import required_approval_tool_names, validate_approval_tool_owners
+from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
@@ -83,7 +83,7 @@ async def test_reserved_controls_obey_approval_and_plugin_hooks(
             ModelResponse(content="done"),
         ],
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: model)
     try:
         with tool_runtime_context(context):
             actor = create_agent(

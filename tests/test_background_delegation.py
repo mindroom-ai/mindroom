@@ -17,10 +17,11 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
-from mindroom import approval_manager
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -38,7 +39,6 @@ from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_r
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
@@ -82,9 +82,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
-    from mindroom.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_jobs.runtime import ToolJobRuntime
 
 

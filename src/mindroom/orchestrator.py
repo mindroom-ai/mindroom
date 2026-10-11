@@ -20,16 +20,18 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
-from mindroom.approval_manager import initialize_approval_store
-from mindroom.approval_recovery import ApprovalRecovery
-from mindroom.approval_transport import ApprovalMatrixTransport
+from mindroom.approval.manager import initialize_approval_store
+from mindroom.approval.recovery import ApprovalRecovery
+from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
+from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
-from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
+from mindroom.embeddings.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
     MissingManagedEntityAccountError,
@@ -54,10 +56,7 @@ from mindroom.hooks import (
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
-from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.legacy_state_root_records import migrate_state_root_records
-from mindroom.legacy_tool_credentials import migrate_tool_credential_defaults
-from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
@@ -84,6 +83,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
@@ -101,11 +101,10 @@ from mindroom.runtime_state import (
     set_runtime_ready,
     set_runtime_starting,
 )
-from mindroom.scheduling_executor import set_scheduling_hook_registry
+from mindroom.scheduling.executor import set_scheduling_hook_registry
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
-from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
@@ -115,6 +114,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.usage.legacy_usage_storage import migrate_usage_storage
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
@@ -126,8 +126,8 @@ from mindroom.workers.runtime import (
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
-from .credentials_sync import sync_env_to_credentials
-from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
+from .credentials.sync import sync_env_to_credentials
+from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
@@ -169,7 +169,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier

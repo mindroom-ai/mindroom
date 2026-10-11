@@ -35,8 +35,8 @@ from mindroom.debug_report import (
     build_debug_report,
     collect_ids,
 )
+from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
-from mindroom.event_journal_open import event_journal_sqlite_path
 from mindroom.history.session_context import _team_scope_state_root
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system import tool_calls
@@ -45,7 +45,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     private_instance_scope_root_path,
 )
-from mindroom.usage_storage import SYSTEM_USAGE_STORAGE_NAME
+from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import postgres_journal_schema_url, seed_session, test_runtime_paths
 
 if TYPE_CHECKING:

@@ -33,6 +33,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import EventJournalStore, PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
     HookContextSupport,
@@ -51,7 +52,6 @@ from mindroom.response_runner import (
     ResponseRunnerDeps,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )

@@ -25,7 +25,8 @@ from agno.tools.function import FunctionCall, FunctionExecutionResult, ToolResul
 from agno.utils.timer import Timer
 from pydantic import BaseModel
 
-from mindroom.agno_compat_cli_checkpoint import cli_dispatch_active
+from mindroom.agent_cli.agno_compat_cli_checkpoint import cli_dispatch_active
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import (
     run_blocking_until_complete,
     run_coroutine_until_complete,
@@ -33,7 +34,6 @@ from mindroom.background_tasks import (
 )
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
-from mindroom.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.tool_jobs.agno_compat_functions import (
     function_actor,
     function_run_context,

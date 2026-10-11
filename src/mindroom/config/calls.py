@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.voice import SpeechServiceConfig  # noqa: TC001 - Pydantic needs the runtime model
-from mindroom.credentials import validate_service_name
+from mindroom.credentials.manager import validate_service_name
 
 
 class RealtimeCallProfile(BaseModel):

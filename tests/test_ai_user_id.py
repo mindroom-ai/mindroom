@@ -75,12 +75,12 @@ from mindroom.llm_request_logging import install_llm_request_logging, stream_wit
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
     prepare_memory_and_model_context,
 )
 from mindroom.response_turn import CompletedAttempt, PausedAttempt, ResponsePausedForApproval
-from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,

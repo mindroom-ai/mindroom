@@ -6,8 +6,8 @@ from agno.agent import Agent  # noqa: TC002 - Agno reads tool annotations at run
 from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
-from mindroom.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
-from mindroom.scheduling import (
+from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
+from mindroom.scheduling.tasks import (
     cancel_scheduled_task,
     edit_scheduled_task,
     list_scheduled_tasks,

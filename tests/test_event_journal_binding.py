@@ -25,7 +25,7 @@ from mindroom.cli.main import app
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.event_journal import EventJournalStore
-from mindroom.event_journal_open import (
+from mindroom.event_journal.opening import (
     EventJournalBinding,
     EventJournalBindingError,
     adopt_event_journal,
@@ -443,7 +443,7 @@ class TestAdoptCommand:
 
         with (
             mock.patch(
-                "mindroom.event_journal_open._open_store",
+                "mindroom.event_journal.opening._open_store",
                 side_effect=RuntimeError("the database refused the connection"),
             ),
             pytest.raises(RuntimeError),

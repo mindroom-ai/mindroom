@@ -18,9 +18,9 @@ from openai import AsyncOpenAI
 
 from mindroom.agno_participation import participation_model
 from mindroom.ai import ai_response, stream_agent_response
-from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.openai_models import MindRoomOpenAIChat
 from mindroom.participation import ParticipationGate
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.openai_models import MindRoomOpenAIChat
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context
 from tests.gemini_helpers import gemini_client, gemini_decision_response, gemini_response

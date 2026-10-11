@@ -45,6 +45,12 @@ from mindroom.delivery_gateway import (
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import DepartureSource, EventClass, EventKind, InboundEvent, TerminalTurnWrite
+from mindroom.event_journal.matrix_delivery import (
+    MatrixDeliveryWorker,
+    PermanentDeliveryError,
+    RecoveryOutcome,
+    TurnHandoff,
+)
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
@@ -55,7 +61,6 @@ from mindroom.matrix.large_messages import (
     _calculate_delivery_event_size,
     calculate_event_size,
 )
-from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome, TurnHandoff
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, NoteKind, Presentation, Segment, note_segment
 from mindroom.reply_scope import ReplyRuntime, initial_write

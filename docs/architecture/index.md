@@ -53,15 +53,15 @@ MindRoom's architecture consists of several key components working together.
 ## Storage upgrade boundaries
 
 Historical formats stay with their storage or lifecycle owners, while current callers consume canonical identities and paths.
-`legacy_private_storage_aliases.py` owns historical requester spellings and verified aliases; only startup migration, `private_storage_paths.py`, and `usage_stats_storage.py` can import it.
+`private_storage/legacy_private_storage_aliases.py` owns historical requester spellings and verified aliases; only startup migration, `private_storage/alias_paths.py`, and `usage/stats_storage.py` can import it.
 Usage discovery uses verified aliases only to classify coverage, skipping duplicate historical paths while scanning their canonical directories.
-Worker mount planning and sandbox path validation use `private_storage_paths.py`, while `private_instance_identity_store.py` validates current identities.
+Worker mount planning and sandbox path validation use `private_storage/alias_paths.py`, while `private_storage/private_instance_identity_store.py` validates current identities.
 
 `oauth/legacy_credentials.py` owns publication-field normalization and lossless historical requester bindings.
 Only `oauth/credential_store.py` can import it; the store retains schema, scope validation, current credential state, transaction locks, retries, and commit ownership.
 OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
 
-Existing lifecycle adapters remain at their focused entry points: `legacy_private_storage.py` at startup, `config/legacy_access.py` during config loading, and Nio journal and crypto adapters when their stores open.
+Existing lifecycle adapters remain at their focused entry points: `private_storage/legacy_private_storage.py` at startup, `config/legacy_access.py` during config loading, and Nio journal and crypto adapters when their stores open.
 `session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](orchestration.md#session-storage-recovery).
 Tach visibility rules keep compatibility internals behind their owning boundaries.
 
@@ -71,7 +71,7 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
    `matrix/journal_ingress.py` supplies typed classification from nio provenance and replay reconstruction.
    `journal_dispatch.py` hands admitted events through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome.
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
-3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches each sender's live conversation burst.
+3. **Messages are ordered and coalesced**: `coalescing/ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing/gate.py` batches each sender's live conversation burst.
    Ordinary text completes an utterance and dispatches immediately; adaptive text waits its configured quiet period.
    Later adaptive text cannot extend an earlier immediate text's wait.
    A live batch ending in media waits for more attachments or a trailing caption.

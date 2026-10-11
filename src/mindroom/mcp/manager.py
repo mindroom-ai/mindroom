@@ -18,7 +18,7 @@ from httpx2 import HTTPStatusError
 from mcp import ClientSession
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
     MCPServerConfig,
@@ -79,7 +79,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)

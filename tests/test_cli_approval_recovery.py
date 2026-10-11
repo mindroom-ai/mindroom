@@ -27,17 +27,19 @@ from agno.session.agent import AgentSession
 from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents, approval_execution, approval_tools, cli_approval_recovery, minimal_agent
-from mindroom.agent_cli import response_owner
+from mindroom import agents
+from mindroom.agent_cli import cli_approval_recovery, minimal_agent, response_owner
+from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.agent_cli.approval import CliApprovalCall
+from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_cli.events import emit_cli_suspension, project_cli_execution
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_storage import create_session_storage, create_state_storage
-from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
-from mindroom.cli_approval_waits import CliApprovalWaits
+from mindroom.approval import execution as approval_execution
+from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
@@ -1047,7 +1049,7 @@ async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_exp
     )
     progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
 
-    with patch("mindroom.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
+    with patch("mindroom.agent_cli.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
         await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
 
     responses.request_failure.assert_not_awaited()

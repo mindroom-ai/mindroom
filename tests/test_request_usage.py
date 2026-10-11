@@ -22,8 +22,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.legacy_usage_storage import migrate_usage_database
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.legacy_usage_storage import migrate_usage_database
+from mindroom.usage.stats import collect_admin_usage
 from tests.history_helpers import RecordingModel
 
 if TYPE_CHECKING:

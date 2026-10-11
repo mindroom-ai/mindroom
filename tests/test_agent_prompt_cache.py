@@ -19,11 +19,11 @@ from agno.session.summary import SessionSummary
 from agno.utils.models.claude import format_messages
 
 from mindroom.agents import create_agent
-from mindroom.claude_prompt_cache import _count_cache_markers, prepare_claude_request_kwargs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
+from mindroom.providers.claude_prompt_cache import _count_cache_markers, prepare_claude_request_kwargs
 from mindroom.system_prompt import render_session_context
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts

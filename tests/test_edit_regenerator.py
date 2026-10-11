@@ -11,7 +11,7 @@ import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.coalescing_batch import tagged_coalesced_prompt
+from mindroom.coalescing.batch import tagged_coalesced_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths

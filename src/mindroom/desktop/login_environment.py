@@ -12,7 +12,7 @@ from uuid import uuid4
 from mindroom.constants import subprocess_path_with_prepends
 from mindroom.desktop.shell import DesktopShellOutput
 from mindroom.logging_config import get_logger
-from mindroom.shell_execution import ProcessRecord, kill_all_records, run_command
+from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
 
 logger = get_logger(__name__)
 

@@ -29,7 +29,7 @@ from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.voice import normalize_speech_base_url
-from mindroom.credentials_sync import get_api_key_for_service
+from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
