@@ -378,10 +378,19 @@ async def _run_operation(
                     replay=replay,
                     control=_control_payload(success) if isinstance(success, AgentRunException) else None,
                 )
+                try:
+                    encoded = encode_result_payload(payload)
+                except ValueError as error:
+                    # The call already ran, so its lost result must not read as a call that did not take effect.
+                    return BackgroundOutcome(
+                        "failed",
+                        f"The call ran, but its result could not be saved ({error}). "
+                        "Its effects stand: do not call it again.",
+                    )
                 return BackgroundOutcome(
                     "completed" if success is True else "failed",
                     result=value.content if isinstance(value, ToolResult) else str(value),
-                    result_payload=encode_result_payload(payload),
+                    result_payload=encoded,
                 )
 
             encoding = asyncio.create_task(asyncio.to_thread(encode_outcome))

@@ -8,6 +8,7 @@ import json
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Never
 
 import pytest
@@ -1138,6 +1139,54 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
                 with pytest.raises(AgentRunException, match="stop requested") as stopped:
                     await JobTools(paths, owner).job(action="wait", job_id=jobs[0].job_id, wait_timeout=0)
                 assert stopped.value.stop_execution
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", ["driver_type", "oversized"])
+async def test_a_call_that_ran_never_reads_as_one_that_did_not(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result: str,
+) -> None:
+    """A result the job cannot keep as returned still tells the model the call ran, so it is not repeated.
+
+    A value with no wire tag keeps its text, as inline; a result over the size limit says the call took effect.
+    """
+    ran: list[str] = []
+
+    async def create_event() -> dict[str, object]:
+        ran.append("created")
+        return {"at": datetime(2026, 10, 10, tzinfo=UTC)}
+
+    if result == "oversized":
+        monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 64)
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("create_event", "event-call")]), ModelResponse(content="done")],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[assembled_function(create_event)])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                response = await agent.arun("Create", session_id=context.session_id)
+        assert response.tools is not None
+        [tool] = response.tools
+        assert ran == ["created"]
+        if result == "driver_type":
+            assert not tool.tool_call_error
+            assert "2026-10-10 00:00:00+00:00" in str(tool.result)
+        else:
+            assert tool.tool_call_error
+            assert "The call ran" in str(tool.result)
+            assert "do not call it again" in str(tool.result)
     finally:
         await runtime.shutdown()
 

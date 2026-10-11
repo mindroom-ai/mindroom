@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import os
 import stat
 from dataclasses import dataclass, field
@@ -98,17 +99,14 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
     if isinstance(value, Path):
         return {"type": "path", "value": str(value)}
     if isinstance(value, dict):
-        if not all(isinstance(key, str) for key in value):
-            msg = "Tool result dictionaries require string keys"
-            raise TypeError(msg)
-        return {"type": "dict", "value": {key: _encode(item, allowance) for key, item in value.items()}}
+        return {"type": "dict", "value": {str(key): _encode(item, allowance) for key, item in value.items()}}
     if isinstance(value, (list, tuple)):
         kind = "tuple" if isinstance(value, tuple) else "list"
         return {"type": kind, "value": [_encode(item, allowance) for item in value]}
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, int, bool)) or (isinstance(value, float) and math.isfinite(value)):
         return value
-    msg = f"Unsupported durable tool result type: {type(value).__name__}"
-    raise TypeError(msg)
+    # Any other value, such as a datetime or a driver's own type, keeps the text the model reads for it inline.
+    return str(value)
 
 
 def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch per supported wire tag.
