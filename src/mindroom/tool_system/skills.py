@@ -140,12 +140,10 @@ class _MindroomSkills(Skills):
         loaders: list[SkillLoader],
         output_file_policy: ToolOutputFilePolicy | None = None,
         only: Collection[str] | None = None,
-        unavailable_functions: Collection[str] = (),
     ) -> None:
         self._workspace_roots_by_skill: dict[str, Path] = {}
         self._output_file_policy = output_file_policy
         self._only = None if only is None else frozenset(only)
-        self._unavailable_functions = sorted(unavailable_functions)
         super().__init__(loaders=loaders)
 
     def get_tools(self) -> list[Function]:
@@ -154,22 +152,6 @@ class _MindroomSkills(Skills):
         if self._output_file_policy is None:
             return tools
         return [wrap_function_for_output_files(tool, self._output_file_policy) for tool in tools]
-
-    # AGNO_COMPAT: Skills always describes all three skill functions.
-    # Reason: Agno 3.0.9 Skills.get_system_prompt_snippet names get_skill_instructions, get_skill_reference, and
-    #   get_skill_script even when an approval rule hides one, so the model is told to call a function it lacks.
-    #   MindRoom's own SKILLS_TOOL_USAGE_PROMPT lists all three too, and this note corrects both.
-    # Upstream issue: Tracking gap; no issue for rendering skill guidance from the offered functions has been identified.
-    # Upstream PR: None identified.
-    # Remove when: Skills renders its prompt guidance from the skill functions the agent is actually offered, and
-    #   SKILLS_TOOL_USAGE_PROMPT then names only the offered functions or the note moves beside it.
-    # Coverage: tests/test_dynamic_workflow_subagents.py::test_participant_reads_only_the_skills_it_names.
-    def get_system_prompt_snippet(self) -> str:
-        """Return Agno's skills prompt, naming any skill function an approval rule hides."""
-        snippet = super().get_system_prompt_snippet()
-        if not snippet or not self._unavailable_functions:
-            return snippet
-        return f"{snippet}\nThese skill functions are not available to you: {', '.join(self._unavailable_functions)}."
 
     def _load_skills(self) -> None:
         """Load skills, keeping only the names in ``only`` when set, and track which came from workspace loaders."""
@@ -308,12 +290,8 @@ def build_agent_skills(
     credential_keys: set[str] | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: Collection[str] | None = None,
-    unavailable_functions: Collection[str] = (),
 ) -> Skills | None:
-    """Build an Agno Skills object for a specific agent, narrowed to the skill names in ``only`` when set.
-
-    ``unavailable_functions`` names skill functions the agent is not offered, which its prompt then excludes.
-    """
+    """Build an Agno Skills object for a specific agent, narrowed to the skill names in ``only`` when set."""
     if only is not None and not only:
         return None
     agent_config = config.get_agent(agent_name)
@@ -351,12 +329,7 @@ def build_agent_skills(
     else:
         loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
 
-    skills = _MindroomSkills(
-        loaders=loaders,
-        output_file_policy=output_file_policy,
-        only=only,
-        unavailable_functions=unavailable_functions,
-    )
+    skills = _MindroomSkills(loaders=loaders, output_file_policy=output_file_policy, only=only)
     # A narrowed set with no surviving skill offers nothing, even beside configured skills.
     if skills.get_skill_names() or (agent_config.skills and only is None):
         return skills

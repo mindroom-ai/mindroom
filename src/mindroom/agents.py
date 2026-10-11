@@ -1409,7 +1409,6 @@ def _load_agent_skills(
     workspace_root: Path | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: tuple[str, ...] | None = None,
-    unavailable_functions: frozenset[str] = frozenset(),
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
@@ -1418,7 +1417,6 @@ def _load_agent_skills(
         workspace_root=workspace_root,
         output_file_policy=output_file_policy,
         only=only,
-        unavailable_functions=unavailable_functions,
     )
 
 
@@ -1804,13 +1802,22 @@ def _build_agent_role_context(
     )
 
 
+def _skill_usage_instructions(config: Config, skills: Skills | None, hidden_functions: frozenset[str]) -> list[str]:
+    """Return the skill-function guidance for an agent offered skills, naming any skill function approval hides."""
+    if skills is None or not skills.get_skill_names():
+        return []
+    # This guidance and Agno's skills prompt both name every skill function, so name the ones the agent lacks.
+    hidden = f"These skill functions are not available to you: {', '.join(sorted(hidden_functions))}."
+    return [config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"), *((hidden,) if hidden_functions else ())]
+
+
 def _build_agent_instructions(
     agent_name: str,
     configured_instructions: Sequence[str],
     config: Config,
     agent_runtime: ResolvedAgentRuntime,
     *,
-    skills: Skills | None,
+    skill_instructions: Sequence[str],
     session_id: str | None,
     include_interactive_questions: bool,
     disable_runtime_capabilities: bool,
@@ -1824,10 +1831,7 @@ def _build_agent_instructions(
 
     ``skill_authoring`` adds the note on writing workspace skills, for agents that can use skills.
     """
-    instructions = list(configured_instructions)
-
-    if skills and skills.get_skill_names():
-        instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
+    instructions = [*configured_instructions, *skill_instructions]
 
     instructions.extend(
         _build_native_tool_search_instruction_blocks(
@@ -2091,7 +2095,7 @@ def create_agent(
     )
 
     workspace = agent_runtime.workspace
-    # Approval rules hide generated functions, so the skills prompt names the skill functions they hide
+    # Approval rules hide generated functions, so skill guidance names the skill functions they hide
     # and is left out when they hide all of them.
     hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
     skills = (
@@ -2108,7 +2112,6 @@ def create_agent(
                 config.defaults.tool_output_auto_save_threshold_bytes,
             ),
             only=persona.kept_skills if persona is not None else None,
-            unavailable_functions=hidden_skill_functions,
         )
     )
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
@@ -2117,7 +2120,7 @@ def create_agent(
         agent_config.instructions if persona is None else (),
         config,
         agent_runtime,
-        skills=prompt_skills,
+        skill_instructions=_skill_usage_instructions(config, prompt_skills, hidden_skill_functions),
         session_id=session_id,
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,
