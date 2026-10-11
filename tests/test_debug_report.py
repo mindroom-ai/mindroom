@@ -121,7 +121,7 @@ def test_runtime_names_and_paths_copied_by_the_reader_match_the_runtime(tmp_path
         process_env={},
     )
     sources = _resolve_sources(runtime_paths)
-    # model_loading.py passes `runtime_paths.storage_root / "logs" / "llm_requests"` to the request-log writer
+    # providers/model_loading.py passes `runtime_paths.storage_root / "logs" / "llm_requests"` to the request-log writer
     # as an inline expression, so that literal is what is pinned here.
     assert sources.llm_request_log_dir == runtime_paths.storage_root / "logs" / "llm_requests"
 

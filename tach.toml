@@ -470,6 +470,7 @@ expose = [
 path = "mindroom.event_journal"
 depends_on = [
     "mindroom.constants",
+    "mindroom.event_journal.history_recovery",
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.response_sources",
     "mindroom.history.types",
@@ -505,7 +506,6 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
-    "mindroom.event_journal.matrix_delivery",
     "mindroom.reply_scope",
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
@@ -1284,6 +1284,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.response"
 depends_on = [
+    "mindroom.response_sources",
     "mindroom.approval.failure",
     "mindroom.approval.manager",
     "mindroom.cancellation",
@@ -1484,7 +1485,6 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
-    "mindroom.delegation.sessions",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
 ]
@@ -2830,7 +2830,6 @@ depends_on = [
     "mindroom.tool_system.skills",
     "mindroom.workers.backends.legacy_state_root_mounts",
     "mindroom.workers.runtime",
-    "mindroom.delegation.recovery",
     "mindroom.automations.runner",
     "mindroom.skill_learning.runner",
 ]
@@ -2888,9 +2887,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_summary",
-    "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.control",
-    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
@@ -4306,7 +4303,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.journal_dispatch",
-    "mindroom.knowledge.utils",
     "mindroom.legacy_handled_turns",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
@@ -4316,7 +4312,6 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.journal_ingress",
     "mindroom.matrix.personal_rooms",
-    "mindroom.matrix.relation_lookup",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
@@ -4327,7 +4322,6 @@ depends_on = [
     "mindroom.event_journal.matrix_delivery",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
-    "mindroom.model_catalog_receiver",
     "mindroom.personal_room_lifecycle",
     "mindroom.post_response_effects",
     "mindroom.reaction_dispatch",
@@ -5621,6 +5615,10 @@ visibility = [
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.refresh_scheduler",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_entrypoint"
+depends_on = ["mindroom.knowledge.refresh_runner"]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
@@ -7330,6 +7328,10 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.delegation.execution",
 ]
+
+[[modules]]
+path = "mindroom.event_journal.history_recovery"
+depends_on = []
 
 [[modules]]
 path = "mindroom.event_journal.legacy_response_attempts"
