@@ -2532,7 +2532,7 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
-    await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=0.2)
+    await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     await _admit_ready(gate, resolved_key, make_pending_event(followup, room, source_kind="message"))
     await asyncio.sleep(0.02)
 

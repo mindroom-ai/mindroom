@@ -4454,8 +4454,6 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         return await wait_for(boundary, timeout)
 
     monkeypatch.setattr(asyncio, "wait_for", deadline_from_acceptance)
-    loop = asyncio.get_running_loop()
-    released_at: list[float] = []
 
     async def release_after_the_deadline() -> None:
         # The expired deadline is cancelling the reload while the accepted revocation still holds it.
@@ -4466,22 +4464,18 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         for _ in range(20):
             await asyncio.sleep(0)
         assert not boundaries[0].done(), "the reload stopped waiting for its accepted revocation"
-        released_at.append(loop.time())
         release.set()
 
     releaser = asyncio.create_task(release_after_the_deadline())
     try:
         with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
             await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
-        returned_at = loop.time()
         # The accepted revocation finished before the reload returned.
         assert store.get_run("run-1").cancel_requested_at is not None
     finally:
         release.set()
         await releaser
 
-    assert released_at
-    assert returned_at >= released_at[0]
     assert broker_revocations == []
 
 

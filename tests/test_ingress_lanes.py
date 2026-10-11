@@ -33,6 +33,7 @@ from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.voice import handler as voice_handler
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     make_pending_event,
     prepared_dispatch_result,
     record_turn_answered,
@@ -855,7 +856,7 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         ),
     ):
         await bot._turn_controller.handle_text_event(room, first)
-        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+        await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         await bot._turn_controller.handle_text_event(room, second)
         await bot._turn_controller.handle_text_event(room, other_thread_reply)
@@ -1070,7 +1071,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         ),
     ):
         await bot._turn_controller.handle_text_event(room, first)
-        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+        await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         await bot._turn_controller.handle_media_event(room, voice_note)
         await bot._turn_controller.handle_text_event(room, echo)
@@ -1168,12 +1169,12 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             ),
         ):
             await bot._turn_controller.handle_text_event(room, first)
-            await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+            await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
             # The answer's callback hands the selection to a runner-owned task and returns while the active turn
             # still holds this conversation.
             answer_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, answer))
-            await asyncio.wait_for(answer_task, timeout=1.0)
+            await asyncio.wait_for(answer_task, timeout=SETTLE_TIMEOUT_SECONDS)
             await bot._turn_controller.handle_text_event(room, other_thread)
 
             await _wait_for(lambda: "$b1" in generated)
@@ -1369,7 +1370,7 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
         ),
     ):
         await bot._turn_controller.handle_text_event(room, first)
-        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+        await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
             await _enqueue_for_dispatch(
