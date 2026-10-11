@@ -38,6 +38,7 @@ from tests.conftest import test_runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     awaiting_approval,
+    cancel_settled,
     intercept_job_saves,
     job_child,
     job_owner,
@@ -150,7 +151,7 @@ async def test_cancellation_after_native_settlement_keeps_its_outcome(tmp_path: 
     try:
         await start_delegation_job(runtime, child, owner=job_owner(), operation=operation)
         await settled.wait()
-        result = await runtime.cancel(child.delegation_id, owner=job_owner(), depth=0)
+        result = await cancel_settled(runtime, child.delegation_id, owner=job_owner(), depth=0)
         assert result.status == "completed"
         assert result.result == "Native completion before generic settlement"
     finally:
@@ -277,8 +278,8 @@ async def test_scope_mismatch_cannot_inspect_or_cancel(tmp_path: Path, change: d
         with pytest.raises(ValueError, match="not available"):
             await lookup(runtime, job.job_id, owner=replace(job_owner(), **change), depth=0)
         with pytest.raises(ValueError, match="not available"):
-            await runtime.cancel(job.job_id, owner=replace(job_owner(), **change), depth=0)
-        assert (await runtime.cancel(job.job_id, owner=job_owner(), depth=0)).status == "cancelled"
+            await cancel_settled(runtime, job.job_id, owner=replace(job_owner(), **change), depth=0)
+        assert (await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)).status == "cancelled"
     finally:
         await runtime.shutdown()
 
@@ -383,7 +384,7 @@ async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) ->
 
         job = await start_delegation_job(runtime, child, owner=job_owner(), operation=operation, cancel=cleanup)
         await wait_for_status(runtime, job.job_id, "awaiting_approval")
-        cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
+        cancelling = asyncio.create_task(cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0))
         await cleaning.wait()
         assert (await lookup(runtime, job.job_id, owner=job_owner(), depth=0)).status == "cancel_requested"
         cleaned.set()
@@ -451,7 +452,7 @@ async def test_recovery_interrupts_running_work_and_cancels_only_on_request(tmp_
         running = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=blocked)
         cancelled = await start_delegation_job(runtime, job_child("d" * 32), owner=job_owner(), operation=unwinding)
         # A requested cancellation is saved before its cleanup finishes.
-        cancelling = asyncio.create_task(runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0))
+        cancelling = asyncio.create_task(cancel_settled(runtime, cancelled.job_id, owner=job_owner(), depth=0))
         await wait_for_status(runtime, cancelled.job_id, "cancel_requested")
         # The process dies without an orderly shutdown, and the next one takes its jobs over.
         restored = await tool_job_runtime(tmp_path, cancel=cleanup)
@@ -618,7 +619,7 @@ async def test_shutdown_drains_accepted_cancellation(
 
     job = await start_delegation_job(runtime, child, owner=job_owner(), operation=approval)
     await wait_for_status(runtime, job.job_id, "awaiting_approval")
-    cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
+    cancelling = asyncio.create_task(cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0))
     await cleanup_started.wait()
     runtime.changed.clear()
     stopping = asyncio.create_task(runtime.shutdown())
@@ -671,7 +672,7 @@ async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, op
             "acknowledge_wait": lambda: runtime.acknowledge_wait(job.job_id, waiting.claim),
             "lookup": lambda: lookup(runtime, job.job_id, owner=job_owner(), depth=0),
             "wait": lambda: runtime.wait(job.job_id, owner=job_owner(), depth=0),
-            "cancel": lambda: runtime.cancel(job.job_id, owner=job_owner(), depth=0),
+            "cancel": lambda: cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0),
         }
         with pytest.raises(ValueError, match="closed"):
             await operations[operation_name]()
@@ -706,7 +707,7 @@ async def test_shutdown_rejects_new_cancel_while_draining_execution(tmp_path: Pa
     await draining.wait()
     try:
         with pytest.raises(ValueError, match="shutting down"):
-            await runtime.cancel(second.job_id, owner=job_owner(), depth=0)
+            await cancel_settled(runtime, second.job_id, owner=job_owner(), depth=0)
     finally:
         release.set()
         await stopping
@@ -730,7 +731,7 @@ async def test_shutdown_does_not_cancel_an_existing_execution_cleanup_twice(tmp_
 
     job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
     await executing.wait()
-    cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
+    cancelling = asyncio.create_task(cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0))
     await cleaning.wait()
     stopping = asyncio.create_task(runtime.shutdown())
     admitted = asyncio.Event()

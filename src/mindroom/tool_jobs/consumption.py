@@ -168,7 +168,7 @@ def restore_control(control: dict[str, Any]) -> AgentRunException:
     return AgentRunException(values.pop("message"), **values)
 
 
-async def retain_claim(
+async def _retain_claim(
     runtime: ToolJobRuntime,
     job_id: str,
     claim: JobClaim,
@@ -204,5 +204,5 @@ async def consume_tool_job(
     except BaseException:
         await runtime.release_wait(job.job_id, claim)
         raise
-    await retain_claim(runtime, job.job_id, claim, call)
+    await _retain_claim(runtime, job.job_id, claim, call)
     return value, payload

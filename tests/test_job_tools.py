@@ -430,13 +430,8 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("save_fails", [False, True])
-async def test_cancel_acknowledges_only_saved_management_result(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    save_fails: bool,
-) -> None:
-    """A saved cancellation receipt suppresses completion; failed parent saves remain discoverable."""
+async def test_cancel_returns_at_once_and_leaves_the_outcome_to_the_notice(tmp_path: Path) -> None:
+    """The model's cancel returns the request; the job's cancelled outcome stays for the next notice to report."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
@@ -445,21 +440,10 @@ async def test_cancel_acknowledges_only_saved_management_result(
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
-    def storage_factory() -> BaseDb:
-        return create_session_storage("leader", config, paths, owner)
-
     async def operation() -> BackgroundOutcome:
         await asyncio.Event().wait()
         return BackgroundOutcome("completed", "unreachable")
 
-    storage = storage_factory()
-    if save_fails:
-
-        def fail_save(*_args: object, **_kwargs: object) -> None:
-            msg = "storage unavailable"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(type(storage), "upsert_run", fail_save)
     try:
         await start_job(runtime, "cancelled", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         model = DelegationModel(
@@ -470,20 +454,13 @@ async def test_cancel_acknowledges_only_saved_management_result(
             ],
         )
         install_tool_job_execution(model)
-        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage)
-
-        @owned_tool_execution
-        async def run() -> RunOutput:
-            set_consumption_storage(storage_factory)
-            return await agent.arun("cancel", session_id=context.session_id, user_id=context.requester_id)
-
+        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)])
         with tool_runtime_context(context):
-            response = await run()
-        assert json.loads(response.tools[0].result)["status"] == "cancelled"
-        job = await lookup(runtime, "cancelled", owner=owner, depth=0)
-        assert job.consumed is not save_fails
+            response = await agent.arun("cancel", session_id=context.session_id, user_id=context.requester_id)
+        assert json.loads(response.tools[0].result)["status"] == "cancel_requested"
+        await wait_for_status(runtime, "cancelled", "cancelled")
+        assert not (await lookup(runtime, "cancelled", owner=owner, depth=0)).consumed
     finally:
-        storage.close()
         await runtime.shutdown()
 
 

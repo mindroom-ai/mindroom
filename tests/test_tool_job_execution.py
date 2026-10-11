@@ -65,6 +65,7 @@ from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     SpanRecorder,
     assembled_function,
+    cancel_settled,
     lookup,
     pending_outcomes,
     saved_jobs,
@@ -199,7 +200,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
                     stopping = asyncio.create_task(runtime.shutdown())
                     await asyncio.sleep(0)
                 else:
-                    stopping = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0))
+                    stopping = asyncio.create_task(cancel_settled(runtime, job_id, owner=owner, depth=0))
                     await wait_for_status(runtime, job_id, "cancel_requested")
                 assert not closed.is_set()
                 release.set()
@@ -711,8 +712,8 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_bridge", [False, True])
-async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_bridge: bool) -> None:
-    """Cancellation cannot release resources before the actual sync worker exits."""
+async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Path, with_bridge: bool) -> None:
+    """A cancel returns at once, and cannot settle or release resources before the actual sync worker exits."""
     started, release = threading.Event(), threading.Event()
     finished = threading.Event()
 
@@ -751,15 +752,17 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
             signal.set()
             response = await asyncio.wait_for(parent, JOB_TEST_TIMEOUT)
             job_id = json.loads(response.tools[0].result)["job_id"]
-            cancelling = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0))
-            await wait_for_status(runtime, job_id, "cancel_requested")
+            # The model's cancel returns at once; the job settles once the actual thread exits.
+            requested = await asyncio.wait_for(runtime.cancel(job_id, owner=owner, depth=0), JOB_TEST_TIMEOUT)
+            assert requested.status == "cancel_requested"
             assert not finished.is_set()
-            done, _ = await asyncio.wait({cancelling}, timeout=0.05)
+            drain = runtime._entries[job_id].drain
+            assert drain is not None
+            done, _ = await asyncio.wait({drain}, timeout=0.05)
             assert not done, "cancellation settled while synchronous side effects were still running"
             release.set()
-            result = await cancelling
+            await wait_for_status(runtime, job_id, "cancelled")
             assert finished.is_set()
-            assert result.status == "cancelled"
     finally:
         release.set()
         await runtime.shutdown()
@@ -815,8 +818,8 @@ async def test_fast_generator_preserves_sdk_events(tmp_path: Path, *, structured
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["completed", "failed", "control"])
-async def test_cancellation_receipt_does_not_replay_the_original_outcome(tmp_path: Path, outcome: str) -> None:
-    """A saved cancel result acknowledges control without applying old errors or state changes."""
+async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Path, outcome: str) -> None:
+    """A cancel of an ended job neither replays its outcome's errors or state changes nor acknowledges it."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
@@ -877,7 +880,8 @@ async def test_cancellation_receipt_does_not_replay_the_original_outcome(tmp_pat
         assert json.loads(response.tools[0].result)["job_id"] == job.job_id
         saved = storage.get_run(response.run_id)
         assert saved.session_state["counter"] == 0
-        assert pending_outcomes(runtime) == []
+        # The job had already ended, so its outcome stays for the next notice or collect to report.
+        assert [pending.job_id for pending in pending_outcomes(runtime)] == [job.job_id]
     finally:
         storage.close()
         await runtime.shutdown()

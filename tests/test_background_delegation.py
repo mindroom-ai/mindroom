@@ -68,6 +68,7 @@ from tests.delegation_helpers import (
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     SpanRecorder,
+    cancel_settled,
     intercept_job_saves,
     job_child,
     lookup,
@@ -457,13 +458,13 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         if exclude_after_acceptance:
             config.background_tool_jobs.exclude_toolkits.append("delegate")
         if approval == "cancelled":
-            assert '"status": "cancelled"' in str(await JobTools(paths, identity).job("cancel", job_id))
+            assert '"status": "cancel_requested"' in str(await JobTools(paths, identity).job("cancel", job_id))
+            await wait_for_status(runtime, job_id, "cancelled")
             cancelled = await read_child_run(children[0], config, paths)
             assert cancelled is not None
             assert cancelled.status == RunStatus.cancelled
             assert cards.settled == [_approval_run_id(job_id)]
             return
-        # A Stop recorded for the reply before its job applied it wins over an approval that lands meanwhile.
         status = "denied" if approval == "denied" else "approved"
         cards.decision.set_result(BackgroundApprovalDecision(status, "Not now" if status == "denied" else None))
 
@@ -1190,7 +1191,7 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path
         if shutdown:
             await runtime.quiesce()
         else:
-            await runtime.cancel(running.delegation_id, owner=_BACKGROUND_PARENT, depth=0)
+            await cancel_settled(runtime, running.delegation_id, owner=_BACKGROUND_PARENT, depth=0)
 
     await _drive_background_child(tmp_path, runtime, child, while_waiting=stop)
     (job,) = (await saved_jobs(tmp_path)).values()

@@ -17,6 +17,7 @@ from tests.bot_helpers import _runtime_bound_config
 from tests.conftest import runtime_paths_for
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    cancel_settled,
     intercept_job_saves,
     job_owner,
     lookup,
@@ -169,7 +170,7 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
         )
         await asyncio.wait_for(cleaning.wait(), JOB_TEST_TIMEOUT)
         stopping = asyncio.create_task(
-            runtime.shutdown() if shutdown else runtime.cancel("returned", owner=job_owner(), depth=0),
+            runtime.shutdown() if shutdown else cancel_settled(runtime, "returned", owner=job_owner(), depth=0),
         )
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(asyncio.shield(stopping), 0.02)
@@ -226,7 +227,7 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
             operation=operation,
         )
         monkeypatch.setattr(runtime, "_publish", delayed_publish)
-        stopping = asyncio.create_task(runtime.cancel("returned", owner=job_owner(), depth=0))
+        stopping = asyncio.create_task(cancel_settled(runtime, "returned", owner=job_owner(), depth=0))
         await asyncio.wait_for(saving.wait(), JOB_TEST_TIMEOUT)
         finish.set()
         await asyncio.wait_for(returned.wait(), JOB_TEST_TIMEOUT)

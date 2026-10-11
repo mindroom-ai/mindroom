@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
-from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, retain_claim
+from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, format_job_handle, get_background_runtime, job_summary
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
@@ -106,7 +106,8 @@ class JobTools(Toolkit):
                 "Calls made inside an already running job stay with that job and accept no separate wait budget. "
                 "A newer message you answer releases waits while work continues. "
                 'Use job(action="list") to rediscover jobs and their status after a new turn, '
-                'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to stop one. '
+                'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to ask '
+                "one to stop; the next notice says how it ended. "
                 'When told background jobs ended, call job(action="collect") once to read and acknowledge all of them. '
                 "Only the agent that started a job can access it; teams must ask that member to manage it."
             ),
@@ -227,11 +228,8 @@ class JobTools(Toolkit):
                 return format_job_handle(waited.job)
             if action != "cancel":
                 return "Unknown job action."
-            job = await runtime.cancel(job_id, owner=owner, depth=0)
-            waited = await runtime.wait(job_id, owner=owner, depth=0, timeout=0)
-            if waited.claim is not None:
-                await retain_claim(runtime, job_id, waited.claim)
-            return format_job_handle(job)
+            # The job stops on its own time; the next notice reports how it ended.
+            return format_job_handle(await runtime.cancel(job_id, owner=owner, depth=0))
         except ValueError as error:
             # Unavailable jobs and invalid limits, offsets, or wait budgets are the model's to correct.
             return str(error)

@@ -685,13 +685,13 @@ class ToolJobRuntime:
                 await self._request_cancel(entry)
 
     async def cancel(self, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
-        """Cancel execution and return the job once its execution and cleanup have settled."""
+        """Ask a job its caller may see to stop, and return it as requested; the runtime drains it to its outcome."""
         async with self._lock:
             self._ensure_open(accepting=True)
             entry = self._entry(job_id, owner, depth)
-            drain = await self._request_cancel(entry)
-        # The runtime owns the drain, so a Stop of the caller does not wait for work that ignores cancellation.
-        return await asyncio.shield(drain)
+            # A job that already ended still drains, which retries saving an outcome that failed to save.
+            await self._request_cancel(entry)
+            return await self._snapshot(entry)
 
     @staticmethod
     async def _isolated(

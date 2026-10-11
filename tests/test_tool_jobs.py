@@ -18,6 +18,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, ToolJo
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     backdate_job,
+    cancel_settled,
     intercept_job_saves,
     job_owner,
     lookup,
@@ -163,7 +164,7 @@ async def test_quiescence_fences_control_but_retains_receipts_and_storage(tmp_pa
                 operation=operation,
             )
         with pytest.raises(runtime_module.JobAccessError, match="shutting down"):
-            await runtime.cancel("quiesced", owner=job_owner(), depth=0)
+            await cancel_settled(runtime, "quiesced", owner=job_owner(), depth=0)
         await runtime.acknowledge_wait(job.job_id, waited.claim)
         assert (await lookup(runtime, job.job_id, owner=job_owner(), depth=0)).consumed
     finally:
@@ -225,7 +226,7 @@ async def test_settled_payload_is_written_once(tmp_path: Path, monkeypatch: pyte
             await runtime.acknowledge_wait("once", waited.claim)
         else:
             await runtime.release_wait("once", waited.claim)
-            await runtime.cancel("once", owner=job_owner(), depth=0)
+            await cancel_settled(runtime, "once", owner=job_owner(), depth=0)
     finally:
         await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
@@ -351,7 +352,7 @@ async def test_shutdown_drains_a_terminal_cancellation_retry(tmp_path: Path, mon
     with monkeypatch.context() as patch:
         intercept_job_saves(patch, before=fail_terminal)
         with pytest.raises(OSError, match="terminal save failed"):
-            await runtime.cancel("retry", owner=job_owner(), depth=0)
+            await cancel_settled(runtime, "retry", owner=job_owner(), depth=0)
 
     retry_started, release_retry = asyncio.Event(), asyncio.Event()
     original_publish = runtime._publish
@@ -367,7 +368,7 @@ async def test_shutdown_drains_a_terminal_cancellation_retry(tmp_path: Path, mon
         await original_publish(entry, job, payload)
 
     monkeypatch.setattr(runtime, "_publish", publish)
-    retrying = asyncio.create_task(runtime.cancel("retry", owner=job_owner(), depth=0))
+    retrying = asyncio.create_task(cancel_settled(runtime, "retry", owner=job_owner(), depth=0))
     await retry_started.wait()
     stopping = asyncio.create_task(runtime.shutdown())
     try:
@@ -416,7 +417,7 @@ async def test_failed_cancellation_save_wakes_an_existing_waiter(
     try:
         with monkeypatch.context() as patch:
             intercept_job_saves(patch, before=fail_terminal)
-            cancelling = asyncio.create_task(runtime.cancel("wake", owner=job_owner(), depth=0))
+            cancelling = asyncio.create_task(cancel_settled(runtime, "wake", owner=job_owner(), depth=0))
             await cleaning.wait()
             await asyncio.sleep(0)
             assert not waiter.done()
@@ -468,10 +469,10 @@ async def test_consumption_repairs_failed_cancellation_save_before_reread(
         with monkeypatch.context() as patch:
             intercept_job_saves(patch, before=fail_terminal)
             with pytest.raises(OSError, match="terminal save failed"):
-                await runtime.cancel("cancel-retry", owner=job_owner(), depth=0)
+                await cancel_settled(runtime, "cancel-retry", owner=job_owner(), depth=0)
         waited = await runtime.wait("cancel-retry", owner=job_owner(), depth=0)
         await runtime.acknowledge_wait("cancel-retry", waited.claim)
-        result = await runtime.cancel("cancel-retry", owner=job_owner(), depth=0)
+        result = await cancel_settled(runtime, "cancel-retry", owner=job_owner(), depth=0)
         assert result.status == "cancelled"
         assert result.consumed
     finally:
@@ -878,7 +879,7 @@ async def test_cancel_requested_remains_owned_until_operation_finally_finishes(t
         operation=operation,
     )
     await started.wait()
-    cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
+    cancelling = asyncio.create_task(cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0))
     await cleaning.wait()
     assert (await lookup(runtime, job.job_id, owner=job_owner(), depth=0)).status == "cancel_requested"
     assert pending_outcomes(runtime) == []
@@ -927,9 +928,9 @@ async def test_repeated_cancel_joins_the_in_flight_drain(tmp_path: Path, monkeyp
             operation=operation,
             cancel=cleanup,
         )
-        first = asyncio.create_task(runtime.cancel("twice", owner=job_owner(), depth=0))
+        first = asyncio.create_task(cancel_settled(runtime, "twice", owner=job_owner(), depth=0))
         await cleaning.wait()
-        second = asyncio.create_task(runtime.cancel("twice", owner=job_owner(), depth=0))
+        second = asyncio.create_task(cancel_settled(runtime, "twice", owner=job_owner(), depth=0))
         await joined.wait()
         assert drains[1] is drains[0]
         assert not drains[0].done()
@@ -969,7 +970,7 @@ async def test_a_stopped_caller_does_not_wait_for_work_that_ignores_cancellation
             operation=operation,
         )
         await started.wait()
-        cancelling = asyncio.create_task(runtime.cancel("stubborn", owner=job_owner(), depth=0))
+        cancelling = asyncio.create_task(cancel_settled(runtime, "stubborn", owner=job_owner(), depth=0))
         await cancel_seen.wait()
         # The request is saved and the caller now waits for the drain.
         for _ in range(3):
@@ -1020,7 +1021,7 @@ async def test_cancelled_caller_still_settles_its_cancellation_request(
         )
         await started.wait()
         intercept_job_saves(monkeypatch, before=blocked_request)
-        cancelling = asyncio.create_task(runtime.cancel("caller", owner=job_owner(), depth=0))
+        cancelling = asyncio.create_task(cancel_settled(runtime, "caller", owner=job_owner(), depth=0))
         await writing.wait()
         cancelling.cancel()
         release.set()
@@ -1082,8 +1083,8 @@ async def test_failed_cancellation_persistence_can_be_retried(
     runtime._publish = publish
     try:
         with pytest.raises(OSError, match="injected durable write failure"):
-            await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
-        settled = await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
+            await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)
+        settled = await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)
         saved = (await saved_jobs(tmp_path))["retry-cancel"]
         assert settled.status == "cancelled"
         assert saved.status == "cancelled"
@@ -1183,8 +1184,8 @@ async def test_cancellation_retry_propagates_failed_terminal_persistence(tmp_pat
     retry: asyncio.Task[runtime_module.BackgroundJob] | None = None
     try:
         with pytest.raises(OSError, match="initial terminal write failed"):
-            await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
-        retry = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
+            await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)
+        retry = asyncio.create_task(cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0))
         await asyncio.wait_for(retry_write_started.wait(), JOB_TEST_TIMEOUT)
         for _ in range(3):
             await asyncio.sleep(0)
@@ -1237,7 +1238,7 @@ async def test_shutdown_cancels_operation_after_failed_cancellation_admission(tm
 
     runtime._publish = fail_publish
     with pytest.raises(OSError, match="injected durable write failure"):
-        await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
+        await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)
     runtime._publish = original_publish
     shutdown = asyncio.create_task(runtime.shutdown())
     done, _ = await asyncio.wait({shutdown}, timeout=0.2)
@@ -1333,7 +1334,7 @@ async def test_terminal_operation_stays_pending_until_cancellation_cleanup_settl
         cancel=cleanup,
     )
     await started.wait()
-    cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
+    cancelling = asyncio.create_task(cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0))
     try:
         await cleaning.wait()
         assert (await lookup(runtime, job.job_id, owner=job_owner(), depth=0)).status == "cancel_requested"
@@ -1560,7 +1561,7 @@ async def test_failed_cancellation_cleanup_settles_without_claiming_side_effects
             cancel=cleanup,
         )
         await started.wait()
-        result = await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
+        result = await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)
         assert result.status == "failed"
         assert "remote cleanup unavailable" in (result.result or "")
         assert "may still" in (result.result or "")
@@ -1665,7 +1666,7 @@ async def test_failure_while_draining_cancellation_is_not_reported_cancelled(tmp
             operation=operation,
         )
         await started.wait()
-        result = await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
+        result = await cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0)
         assert result.status == "failed"
         assert result.result == "operation cleanup failed"
     finally:

@@ -433,3 +433,16 @@ def job_context(tmp_path: Path, owner: ToolExecutionIdentity) -> ToolRuntimeCont
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
+
+
+async def cancel_settled(
+    runtime: ToolJobRuntime,
+    job_id: str,
+    *,
+    owner: ToolExecutionIdentity,
+    depth: int,
+) -> BackgroundJob:
+    """Cancel a job as its caller, then wait until the runtime drained it to its outcome."""
+    requested = await runtime.cancel(job_id, owner=owner, depth=depth)
+    drain = runtime._entries[job_id].drain
+    return requested if drain is None else await asyncio.shield(drain)

@@ -39,6 +39,7 @@ from tests.test_dynamic_workflows import _make_context, _workflow_spec
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
+    cancel_settled,
     tool_job_journal,
     tool_job_runtime,
     wait_for_status,
@@ -254,7 +255,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
             await asyncio.wait_for(started[0].wait(), JOB_TEST_TIMEOUT)
             if parallel:
                 await asyncio.wait_for(started[1].wait(), JOB_TEST_TIMEOUT)
-            waiter = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0))
+            waiter = asyncio.create_task(cancel_settled(runtime, job_id, owner=owner, depth=0))
             await wait_for_status(runtime, job_id, "cancel_requested")
             assert not cleaned.is_set()
             done, _ = await asyncio.wait({waiter}, timeout=0.05)

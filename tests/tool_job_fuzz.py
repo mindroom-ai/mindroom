@@ -24,6 +24,7 @@ from mindroom.tool_jobs.runtime import (
     parse_saved_job,
 )
 from tests.tool_job_helpers import (
+    cancel_settled,
     intercept_job_saves,
     job_owner,
     pending_outcomes,
@@ -345,7 +346,7 @@ class JobFuzzRunner:
 
     async def _cancel(self, _action: Action, job_id: str) -> None:
         self._cause(job_id, "cancel")
-        task = asyncio.create_task(self.runtime.cancel(job_id, owner=job_owner(), depth=0))
+        task = asyncio.create_task(cancel_settled(self.runtime, job_id, owner=job_owner(), depth=0))
         self._cancels.append((task, self._faults))
 
     async def _fail_write(self, action: Action, _job_id: str) -> None:
