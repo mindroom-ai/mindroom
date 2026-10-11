@@ -3,7 +3,7 @@
 Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned reverse proxy or identity gateway that has already authenticated the human.
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
-The [Connections portal](#connections-portal), the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service) also build on this mode.
+The [Connections portal](#connections-portal), the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service), and the [budget service](https://docs.mindroom.chat/budgets/#budget-service) also build on this mode.
 
 Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
 Enable it only when every network path to MindRoom removes client-supplied copies of the trusted headers and injects verified values itself; never expose such an instance directly to browsers or the public internet.

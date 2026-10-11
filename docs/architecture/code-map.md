@@ -156,8 +156,9 @@ Matrix sync callback
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
-| `budgets/monitor.py` | Background spend refresh and the per-reply decision to use the fallback model |
-| `config/budgets.py` | Opt-in per-user monthly caps and fallback model |
+| `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
+| `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
+| `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
@@ -221,7 +222,7 @@ Matrix sync callback
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
 | `api/request_body_limit.py` | Pure ASGI middleware answering 413 for dashboard API request bodies over 16 MiB, except knowledge uploads |
 | `api/validation_errors.py` | 422 handler for the dashboard API and sandbox runner that returns FastAPI's validation error detail without the rejected request values |
-| `api/budgets.py` | Dashboard route reporting budget settings and month-to-date spend from the runtime's budget monitor |
+| `api/budgets.py` | Dashboard and budget-service routes for budget status and setting or clearing one user's cap |
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
