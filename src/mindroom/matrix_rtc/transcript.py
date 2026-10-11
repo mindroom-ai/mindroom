@@ -37,19 +37,18 @@ _GLUED_PUNCTUATION = tuple(",.;:!?…)]}")
 
 
 def _spoken_continuation(fragment: str) -> str:
-    """Return one non-empty speech fragment normalized for appending to the same speaker's turn."""
-    fragment = " ".join(fragment.split())
+    """Return one normalized, non-empty speech fragment prefixed for appending to the same speaker's turn."""
     return fragment if fragment.startswith(_GLUED_PUNCTUATION) else f" {fragment}"
 
 
 def merge_spoken_turns(turns: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Join consecutive non-empty fragments from the same speaker into one turn."""
+    """Join consecutive normalized, non-empty fragments from the same speaker into one turn."""
     merged: list[tuple[str, str]] = []
     for role, text in turns:
         if merged and merged[-1][0] == role:
             merged[-1] = (role, merged[-1][1] + _spoken_continuation(text))
         else:
-            merged.append((role, " ".join(text.split())))
+            merged.append((role, text))
     return merged
 
 
