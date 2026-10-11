@@ -20,6 +20,7 @@ from mindroom.ai import (
     _PreparedAgentRun,
 )
 from mindroom.bot import AgentBot
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -350,6 +351,7 @@ def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNam
         hook_matrix_admin=lambda: matrix_admin,
         hook_room_state_querier=lambda: None,
         hook_room_state_putter=lambda: None,
+        budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
     )
 
 

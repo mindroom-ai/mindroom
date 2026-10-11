@@ -534,6 +534,7 @@ async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> Non
         config=with_file,
         runtime_paths=paths,
         depth=0,
+        budget_monitor=None,
         persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",)),
     )
     await reserve_subagent_turn(child, owner=identity, runtime_paths=paths)

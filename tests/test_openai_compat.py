@@ -1791,6 +1791,7 @@ class TestStreamingCompletion:
                 test_config,
                 _runtime_paths(),
                 None,
+                model_name="default",
             )
 
         assert isinstance(response, openai_compat._OpenAIStreamingResponse)
@@ -1847,6 +1848,7 @@ class TestStreamingCompletion:
                 runtime_paths,
                 None,
                 None,
+                model_name="default",
                 execution_identity=execution_identity,
             )
 
@@ -2357,7 +2359,7 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         background=BackgroundTask(existing_background),
     )
 
-    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock)
+    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2461,7 +2463,7 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2508,7 +2510,7 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         await partial_sent.wait()
@@ -2545,6 +2547,7 @@ async def test_openai_json_response_skips_background_when_send_fails() -> None:
             background=BackgroundTask(background),
         ),
         completion_lock,
+        None,
     )
 
     async def receive() -> dict[str, str]:
@@ -2574,6 +2577,7 @@ async def test_openai_error_response_releases_lock_when_send_fails() -> None:
     response = openai_compat._attach_openai_completion_lock_release(
         openai_compat._error_response(500, "failed", error_type="server_error"),
         completion_lock,
+        None,
     )
 
     async def receive() -> dict[str, str]:
@@ -3261,6 +3265,7 @@ class TestTeamCompletion:
                 config=team_config,
                 runtime_paths=runtime_paths,
                 thread_history=[],
+                team_model_name="default",
                 execution_identity=execution_identity,
             )
 
@@ -3542,6 +3547,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -3804,6 +3810,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -4275,6 +4282,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -5030,6 +5038,7 @@ class TestTeamCompletion:
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=[],
+                    team_model_name="default",
                 )
 
         assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
@@ -5108,6 +5117,11 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models(
+                        "collab_team",
+                        collaborate_config,
+                        lambda model_name: model_name,
+                    ),
                 )
 
             mock_team_init.assert_called_once()
@@ -5154,6 +5168,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
             mock_team_init.assert_called_once()
@@ -5199,6 +5214,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
         assert mock_team_init.call_args.kwargs["id"] == "coord_team"
@@ -5247,6 +5263,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
         assert team.num_history_runs is None
@@ -5294,6 +5311,7 @@ class TestTeamCompletion:
                 execution_identity=execution_identity,
                 scope_context=scope_context,
                 session_id="openai-team-session",
+                models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
             )
 
         try:
@@ -5359,6 +5377,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
             mock_close.assert_called_once_with(
                 agents=[built_agent],
@@ -5421,6 +5440,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
                 )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge

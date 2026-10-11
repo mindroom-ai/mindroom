@@ -35,6 +35,7 @@ from mindroom.approval_response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
+from mindroom.budgets.monitor import budget_model
 from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -145,6 +146,7 @@ from mindroom.streaming import (
 )
 from mindroom.teams import (
     TeamMode,
+    TeamTurnModelSelection,
     continue_paused_team_run,
     resolve_team_turn_models,
     select_model_for_team,
@@ -1446,16 +1448,32 @@ class ResponseRunner:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
-            notify_response_finished=self._automation_notifier(request.sources.logical_source_event_ids),
+            notify_response_finished=self._response_finished_notifier(request.sources.logical_source_event_ids),
             persist_response_event_id=persist_response_event_id,
         )
 
-    def _automation_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
-        """Return the callback that lets an automation verify the run its prompt started."""
+    def _budgeted_model(self, request: ResponseRequest, model_name: str) -> str:
+        """Return the model this request's requester may use under their budget."""
+        orchestrator = self.deps.runtime.orchestrator
+        return budget_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            orchestrator.budgets if orchestrator is not None else None,
+            request.response_envelope.requester_id,
+            model_name,
+        )
+
+    def _response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
+        """Return the callback that lets automations verify their runs and budgets count the new spend."""
         orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
             return None
-        return lambda: orchestrator.automations.response_finished(source_event_ids)
+
+        def notify() -> None:
+            orchestrator.budgets.response_finished()
+            orchestrator.automations.response_finished(source_event_ids)
+
+        return notify
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -2437,7 +2455,7 @@ class ResponseRunner:
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
             # A continuation keeps its turn's source events, so a run paused for approval is verified when it ends.
-            notify_response_finished=self._automation_notifier(continuation.sources.logical_source_event_ids),
+            notify_response_finished=self._response_finished_notifier(continuation.sources.logical_source_event_ids),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )
 
@@ -4491,6 +4509,17 @@ class ResponseRunner:
                 active_model_name=request.scheduled_model,
             )
         )
+        if turn_models is not None:
+            budgeted = {
+                model_name: self._budgeted_model(request, model_name)
+                for model_name in {turn_models.team_model_name, *turn_models.member_model_names.values()}
+            }
+            turn_models = TeamTurnModelSelection(
+                team_model_name=budgeted[turn_models.team_model_name],
+                member_model_names={
+                    member: budgeted[model_name] for member, model_name in turn_models.member_model_names.items()
+                },
+            )
         request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -5059,6 +5088,7 @@ class ResponseRunner:
                 thread_id=response_thread_id,
                 runtime_paths=self.deps.runtime_paths,
             ).model_name
+        active_model_name = self._budgeted_model(request, active_model_name)
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,

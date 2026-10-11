@@ -13,6 +13,7 @@ from agno.run.base import RunStatus
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.budgets.monitor import budget_model
 from mindroom.delegation.audit import (
     child_audit_context,
     child_response_usage,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
     from mindroom.agent_modes import AgentMode
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import SubagentPersona
@@ -103,10 +105,12 @@ def note_child_run_id(
     """Publish the exact attempt and bound model before it can execute tools."""
     child.run_id = run_id
     context = get_tool_runtime_context()
-    if model_name is not None:
+    if model_name is None and context is not None:
+        model_name = context.active_model_name
+    if model_name is not None and model_name != child.model_name:
+        # A model switch during the run is what the child's follow-ups ask for next.
+        child.requested_model_name = model_name
         child.model_name = model_name
-    elif context is not None and context.active_model_name is not None:
-        child.model_name = context.active_model_name
     update_subagent_turn_sync(child, runtime_paths)
 
 
@@ -398,6 +402,7 @@ def prepare_child_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     depth: int,
+    budget_monitor: BudgetMonitor | None,
     model: str | None = None,
     agent_mode: AgentMode = "standard",
     previous: DelegationChild | None = None,
@@ -407,7 +412,7 @@ def prepare_child_turn(
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the model, mode, and persona of the child it continues.
+    A follow-up keeps the mode and persona of the child it continues, and its requested model, checked again against the owner's budget.
     """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
@@ -420,17 +425,23 @@ def prepare_child_turn(
             session_id=session_id,
         )
     )
-    model_name = (
-        previous.model_name
-        if previous is not None
-        else config.resolve_runtime_model(
+    if previous is not None:
+        # LEGACY_COMPAT: Delegated children persisted without a requested model.
+        # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
+        # Last legacy release: v2026.10.236; replacement: the next release also persists requested_model_name.
+        # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
+        # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
+        requested_model_name = previous.requested_model_name or previous.model_name
+    else:
+        requested_model_name = config.resolve_runtime_model(
             entity_name=agent_name,
             active_model_name=model,
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
             runtime_paths=runtime_paths,
         ).model_name
-    )
+    # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
+    model_name = budget_model(config, runtime_paths, budget_monitor, owner.requester_id, requested_model_name)
     return DelegationChild(
         delegation_id=delegation_id,
         parent_tool_call_id=parent_tool_call_id,
@@ -440,6 +451,7 @@ def prepare_child_turn(
         session_id=session_id,
         run_id=uuid4().hex,
         model_name=model_name,
+        requested_model_name=requested_model_name,
         depth=depth + 1,
         execution_identity=serialize_tool_execution_identity(identity),
         subagent_id=previous.subagent_id if previous is not None else delegation_id,

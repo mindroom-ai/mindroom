@@ -367,7 +367,9 @@ def _wire(
         source: UsageStorageSource,
         *,
         mode: str = "runs",
+        since: float | None = None,
     ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
+        del since
         if calls is not None:
             calls.append((source.path_label, mode))
         yield from rows.get(source.path_label, ())
@@ -567,6 +569,42 @@ def test_daily_usage_groups_utc_dates_and_deduplicates_runs(tmp_path: Path, monk
     assert payload["daily_coverage"]["unavailable_sources"] == 0
     assert "UTC" in payload["daily_coverage"]["note"]
     assert "retained top-level runs" in payload["daily_coverage"]["note"]
+
+
+def test_admin_usage_since_reads_only_runs_from_that_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _source()
+    calls: list[tuple[str, str]] = []
+    september = _run(run_id="sept", created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp())
+    october = _run(run_id="oct", total_tokens=20, created_at=datetime(2026, 10, 2, tzinfo=UTC).timestamp())
+    since = datetime(2026, 10, 1, tzinfo=UTC).timestamp()
+
+    def iter_rows(
+        source: UsageStorageSource,
+        *,
+        mode: str = "runs",
+        since: float | None = None,
+    ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
+        calls.append((mode, str(since)))
+        runs = (
+            (september, october)
+            if since is None
+            else tuple(run for run in (september, october) if run.created_at >= since)
+        )
+        yield _row(source, *runs)
+
+    monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: (source,))
+    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
+
+    payload = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        include_daily=True,
+        since=since,
+    ).to_dict()
+
+    assert calls == [("runs", str(since))]
+    (user,) = payload["user_breakdown"]
+    assert [row["date"] for row in user["daily_breakdown"]] == ["2026-10-02"]
 
 
 @pytest.mark.parametrize("private", [False, True])

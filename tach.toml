@@ -1757,6 +1757,7 @@ depends_on = [
     "mindroom.api.script_gateway",
     "mindroom.api.skills",
     "mindroom.api.tools",
+    "mindroom.api.budgets",
     "mindroom.api.usage",
     "mindroom.api.usage_export",
     "mindroom.api.workers",
@@ -2019,6 +2020,12 @@ path = "mindroom.api.skills"
 depends_on = [
     "mindroom.constants",
     "mindroom.tool_system.skills",
+]
+
+[[modules]]
+path = "mindroom.api.budgets"
+depends_on = [
+    "mindroom.api.config_lifecycle",
 ]
 
 [[modules]]
@@ -5655,6 +5662,7 @@ expose = [
     "is_cancelled_run_output",
     "is_errored_run_output",
     "resolve_team_turn_models",
+    "TeamTurnModelSelection",
     "select_model_for_team",
     "strip_team_display",
     "team_response",
@@ -6241,6 +6249,7 @@ expose = [
     "ToolRuntimeContext",
     "DetachedRequesterContext",
     "detached_requester_context",
+    "current_budget_monitor",
     "get_detached_requester_context",
     "ToolRuntimeModelBinding",
     "ToolRuntimeHookBindings",

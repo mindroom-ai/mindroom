@@ -82,6 +82,10 @@ See [Models](configuration/models.md) for providers and fields.
 
 See [Usage Tracking](usage.md#dashboard-usage-tab).
 
+### Budgets
+
+See [Budgets](budgets.md#dashboard-budgets-page).
+
 ### Memory
 
 Sets the global memory backend, embedder, file backend, and auto-flush settings; per-agent backend overrides are on the **Agents** tab.

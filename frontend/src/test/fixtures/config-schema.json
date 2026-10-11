@@ -807,6 +807,49 @@
       "title": "AuthorizationConfig",
       "type": "object"
     },
+    "BudgetsConfig": {
+      "additionalProperties": false,
+      "description": "Monthly USD caps per requester, with a fallback model once a cap is reached.",
+      "properties": {
+        "monthly_limit_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default monthly cap in USD for each user; unset leaves users without an override uncapped",
+          "title": "Monthly Limit Usd"
+        },
+        "fallback_model": {
+          "description": "Model that replies use instead of a priced model once the requester reaches their cap",
+          "title": "Fallback Model",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "users": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "default": {},
+          "description": "Monthly USD caps for specific Matrix users, overriding monthly_limit_usd",
+          "title": "Users",
+          "type": "object"
+        }
+      },
+      "required": [
+        "fallback_model"
+      ],
+      "title": "BudgetsConfig",
+      "type": "object"
+    },
     "CallsConfig": {
       "additionalProperties": false,
       "description": "MatrixRTC settings, named call profiles, and agent assignments.",
@@ -2966,6 +3009,18 @@
           "default": null,
           "description": "Seconds a streamed model request may go without a provider event before MindRoom treats it as stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit",
           "title": "Stream Idle Timeout Seconds"
+        },
+        "pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelPricing"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Provider prices in USD per million tokens, used to measure spend against budgets"
         }
       },
       "required": [
@@ -2973,6 +3028,58 @@
         "id"
       ],
       "title": "ModelConfig",
+      "type": "object"
+    },
+    "ModelPricing": {
+      "additionalProperties": false,
+      "description": "Provider prices in USD per million tokens.",
+      "properties": {
+        "input": {
+          "description": "USD per million uncached input tokens",
+          "minimum": 0,
+          "title": "Input",
+          "type": "number"
+        },
+        "output": {
+          "description": "USD per million output tokens, including reasoning tokens",
+          "minimum": 0,
+          "title": "Output",
+          "type": "number"
+        },
+        "cache_read": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "USD per million cache-read input tokens; unset uses the input price",
+          "title": "Cache Read"
+        },
+        "cache_write": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "USD per million cache-write input tokens; unset uses the input price",
+          "title": "Cache Write"
+        }
+      },
+      "required": [
+        "input",
+        "output"
+      ],
+      "title": "ModelPricing",
       "type": "object"
     },
     "OpenAIDecisionsJudgmentConfig": {
@@ -4725,6 +4832,18 @@
       ],
       "default": null,
       "description": "Optional native personal agent rooms"
+    },
+    "budgets": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BudgetsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional per-user monthly spending budgets"
     },
     "voice": {
       "$ref": "#/$defs/VoiceConfig",

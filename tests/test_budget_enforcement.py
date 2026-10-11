@@ -1,0 +1,519 @@
+"""Over-budget requesters' replies use the configured fallback model."""
+# ruff: noqa: D103
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from dataclasses import replace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import nio
+import pytest
+from agno.run.team import RunContentEvent as TeamContentEvent
+from agno.run.team import TeamRunOutput
+from agno.team import Team as AgnoTeam
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from mindroom.api import config_lifecycle, openai_compat
+from mindroom.api.main import initialize_api_app
+from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.budgets import BudgetsConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
+from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
+from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
+from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
+from mindroom.synthetic_model import SyntheticModel
+from mindroom.teams import TeamMode, TeamTurnModelSelection
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.budget_helpers import budget_monitor_with_spend
+from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.identity_helpers import persist_entity_accounts
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
+from tests.test_delegation_direct_audit import _identity
+from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config
+from tests.test_dynamic_workflow_subagents import _spec as _subagent_workflow_spec
+from tests.test_dynamic_workflow_subagents import _Workflow as _SubagentWorkflow
+from tests.test_dynamic_workflows import _fake_stream_agent, _make_context, _make_multi_agent_context, _workflow_spec
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+    from pathlib import Path
+
+    from mindroom.budgets.monitor import BudgetMonitor
+    from mindroom.constants import RuntimePaths
+
+
+def _budget(config: Config, *, monthly_limit_usd: float | None = 0) -> None:
+    """Price the agent's model and cap every requester at ``monthly_limit_usd``."""
+    config.models["default"].pricing = ModelPricing(input=5, output=30)
+    config.models["luna"] = ModelConfig(
+        provider="openai",
+        id="gpt-6-luna",
+        pricing=ModelPricing(input=0.2, output=1.25),
+    )
+    config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=monthly_limit_usd)
+
+
+@pytest.mark.asyncio
+async def test_agent_reply_uses_fallback_for_over_budget_requester(tmp_path: Path) -> None:
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    _budget(coordinator.deps.runtime.config)
+
+    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
+
+    assert runtime.active_model_name == "luna"
+
+
+@pytest.mark.asyncio
+async def test_agent_reply_keeps_its_model_within_budget(tmp_path: Path) -> None:
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    _budget(coordinator.deps.runtime.config, monthly_limit_usd=None)
+
+    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
+
+    assert runtime.active_model_name == "default"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_model_is_budgeted_too(tmp_path: Path) -> None:
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    config = coordinator.deps.runtime.config
+    _budget(config)
+    config.models["large"] = ModelConfig(provider="openai", id="gpt-6-astra", pricing=ModelPricing(input=5, output=30))
+
+    runtime = await coordinator.prepare_response_runtime(replace(_plain_request(_target()), scheduled_model="large"))
+
+    assert runtime.active_model_name == "luna"
+
+
+@pytest.mark.asyncio
+async def test_completed_response_asks_budgets_to_count_the_new_spend(tmp_path: Path) -> None:
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    orchestrator = MagicMock(knowledge_refresh_scheduler=None)
+    coordinator.deps.runtime.orchestrator = orchestrator
+    model = SyntheticModel(id="synthetic", min_response_chars=10, max_response_chars=10, chars_per_second=0)
+
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(typing_indicator=_noop_typing, should_use_streaming=AsyncMock(return_value=False)),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+
+    orchestrator.budgets.response_finished.assert_called_once_with()
+
+
+def _spent(runtime_paths: RuntimePaths, spend_usd: float) -> BudgetMonitor:
+    """Return a monitor reporting ``spend_usd`` for the delegating owner this month."""
+    return budget_monitor_with_spend(runtime_paths, {"@alice:example.org": spend_usd})
+
+
+def _delegation_config() -> Config:
+    config = _make_config(
+        {
+            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child"),
+        },
+    )
+    config.models["default"].pricing = ModelPricing(input=5, output=30)
+    config.models["luna"] = ModelConfig(
+        provider="openai",
+        id="gpt-6-luna",
+        pricing=ModelPricing(input=0.2, output=1.25),
+    )
+    config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
+    return config
+
+
+def _owner() -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="leader",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="parent-session",
+    )
+
+
+@pytest.mark.parametrize(("spend", "expected"), [(12.0, "luna"), (3.0, "default")])
+def test_delegated_child_model_follows_the_owners_budget(tmp_path: Path, spend: float, expected: str) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    child = prepare_child_turn(
+        "leader",
+        "child",
+        "Do the work",
+        owner=_owner(),
+        config=_delegation_config(),
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_spent(runtime_paths, spend),
+    )
+
+    assert child.model_name == expected
+
+
+def test_delegated_follow_up_returns_to_the_requested_model_under_budget(tmp_path: Path) -> None:
+    """A subagent first run on the fallback uses its requested model again once spend is under the cap."""
+    config = _delegation_config()
+    runtime_paths = _runtime_paths(tmp_path)
+    first = prepare_child_turn(
+        "leader",
+        "child",
+        "Do the work",
+        owner=_owner(),
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_spent(runtime_paths, 12.0),
+    )
+
+    follow_up = prepare_child_turn(
+        "leader",
+        "child",
+        "Continue",
+        owner=_owner(),
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_spent(runtime_paths, 3.0),
+        previous=first,
+    )
+
+    assert (first.model_name, first.requested_model_name) == ("luna", "default")
+    assert (follow_up.model_name, follow_up.requested_model_name) == ("default", "default")
+
+
+def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: Path) -> None:
+    """A model the child switched to mid-run is what its follow-ups ask for, with or without budgets."""
+    config = _delegation_config()
+    config.models["alternate"] = ModelConfig(provider="openai", id="gpt-6-astra")
+    runtime_paths = _runtime_paths(tmp_path)
+    child = prepare_child_turn(
+        "leader",
+        "child",
+        "Do the work",
+        owner=_owner(),
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_spent(runtime_paths, 0.0),
+    )
+
+    note_child_run_id(child, "after-switch", runtime_paths, model_name="alternate")
+    follow_up = prepare_child_turn(
+        "leader",
+        "child",
+        "Continue",
+        owner=_owner(),
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_spent(runtime_paths, 0.0),
+        previous=child,
+    )
+
+    assert (follow_up.model_name, follow_up.requested_model_name) == ("alternate", "alternate")
+
+
+def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path: Path) -> None:
+    """Children saved by earlier releases continue on the model they recorded."""
+    config = _delegation_config()
+    runtime_paths = _runtime_paths(tmp_path)
+    saved = replace(
+        prepare_child_turn(
+            "leader",
+            "child",
+            "Do the work",
+            owner=_owner(),
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=0,
+            budget_monitor=_spent(runtime_paths, 0.0),
+        ),
+        requested_model_name=None,
+    )
+
+    follow_up = prepare_child_turn(
+        "leader",
+        "child",
+        "Continue",
+        owner=_owner(),
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=0,
+        budget_monitor=_spent(runtime_paths, 12.0),
+        previous=saved,
+    )
+
+    assert (follow_up.model_name, follow_up.requested_model_name) == ("luna", "default")
+
+
+@pytest.mark.asyncio
+async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path: Path) -> None:
+    config = _delegation_config()
+    runtime_paths = _runtime_paths(tmp_path)
+    tools = DelegateTools("leader", ["child"], runtime_paths, config, execution_identity=_owner())
+    context = replace(
+        _delegate_runtime_context(config, runtime_paths, execution_identity=_owner()),
+        orchestrator=MagicMock(budgets=_spent(runtime_paths, 12.0)),
+    )
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock, return_value="Child completed.") as response,
+    ):
+        await tools.run_subagent(agent_name="child", task="Do the work")
+
+    assert response.await_args.args[0].active_model_name == "luna"
+
+
+def _openai_config() -> Config:
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="GeneralAgent", rooms=[]),
+            "code": AgentConfig(display_name="CodeAgent", model="local", rooms=[]),
+        },
+        teams={
+            "super_team": TeamConfig(
+                display_name="Super Team",
+                role="Team",
+                agents=["general", "code"],
+                model="default",
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="ollama", id="test-model", pricing=ModelPricing(input=5, output=30)),
+            "local": ModelConfig(provider="ollama", id="local-model"),
+            "luna": ModelConfig(provider="ollama", id="cheap-model", pricing=ModelPricing(input=0.2, output=1.25)),
+        },
+        router=RouterConfig(model="default"),
+        budgets=BudgetsConfig(fallback_model="luna", monthly_limit_usd=0),
+    )
+    for entity in (config.agents["general"], config.agents["code"], config.teams["super_team"]):
+        entity.access = ResponderAccessConfig(users=["@alice:localhost"])
+    return config
+
+
+@contextmanager
+def _openai_client(tmp_path: Path, config: Config, *, authenticated: bool) -> Iterator[TestClient]:
+    process_env = (
+        {
+            "OPENAI_COMPAT_API_KEYS": "alice-key",
+            "OPENAI_COMPAT_API_KEY_REQUESTERS": json.dumps({"alice-key": "@alice:localhost"}),
+        }
+        if authenticated
+        else {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env=process_env,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    initialize_api_app(app, runtime_paths)
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        TestClient(app, base_url="http://localhost") as client,
+    ):
+        yield client
+
+
+@pytest.mark.parametrize(("authenticated", "expected"), [(True, "luna"), (False, "default")])
+def test_openai_compat_agent_completion_budgets_mapped_requesters(
+    tmp_path: Path,
+    authenticated: bool,
+    expected: str,
+) -> None:
+    with (
+        _openai_client(tmp_path, _openai_config(), authenticated=authenticated) as client,
+        patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi") as response,
+    ):
+        reply = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer alice-key"} if authenticated else {},
+            json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
+        )
+
+    assert reply.status_code == 200
+    assert response.await_args.args[0].active_model_name == expected
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_openai_compat_team_completion_budgets_priced_models(tmp_path: Path, stream: bool) -> None:
+    team = AgnoTeam(name="Super Team", id="super-team", model=SyntheticModel(id="synthetic"), members=[], tools=[])
+
+    async def stream_events() -> AsyncIterator[object]:
+        yield TeamContentEvent(content="Team answer")
+
+    async def run() -> TeamRunOutput:
+        return TeamRunOutput(content="Team answer")
+
+    team.arun = MagicMock(side_effect=lambda *_args, **kwargs: stream_events() if kwargs.get("stream") else run())
+    with (
+        _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
+        patch("mindroom.api.openai_compat._build_team", return_value=([], team, TeamMode.COORDINATE)) as build,
+        patch(
+            "mindroom.api.openai_compat._prepare_openai_team_prompt",
+            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+        ) as prepare,
+    ):
+        reply = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer alice-key"},
+            json={"model": "team/super_team", "messages": [{"role": "user", "content": "Build it"}], "stream": stream},
+        )
+
+    assert reply.status_code == 200
+    expected = TeamTurnModelSelection(team_model_name="luna", member_model_names={"general": "luna", "code": "local"})
+    assert build.call_args.kwargs["models"] == expected
+    assert prepare.await_args.kwargs["team_model_name"] == "luna"
+
+
+def _budget_context_config(config: Config) -> None:
+    config.models["default"].pricing = ModelPricing(input=3, output=15)
+    config.models["luna"] = ModelConfig(
+        provider="openai",
+        id="gpt-6-luna",
+        pricing=ModelPricing(input=0.2, output=1.25),
+    )
+    config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=0)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_workflow_room_agent_participant_uses_fallback(tmp_path: Path) -> None:
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+    _budget_context_config(context.config)
+
+    with patch("mindroom.agents.create_agent", return_value=_fake_stream_agent(content="done")) as create_agent:
+        await dynamic_workflow_module._aexecute_room_agent_participant(
+            context,
+            {"id": "writer", "kind": "room_agent", "agent": "specialist"},
+            "Write a report.",
+        )
+
+    assert create_agent.call_args.kwargs["active_model_name"] == "luna"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_workflow_subagent_participant_uses_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _subagent_workflow_config()
+    _budget(config)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(
+        _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": [], "model": "default"}]),
+    )
+
+    assert run["status"] == "completed", run
+    assert workflow.models_loaded == ["luna"]
+
+
+@pytest.mark.parametrize("model", ["general", "team/super_team"])
+def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: Path, model: str) -> None:
+    team = AgnoTeam(name="Super Team", id="super-team", model=SyntheticModel(id="synthetic"), members=[], tools=[])
+    team.arun = AsyncMock(return_value=TeamRunOutput(content="Team answer"))
+    monitor = budget_monitor_with_spend(_runtime_paths(tmp_path), {})
+    with (
+        _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
+        patch.object(monitor, "response_finished") as response_finished,
+        patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi"),
+        patch("mindroom.api.openai_compat._build_team", return_value=([], team, TeamMode.COORDINATE)),
+        patch(
+            "mindroom.api.openai_compat._prepare_openai_team_prompt",
+            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+        ),
+    ):
+        config_lifecycle.app_state(client.app).budget_monitor = monitor
+        reply = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer alice-key"},
+            json={"model": model, "messages": [{"role": "user", "content": "Hello"}]},
+        )
+
+    assert reply.status_code == 200
+    response_finished.assert_called_once_with()
+
+
+async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) -> dict[str, object]:
+    """Create and run the workflow from a reply that runs on ``active_model_name``."""
+    spec = _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": []}], models=["default-model"])
+    context = replace(
+        _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity()),
+        active_model_name=active_model_name,
+    )
+    with tool_runtime_context(context):
+        created = json.loads(await workflow.tools.acreate_workflow(spec))
+        assert created["status"] == "ok", created
+        return json.loads(await workflow.tools.arun_workflow(workflow_id="review", input={}))
+
+
+@pytest.mark.asyncio
+async def test_over_budget_caller_runs_saved_workflows_on_the_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow that names the caller's priced model keeps working once the caller is over budget."""
+    config = _subagent_workflow_config()
+    _budget(config)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+
+    # The response runner hands tools the budgeted model of the reply.
+    run = await _run_workflow_as(workflow, "luna")
+
+    assert run["status"] == "completed", run
+    assert workflow.models_loaded == ["luna"]
+
+
+def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
+    context = _make_context(tmp_path)
+    _budget_context_config(context.config)
+    context.config.models["opus"] = ModelConfig(
+        provider="anthropic",
+        id="claude-opus-5",
+        pricing=ModelPricing(input=5, output=25),
+    )
+    context = replace(context, active_model_name="luna")
+    spec = _workflow_spec()
+    spec["participants"][0]["model"] = "claude-opus-5"  # type: ignore[index]
+
+    with tool_runtime_context(context):
+        payload = json.loads(DynamicWorkflowTools().create_workflow(spec))
+
+    assert payload["status"] == "error"
+    assert "not allowed by permissions.models" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_crosses_the_cap_still_runs_its_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's reply started on the priced model; its workflow then runs on the fallback."""
+    config = _subagent_workflow_config()
+    _budget(config)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+
+    run = await _run_workflow_as(workflow, "default")
+
+    assert run["status"] == "completed", run
+    assert workflow.models_loaded == ["luna"]

@@ -82,6 +82,8 @@ class DelegationChild:
     # Handling: The dataclass default reads an absent mode as standard, so retained children and follow-ups keep their behavior.
     # Coverage: tests/test_delegation_minimal_mode.py::test_child_snapshot_without_mode_continues_in_standard_mode.
     agent_mode: AgentMode = "standard"
+    # The model the child was asked to use before the requester's budget picked the one it runs on.
+    requested_model_name: str | None = None
     # LEGACY_COMPAT: Delegated children persisted without a persona.
     # Legacy format: Parent delegation state and subagent session records omitted persona; every child ran its configured prompt.
     # Last legacy release: v2026.10.230; replacement: the next release persists each child's authored persona or null.

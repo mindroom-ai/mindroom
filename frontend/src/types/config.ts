@@ -11,6 +11,19 @@ export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
 export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
 export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
 
+export interface ModelPricing {
+  input?: number; // USD per million uncached input tokens (required by the backend)
+  output?: number; // USD per million output tokens (required by the backend)
+  cache_read?: number | null; // Defaults to the input price
+  cache_write?: number | null; // Defaults to the input price
+}
+
+export interface BudgetsConfig {
+  monthly_limit_usd?: number | null; // Default cap per user; unset leaves users uncapped
+  fallback_model: string;
+  users?: Record<string, number>; // Per-user caps overriding the default
+}
+
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
@@ -22,6 +35,7 @@ export interface ModelConfig {
   host?: string; // For ollama
   api_key?: string | null; // Model-specific key from config.yaml
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
+  pricing?: ModelPricing | null; // Used to measure spend against budgets
 }
 
 export interface MemoryConfig {
@@ -319,6 +333,8 @@ export interface VoiceConfig {
 
 export interface Config {
   administrators?: string[];
+  authorization?: { aliases?: Record<string, string[]> }; // Bridge aliases per canonical Matrix user
+  budgets?: BudgetsConfig | null;
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   models: Record<string, ModelConfig>;

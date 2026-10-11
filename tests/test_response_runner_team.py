@@ -15,7 +15,9 @@ from agno.team import Team as AgnoTeam
 
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_storage import get_team_session
-from mindroom.config.models import ModelConfig
+from mindroom.budgets.monitor import BudgetMonitor
+from mindroom.config.budgets import BudgetsConfig
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
@@ -362,6 +364,69 @@ class TestAgentBot(AgentBotTestBase):
         response_kwargs = mock_team_response.await_args.kwargs
         assert response_kwargs["model_name"] == "cheap"
         assert response_kwargs["member_model_names"] == {"calculator": "cheap", "general": "cheap"}
+
+    @pytest.mark.asyncio
+    async def test_over_budget_requester_team_uses_fallback_for_priced_models(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An over-budget requester's team turn swaps every priced coordinator and member model."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        config.models["large"] = ModelConfig(
+            provider="test",
+            id="large-model",
+            pricing=ModelPricing(input=5, output=30),
+        )
+        config.models["local"] = ModelConfig(provider="test", id="local-model")
+        config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+        config.agents["calculator"].model = "large"
+        config.agents["general"].model = "local"
+        config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths,
+            budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
+        )
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        matrix_ids = entity_ids(config, runtime_paths)
+        mock_team_response = AsyncMock(return_value="Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=mock_team_response,
+            ),
+        ):
+            await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+            )
+
+        response_kwargs = mock_team_response.await_args.kwargs
+        assert response_kwargs["model_name"] == "cheap"
+        assert response_kwargs["member_model_names"] == {"calculator": "cheap", "general": "local"}
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_is_complete_before_streaming_check_yields(

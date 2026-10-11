@@ -2,7 +2,7 @@
 
 MindRoom records content-free token usage for agent and team replies and the [helper and internal AI work](#token-usage) listed below, plus call duration for GPT-Live voice calls.
 View it in the dashboard [Usage tab](#dashboard-usage-tab), fetch it over [HTTP](#usage-report-api) for reporting or cost tools, or let agents read it with the [`usage_stats`](#usage_stats) tool.
-Reports show retained usage, not estimated spend or a billing ledger.
+Reports show retained usage, not estimated spend or a billing ledger; to cap spend per user, see [Budgets](https://docs.mindroom.chat/budgets/).
 
 ## Dashboard Usage Tab
 

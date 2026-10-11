@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -276,6 +277,73 @@ def test_reader_keeps_usage_when_run_timestamp_is_unusable(tmp_path: Path, creat
     assert isinstance(row, UsageSessionRow)
     assert row.runs[0].created_at is None
     assert row.runs[0].metrics["total_tokens"] == 20
+
+
+def test_reader_since_skips_older_and_undated_usage_rows(tmp_path: Path) -> None:
+    """A start timestamp limits the read to runs created at or after it."""
+    database = tmp_path / "code.db"
+    september = datetime(2026, 9, 29, tzinfo=UTC).timestamp()
+    october = datetime(2026, 10, 2, tzinfo=UTC).timestamp()
+    _create_database(
+        database,
+        runs=[
+            {**_run(), "run_id": "sept", "created_at": september},
+            {**_run(), "run_id": "oct", "created_at": october},
+            {**_run(), "run_id": "undated", "created_at": None},
+        ],
+    )
+    source = _source(database)
+
+    since = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    rows = [row for row in iter_usage_storage_rows(source, since=since) if isinstance(row, UsageSessionRow)]
+
+    assert [run.run_id for row in rows for run in row.runs] == ["oct"]
+    assert all(row.session_metrics_available is False for row in rows)
+    unfiltered = [row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]
+    assert sorted(run.run_id or "" for row in unfiltered for run in row.runs) == ["oct", "sept", "undated"]
+
+
+def test_reader_since_skips_sessions_without_recent_usage(tmp_path: Path) -> None:
+    """A month scan reads only sessions with usage in range, so its cost follows recent activity."""
+    database = tmp_path / "code.db"
+    _create_database(
+        database,
+        runs=[{**_run(), "run_id": "recent", "created_at": datetime(2026, 10, 2, tzinfo=UTC).timestamp()}],
+    )
+    _insert_runs_row(
+        database,
+        session_id="old-session",
+        runs=[{**_run(), "run_id": "old", "created_at": datetime(2026, 8, 2, tzinfo=UTC).timestamp()}],
+    )
+    source = _source(database)
+
+    since = datetime(2026, 9, 30, tzinfo=UTC).timestamp()
+    rows = [row for row in iter_usage_storage_rows(source, since=since) if isinstance(row, UsageSessionRow)]
+
+    assert [row.row_key for row in rows] == ["session-1"]
+    assert len([row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]) == 2
+
+
+def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_path: Path) -> None:
+    """One corrupt usage row must not hide the rest of the store from a dated read."""
+    database = tmp_path / "code.db"
+    _create_database(
+        database,
+        runs=[{**_run(), "run_id": "recent", "created_at": datetime(2026, 10, 2, tzinfo=UTC).timestamp()}],
+    )
+    source = _source(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO code_sessions_usage (session_id, run_id, usage_data) VALUES (?, ?, ?)",
+            ("session-1", "broken", "{not json"),
+        )
+
+    rows = list(iter_usage_storage_rows(source, since=datetime(2026, 9, 30, tzinfo=UTC).timestamp()))
+
+    (row,) = rows
+    assert isinstance(row, UsageSessionRow)
+    assert [run.run_id for run in row.runs] == ["recent"]
+    assert row.runs_available is False
 
 
 def test_reader_uses_run_table_timestamp_when_dict_payload_omits_it(tmp_path: Path) -> None:

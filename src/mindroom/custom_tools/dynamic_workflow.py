@@ -13,6 +13,7 @@ from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 
 from mindroom.authorization import responder_candidate_entities_from_cached_room
+from mindroom.budgets.monitor import budget_model
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -553,7 +554,7 @@ async def _aexecute_room_agent_participant(
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
-    active_model_name = _runtime_model_name(context, agent_name)
+    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
     session_id = f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
     participant_context = replace(
         context,
@@ -661,6 +662,7 @@ async def _aexecute_subagent_participant(
         config=context.config,
         runtime_paths=context.runtime_paths,
         depth=0,
+        budget_monitor=context.budget_monitor,
         model=request.model,
         agent_mode=request.agent_mode,
         previous=previous,
@@ -990,7 +992,10 @@ def _validate_workflow_policy_for_context(
     if tool_names:
         ensure_tool_registry_loaded(context.runtime_paths, context.config)
         _reject_unavailable_workflow_tools(tool_names)
-    permission_models = _workflow_permission_model_refs(context, permissions.get("models") or [])
+    permission_models = _with_budget_substitutes(
+        context,
+        _workflow_permission_model_refs(context, permissions.get("models") or []),
+    )
     requests: dict[str, PersonaRequest] = {}
     for participant in participants:
         if participant["kind"] == "room_agent":
@@ -1012,6 +1017,27 @@ def _validate_workflow_policy_for_context(
             )
             raise DynamicWorkflowError(msg)
     return requests
+
+
+def _budgeted_model(context: ToolRuntimeContext, model_name: str, *, log_fallback: bool = True) -> str:
+    return budget_model(
+        context.config,
+        context.runtime_paths,
+        context.budget_monitor,
+        context.requester_id,
+        model_name,
+        log_fallback=log_fallback,
+    )
+
+
+def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
+    """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
+    substitutes = {
+        _budgeted_model(context, model_name, log_fallback=False)
+        for model_name in context.config.models
+        if not _model_refs(context, model_name).isdisjoint(model_refs)
+    }
+    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
 
 
 def _runtime_model_name(context: ToolRuntimeContext, agent_name: str) -> str:

@@ -19,6 +19,7 @@ const EXPECTED_ROUTES = [
   ["External", "/unconfigured-rooms"],
   ["Models", "/models"],
   ["Usage", "/usage"],
+  ["Budgets", "/budgets"],
   ["Memory", "/memory"],
   ["Knowledge", "/knowledge"],
   ["Credentials", "/credentials"],

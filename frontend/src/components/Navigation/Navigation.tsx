@@ -17,6 +17,7 @@ import {
   SlidersHorizontal,
   type LucideIcon,
   Users,
+  Wallet,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -70,6 +71,12 @@ export const NAV_ITEMS: NavigationItem[] = [
     value: "usage",
     label: "Usage",
     icon: BarChart3,
+    group: "Configuration",
+  },
+  {
+    value: "budgets",
+    label: "Budgets",
+    icon: Wallet,
     group: "Configuration",
   },
   {

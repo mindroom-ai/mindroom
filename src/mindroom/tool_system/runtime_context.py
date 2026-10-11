@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -72,6 +73,7 @@ class DetachedRequesterContext:
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
     config_provider: Callable[[], Config | None]
+    budget_monitor: BudgetMonitor | None
 
 
 _DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = ContextVar(
@@ -83,6 +85,14 @@ _DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = Conte
 def get_detached_requester_context() -> DetachedRequesterContext | None:
     """Return authority established by the current detached request boundary."""
     return _DETACHED_REQUESTER_CONTEXT.get()
+
+
+def current_budget_monitor() -> BudgetMonitor | None:
+    """Return the spend monitor of the current conversation or detached API request."""
+    if (context := get_tool_runtime_context()) is not None:
+        return context.budget_monitor
+    detached = get_detached_requester_context()
+    return detached.budget_monitor if detached is not None else None
 
 
 @contextmanager
@@ -143,6 +153,11 @@ class ToolRuntimeContext:
     def current_config(self) -> Config:
         """Return the managed runtime's current config or this detached snapshot."""
         return self.config_provider() if self.config_provider is not None else self.config
+
+    @property
+    def budget_monitor(self) -> BudgetMonitor | None:
+        """Return the managed runtime's spend monitor; detached contexts have none."""
+        return self.orchestrator.budgets if self.orchestrator is not None else None
 
     def require_agent_reply_memberships(self) -> AgentReplyMembershipIndex:
         """Return the injected index or reject membership-aware extension work."""

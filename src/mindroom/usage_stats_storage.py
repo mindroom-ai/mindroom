@@ -60,6 +60,10 @@ _REQUIRED_COLUMNS = frozenset(
     {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
 )
 _USAGE_REQUIRED_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
+# Malformed snapshots stay in a dated read, so the reader reports them instead of SQLite failing the whole store.
+_USAGE_SINCE_CONDITION = (
+    "CASE WHEN json_valid(usage_data) THEN json_extract(usage_data, '$.created_at') >= ? ELSE 1 END"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,10 +469,17 @@ def iter_usage_storage_rows(
     source: UsageStorageSource,
     *,
     mode: _UsageReadMode = "runs",
+    since: float | None = None,
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-    """Read independent usage snapshots and optional cumulative session counters without writes."""
+    """Read independent usage snapshots and optional cumulative session counters without writes.
+
+    ``since`` reads only runs created at or after that epoch time and skips session counters,
+    which cover a session's whole history.
+    """
     if mode not in {"runs", "both"}:
         raise ValueError(mode)
+    if since is not None:
+        mode = "runs"
     if not source.path.is_file():
         yield _source_diagnostic(source, "absent", "database absent")
         return
@@ -481,13 +492,23 @@ def iter_usage_storage_rows(
             table = quote_identifier(source.expected_session_table)
             usage_table = f"{source.expected_session_table}_usage"
             has_usage = _table_exists(connection, usage_table)
+            # Session counters cover all history, so a run-only read skips their payload.
+            session_data = "session_data" if mode == "both" else "NULL AS session_data"
             query = (
-                "SELECT session_id, session_type, agent_id, team_id, user_id, session_data "  # noqa: S608
+                f"SELECT session_id, session_type, agent_id, team_id, user_id, {session_data} "  # noqa: S608
                 f"FROM {table}"
             )
-            for row in connection.execute(query):
+            parameters: tuple[object, ...] = ()
+            if since is not None and has_usage:
+                # A dated read visits only sessions with a usage snapshot in range.
+                query += (
+                    f" WHERE session_id IN (SELECT session_id FROM {quote_identifier(usage_table)} "  # noqa: S608
+                    f"WHERE {_USAGE_SINCE_CONDITION})"
+                )
+                parameters = (since,)
+            for row in connection.execute(query, parameters):
                 try:
-                    yield _extract_row(source, row, connection, mode=mode, has_usage=has_usage)
+                    yield _extract_row(source, row, connection, mode=mode, has_usage=has_usage, since=since)
                 except (RecursionError, TypeError, ValueError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
@@ -531,6 +552,7 @@ def _extract_row(
     *,
     mode: _UsageReadMode,
     has_usage: bool,
+    since: float | None,
 ) -> UsageSessionRow:
     entity_kind = row["session_type"]
     if entity_kind not in {"agent", "team"}:
@@ -542,24 +564,18 @@ def _extract_row(
     row_requester = _optional_string(row["user_id"])
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
-    runs: list[UsageRunNode] = []
-    runs_available = has_usage
-    if has_usage:
-        query = (
-            f"SELECT usage_data FROM {quote_identifier(source.expected_session_table + '_usage')} "  # noqa: S608
-            "WHERE session_id = ? ORDER BY id"
+    runs, runs_available = (
+        _read_runs(
+            connection,
+            source,
+            row_key,
+            row_requester=row_requester,
+            include_team_members=source.scope == "team" and entity_kind == "team",
+            since=since,
         )
-        for (payload,) in connection.execute(query, (row_key,)):
-            try:
-                run = _extract_run(
-                    json.loads(payload),
-                    row_requester=row_requester,
-                    include_team_members=source.scope == "team" and entity_kind == "team",
-                )
-                if run is not None:
-                    runs.append(run)
-            except (RecursionError, TypeError, ValueError):
-                runs_available = False
+        if has_usage
+        else ([], False)
+    )
     session_metrics: Mapping[str, _MetricValue] = MappingProxyType({})
     session_model_metrics: tuple[UsageModelMetrics, ...] | None = ()
     session_metrics_available = mode == "both"
@@ -581,6 +597,40 @@ def _extract_row(
         runs_available=runs_available,
         session_metrics_available=session_metrics_available,
     )
+
+
+def _read_runs(
+    connection: sqlite3.Connection,
+    source: UsageStorageSource,
+    session_id: str,
+    *,
+    row_requester: str | None,
+    include_team_members: bool,
+    since: float | None,
+) -> tuple[list[UsageRunNode], bool]:
+    """Read one session's usage snapshots, reporting whether every snapshot was usable."""
+    query = (
+        f"SELECT usage_data FROM {quote_identifier(source.expected_session_table + '_usage')} "  # noqa: S608
+        "WHERE session_id = ?"
+    )
+    parameters: tuple[object, ...] = (session_id,)
+    if since is not None:
+        query += f" AND {_USAGE_SINCE_CONDITION}"
+        parameters = (session_id, since)
+    runs: list[UsageRunNode] = []
+    runs_available = True
+    for (payload,) in connection.execute(query + " ORDER BY id", parameters):
+        try:
+            run = _extract_run(
+                json.loads(payload),
+                row_requester=row_requester,
+                include_team_members=include_team_members,
+            )
+            if run is not None:
+                runs.append(run)
+        except (RecursionError, TypeError, ValueError):
+            runs_available = False
+    return runs, runs_available
 
 
 def _decode_session_usage(

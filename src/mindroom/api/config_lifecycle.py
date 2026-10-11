@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config_reload import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -132,6 +133,7 @@ class _MindroomAppState:
     external_trigger_runtime: ExternalTriggerRuntime | None = None
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
+    budget_monitor: BudgetMonitor | None = None
     openai_responses: set[ResponseIdentity] = field(default_factory=set)
     active_calls: Callable[[], list[ResponseIdentity]] | None = None
     active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None

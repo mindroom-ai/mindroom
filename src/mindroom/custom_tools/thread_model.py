@@ -7,6 +7,7 @@ from typing import Literal
 from agno.tools import Toolkit
 
 from mindroom.authorization import addressable_responder_names
+from mindroom.budgets.monitor import budget_model
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.thread_models import (
     clear_thread_model_override,
@@ -138,6 +139,40 @@ class ThreadModelTools(Toolkit):
             entity_names=self._addressable_entities(context),
             config=context.config,
         )
+        budgeted_model_name = budget_model(
+            context.config,
+            context.runtime_paths,
+            context.budget_monitor,
+            context.requester_id,
+            model_name,
+            # Only a switch for the current response chooses a reply model now.
+            log_fallback=when == "after-toolcall",
+        )
+        if when == "after-toolcall" and budgeted_model_name != model_name:
+            model = context.config.models[budgeted_model_name]
+            return self._payload(
+                "ok",
+                action="switch",
+                thread_id=thread_id,
+                model=budgeted_model_name,
+                requested_model=model_name,
+                provider=model.provider,
+                model_id=model.id,
+                when=when,
+                note=(
+                    f"The requester's monthly budget is used up, so the current response continues with "
+                    f"`{budgeted_model_name}`; `{model_name}` stays selected for this thread."
+                ),
+            )
+        if when == "after-toolcall":
+            note = "The current response will continue with the new model after this tool call."
+        elif budgeted_model_name != model_name:
+            note = (
+                "The new model applies from the next message in this thread, but the requester's monthly budget "
+                f"is used up, so replies use `{budgeted_model_name}` until it resets."
+            )
+        else:
+            note = "The new model applies from the next message in this thread."
         model = context.config.models[model_name]
         return self._payload(
             "ok",
@@ -147,11 +182,7 @@ class ThreadModelTools(Toolkit):
             provider=model.provider,
             model_id=model.id,
             when=when,
-            note=(
-                "The current response will continue with the new model after this tool call."
-                if when == "after-toolcall"
-                else "The new model applies from the next message in this thread."
-            ),
+            note=note,
         )
 
     async def reset_thread_model(self) -> str:

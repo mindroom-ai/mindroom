@@ -54,7 +54,11 @@ describe("ModelConfig", () => {
     config: {
       models: {
         default: { provider: "ollama", id: "devstral-small-2:24b" },
-        anthropic: { provider: "anthropic", id: "claude-haiku-4-5" },
+        anthropic: {
+          provider: "anthropic",
+          id: "claude-haiku-4-5",
+          pricing: { input: 1, output: 5 },
+        },
         openrouter: { provider: "openrouter", id: "z-ai/glm-5.3" },
         openrouter_backup: {
           provider: "openrouter",
@@ -207,6 +211,8 @@ describe("ModelConfig", () => {
         expect.objectContaining({
           provider: "anthropic",
           id: "claude-sonnet-5",
+          // Budget prices are edited on the Budgets page and survive row edits.
+          pricing: { input: 1, output: 5 },
         }),
       );
       expect(mockStore.deleteModel).toHaveBeenCalledWith("anthropic");
@@ -500,7 +506,11 @@ describe("ModelConfig", () => {
     await waitFor(() => {
       expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
         ["models", "keyed"],
-        { provider: "openai", id: "gpt-6-astra", api_key: "sk-openai-config" },
+        {
+          provider: "openai",
+          id: "gpt-6-astra",
+          api_key: "sk-openai-config",
+        },
       );
     });
     expect(deleteCallsFor("model:keyed")).toHaveLength(0);

@@ -650,6 +650,41 @@ def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict
     return normalized
 
 
+class ModelPricing(BaseModel):
+    """Provider prices in USD per million tokens."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: float = Field(ge=0, allow_inf_nan=False, description="USD per million uncached input tokens")
+    output: float = Field(
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million output tokens, including reasoning tokens",
+    )
+    cache_read: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million cache-read input tokens; unset uses the input price",
+    )
+    cache_write: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million cache-write input tokens; unset uses the input price",
+    )
+
+    @property
+    def cache_read_price(self) -> float:
+        """Return the cache-read price, charging the input price when none is set."""
+        return self.input if self.cache_read is None else self.cache_read
+
+    @property
+    def cache_write_price(self) -> float:
+        """Return the cache-write price, charging the input price when none is set."""
+        return self.input if self.cache_write is None else self.cache_write
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -694,6 +729,10 @@ class ModelConfig(BaseModel):
             "stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their "
             "built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit"
         ),
+    )
+    pricing: ModelPricing | None = Field(
+        default=None,
+        description="Provider prices in USD per million tokens, used to measure spend against budgets",
     )
 
     @field_validator("display_name")

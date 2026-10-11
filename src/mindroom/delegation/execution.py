@@ -73,7 +73,7 @@ from mindroom.tool_system.output_files import (
     normalize_output_path_argument,
     prepare_tool_output_file,
 )
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
@@ -957,6 +957,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             config=config,
             runtime_paths=runtime_paths,
             depth=delegation_depth,
+            budget_monitor=current_budget_monitor(),
             model=model,
             agent_mode=target.agent_mode,
             previous=target.previous_child,
