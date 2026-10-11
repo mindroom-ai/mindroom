@@ -516,6 +516,9 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             try:
                 check_current_execution_authority()
             except JobAccessError as error:
+                if job_owns_execution():
+                    # A job whose grant no longer covers its nested call fails as a whole.
+                    raise
                 # Access changed after the call was offered, as a reload that removed its toolkit does: the call
                 # fails, not the reply's run.
                 return _failed_call(call, error)
