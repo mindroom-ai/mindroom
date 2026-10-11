@@ -1318,6 +1318,53 @@ async def test_a_stop_during_admission_stops_the_job_it_admits(
 
 
 @pytest.mark.asyncio
+async def test_a_call_whose_access_resolves_during_its_wait_returns_its_handle(tmp_path: Path) -> None:
+    """A call that ran while its requester's access re-resolved returns its job handle, so the model never repeats it.
+
+    The job stays held, so the reply waits for it and a wake delivers its result once the access resolves.
+    """
+    grant = {"access": "allowed"}
+    ran: list[str] = []
+
+    async def pay() -> str:
+        ran.append("paid")
+        # A membership refresh starts while the call runs.
+        grant["access"] = "pending"
+        return "paid"
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(
+        tmp_path,
+        authorize=lambda _job: grant["access"] == "allowed",
+        denied=lambda _job: False,
+    )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("pay", "pay-call")]), ModelResponse(content="done")],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[assembled_function(pay)])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                response = await agent.arun("Pay", session_id=context.session_id)
+        assert response.tools is not None
+        [tool] = response.tools
+        assert ran == ["paid"]
+        assert not tool.tool_call_error
+        handle = json.loads(str(tool.result))
+        assert handle["tool"] == "pay"
+        await wait_for_status(runtime, handle["job_id"], "completed")
+        # Its outcome stays unconsumed for the wake.
+        assert not runtime._entries[handle["job_id"]].job.consumed
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("refusal", ["start", "authority"])
 async def test_a_refused_job_fails_its_call_not_the_reply(
     tmp_path: Path,

@@ -253,6 +253,18 @@ def register_background_runtime(runtime_paths: RuntimePaths, runtime: ToolJobRun
     instance.runtime = runtime
 
 
+def _approval_deadline(
+    job: BackgroundJob,
+    approval_timeout: float | None,
+    current: float | None,
+    now: float,
+) -> float | None:
+    """Return when a wait stops waiting for the job's approval: the whole allowance from each ask it sees."""
+    if job.status != "awaiting_approval" or approval_timeout is None:
+        return None
+    return now + approval_timeout if current is None else current
+
+
 class ToolJobRuntime:
     """Keep tool execution alive while individual foreground waiters come and go."""
 
@@ -326,6 +338,24 @@ class ToolJobRuntime:
         if entry is None or not self._visible(entry, owner, depth):
             raise JobAccessError(_UNAVAILABLE)
         return entry
+
+    def _waited_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> tuple[_Entry, bool]:
+        """Return a job its caller may wait on, and whether its outcome is readable now.
+
+        Only an unknown or foreign job, or a proven denial, refuses the wait; while the caller's access still
+        resolves, as after a membership refresh, the job stays held, so the wait is released instead of failing a
+        call that may have run.
+        """
+        self._ensure_open()
+        entry = self._entries.get(job_id)
+        if (
+            entry is None
+            or not owner.session_id
+            or (entry.job.owner, entry.job.depth) != (self._canonical_owner(owner), depth)
+            or self._denied(entry.job)
+        ):
+            raise JobAccessError(_UNAVAILABLE)
+        return entry, self._authorize(entry.job)
 
     async def _publish(
         self,
@@ -445,8 +475,9 @@ class ToolJobRuntime:
                 # Native adapters mutate this exact mapping; owns_execution verifies its identity.
                 adapter=adapter,
             )
+            readable = True
             if reattach and job_id in self._entries:
-                entry = self._entry(job_id, owner, depth)
+                entry, readable = self._waited_entry(job_id, owner, depth)
                 if _ADMITTED_OPERATION(entry.job) != _ADMITTED_OPERATION(job):
                     raise JobAccessError(_UNAVAILABLE)
             else:
@@ -458,7 +489,7 @@ class ToolJobRuntime:
                 entry = _Entry(job, cancel=cancel)
                 await run_coroutine_until_complete(self._admit(entry, job, operation))
             snapshot = await self._snapshot(entry)
-            return snapshot, entry.claim_for(None)
+            return snapshot, entry.claim_for(None) if readable else None
 
     async def _admit(self, entry: _Entry, job: BackgroundJob, operation: _Operation) -> None:
         """Publish accepted ownership, then launch it; callers finish this before propagating cancellation."""
@@ -567,8 +598,8 @@ class ToolJobRuntime:
         approval_deadline: float | None = None
         retained = False
         async with self._lock:
-            entry = self._entry(job_id, owner, depth)
-            claim = entry.claim_for(claim)
+            entry, readable = self._waited_entry(job_id, owner, depth)
+            claim = entry.claim_for(claim) if readable else None
             if claim is None:
                 return _JobWait(await self._snapshot(entry))
             turn_queued = asyncio.Event()
@@ -584,7 +615,9 @@ class ToolJobRuntime:
         try:
             while True:
                 async with self._lock:
-                    self._entry(job_id, owner, depth)
+                    _, readable = self._waited_entry(job_id, owner, depth)
+                    if not readable:
+                        return _JobWait(await self._snapshot(entry))
                     if entry.job.status in TERMINAL_STATUSES:
                         # A released claim can be taken again unless another waiter has claimed the outcome since.
                         claim = entry.claim_for(claim)
@@ -592,14 +625,9 @@ class ToolJobRuntime:
                         retained = claim is not None
                         return _JobWait(snapshot, claim)
                     now = asyncio.get_running_loop().time()
-                    remaining = None if deadline is None else deadline - now
-                    if entry.job.status != "awaiting_approval" or approval_timeout is None:
-                        approval_deadline = None
-                    else:
-                        # Each approval the job asks for gets the whole allowance.
-                        approval_deadline = now + approval_timeout if approval_deadline is None else approval_deadline
-                        approval_remaining = approval_deadline - now
-                        remaining = approval_remaining if remaining is None else min(remaining, approval_remaining)
+                    approval_deadline = _approval_deadline(entry.job, approval_timeout, approval_deadline, now)
+                    ends = [end for end in (deadline, approval_deadline) if end is not None]
+                    remaining = min(ends) - now if ends else None
                     if turn_queued.is_set() or (remaining is not None and remaining <= 0):
                         return _JobWait(await self._snapshot(entry))
                     changed = entry.changed

@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import QueuedTurnSignal, job_checkpoint, queued_turn_signal_context
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
-from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, ToolJobRuntime
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     backdate_job,
@@ -44,6 +44,51 @@ async def test_wait_rejects_unrepresentable_timeout_before_lookup(tmp_path: Path
         with pytest.raises(ValueError, match="finite"):
             await runtime.wait("unknown", owner=job_owner(), depth=0, timeout=10**400)
     finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", ["pending", "denied"])
+async def test_a_wait_whose_access_is_still_resolving_is_released_not_refused(
+    tmp_path: Path,
+    access: Literal["pending", "denied"],
+) -> None:
+    """While a grant only resolves, the job stays held, so its wait returns its handle; a proven denial refuses it."""
+    grant = {"access": "allowed"}
+    runtime = await tool_job_runtime(
+        tmp_path,
+        authorize=lambda _job: grant["access"] == "allowed",
+        denied=lambda _job: grant["access"] == "denied",
+    )
+    owner = job_owner()
+    finish = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "paid")
+
+    try:
+        _, claim = await runtime.start("job-1", tool_name="pay", depth=0, adapter={}, owner=owner, operation=operation)
+        waiting = asyncio.create_task(runtime.wait("job-1", owner=owner, depth=0, claim=claim))
+        await asyncio.sleep(0)
+        grant["access"] = access
+        finish.set()
+        await wait_for_status(runtime, "job-1", "completed")
+        if access == "denied":
+            with pytest.raises(JobAccessError):
+                await waiting
+            return
+        waited = await waiting
+        assert waited.claim is None
+        assert waited.job.status == "completed"
+        assert not waited.job.consumed
+        # Once the grant resolves, the outcome is still there to retrieve.
+        grant["access"] = "allowed"
+        retrieved = await runtime.wait("job-1", owner=owner, depth=0)
+        assert retrieved.claim is not None
+        await runtime.release_wait("job-1", retrieved.claim)
+    finally:
+        finish.set()
         await runtime.shutdown()
 
 
