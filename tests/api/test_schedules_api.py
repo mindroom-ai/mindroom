@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
+from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
 
 
 def _task(

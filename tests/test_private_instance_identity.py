@@ -10,15 +10,15 @@ from threading import Barrier, Thread
 
 import pytest
 
-from mindroom import private_instance_identity_store
-from mindroom.private_instance_identity import (
+from mindroom.private_storage import private_instance_identity_store
+from mindroom.private_storage.private_instance_identity import (
     PrivateInstance,
     PrivateInstanceIdentity,
     PrivateInstanceIdentityError,
     load_private_instance_identity,
     private_instances_for_agent,
 )
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 
 

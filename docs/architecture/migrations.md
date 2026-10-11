@@ -37,18 +37,18 @@ rg -n -F 'LEGACY_COMPAT:' --glob '*.py'
 | Boundary | Trigger and current caller | Retained guarantees |
 | --- | --- | --- |
 | [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
-| `src/mindroom/legacy_usage_storage.py` | Startup or direct storage opening finds a session database without an independent usage table. | Import only retained facts, publishing the table and seed atomically; current reporting never reads old run representations. |
-| `src/mindroom/legacy_usage_storage.py` | A retained request snapshot has no model or provider fields; current single-model compaction snapshots also use this shape. | Inherit a single known run model only when every request counter reconciles with the run and per-model totals; ambiguous mixed-model history remains unavailable. |
+| `src/mindroom/usage/legacy_usage_storage.py` | Startup or direct storage opening finds a session database without an independent usage table. | Import only retained facts, publishing the table and seed atomically; current reporting never reads old run representations. |
+| `src/mindroom/usage/legacy_usage_storage.py` | A retained request snapshot has no model or provider fields; current single-model compaction snapshots also use this shape. | Inherit a single known run model only when every request counter reconciles with the run and per-model totals; ambiguous mixed-model history remains unavailable. |
 | [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion or initial usage migration encounters an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, and diagnostics remain with current owners. |
-| [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `openai_response_replay.py`. |
-| `src/mindroom/legacy_tool_credentials.py` | Primary or standalone API startup finds no receipt in the primary credential directory. | Only a `verify_ssl: false` in a `daytona` document is dropped, from the primary and every existing worker store, through the credential store's no-follow reads, encryption policy, and atomic writes; a lock beside the receipt serializes starting processes, the receipt keeps a later deliberate `false`, and it is withheld while any stored document is unreadable. |
-| `src/mindroom/legacy_tool_credentials.py` | Primary or standalone API startup finds no worker-copy receipt in the primary credential directory. | Documents of built-in tools that require the primary runtime or room context are deleted, unread, from every existing worker's own store through a no-follow directory descriptor; primary stores and worker shared-credential mirrors are kept, and the receipt is withheld while any worker store cannot be inspected or cleaned. |
+| [`src/mindroom/providers/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `providers/openai_response_replay.py`. |
+| `src/mindroom/credentials/legacy_tool_credentials.py` | Primary or standalone API startup finds no receipt in the primary credential directory. | Only a `verify_ssl: false` in a `daytona` document is dropped, from the primary and every existing worker store, through the credential store's no-follow reads, encryption policy, and atomic writes; a lock beside the receipt serializes starting processes, the receipt keeps a later deliberate `false`, and it is withheld while any stored document is unreadable. |
+| `src/mindroom/credentials/legacy_tool_credentials.py` | Primary or standalone API startup finds no worker-copy receipt in the primary credential directory. | Documents of built-in tools that require the primary runtime or room context are deleted, unread, from every existing worker's own store through a no-follow directory descriptor; primary stores and worker shared-credential mirrors are kept, and the receipt is withheld while any worker store cannot be inspected or cleaned. |
 | `src/mindroom/api/credentials_target.py` | A dashboard delete of a scoped tool's settings, which the primary now owns. | The worker copy an older dashboard saved is deleted along with the primary copy, through the same credential store delete. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
 | [`src/mindroom/event_journal/legacy_response_attempts.py`][legacy-response-attempts] | Backend startup finds `approval_continuations` without `span_id`, before the schema statements run. | An upgrade cannot rule out a pending approval, so one schema transaction cancels every continuation: it deletes the continuation with its calls and cards and settles its sources unanswered, leaving its reply's Matrix message as it was, then drops `response_attempts`, `response_attempt_sources`, `approval_continuation_sources`, the continuation's `entity_name` column, and the emptied `approval_continuation_calls`, which the schema recreates with its `toolkit_name` and `arguments_digest` columns; a second open does not repeat the upgrade. |
 | [`src/mindroom/legacy_delivery_payloads.py`][legacy-delivery] | Outbox reads or Matrix writes encounter inline FINAL results and the bounded marker. | Old inline outcomes keep rolling-writer precedence, current local results remain authoritative otherwise, and full recovery data stays off the wire. |
-| [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | An approval card names its call only through the older `tool_call_id` field. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
+| [`src/mindroom/approval/legacy_approval_payloads.py`][legacy-approval] | An approval card names its call only through the older `tool_call_id` field. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
 | [`src/mindroom/matrix/legacy_sync_continuity.py`][legacy-sync] | `SyncContinuityStore` loads a valid v2 or v3 record. | The helper validates the old shape, discards its checkpoint, increments revision once, and lets the store rewrite v4 under lock. |
 | [`src/mindroom/external_triggers/legacy_replay_store.py`][legacy-replay-store] | An external trigger replay call finds the shared `external_triggers/replay.json`, including one written before thread keys existed. | The helper splits the file by replay scope and supplies an empty `threads` section; `ExternalTriggerReplayStore` validates every record before writing one current file per scope, deletes the old file under its lock, and fails closed on a malformed one. |
 | [`src/mindroom/script_runs/legacy_schema.py`][script-legacy-schema] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
@@ -61,9 +61,9 @@ rg -n -F 'LEGACY_COMPAT:' --glob '*.py'
 | [`src/mindroom/legacy_revision_replay.py`][legacy-revision-replay] | Turn-record merges and redaction lookups encounter reconstructed revision provenance from pre-v2026.9.43 summaries. | Current revision facts win, storage mutation stays in `history/storage.py`, and `TurnStore.redacted_history_events` reports a redacted revision with its source only for labeled historical replay. |
 | [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, or the outbox lacks reply identity and the `edit` stage. | Journals from before Nio ownership keep their history and completed turns, while their unfinished requests, deliveries, and approvals are dropped and do not resume. |
 | [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
-| [`src/mindroom/legacy_private_storage.py`][private-legacy], [`legacy_private_storage_aliases.py`][private-legacy-aliases], and [`private_storage_paths.py`][private-paths] | Startup without the `tracking/private_storage_migrated.json` receipt finds a verified private scope with the historical requester spelling. | Intent records, owner and inode checks, worker quiescence, ordered renames, and verified aliases protect recovery and current callers. Sandbox runners can write `private_instances`, so an entry there whose evidence is invalid stays untouched with a warning instead of stopping startup, including an interrupted move whose session mirror is missing or whose configured roots changed; only unexpected entries in a separate session root and checks across all pending moves, such as a missing volume, still stop startup. The receipt, written once a start finishes every verified move, keeps later starts from scanning `private_instances` again, so an entry left untouched is retried only after the operator restores what it needs and deletes `tracking/private_storage_migrated.json`. |
+| [`src/mindroom/private_storage/legacy_private_storage.py`][private-legacy], [`private_storage/legacy_private_storage_aliases.py`][private-legacy-aliases], and [`private_storage/alias_paths.py`][private-paths] | Startup without the `tracking/private_storage_migrated.json` receipt finds a verified private scope with the historical requester spelling. | Intent records, owner and inode checks, worker quiescence, ordered renames, and verified aliases protect recovery and current callers. Sandbox runners can write `private_instances`, so an entry there whose evidence is invalid stays untouched with a warning instead of stopping startup, including an interrupted move whose session mirror is missing or whose configured roots changed; only unexpected entries in a separate session root and checks across all pending moves, such as a missing volume, still stop startup. The receipt, written once a start finishes every verified move, keeps later starts from scanning `private_instances` again, so an entry left untouched is retried only after the operator restores what it needs and deletes `tracking/private_storage_migrated.json`. |
 | `src/mindroom/legacy_state_root_records.py` | Primary or standalone API startup without the `tracking/state_root_records_moved.json` receipt finds invited-room, pending-invite, personal-room, or conversation-mode records inside `agents/` or `private_instances/`. | Each old file is read without following links or blocking; a valid one is copied below `tracking/` at the same relative path unless a record already exists there and is then removed, anything else stays in place with a warning, and the receipt stops later starts from reading the worker-mounted locations again. An invalid old invited-room ledger is not adopted, so that entity leaves the rooms it kept on its first room pass after the upgrade. |
-| `src/mindroom/private_instance_identity_store.py` | A requester's turn finds its private scope's owner record without the primary's copy below `tracking/`, because the scope was created or last used before that copy existed. | The matching record is copied below `tracking/` at the scope's relative path; until then the thread exporter gives that instance no target and clears its export tree, so an owner record planted in `private_instances` never gains a copy unless its requester uses the agent. |
+| `src/mindroom/private_storage/private_instance_identity_store.py` | A requester's turn finds its private scope's owner record without the primary's copy below `tracking/`, because the scope was created or last used before that copy existed. | The matching record is copied below `tracking/` at the scope's relative path; until then the thread exporter gives that instance no target and clears its export tree, so an owner record planted in `private_instances` never gains a copy unless its requester uses the agent. |
 | `src/mindroom/delegation/records.py` | A delegation record operation finds the record's workspace directory but no state below `tracking/`, because the record started before records kept their state there. | The operation returns without reading or writing the workspace files, so the delegation still settles and its record keeps what it held at the upgrade; a record found in neither place still fails as missing. |
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership. |
@@ -90,10 +90,10 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J7 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old approval transport and continuations rather than converting or tombstoning them. |
 | J8 | Isolated | [`legacy_delivery_payloads.py`][legacy-delivery] owns inline FINAL results, precedence, markers, and wire sanitation. |
 | J9 | Removed/superseded | A continuation's origin and the rest of its context are always the native snapshot: the [continuation upgrade][legacy-response-attempts] cancels every approval an earlier release left, so nothing rebuilds historical optional context. |
-| J10 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] owns the old card ID alias; [`approval_manager.py`][approval-manager] keeps current authentication, retries, tombstones, and fail-closed behavior. |
+| J10 | Isolated | [`approval/legacy_approval_payloads.py`][legacy-approval] owns the old card ID alias; [`approval/manager.py`][approval-manager] keeps current authentication, retries, tombstones, and fail-closed behavior. |
 | J11 | Isolated | [`matrix/legacy_sync_continuity.py`][legacy-sync] converts valid v2/v3 join fences to current v4. |
 | J12 | Removed/superseded | [The upgrade fixture][pre-journal-test] confirms old event-cache and dispatch-obligation files have no runtime reader and remain untouched. |
-| J13 | Current behavior | [`event_journal_open.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
+| J13 | Current behavior | [`event_journal/opening.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
 | J14 | Current behavior | Reply claims in [`reply_lifecycle.py`][reply-lifecycle] decide replays and retried regenerations; [`visible_response_reconciliation.py`][visible-recovery] keeps visible-response safety. |
 | J15 | Removed/superseded | No approval stranded by historical INITIAL retirement survives: the [continuation upgrade][legacy-response-attempts] cancels every approval an earlier release left, and current retirement never retires an acknowledged INITIAL. |
 | J16 | Current behavior | [`turn_store.py`][turn-store] does not migrate ledger tombstones that carry no room, so one that v2026.10.30 or earlier wrote for a redaction delivered in another room still marks its event handled and blocks replies in threads that contain it until ledger retention drops it. |
@@ -116,11 +116,11 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S6 | Tiny retained default | [`memory/auto_flush.py`][auto-flush] discards two retired location fields while current worker identity sanitation and queue defaults remain. |
 | S7 | Removed/superseded | [`memory/functions.py`][memory-functions] no longer contains or exports the monolithic memory-prompt wrapper. |
 | S8 | Current behavior | [`ai_runtime.py`][ai-runtime] supports string input and deep-copies canonical message sequences for retries. |
-| S9 | Isolated | [`legacy_openai_tool_replay.py`][legacy-openai] repairs old stored calls; current sparse-stream filtering stays in the adapters. |
+| S9 | Isolated | [`providers/legacy_openai_tool_replay.py`][legacy-openai] repairs old stored calls; current sparse-stream filtering stays in the adapters. |
 | S10 | Current behavior | [`agent_storage.py`][agent-storage] and [`history/replay.py`][history-replay] own the current prompt persistence and replay boundary. |
 | S11 | Removed/superseded | [`thread_export/storage.py`][thread-export] refuses populated markerless roots and marks only empty roots. |
 | S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file`. |
-| S13 | Tiny retained default | [`scheduling.py`][scheduling] treats missing `history_limit` as the current `None` default. |
+| S13 | Tiny retained default | [`scheduling/tasks.py`][scheduling] treats missing `history_limit` as the current `None` default. |
 | S14 | Isolated | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1; [`history/legacy_compaction_state.py`][legacy-compaction-state] migrates, once when the conversation database opens, state written before compacted runs were archived. |
 | S15 | Current behavior | [`knowledge/candidate_checkpoint.py`][candidate-checkpoint] rebuilds unknown versions and retains current torn-tail recovery. |
 | S16 | Isolated | [`external_triggers/store.py`][trigger-store] and [`external_triggers/replay_store.py`][replay-store] own current validation and replay deduplication; [`external_triggers/legacy_replay_store.py`][legacy-replay-store] splits the shared replay file into per-scope files and supplies an empty `threads` map when that section is absent. |
@@ -132,7 +132,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] parses a todo item without `requester_id` but never pokes it, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
 | S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 | S24 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained subagent without `agent_mode` as standard, so delegations saved before minimal subagents continue unchanged. |
-| S25 | Tiny retained default | [`scheduling.py`][scheduling] reads a scheduled workflow without `pre_approved_call` as an ordinary task, since no task saved before scheduled tool calls carried a call approval. |
+| S25 | Tiny retained default | [`scheduling/tasks.py`][scheduling] reads a scheduled workflow without `pre_approved_call` as an ordinary task, since no task saved before scheduled tool calls carried a call approval. |
 | S26 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained subagent without `persona` as a configured-agent child, so delegations saved before authored subagents continue with their configured prompt. |
 | S27 | Isolated | [`dynamic_workflows/legacy_participants.py`][workflow-legacy-participants] reads a saved revision's `ephemeral_agent` participants as `subagent` participants, rendering name, role, and instructions into `system_prompt` and keeping absent tools as none; the next `update_workflow()` writes the current format. |
 | S28 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained authored persona without `skills` as having none, matching the releases since v2026.10.236 that ran authored subagents without skills. |
@@ -159,11 +159,11 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C16 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads device pair sessions persisted before requester addresses were recorded with no address, which the approval page shows as unknown. |
 | C17 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] still registers the agent password that released clients send to register-agent, instead of generating a one-time password, until no paired installs run a release older than the first release containing #2428. |
 | C18 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] imports the single `state.json` that earlier versions rewrote on every change into its SQLite state database once, on the first start with a new database, and opens the database beside a state path that still names the `.json` file; the import stays in the script because the service deploys as one standalone file. |
-| A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
-| A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
-| A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
-| A4 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current inline, named, embedder, and shared OpenAI credential sources. |
-| A5 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current provider aliases and `NAME` or `NAME_FILE` secrets. |
+| A1 | Current behavior | [`credentials/manager.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
+| A2 | Current behavior | [`credentials/sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
+| A3 | Current behavior | [`credentials/manager.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
+| A4 | Current behavior | [`credentials/sync.py`][credentials-sync] supports current inline, named, embedder, and shared OpenAI credential sources. |
+| A5 | Current behavior | [`credentials/sync.py`][credentials-sync] supports current provider aliases and `NAME` or `NAME_FILE` secrets. |
 | A6 | Tiny retained default | [`workers/backends/kubernetes_resources.py`][kubernetes-resources] nulls the credential encryption key entries that earlier releases stored in Kubernetes worker auth Secrets whenever it applies or cleans up a worker's Secret entry. |
 
 ## OAuth, Matrix state, and tools
@@ -232,13 +232,13 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
 [ai-runtime]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/ai_runtime.py
 [api-oauth]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/oauth.py
-[approval-manager]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_manager.py
+[approval-manager]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval/manager.py
 [attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/attachments.py
 [auto-flush]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/auto_flush.py
 [brandfetch]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/brandfetch.py
 [candidate-checkpoint]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/candidate_checkpoint.py
 [cancellation]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cancellation.py
-[claude-compat]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/claude_compat.py
+[claude-compat]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/providers/claude_compat.py
 [cli-migrate]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cli/migrate.py
 [cli-owner]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cli/owner.py
 [client-chart]: https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/client
@@ -248,8 +248,8 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [config-memory]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/memory.py
 [config-models]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/models.py
 [constants]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/constants.py
-[credentials]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/credentials.py
-[credentials-sync]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/credentials_sync.py
+[credentials]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/credentials/manager.py
+[credentials-sync]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/credentials/sync.py
 [crypto-upgrade]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_crypto_upgrade.py
 [desktop-legacy-journal]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/legacy_command_journal.py
 [desktop-protocol]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/protocol.py
@@ -259,7 +259,7 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [history-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/replay.py
 [history-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/storage.py
 [invited-rooms]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/invited_rooms_store.py
-[journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal_open.py
+[journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/opening.py
 [journal-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_schema.py
 [knowledge-collections]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/collections.py
 [knowledge-git-source]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/git_source.py
@@ -271,13 +271,13 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
-[legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
+[legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval/legacy_approval_payloads.py
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-docker-worker-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_docker_worker_metadata.py
 [legacy-state-root-mounts]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_state_root_mounts.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
-[legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_openai_tool_replay.py
+[legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/providers/legacy_openai_tool_replay.py
 [legacy-session]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_session_storage.py
 [legacy-sync]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_sync_continuity.py
 [legacy-turn-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_turn_records.py
@@ -295,9 +295,9 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [oauth-providers]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/providers.py
 [plugin-imports]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/plugin_imports.py
 [pre-journal-test]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_upgrade_from_pre_journal_storage.py
-[private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
-[private-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage.py
-[private-paths]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_paths.py
+[private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage/legacy_private_storage_aliases.py
+[private-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage/legacy_private_storage.py
+[private-paths]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage/alias_paths.py
 [provisioning-service]: https://github.com/mindroom-ai/mindroom/blob/main/scripts/local_mindroom_provisioning_service.py
 [python-tools]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/python.py
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
@@ -305,8 +305,8 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
 [reply-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/reply_lifecycle.py
 [saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
-[scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
-[scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
+[scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling/scheduled_run_records.py
+[scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling/tasks.py
 [delegation-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/delegation/state.py
 [workflow-legacy-participants]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/dynamic_workflows/legacy_participants.py
 [script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
@@ -328,7 +328,7 @@ See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limit
 [tool-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/metadata.py
 [tool-legacy-overrides]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/legacy_tool_overrides.py
 [trigger-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/store.py
-[usage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/usage_stats_storage.py
+[usage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/usage/stats_storage.py
 [visible-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/visible_response_reconciliation.py
 [worker-compat]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/compatibility.py
 [workflow-api]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/dynamic_workflows.py

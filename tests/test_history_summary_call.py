@@ -387,7 +387,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
         capture_logs() as logs,

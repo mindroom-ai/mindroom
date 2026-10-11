@@ -12,8 +12,8 @@ from agno.models.message import Message
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.hooks.enrichment import render_transient_context
-from mindroom.model_loading import get_model_instance
-from mindroom.openai_models import MindRoomOpenRouter
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.openai_models import MindRoomOpenRouter
 from mindroom.system_prompt import render_session_context
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 

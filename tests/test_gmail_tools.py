@@ -21,7 +21,7 @@ from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.main import Config
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider

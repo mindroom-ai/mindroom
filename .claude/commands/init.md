@@ -86,7 +86,7 @@ Read and understand the MindRoom project structure:
    - `src/mindroom/routing.py` - Agent routing logic
    - `src/mindroom/conversation_resolver.py` - Conversation and delivery-target resolution
    - `src/mindroom/turn_policy.py` - Participation and response decisions
-   - `src/mindroom/scheduling.py` - Task scheduling
+   - `src/mindroom/scheduling/tasks.py` - Task scheduling
    - `src/mindroom/background_tasks.py` - Background task management
    - `src/mindroom/memory/` - Memory persistence system
    - `src/mindroom/tools/` - 100+ tool integrations

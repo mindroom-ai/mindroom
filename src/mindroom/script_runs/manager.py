@@ -44,7 +44,7 @@ from mindroom.script_runs.reasons import (
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptCancel, WorkerScriptStatus
-from mindroom.shell_supervisor import (
+from mindroom.shell.supervisor import (
     background_script_supervision_supported,
     check_command_via_supervisor,
     ensure_shell_supervisor,

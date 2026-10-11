@@ -35,11 +35,11 @@ from mindroom.api.credentials_target import (
     save_credentials_for_target,
     target_primary_owns_tool_settings,
 )
-from mindroom.credential_policy import credential_service_policy, is_oauth_token_service
-from mindroom.credentials import list_worker_grantable_shared_services, validate_service_name
-from mindroom.credentials_sync import canonical_provider_service, resolve_provider_service_api_key
-from mindroom.embedder_health import handle_embedder_credential_change
-from mindroom.embedding_factory import embedder_client_signature
+from mindroom.credentials.manager import list_worker_grantable_shared_services, validate_service_name
+from mindroom.credentials.policy import credential_service_policy, is_oauth_token_service
+from mindroom.credentials.sync import canonical_provider_service, resolve_provider_service_api_key
+from mindroom.embeddings.embedder_health import handle_embedder_credential_change
+from mindroom.embeddings.factory import embedder_client_signature
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 
 if TYPE_CHECKING:

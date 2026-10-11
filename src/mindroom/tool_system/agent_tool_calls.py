@@ -19,8 +19,8 @@ from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
+from mindroom.agent_cli.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
-from mindroom.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.agno_compat_prepared_tools import OwnedAgentFunctionCall, prepare_agent_tools, temporary_tool_instructions
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream

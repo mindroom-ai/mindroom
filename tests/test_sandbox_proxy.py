@@ -55,7 +55,7 @@ from mindroom.constants import (
     shell_extra_env_values,
     subprocess_path_with_prepends,
 )
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES

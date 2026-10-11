@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
+from mindroom.browser.fetch_guard import continue_or_abort_browser_fetch
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.declarations import (

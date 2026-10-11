@@ -32,8 +32,8 @@ from mindroom.api import oauth as oauth_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
-from mindroom.credential_policy import OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.policy import OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY
 from mindroom.mcp.errors import MCPConnectionError
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager

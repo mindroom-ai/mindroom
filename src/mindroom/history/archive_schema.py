@@ -6,7 +6,7 @@ migration when it opens a conversation database.
 
 from __future__ import annotations
 
-from mindroom.usage_storage import quote_identifier
+from mindroom.usage.storage import quote_identifier
 
 
 def archive_table_names(session_table: str) -> tuple[str, str]:

@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING
 
 from agno.models.message import Message
 
-from mindroom import model_loading
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.answers import JudgmentError, JudgmentResponse, JudgmentResult, TokenUsage
 from mindroom.judgment.execution import run_judgment, run_judgment_thread
-from mindroom.provider_tool_policy import without_provider_tools
+from mindroom.providers import model_loading
+from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
     from mindroom.config.judgment import LLMJudgmentConfig

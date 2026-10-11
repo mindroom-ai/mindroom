@@ -344,7 +344,7 @@ def main() -> None:
             ),
         )
 
-        from mindroom.tool_schema_cache import _cached_processed_function_schema  # noqa: PLC0415
+        from mindroom.tool_system.tool_schema_cache import _cached_processed_function_schema  # noqa: PLC0415
 
         cache_info = _cached_processed_function_schema.cache_info()
         results.append(

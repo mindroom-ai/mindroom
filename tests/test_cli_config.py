@@ -27,7 +27,7 @@ from typer.testing import CliRunner
 
 import mindroom.cli.connect as cli_connect
 import mindroom.constants as constants_module
-import mindroom.google_adc as google_adc_module
+import mindroom.providers.google_adc as google_adc_module
 import mindroom.workspaces as workspaces_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
@@ -41,8 +41,8 @@ from mindroom.cli.main import (
     app,
 )
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import configure_default_logging, uses_default_logging
 from mindroom.matrix.state import MatrixAccount, MatrixState
@@ -58,7 +58,7 @@ from mindroom.model_defaults import (
     OPENAI_GPT_SOL,
     llama_cpp_server_command,
 )
-from mindroom.model_loading import missing_model_api_key_provider
+from mindroom.providers.model_loading import missing_model_api_key_provider
 from mindroom.services.config import InstallResult, ServiceManager, ServiceStatus
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
@@ -3783,7 +3783,10 @@ class TestDoctor:
                 msg = "credential store unreadable"
                 raise OSError(msg)
 
-            monkeypatch.setattr("mindroom.model_loading.get_runtime_shared_credentials_manager", _unreadable_store)
+            monkeypatch.setattr(
+                "mindroom.providers.model_loading.get_runtime_shared_credentials_manager",
+                _unreadable_store,
+            )
         monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
         requests = _record_doctor_requests(monkeypatch)
 

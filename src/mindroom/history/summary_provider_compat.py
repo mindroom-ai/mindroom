@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Literal
 
 import httpx
 
-from mindroom.claude_prompt_cache import as_anthropic_claude
+from mindroom.providers.claude_prompt_cache import as_anthropic_claude
 
 if TYPE_CHECKING:
     from agno.models.anthropic import Claude
@@ -58,7 +58,7 @@ def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
     """Normalize the effective request on a fresh summary model, preserving caller mappings."""
     from agno.models.openai import OpenAIChat, OpenAIResponses  # noqa: PLC0415 - defer optional provider imports
 
-    from mindroom.openai_models import MindRoomOpenRouter  # noqa: PLC0415 - defer optional provider imports
+    from mindroom.providers.openai_models import MindRoomOpenRouter  # noqa: PLC0415 - defer optional provider imports
 
     # Agno-level retries belong to the outer summary retry policy.
     model.retries = 0

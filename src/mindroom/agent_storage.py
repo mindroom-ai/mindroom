@@ -31,11 +31,11 @@ from mindroom import (
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.legacy_compaction_state import migrate_compaction_database
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
-from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage_preflight import session_storage_preflight
-from mindroom.usage_storage import project_usage, usage_table_sql, usage_upsert_sql
+from mindroom.usage.legacy_usage_storage import migrate_usage_database
+from mindroom.usage.storage import project_usage, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-    from mindroom.usage_storage import IndependentUsageKind
+    from mindroom.usage.storage import IndependentUsageKind
 
 
 _BUSY_TIMEOUT_SECONDS = 30.0

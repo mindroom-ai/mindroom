@@ -14,6 +14,7 @@ import yaml
 
 from mindroom.agents import create_agent
 from mindroom.api import config_lifecycle, main
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -22,7 +23,6 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.self_config import SelfConfigTools
 from mindroom.message_target import MessageTarget
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (

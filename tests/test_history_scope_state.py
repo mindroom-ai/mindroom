@@ -36,7 +36,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
 )
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -401,7 +401,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

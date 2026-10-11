@@ -35,7 +35,7 @@ from mindroom.script_runs.worker_client import (
     WorkerScriptCancel,
     WorkerScriptStatus,
 )
-from mindroom.shell_execution import ShellRunResult
+from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.embedding_errors import classified_embedder_error, is_embedder_auth_failure_detail
+from mindroom.embeddings.errors import classified_embedder_error, is_embedder_auth_failure_detail
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
     add_agent_memory,

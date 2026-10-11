@@ -573,7 +573,7 @@ def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
     request = {"base_id": "docs", "config_data": {"GIT_CONFIG_VALUE_0": _FRAME_LOCAL_CREDENTIAL}}
 
     completed = subprocess.run(
-        [sys.executable, "-m", "mindroom.knowledge_refresh_runner"],
+        [sys.executable, "-m", "mindroom.knowledge.refresh_entrypoint"],
         input=json.dumps(request).encode(),
         capture_output=True,
         check=False,
@@ -696,7 +696,7 @@ def test_knowledge_refresh_subprocess_logs_like_its_parent(
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
 
     completed = subprocess.run(
-        [sys.executable, "-m", "mindroom.knowledge_refresh_runner"],
+        [sys.executable, "-m", "mindroom.knowledge.refresh_entrypoint"],
         input=json.dumps({"base_id": "docs"}).encode(),
         env={**os.environ, **subprocess_logging_env()},
         capture_output=True,

@@ -69,8 +69,8 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history import archive
+from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.types import HistoryScope, HistoryScopeState
-from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.logging_config import get_logger
 

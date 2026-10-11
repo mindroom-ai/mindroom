@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.spotify import SpotifyTools as AgnoSpotifyTools
 
-from mindroom.credentials import CredentialsManager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials.manager import CredentialsManager, load_scoped_credentials, save_scoped_credentials
 from mindroom.spotify_tokens import current_spotify_credentials
 
 if TYPE_CHECKING:

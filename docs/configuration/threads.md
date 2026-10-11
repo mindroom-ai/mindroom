@@ -113,7 +113,7 @@ After a judgment backend approves, the agent replies normally with its own model
 
 ### Judgment Backends
 
-`participation.judgment`, `mid_turn.judgment`, and the [research check plugin](../plugins.md#research-check-plugin) `judgment` setting select a separate decision model, while the agent's configured model still writes the reply.
+`participation.judgment` and `mid_turn.judgment` select a separate decision model, while the agent's configured model still writes the reply.
 
 | Field | Backend | Default | Description |
 |-------|---------|---------|-------------|

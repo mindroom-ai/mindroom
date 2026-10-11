@@ -12,6 +12,7 @@ from openai import AuthenticationError as OpenAIAuthError
 from openai import OpenAIError
 
 from mindroom import constants
+from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.error_handling import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     MinimalModeUnavailableError,
@@ -20,7 +21,6 @@ from mindroom.error_handling import (
     get_user_friendly_error_message,
     run_error_event_exception,
 )
-from mindroom.minimal_agent import MinimalAgent
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
 

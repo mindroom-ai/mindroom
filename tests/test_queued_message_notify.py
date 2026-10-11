@@ -24,7 +24,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
-from mindroom import ai_runtime, model_loading
+from mindroom import ai_runtime
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
@@ -34,7 +34,7 @@ from mindroom.ai_runtime import (
     register_queued_notice_storage,
 )
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing_batch import (
+from mindroom.coalescing.batch import (
     CoalescingKey,
     RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
@@ -77,6 +77,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.providers import model_loading
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import (
@@ -3646,7 +3647,7 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
             config=config,
             execution_identity=None,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
         patch("mindroom.teams.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):

@@ -405,7 +405,9 @@ def test_tach_breaks_metadata_plugins_cycle_with_private_split_modules() -> None
 
 def test_selected_modules_do_not_hide_tool_system_imports_inside_functions() -> None:
     """Standalone tool-system helpers should be imported at module scope once the cycle is split."""
-    assert "mindroom.tool_system.worker_routing" not in _function_local_imports(SOURCE_ROOT / "credentials.py")
+    assert "mindroom.tool_system.worker_routing" not in _function_local_imports(
+        SOURCE_ROOT / "credentials" / "manager.py",
+    )
     assert "mindroom.tool_system.plugin_identity" not in _function_local_imports(
         SOURCE_ROOT / "hooks" / "context.py",
     )

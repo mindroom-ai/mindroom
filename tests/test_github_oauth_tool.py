@@ -27,7 +27,7 @@ from github.Requester import Requester
 from urllib3.response import HTTPResponse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     CredentialsManager,
     get_runtime_credentials_manager,
     scoped_credentials_path,

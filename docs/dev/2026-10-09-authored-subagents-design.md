@@ -227,7 +227,7 @@ The primary reads profiles only through no-follow confinement with the count and
 - `src/mindroom/delegation/direct.py`: the shared reserve, start, run, and settle sequence for one child turn inside a caller's tool call.
 - `src/mindroom/custom_tools/delegate.py` and `src/mindroom/delegation/execution.py`: persona parameters and resolution on both delegation paths.
 - `src/mindroom/delegation/state.py`, `sessions.py`, `lifecycle.py`, and `audit.py`: persona snapshot, grant-aware authorization, and record fields.
-- `src/mindroom/agents.py` and `src/mindroom/minimal_agent.py`: accept a persona and apply it in a private helper beside `create_agent`.
+- `src/mindroom/agents.py` and `src/mindroom/agent_cli/minimal_agent.py`: accept a persona and apply it in a private helper beside `create_agent`.
 - `src/mindroom/custom_tools/dynamic_workflow.py`, `src/mindroom/dynamic_workflows/validation.py`, and `src/mindroom/dynamic_workflows/store.py`: new participant schema, lifecycle-based execution, and migration call.
 - `src/mindroom/dynamic_workflows/legacy_participants.py`: the read-time conversion of legacy participants.
 - `tach.toml`: any new dependency from `dynamic_workflows` or `custom_tools.dynamic_workflow` onto `delegation`.
