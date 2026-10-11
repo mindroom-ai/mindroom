@@ -3443,6 +3443,30 @@
       "title": "RealtimeCallProfile",
       "type": "object"
     },
+    "ReportPublishingConfig": {
+      "additionalProperties": false,
+      "description": "Policy for creating new published reports.",
+      "properties": {
+        "default_access_policy": {
+          "default": "public",
+          "description": "Default access policy for newly published reports",
+          "enum": [
+            "public",
+            "origin_room"
+          ],
+          "title": "Default Access Policy",
+          "type": "string"
+        },
+        "allow_public": {
+          "default": true,
+          "description": "Whether agents may create new public bearer-link reports",
+          "title": "Allow Public",
+          "type": "boolean"
+        }
+      },
+      "title": "ReportPublishingConfig",
+      "type": "object"
+    },
     "ResponderAccessConfig": {
       "additionalProperties": false,
       "description": "Authored conversation-access rules for one responder.",
@@ -4684,6 +4708,14 @@
         "admin_users": []
       },
       "description": "Global policy for tool-managed signed external triggers"
+    },
+    "report_publishing": {
+      "$ref": "#/$defs/ReportPublishingConfig",
+      "default": {
+        "default_access_policy": "public",
+        "allow_public": true
+      },
+      "description": "Access policy for newly published reports"
     },
     "models": {
       "additionalProperties": {

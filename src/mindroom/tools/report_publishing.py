@@ -14,7 +14,7 @@ register_builtin_tool_metadata(
         name="report_publishing",
         file_access=ToolFileAccess.NONE,
         display_name="Report Publishing",
-        description="Share reports through public links that you can revoke",
+        description="Share reports through public or room-restricted links that you can revoke",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
@@ -26,7 +26,7 @@ register_builtin_tool_metadata(
         dependencies=[],
         function_names=(
             "publish_report",
-            "revoke_public_report",
+            "revoke_report",
         ),
     ),
 )

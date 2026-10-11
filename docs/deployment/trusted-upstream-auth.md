@@ -7,7 +7,7 @@ icon: lucide/log-in
 Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned reverse proxy or identity gateway that has already authenticated the human.
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
-The [Connections portal](#connections-portal), the [MCP Gateway](mcp-gateway.md), and the [usage export service](../usage.md#usage-export-service) also build on this mode.
+The [Connections portal](#connections-portal), [origin-room reports](#origin-room-reports), the [MCP Gateway](mcp-gateway.md), and the [usage export service](../usage.md#usage-export-service) also build on this mode.
 
 Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
 Enable it only when every network path to MindRoom removes client-supplied copies of the trusted headers and injects verified values itself; never expose such an instance directly to browsers or the public internet.
@@ -123,6 +123,15 @@ Users choose the agents and tools the optional [MCP Gateway](mcp-gateway.md#choo
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API behind the authenticated upstream.
 Exclude `/connections` from the other application's service-worker navigation fallback.
 Portal assets are served under `/connections/assets/`, so root `/assets/` can keep serving the other application.
+
+## Origin-Room Reports
+
+[Origin-room report links](../tools/agent-orchestration.md#report_publishing) use this mode only to learn the viewer's verified Matrix user ID, from the Matrix user ID header, a signed Matrix claim, or the email-to-Matrix template.
+Viewers need no dashboard access, API key, or other API permission, but `/reports/room/*` must pass through the gateway like the dashboard.
+Static-site reports run in a sandbox with an opaque origin, so a gateway that authorizes nested asset requests with a browser cookie must set it `SameSite=None; Secure`; with `Lax` or `Strict`, the page opens but its CSS, scripts, and images fail to load.
+[Cloudflare Access defaults its `CF_Authorization` cookie to `SameSite=None` but lets administrators choose `Lax` or `Strict`](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/), so check the application's cookie settings.
+Private-browsing tracking protection may still block such cookies, so test a report with separate CSS, JavaScript, and image files in the browsers you support.
+Because the cookie is sent cross-site, any page a signed-in viewer visits can embed a protected report's scripts or images and observe whether they load, which reveals room membership and any data a report puts in script globals, though not the report's HTML, CSS, or image bytes.
 
 ## Helm Charts
 

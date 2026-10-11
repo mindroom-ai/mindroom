@@ -73,6 +73,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](../scheduling.md) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
+| `report_publishing` | Access policy for newly published reports | [Agent Orchestration](../tools/agent-orchestration.md#report_publishing) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](../matrix.md#matrix-sync) |

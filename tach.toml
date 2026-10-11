@@ -698,7 +698,16 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.report_publishing"
-depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
+depends_on = [
+    "mindroom.durable_write",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.identity",
+    "mindroom.path_confinement",
+]
+
+[[modules]]
+path = "mindroom.trusted_upstream_settings"
+depends_on = []
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
@@ -1519,6 +1528,7 @@ depends_on = [
     "mindroom.api.open_access",
     "mindroom.constants",
     "mindroom.tool_system.dependencies",
+    "mindroom.trusted_upstream_settings",
 ]
 
 [[modules]]
@@ -1576,8 +1586,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.report_publishing"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.report_headers",
+    "mindroom.logging_config",
     "mindroom.report_publishing",
 ]
 
@@ -2693,6 +2705,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.report_authorization_runtime"
+depends_on = [
+    "mindroom.api.main",
+    "mindroom.matrix.room_membership",
+    "mindroom.report_publishing",
+]
+
+[[modules]]
 path = "mindroom.orchestration.todo_poke_runtime"
 depends_on = [
     "mindroom.authorization",
@@ -2775,6 +2795,7 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.orchestration.report_authorization_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.todo_poke_runtime",
@@ -3036,6 +3057,7 @@ depends_on = [
     "mindroom.config.memory",
     "mindroom.config.models",
     "mindroom.config.plugin",
+    "mindroom.config.report_publishing",
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
@@ -3054,6 +3076,7 @@ depends_on = [
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
+    "mindroom.trusted_upstream_settings",
     "mindroom.workspaces",
     "mindroom.config.schema_hints",
 ]

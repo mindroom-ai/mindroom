@@ -1,12 +1,12 @@
 # Agent Orchestration
 
-These built-in tools let an agent hand tasks to other agents, build and run reusable Dynamic Workflows, publish reports through public links, change MindRoom's configuration from chat, and keep Claude Code sessions alive across turns.
+These built-in tools let an agent hand tasks to other agents, build and run reusable Dynamic Workflows, publish reports through public or room-restricted links, change MindRoom's configuration from chat, and keep Claude Code sessions alive across turns.
 
 ## Tools On This Page
 
 - [`delegate`](#delegate) - Run a configured agent as a fresh subagent and wait for its answer.
 - [`dynamic_workflow`](#dynamic_workflow) - Create, update, run, and inspect saved Dynamic Workflows.
-- [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public links.
+- [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public or room-restricted links.
 - [`config_manager`](#config_manager) - Inspect and patch the full configuration, and create, update, or validate agents and teams.
 - [`self_config`](#self_config) - Let an agent read and update only its own configuration.
 - [`claude_agent`](#claude_agent) - Run persistent Claude Agent SDK coding sessions.
@@ -199,7 +199,7 @@ Saved workflows and run records live under `MINDROOM_STORAGE_PATH/dynamic_workfl
 A run completes inside the tool call and writes `report.md`, `report.html`, and `step_outputs.json`, which the run payload lists.
 Only the user who requested a run can read its record, publish it, or open its private report.
 When `MINDROOM_PUBLIC_URL` is set, run payloads include a private report URL under `/reports/private/...` that opens for that user in the dashboard.
-Use [`report_publishing`](#report_publishing) to share a completed run's report through a public link.
+Use [`report_publishing`](#report_publishing) to share a completed run's report through a public or room-restricted link.
 
 ### Spec Shape
 
@@ -302,7 +302,7 @@ A function name shared by several granted toolkits is auto-approved only when ev
 
 ## [`report_publishing`]
 
-`report_publishing` lets an agent publish a completed Dynamic Workflow report or a workspace static site through a revocable public link.
+`report_publishing` lets an agent publish a completed Dynamic Workflow report or a workspace static site through a revocable link that is either public or restricted to the Matrix room it was published from.
 Add it to the agent's `tools:`; it is often enabled next to `dynamic_workflow`.
 
 ```yaml
@@ -316,11 +316,20 @@ agents:
       - report_publishing
 ```
 
-The tool exposes `publish_report(source_type, source, confirm_public)` and `revoke_public_report(slug)`, each returning JSON with a `status` field.
-`confirm_public=True` is required, so an accidental call publishes nothing.
-A successful publish returns a `slug` and the public path `/reports/public/<slug>`, plus an absolute `public_url` when `MINDROOM_PUBLIC_URL` is set.
-Anyone with the link can open it without signing in until it is revoked.
-Only the user who requested the source run or published the link can revoke it.
+The tool exposes `publish_report(source_type, source, confirm_public, access_policy)` and `revoke_report(slug)`, each returning JSON with a `status` field.
+Each report uses one of two access policies:
+
+- **`public`**: anyone with the link can open it without signing in until it is revoked.
+  `confirm_public=True` is required, so an accidental call publishes nothing.
+- **`origin_room`**: only signed-in viewers currently joined to the exact Matrix room the report was published from can open it, and only while the publishing agent is still joined there.
+  Sharing a different room with the agent grants nothing, and no confirmation is needed.
+  Viewers sign in through [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#origin-room-reports) with a verified Matrix user ID and need no dashboard access or API key.
+
+A call without `access_policy` uses the configured default.
+A successful publish returns the `slug`, the `access_policy`, the `report_path` (`/reports/public/<slug>` or `/reports/room/<slug>`), and an absolute `report_url` when `MINDROOM_PUBLIC_URL` is set.
+A viewer who leaves the room loses access once the publishing agent's account syncs the change, and revocation takes effect immediately.
+A signed-in viewer without a verified Matrix identity or room membership gets `404 Report was not found.`, and `503 Report authorization is temporarily unavailable.` means MindRoom cannot check room membership right now, for example because the publishing agent is not running.
+Only the user who requested the source run or published the link can revoke it, under either policy.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 
 - **`dynamic_workflow_run`**: `source` takes `workflow_id`, `run_id`, and optional `scope` (default `agent`), and the run must be completed.
@@ -329,7 +338,7 @@ The tool never accepts arbitrary filesystem paths; it publishes only these sourc
   The agent needs a workspace, which exists when it uses `memory_backend: file` or a `private:` configuration.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
   A site may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB in total, and it may contain only regular files, not symlinks.
-  Static sites are served at `/reports/public/<slug>/` with a trailing slash so relative asset URLs resolve.
+  Static sites are served at the report path with a trailing slash, such as `/reports/room/<slug>/`, so relative asset URLs resolve.
   Scripts can make the page interactive but cannot act as the signed-in dashboard user or call MindRoom APIs.
   Scripts, stylesheets, and fonts must be bundled in the site, while images may also load from external HTTPS URLs.
   Pages cannot use `fetch()` or other API connections, even for the site's own JSON files, so embed data in the HTML or a bundled script.
@@ -345,12 +354,29 @@ publish_report(
     source={"path": "public-demo", "title": "Public Demo"},
     confirm_public=True,
 )
-revoke_public_report("pub_...")
+publish_report(
+    source_type="static_site",
+    source={"path": "room-report", "title": "Room Report"},
+    access_policy="origin_room",
+)
+revoke_report("pub_...")
 ```
+
+The top-level `report_publishing` section sets the policy for new reports:
+
+```yaml
+report_publishing:
+  default_access_policy: origin_room
+  allow_public: false
+```
+
+`default_access_policy` is `public` (the default) or `origin_room` and applies when a call omits `access_policy`.
+An `origin_room` default fails config validation unless trusted upstream auth can produce a verified Matrix user ID.
+`allow_public` defaults to `true`; `false` rejects new public reports, including explicit `access_policy="public"` calls, while existing public links keep working until revoked.
 
 Published copies and link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
 Set `MINDROOM_PUBLIC_URL` to the externally reachable dashboard origin, such as `https://mindroom.example.com`, so results include clickable absolute URLs.
-If the dashboard frontend and the Python backend sit behind separate upstreams, route `/reports/public/*` to the backend without dashboard-login middleware.
+If the dashboard frontend and the Python backend sit behind separate upstreams, route both `/reports/public/*` and `/reports/room/*` to the backend without dashboard-login middleware; `/reports/room/*` must still pass through the trusted upstream gateway.
 
 ## [`config_manager`]
 
