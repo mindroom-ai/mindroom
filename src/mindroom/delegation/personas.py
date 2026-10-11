@@ -487,9 +487,13 @@ def capped_persona_skills(
     """Require a persona's skills to be caller skills within ``cap``, resolving a persona that names none.
 
     Like knowledge search, skills follow an explicit tool list: a persona that names tools but no
-    skills gets none, and one that names neither inherits ``cap``, or every caller skill without one.
-    The caller's skills are read only when the persona names some.
+    skills gets none, and one that names neither inherits the ``cap`` skills its caller still has, as
+    a follow-up loads them, or every caller skill without a cap. The caller's skills are read only
+    when the persona names or inherits some.
     """
+    if persona.skills is None and persona.tools is None and cap:
+        available = set(available_skills())
+        return replace(persona, skills=tuple(skill for skill in cap if skill in available))
     if persona.skills is None:
         persona = replace(persona, skills=() if persona.tools is not None else cap)
     if persona.skills:

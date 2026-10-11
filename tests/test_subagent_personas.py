@@ -524,3 +524,16 @@ def test_persona_naming_tools_but_no_skills_gets_none(tmp_path: Path) -> None:
         assert isinstance(request, PersonaRequest)
         assert request.persona is not None
         assert request.persona.skills == skills
+
+
+def test_inherited_skills_keep_only_those_the_caller_still_has(tmp_path: Path) -> None:
+    """A copy that inherits skills drops one its caller lost, as a follow-up would, while naming that skill refuses."""
+    cap = inline_persona("P", None, ["research", "retired"])
+
+    inherited = _resolve(tmp_path, system_prompt="Q", cap=cap)
+    named = _resolve(tmp_path, system_prompt="Q", skills=["retired"], cap=cap)
+
+    assert isinstance(inherited, PersonaRequest)
+    assert inherited.persona is not None
+    assert inherited.persona.skills == ("research",)
+    assert named == "Cannot delegate: unknown skill 'retired'. Your skills: research, retired."
