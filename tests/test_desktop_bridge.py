@@ -841,7 +841,8 @@ async def test_revoke_and_bridge_stop_kill_running_handles(transport: AsyncMock,
     bridge = _local_bridge(shell=shell)
     pid_file = tmp_path / "leader.pid"
     try:
-        await _handle(bridge, _event(_run_shell(f"echo $$ > {pid_file}; sleep 30", tmp_path)))
+        # The leader outlives any wait below, so only a real kill makes it disappear.
+        await _handle(bridge, _event(_run_shell(f"echo $$ > {pid_file}; sleep 3600", tmp_path)))
         handle = _response(transport).result["handle"]
         assert isinstance(handle, str)
         leader = int(pid_file.read_text())

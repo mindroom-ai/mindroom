@@ -919,7 +919,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
         "import os, pathlib, signal, time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         "pathlib.Path('child.pid').write_text(str(os.getpid())); "
-        "time.sleep(30)"
+        "time.sleep(3600)"
     )
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} >/dev/null 2>&1 & wait"
     event = _shell_event(command, tmp_path)
@@ -1315,7 +1315,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
         assert granted["status"]["shell"]["auto_approve_remaining_seconds"] == 60
         background = await call(
             "run_shell",
-            command="sleep 30 & echo $! >> pids; echo $$ >> pids; wait",
+            command="sleep 3600 & echo $! >> pids; echo $$ >> pids; wait",
             cwd=str(work),
             timeout_seconds=1,
         )
