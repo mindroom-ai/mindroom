@@ -19,7 +19,7 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
-from mindroom.tool_jobs.completion import HoldKey, conversation_work
+from mindroom.tool_jobs.completion import ConversationKey, conversation_work
 from mindroom.tool_jobs.disabled import index_parked_work
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
@@ -378,7 +378,8 @@ class ToolJobRuntimeCoordinator:
             frozenset()
             if stop.hold_key is None
             else frozenset(
-                job.job_id for job in (await conversation_work(self.runtime, HoldKey.decode(stop.hold_key))).jobs
+                job.job_id
+                for job in (await conversation_work(self.runtime, ConversationKey.decode(stop.hold_key))).jobs
             )
         )
 
@@ -408,7 +409,7 @@ class ToolJobRuntimeCoordinator:
             if bot is None or reply.hold_key is None:
                 # Entity removal ends a removed entity's waiting reply; a reply with no key waits for nothing here.
                 continue
-            work = None if runtime is None else await conversation_work(runtime, HoldKey.decode(reply.hold_key))
+            work = None if runtime is None else await conversation_work(runtime, ConversationKey.decode(reply.hold_key))
             if work is None or work.ready or not work.jobs:
                 ready = () if work is None else work.ready
                 await bot.admit_job_wake(reply, wake_event_id(reply, ready))

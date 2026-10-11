@@ -16,7 +16,7 @@ from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, encode_presentation, note_segment
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.completion import HoldKey, join_conversation_jobs
+from mindroom.tool_jobs.completion import ConversationKey, join_conversation_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, notify_job_stops, register_background_runtime
 from mindroom.tool_jobs.wakes import wake_event, wake_event_id
@@ -48,10 +48,10 @@ pytestmark = pytest.mark.asyncio
 _PRINCIPAL = "@mindroom_parent:test"
 
 
-def _key(owner: ToolExecutionIdentity) -> HoldKey:
+def _key(owner: ToolExecutionIdentity) -> ConversationKey:
     assert owner.room_id is not None
     assert owner.requester_id is not None
-    return HoldKey(
+    return ConversationKey(
         recipient=owner.recipient,
         room_id=owner.room_id,
         thread_id=owner.resolved_thread_id,
@@ -61,7 +61,7 @@ def _key(owner: ToolExecutionIdentity) -> HoldKey:
     )
 
 
-async def _waiting_reply(principal: PrincipalStore, key: HoldKey, *, source: str = "$turn") -> rl.Reply:
+async def _waiting_reply(principal: PrincipalStore, key: ConversationKey, *, source: str = "$turn") -> rl.Reply:
     """Answer ``source`` with a reply that waits for ``key``'s work."""
     await principal.admit(
         InboundEvent(
@@ -167,7 +167,7 @@ async def test_the_boundary_names_the_work_its_span_leaves(tmp_path: Path) -> No
 async def test_a_key_round_trips_through_its_recorded_json() -> None:
     """A waiting reply's hold key restores the key the boundary named."""
     key = _key(job_owner())
-    assert HoldKey.decode(key.encode()) == key
+    assert ConversationKey.decode(key.encode()) == key
 
 
 async def test_the_job_runtime_wakes_a_reply_once_its_work_is_ready(tmp_path: Path) -> None:
@@ -291,8 +291,8 @@ async def test_a_recorded_stop_reaches_its_work_before_the_job_runtime_applies_i
         await runtime.shutdown()
 
 
-def _runner_key(bot: AgentBot) -> HoldKey:
-    return HoldKey(
+def _runner_key(bot: AgentBot) -> ConversationKey:
+    return ConversationKey(
         recipient=bot.agent_name,
         room_id="!room:localhost",
         thread_id="$thread",
@@ -302,7 +302,7 @@ def _runner_key(bot: AgentBot) -> HoldKey:
     )
 
 
-def _runner_owner(key: HoldKey) -> ToolExecutionIdentity:
+def _runner_owner(key: ConversationKey) -> ToolExecutionIdentity:
     return replace(
         job_owner(),
         agent_name=key.recipient,
@@ -556,7 +556,7 @@ async def test_a_stop_applied_after_a_regeneration_cancels_what_the_stopped_repl
         await runtime.shutdown()
 
 
-def _regeneration_request(reply: rl.Reply, key: HoldKey) -> rl.ClaimRequest:
+def _regeneration_request(reply: rl.Reply, key: ConversationKey) -> rl.ClaimRequest:
     return rl.ClaimRequest(
         span_id="span-edit",
         delivery_id="$edit",
@@ -764,7 +764,7 @@ async def test_a_wake_whose_ad_hoc_member_left_ends_the_wait(tmp_path: Path) -> 
     assert ended.state is rl.ReplyState.COMPLETED
 
 
-def _rewait(key: HoldKey) -> rl.Decide:
+def _rewait(key: ConversationKey) -> rl.Decide:
     def wait(reply: rl.Reply, span: rl.Span) -> rl.Transition:
         shown = Presentation(
             segments=(Segment(kind="answer", text="answer", span_id=span.span_id),),
@@ -780,7 +780,7 @@ def _rewait(key: HoldKey) -> rl.Decide:
     return wait
 
 
-def _claim_request(key: HoldKey, span_id: str, source: str, **changes: object) -> rl.ClaimRequest:
+def _claim_request(key: ConversationKey, span_id: str, source: str, **changes: object) -> rl.ClaimRequest:
     request = rl.ClaimRequest(
         span_id=span_id,
         delivery_id=source,

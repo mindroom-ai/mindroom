@@ -45,8 +45,8 @@ class _JobJoin:
 
 
 @dataclass(frozen=True)
-class HoldKey:
-    """Whose outstanding work one reply holds: one recipient's work for one requester in one conversation."""
+class ConversationKey:
+    """One recipient's background work for one requester in one conversation."""
 
     recipient: str
     room_id: str
@@ -62,7 +62,7 @@ class HoldKey:
         return json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
 
     @classmethod
-    def decode(cls, stored: str) -> HoldKey:
+    def decode(cls, stored: str) -> ConversationKey:
         """Restore a key a waiting reply recorded."""
         data = cast("dict[str, object]", json.loads(stored))
         return cls(
@@ -85,7 +85,7 @@ class ConversationWork:
 
 async def conversation_work(
     runtime: ToolJobRuntime,
-    key: HoldKey,
+    key: ConversationKey,
     *,
     attempted: Collection[str] = (),
 ) -> ConversationWork:
@@ -149,7 +149,7 @@ async def join_conversation_jobs(
     runtime = get_background_runtime(context.runtime_paths)
     if runtime is None:
         return _JobJoin()
-    key = HoldKey(
+    key = ConversationKey(
         recipient=context.recipient,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id,

@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, retain_claim
-from mindroom.tool_jobs.runtime import format_job_handle, get_background_runtime, job_summary
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, format_job_handle, get_background_runtime, job_summary
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -53,6 +53,41 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
     return value
 
 
+async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any:  # noqa: ANN401 - SDK tool value.
+    """Return every ended, unacknowledged job of this caller with its result, acknowledging each once this call saves."""
+    sections: list[str] = []
+    collected: list[ToolResult] = []
+    for job in await runtime.list_jobs(owner=owner, depth=0, limit=100):
+        if job.status not in TERMINAL_STATUSES or job.consumed:
+            continue
+        waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
+        if waited.claim is None:
+            # Another caller is reading this outcome now.
+            continue
+        value, payload = await consume_tool_job(runtime, waited.job, waited.claim)
+        if isinstance(value, ToolResult):
+            collected.append(value)
+            value = value.content
+        detail = payload.error or value or ""
+        sections.append(f"`{job.job_id}` ({job.tool_name}) {job.status}:\n{detail}".rstrip())
+    if not sections:
+        return "No ended background jobs."
+    content = "\n\n".join(sections)
+    images = [item for result in collected for item in result.images or ()]
+    audios = [item for result in collected for item in result.audios or ()]
+    videos = [item for result in collected for item in result.videos or ()]
+    files = [item for result in collected for item in result.files or ()]
+    if images or audios or videos or files:
+        return ToolResult(
+            content=content,
+            images=images or None,
+            audios=audios or None,
+            videos=videos or None,
+            files=files or None,
+        )
+    return content
+
+
 class JobTools(Toolkit):
     """Discover and manage jobs belonging to the exact caller and conversation."""
 
@@ -72,6 +107,7 @@ class JobTools(Toolkit):
                 "A newer message you answer releases waits while work continues. "
                 'Use job(action="list") to rediscover jobs and their status after a new turn, '
                 'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to stop one. '
+                'When told background jobs ended, call job(action="collect") once to read and acknowledge all of them. '
                 "Only the agent that started a job can access it; teams must ask that member to manage it."
             ),
         )
@@ -137,7 +173,7 @@ class JobTools(Toolkit):
 
     async def job(  # noqa: PLR0911 - Each public action returns its own result.
         self,
-        action: Literal["list", "wait", "cancel"],
+        action: Literal["list", "wait", "cancel", "collect"],
         job_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
@@ -146,7 +182,8 @@ class JobTools(Toolkit):
         """Discover, wait for, or cancel this caller's managed work.
 
         Args:
-            action: Operation; list reports status and saved summaries, wait retrieves the stored result.
+            action: Operation; list reports status and saved summaries, wait retrieves the stored result, and
+                collect returns and acknowledges every ended job.
             job_id: Exact job ID, required except for list.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.
@@ -169,6 +206,8 @@ class JobTools(Toolkit):
                         for job in await runtime.list_jobs(owner=owner, depth=0, limit=limit, offset=offset)
                     ],
                 )
+            if action == "collect":
+                return await _collect(runtime, owner)
             if job_id is None:
                 return "job_id is required for this action."
             if action == "wait":

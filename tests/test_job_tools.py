@@ -34,6 +34,7 @@ from tests.tool_job_helpers import (
     lookup,
     start_job,
     tool_job_runtime,
+    wait_for_status,
 )
 
 if TYPE_CHECKING:
@@ -43,7 +44,8 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
 
-    from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload
+    from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @pytest.mark.asyncio
@@ -512,4 +514,138 @@ async def test_job_errors_return_as_tool_results(
             )
         assert message in result
     finally:
+        await runtime.shutdown()
+
+
+async def _collect_in_a_run(
+    tmp_path: Path,
+    outcomes: dict[str, BackgroundOutcome | None],
+    *,
+    kind: str = "tool",
+) -> tuple[RunOutput, ToolJobRuntime, JobTools, ToolExecutionIdentity, object]:
+    """Start jobs with the given outcomes (``None`` keeps one running), then collect them in one saved agent run."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    for job_id, outcome in outcomes.items():
+
+        async def operation(outcome: BackgroundOutcome | None = outcome) -> BackgroundOutcome:
+            if outcome is None:
+                await asyncio.Event().wait()
+                raise AssertionError
+            return outcome
+
+        await start_job(
+            runtime,
+            job_id,
+            tool_name=f"tool_{job_id}",
+            depth=0,
+            kind=kind,
+            adapter={},
+            owner=owner,
+            operation=operation,
+        )
+        if outcome is not None:
+            await wait_for_status(runtime, job_id, outcome.status)
+    storage = storage_factory()
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("job", "collect", action="collect")]),
+            ModelResponse(content="done"),
+        ],
+    )
+    install_tool_job_execution(model)
+    tools = JobTools(paths, owner)
+    agent = Agent(id="leader", model=model, tools=[tools], db=storage)
+
+    @owned_tool_execution
+    async def run() -> RunOutput:
+        set_consumption_storage(storage_factory)
+        return await agent.arun("collect", session_id=context.session_id, user_id=context.requester_id)
+
+    with tool_runtime_context(context):
+        response = await run()
+    return response, runtime, tools, owner, (storage, context)
+
+
+def _payload(text: str, *, error: str | None = None) -> EncodedResultPayload:
+    return encode_result_payload(ToolResultPayload(value=text, error=error))
+
+
+@pytest.mark.asyncio
+async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
+    """One collect returns every ended job's result, and acknowledging them makes a second collect find none."""
+    response, runtime, tools, owner, (storage, context) = await _collect_in_a_run(
+        tmp_path,
+        {
+            "job_a": BackgroundOutcome("completed", "result a", result_payload=_payload("result a")),
+            "job_b": BackgroundOutcome("failed", "broke", result_payload=_payload("", error="boom")),
+        },
+    )
+    try:
+        result = str(response.tools[0].result)
+        assert "`job_a`" in result
+        assert "result a" in result
+        assert "`job_b`" in result
+        assert "boom" in result
+        for job_id in ("job_a", "job_b"):
+            assert (await lookup(runtime, job_id, owner=owner, depth=0)).consumed
+        with tool_runtime_context(context):
+            assert await tools.job("collect") == "No ended background jobs."
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_collect_acknowledges_a_cancelled_job_without_a_result(tmp_path: Path) -> None:
+    """A cancelled job is reported as cancelled and acknowledged, though it has no result."""
+    response, runtime, _tools, owner, (storage, _context) = await _collect_in_a_run(
+        tmp_path,
+        {"job_a": BackgroundOutcome("cancelled")},
+    )
+    try:
+        result = str(response.tools[0].result)
+        assert "`job_a`" in result
+        assert "cancelled" in result
+        assert (await lookup(runtime, "job_a", owner=owner, depth=0)).consumed
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_collect_leaves_running_jobs_alone(tmp_path: Path) -> None:
+    """A job still running is neither returned nor claimed."""
+    response, runtime, _tools, owner, (storage, _context) = await _collect_in_a_run(tmp_path, {"running": None})
+    try:
+        assert response.tools[0].result == "No ended background jobs."
+        job = await lookup(runtime, "running", owner=owner, depth=0)
+        assert (job.status, job.consumed) == ("running", False)
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_collect_returns_a_background_subagents_answer(tmp_path: Path) -> None:
+    """A finished background subagent's answer is collected like any other job's result."""
+    response, runtime, _tools, _owner, (storage, _context) = await _collect_in_a_run(
+        tmp_path,
+        {"child": delegation_outcome("completed", "the child's answer")},
+        kind="delegation",
+    )
+    try:
+        assert "the child's answer" in str(response.tools[0].result)
+    finally:
+        storage.close()
         await runtime.shutdown()

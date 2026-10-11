@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import JournalEvent
     from mindroom.reply_lifecycle import Reply
-    from mindroom.tool_jobs.completion import HoldKey
+    from mindroom.tool_jobs.completion import ConversationKey
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 _RELEASE = "release"
@@ -71,7 +71,7 @@ def woken_reply_id(event: JournalEvent) -> str | None:
     return reply_id if isinstance(reply_id, str) else None
 
 
-def wake_envelope(key: HoldKey, *, wake_id: str, sender_id: str, prompt: str) -> MessageEnvelope:
+def wake_envelope(key: ConversationKey, *, wake_id: str, sender_id: str, prompt: str) -> MessageEnvelope:
     """Address a wake to its reply's conversation, as runtime work on behalf of the reply's requester."""
     return MessageEnvelope(
         source_event_id=wake_id,

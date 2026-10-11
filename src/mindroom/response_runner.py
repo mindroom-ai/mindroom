@@ -156,7 +156,7 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_jobs.completion import HoldKey, completion_prompt, conversation_work
+from mindroom.tool_jobs.completion import ConversationKey, completion_prompt, conversation_work
 from mindroom.tool_jobs.disabled import approval_is_parked
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.wakes import WAKE_LIMIT, WAKE_RETRY_PROMPT, ends_wait, wake_envelope, woken_reply_id
@@ -3515,7 +3515,7 @@ class ResponseRunner:
                 # The requester's next answered message takes the remaining work, as a span's joins do.
                 await self.deps.delivery_gateway.end_wait(reply.reply_id)
             else:
-                key = HoldKey.decode(reply.hold_key)
+                key = ConversationKey.decode(reply.hold_key)
                 request = await self._job_wake_request(reply, key, event.event_id, claimed=claimed, handoff=handoff)
                 await self._generate_job_wake(request, key)
         if claimed.is_set() or handoff.is_set():
@@ -3541,11 +3541,11 @@ class ResponseRunner:
         reply = await self.deps.replies.store.replies.load(reply_id)
         if reply is None or reply.state is not rl.ReplyState.WAITING or reply.hold_key is None:
             return
-        work = None if released else await self._held_work(HoldKey.decode(reply.hold_key))
+        work = None if released else await self._held_work(ConversationKey.decode(reply.hold_key))
         if work is None or not work.jobs:
             await self.deps.delivery_gateway.end_wait(reply_id)
 
-    async def _held_work(self, key: HoldKey) -> ConversationWork | None:
+    async def _held_work(self, key: ConversationKey) -> ConversationWork | None:
         """Return the outstanding work of a key, or ``None`` when background jobs do not run."""
         runtime = get_background_runtime(self.deps.runtime_paths)
         return None if runtime is None else await conversation_work(runtime, key)
@@ -3559,7 +3559,7 @@ class ResponseRunner:
         reply = await self.deps.replies.store.replies.load(request.wake_reply_id)
         if reply is None or reply.hold_key is None:
             return None
-        work = await self._held_work(HoldKey.decode(reply.hold_key))
+        work = await self._held_work(ConversationKey.decode(reply.hold_key))
         ready = () if work is None else work.ready
         if reply.state is rl.ReplyState.WAITING and not ready:
             return None
@@ -3575,7 +3575,7 @@ class ResponseRunner:
     async def _job_wake_request(
         self,
         reply: rl.Reply,
-        key: HoldKey,
+        key: ConversationKey,
         wake_id: str,
         *,
         claimed: asyncio.Event,
@@ -3608,7 +3608,7 @@ class ResponseRunner:
             source_handoff=handoff,
         )
 
-    async def _generate_job_wake(self, request: ResponseRequest, key: HoldKey) -> None:
+    async def _generate_job_wake(self, request: ResponseRequest, key: ConversationKey) -> None:
         """Continue as this agent, or as the team whose members hold the work."""
         config = self.deps.runtime.config
         team = config.teams.get(self.deps.agent_name)
