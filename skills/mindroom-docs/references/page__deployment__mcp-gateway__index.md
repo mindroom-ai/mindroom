@@ -42,10 +42,19 @@ Restart the API after changing any gateway environment variable.
 Until then, gateway routes return `404 MCP gateway is disabled`.
 If a gateway setting is invalid, the API logs `MCP gateway disabled: check public origin, limits, authentication, and account provisioning` and starts without the gateway.
 
+### Agent eligibility
+
 Agent eligibility follows the agent access rules described for the Connections portal.
 `access.current_room_members` alone does not grant MCP access because MCP requests have no current Matrix room, and credential management alone does not grant tool execution.
 Users can address only agents in their own saved selection and cannot act as another user or credential owner.
 Access changes, including revoked grant-room membership, apply to the next call without a configuration change; calls already running may finish.
+
+By default, the gateway offers only agents that keep OAuth connections, tool settings, and the worker separate for each user: private agents and shared agents with `worker_scope: user` or `user_agent`.
+A shared agent whose worker scope is `shared` or unset, directly or through `defaults.worker_scope`, runs every user's tool calls with the same connected accounts, tool settings, and worker.
+Through the gateway, anyone allowed to use such an agent could call those tools directly, outside the agent's instructions.
+These agents show as **MindRoom only** on the Connections page, cannot be selected, and calls to them return `unauthorized`, even when an earlier selection saved them.
+To expose one anyway, set [`mcp_gateway_shared_credentials: true`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent, and only when every user allowed to use it may use its shared accounts and worker directly.
+Deployment-wide credentials stay shared whatever the agent's scope, such as a configured Google service account (`GOOGLE_SERVICE_ACCOUNT_FILE`), shared credentials listed in `worker_grantable_credentials`, and static headers on MCP servers, so every gateway user of an agent with those tools can use them.
 
 ## Choose exposed agents and tools
 
@@ -310,7 +319,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `tool_not_found` | The identifier is not assigned or selected; repeat discovery, and if a shared-agent tool is missing, check the agent and tool selections in Connections |
 | `invalid_arguments` | Arguments do not match the schema or exceed 64 KiB |
 | `approval_required` | The tool needs confirmation or a configured approval and cannot run through the gateway |
-| `unauthorized` | Agent access or selection changed; check Connections |
+| `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |

@@ -72,6 +72,45 @@ def test_shared_tool_target_uses_authored_scope(personal_snapshot: ApiSnapshot, 
     assert denied.value.status_code == 404
 
 
+@pytest.mark.parametrize(
+    ("scope", "default_scope", "opt_in", "exposed"),
+    [
+        (None, None, False, False),
+        ("shared", None, False, False),
+        (None, "shared", False, False),
+        (None, None, True, True),
+        ("shared", None, True, True),
+        ("user", None, False, True),
+        ("user_agent", None, False, True),
+        (None, "user", False, True),
+    ],
+)
+def test_gateway_requires_opt_in_for_shared_credential_agents(
+    personal_snapshot: ApiSnapshot,
+    scope: str | None,
+    default_scope: str | None,
+    opt_in: bool,
+    exposed: bool,
+) -> None:
+    """Agents whose tools run with credentials every requester shares stay out of MCP unless opted in."""
+    config = personal_snapshot.runtime_config
+    assert config is not None
+    config.defaults.worker_scope = default_scope
+    config.agents["shared"] = AgentConfig.model_validate(
+        {
+            "display_name": "Shared tools",
+            "role": "Shared tools",
+            "tools": ["calculator"],
+            "worker_scope": scope,
+            "mcp_gateway_shared_credentials": opt_in,
+            "access": {"users": ["@alice:example.org"]},
+        },
+    )
+    alice = connection_agents.resolve_connection_user(personal_snapshot, "@alice:example.org")
+    assert alice.agent_names == ("personal", "shared")
+    assert alice.gateway_agent_names == (("personal", "shared") if exposed else ("personal",))
+
+
 def test_connection_user_has_no_implicit_agent_authority(personal_snapshot: ApiSnapshot) -> None:
     """Signed users can retain account controls without being granted any tool target."""
     user = connection_agents.resolve_connection_user(personal_snapshot, "@stranger:example.org")

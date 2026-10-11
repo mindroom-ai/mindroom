@@ -37,6 +37,7 @@ const catalog = (services: (typeof service)[]) => ({
       agent_display_name: "Personal assistant",
       is_shared: false,
       can_use: true,
+      mcp_available: true,
       services,
       tools: services.flatMap((item) =>
         item.tools.map((name) => ({
@@ -116,6 +117,43 @@ it("keeps account management available without offering MCP access to management
     screen.queryAllByRole("checkbox", { name: /Expose .* through MCP/ }),
   ).toHaveLength(0);
   expect(screen.getByText("Credential management only")).toBeInTheDocument();
+});
+
+it("keeps agents that are not available through MCP out of the MCP selection", async () => {
+  const data = catalog([{ ...service, is_shared: true, can_manage: false }]);
+  data.agents[0].mcp_available = false;
+  installApi({
+    "/api/connections": async () => json(data),
+    "/api/connections/mcp/selection": async () =>
+      json({ enabled: true, agents: {} }),
+    "/api/connections/agents/personal/mail/status": async () =>
+      json({ ...status, connected: true, can_connect: false }),
+  });
+  render(<Connections />);
+  await expandAgent();
+  expect(
+    await screen.findByText("Shared connection configured"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryAllByRole("checkbox", { name: /Expose .* through MCP/ }),
+  ).toHaveLength(0);
+  expect(screen.getAllByText("MindRoom only")).toHaveLength(2);
+});
+
+it("does not explain MCP availability while the gateway is disabled", async () => {
+  const data = catalog([service]);
+  data.agents[0].mcp_available = false;
+  installApi({
+    "/api/connections": async () => json(data),
+    "/api/connections/mcp/selection": async () => json({ enabled: false }),
+  });
+  render(<Connections />);
+  await screen.findByRole("button", { name: "Expand Personal assistant" });
+  expect(
+    screen.queryByTitle(
+      "Runs tools with shared credentials, so it is not exposed through MCP",
+    ),
+  ).not.toBeInTheDocument();
 });
 
 function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
@@ -691,6 +729,7 @@ describe("MCP agent selection", () => {
         agent_display_name: "Research Team",
         is_shared: true,
         can_use: true,
+        mcp_available: true,
         services: [],
         tools: [
           {

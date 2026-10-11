@@ -37,7 +37,7 @@ export function ToolExposure({
     return (
       <span className="text-xs text-muted-foreground">No tool access</span>
     );
-  if (tool.requires_room_context)
+  if (!agent.mcp_available || tool.requires_room_context)
     return <span className="text-xs text-muted-foreground">MindRoom only</span>;
   if (!mcp.selection?.enabled)
     return <span className="text-muted-foreground">—</span>;
