@@ -14,7 +14,7 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
-from agno.run.agent import RunOutput
+from agno.run.agent import RunErrorEvent, RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
 from agno.run.base import RunStatus
@@ -881,6 +881,13 @@ def _register_team_notice_storage(
     )
 
 
+def _is_error_text_only(response: RunOutput) -> bool:
+    """Return whether a failed member wrote nothing, so its content is only the error text Agno filled in."""
+    return response.status == RunStatus.error and any(
+        isinstance(event, RunErrorEvent) and event.content == response.content for event in response.events or ()
+    )
+
+
 def _format_contributions_recursive(  # noqa: C901
     response: TeamRunOutput | RunOutput,
     indent: int,
@@ -912,7 +919,7 @@ def _format_contributions_recursive(  # noqa: C901
                         include_consensus=False,  # No consensus for nested teams
                     )
                     parts.extend(nested_parts)
-                elif isinstance(member_resp, RunOutput):
+                elif isinstance(member_resp, RunOutput) and not _is_error_text_only(member_resp):
                     agent_name = member_resp.agent_name or "Team Member"
                     content = _get_response_content(member_resp)
                     if content.strip():

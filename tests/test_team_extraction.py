@@ -6,7 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from agno.models.message import Message
-from agno.run.agent import RunOutput
+from agno.run.agent import RunErrorEvent, RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 
 from mindroom.teams import _get_response_content, format_team_response
@@ -169,6 +170,44 @@ class TestExtractTeamMemberContributions:
         team.messages = []
 
         assert format_team_response(team)[0] == f"**scout**: {content}"
+
+    def test_failed_member_error_text_is_left_out_of_the_reply(self) -> None:
+        """A member that failed before writing anything has only its raw error as content; the leader reports it."""
+        error = "Error code: 529 - overloaded"
+        failed = RunOutput(
+            agent_name="worker",
+            content=error,
+            status=RunStatus.error,
+            events=[RunErrorEvent(content=error)],
+        )
+        team = TeamRunOutput(team_name="Team", content="The worker was unavailable.", member_responses=[failed])
+
+        assert format_team_response(team) == ["\n**Team Consensus**:", "The worker was unavailable."]
+
+    def test_failed_member_keeps_what_it_wrote(self) -> None:
+        """A member that wrote text before failing keeps it in the reply."""
+        failed = RunOutput(
+            agent_name="worker",
+            content="Partial findings",
+            status=RunStatus.error,
+            events=[RunErrorEvent(content="Error code: 529 - overloaded")],
+        )
+        team = TeamRunOutput(team_name="Team", content="Done.", member_responses=[failed])
+
+        assert format_team_response(team)[0] == "**worker**: Partial findings"
+
+    def test_failed_nested_team_keeps_its_members_output(self) -> None:
+        """A sub-team whose leader failed still shows what its members finished."""
+        member = RunOutput(agent_name="scout", content="Found it")
+        nested = TeamRunOutput(
+            team_name="Research",
+            content="Error code: 529 - overloaded",
+            status=RunStatus.error,
+            member_responses=[member],
+        )
+        team = TeamRunOutput(team_name="Team", content="Done.", member_responses=[nested])
+
+        assert format_team_response(team)[:2] == ["**Research** (Team):", "  **scout**: Found it"]
 
     def test_team_without_consensus(self) -> None:
         """Test team that only has member responses, no consensus."""
