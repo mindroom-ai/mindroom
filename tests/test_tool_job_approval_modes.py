@@ -21,6 +21,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools.job import JobTools
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
@@ -450,3 +451,19 @@ async def test_a_calls_own_budget_does_not_outlast_its_approval_wait(
                 )
         handle = json.loads(_tool_result(response))
         assert (handle["status"], run.effects) == ("awaiting_approval", [])
+
+
+@pytest.mark.asyncio
+async def test_retrieving_a_job_that_awaits_approval_waits_no_longer_than_its_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waiting on the job afterwards is bounded the same way, so the reply never sits until the decision."""
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0.05) as run:
+        async with execution_resources():
+            with tool_runtime_context(run.context):
+                response = await run.agent().arun("Write", session_id=run.context.session_id)
+                job_id = json.loads(_tool_result(response))["job_id"]
+                waited = await asyncio.wait_for(JobTools(run.paths, run.owner).job("wait", job_id), JOB_TEST_TIMEOUT)
+        assert json.loads(waited)["status"] == "awaiting_approval"
+        assert run.effects == []

@@ -798,7 +798,15 @@ async def _await_background_child(
         if fresh:
             _, claim = await start_delegation(background, child, owner=owner, operation=operation, cancel=cancel)
         await release_liveness()
-        waited = await background.wait(child.delegation_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
+        waited = await background.wait(
+            child.delegation_id,
+            owner=owner,
+            depth=depth,
+            timeout=wait_timeout,
+            claim=claim,
+            # A child awaiting a human decision holds its caller's reply no longer than a gated call's own wait does.
+            approval_timeout=None if context is None else context.config.background_tool_jobs.approval_wait_timeout,
+        )
     except JobAccessError as error:
         await background.release_wait(child.delegation_id, claim)
         if not background.has_job(child.delegation_id):
