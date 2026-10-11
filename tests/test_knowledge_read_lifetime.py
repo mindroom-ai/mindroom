@@ -28,7 +28,7 @@ from mindroom.knowledge.index_metadata import (
 )
 from mindroom.knowledge.read_proxy import ChromaReadProxy, collection_exists
 from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, runtime_paths_for
+from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import _config
 
 if TYPE_CHECKING:
@@ -216,10 +216,12 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
 
     monkeypatch.setattr(read_process, "_spawn_reader", gated_spawn)
     monkeypatch.setattr(collections, "collection_lifetime_lock", observed_lock)
+    # These waits stay below the reader's 30-second read deadline, so a cancelled read that stopped killing
+    # its reader cannot pass by the reader timing itself out.
     read_task = asyncio.create_task(proxy.async_search("alpha"))
     refresh_task = None
     try:
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with asyncio.timeout(10):
             # The reader creates the file before writing the collection name into it.
             while not (selected.exists() and selected.read_text()):  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
                 await asyncio.sleep(0.01)
@@ -230,7 +232,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
             if direct_delete
             else asyncio.to_thread(_publish, space, key, "replacement"),
         )
-        assert await asyncio.to_thread(cleanup_started.wait, SETTLE_TIMEOUT_SECONDS)
+        assert await asyncio.to_thread(cleanup_started.wait, 10)
         assert not refresh_task.done()
         assert collection_exists(str(space.storage_path), proxy.collection_name)
         if cancel:
@@ -240,7 +242,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         else:
             reader.send_signal(signal.SIGUSR1)
             assert [document.content for document in await read_task] == ["original"]
-        await asyncio.wait_for(refresh_task, SETTLE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(refresh_task, 10)
         assert reader.returncode is not None
         assert not collection_exists(str(space.storage_path), proxy.collection_name)
         if direct_delete:
@@ -253,7 +255,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         read_task.cancel()
         await asyncio.gather(read_task, return_exceptions=True)
         if refresh_task is not None:
-            await asyncio.wait_for(refresh_task, SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(refresh_task, 10)
 
 
 def test_refresh_resolution_stays_in_requester_storage(
