@@ -14,6 +14,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
+from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model
 from mindroom.budgets.pricing import _PriceTable
 from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
@@ -176,22 +177,35 @@ async def test_reaching_the_cap_exactly_applies_the_fallback(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-async def test_per_user_override_beats_the_default_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = _config(users={ALICE_BRIDGE: 100.0, BOB: 1.0})
-    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0}, config)
+async def test_stored_cap_beats_the_default_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0})
+    monitor.caps.set(ALICE, 100, updated_by="test", now=OCTOBER)
+    monitor.caps.set(BOB, 1, updated_by="test", now=OCTOBER)
 
     assert _decide(monitor, ALICE, "astra") == "astra"
+    assert _decide(monitor, ALICE_BRIDGE, "astra") == "astra"
     assert _decide(monitor, BOB, "astra") == "luna"
     await monitor.stop()
 
 
-def test_budget_limit_resolves_aliases_and_defaults() -> None:
-    config = _config(users={ALICE_BRIDGE: 100.0})
+def test_budget_limit_uses_stored_caps_then_default(tmp_path: Path) -> None:
+    caps = BudgetCaps.load(tmp_path / "user_caps.json")
+    caps.set(ALICE, 100, updated_by="test", now=OCTOBER)
+    config = _config()
 
-    assert _budget_limit_usd(config, ALICE) == 100.0
-    assert _budget_limit_usd(config, BOB) == 10.0
-    assert _budget_limit_usd(_config(monthly_limit_usd=None), BOB) is None
-    assert _budget_limit_usd(Config(), BOB) is None
+    assert _budget_limit_usd(config, caps, ALICE) == 100.0
+    assert _budget_limit_usd(config, caps, BOB) == 10.0
+    assert _budget_limit_usd(config, None, ALICE) == 10.0
+    assert _budget_limit_usd(_config(monthly_limit_usd=None), caps, BOB) is None
+    assert _budget_limit_usd(Config(), caps, ALICE) is None
+
+
+def test_monitor_loads_caps_stored_by_an_earlier_run(tmp_path: Path) -> None:
+    BudgetCaps.load(budget_caps_path(_paths(tmp_path))).set(ALICE, 100, updated_by="test", now=OCTOBER)
+
+    monitor, _current = _monitor(tmp_path, _config())
+
+    assert monitor.caps.get(ALICE) == UserCap(limit_usd=100.0, updated_at=OCTOBER, updated_by="test")
 
 
 def test_an_unpriced_alias_of_a_priced_model_is_swapped_too(tmp_path: Path) -> None:
@@ -296,16 +310,25 @@ async def test_disabled_budgets_never_scan_or_swap(tmp_path: Path, monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_status_lists_spenders_and_configured_users(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = _config(users={"@carol:example.test": 50.0})
-    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0}, config)
+async def test_status_lists_spenders_and_users_with_stored_caps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0})
+    carol_cap = monitor.caps.set("@carol:example.test", 50, updated_by="budget-service", now=OCTOBER)
 
     status = monitor.status()
 
     assert status.users == (
-        _BudgetUserStatus(user_id=ALICE, spend_usd=12.0, limit_usd=10.0, over_budget=True),
-        _BudgetUserStatus(user_id=BOB, spend_usd=3.0, limit_usd=10.0, over_budget=False),
-        _BudgetUserStatus(user_id="@carol:example.test", spend_usd=0.0, limit_usd=50.0, over_budget=False),
+        _BudgetUserStatus(user_id=ALICE, spend_usd=12.0, limit_usd=10.0, over_budget=True, cap=None),
+        _BudgetUserStatus(user_id=BOB, spend_usd=3.0, limit_usd=10.0, over_budget=False, cap=None),
+        _BudgetUserStatus(
+            user_id="@carol:example.test",
+            spend_usd=0.0,
+            limit_usd=50.0,
+            over_budget=False,
+            cap=carol_cap,
+        ),
     )
     payload = status.to_dict()
     assert payload["enabled"] is True
@@ -314,7 +337,24 @@ async def test_status_lists_spenders_and_configured_users(tmp_path: Path, monkey
     assert payload["generated_at"] == "2026-10-09T12:00:00+00:00"
     assert payload["default_limit_usd"] == 10.0
     assert payload["fallback_model"] == "luna"
-    assert payload["users"][0] == {"user_id": ALICE, "spend_usd": 12.0, "limit_usd": 10.0, "over_budget": True}
+    assert payload["users"][0] == {
+        "user_id": ALICE,
+        "spend_usd": 12.0,
+        "limit_usd": 10.0,
+        "over_budget": True,
+        "override_usd": None,
+        "updated_at": None,
+        "updated_by": None,
+    }
+    assert payload["users"][2] == {
+        "user_id": "@carol:example.test",
+        "spend_usd": 0.0,
+        "limit_usd": 50.0,
+        "over_budget": False,
+        "override_usd": 50.0,
+        "updated_at": "2026-10-09T12:00:00+00:00",
+        "updated_by": "budget-service",
+    }
     assert payload["unpriced_models"] == [{"provider": "Ollama", "model": "qwen3.8:27b", "total_tokens": 5}]
     assert payload["coverage"] == {"scanned_sources": 2, "unavailable_sources": 0}
     await monitor.stop()
@@ -330,18 +370,20 @@ def test_status_before_first_scan_reports_current_month_without_spend(tmp_path: 
     assert payload["users"] == []
 
 
-def test_decision_resolves_the_requester_once_regardless_of_configured_users(tmp_path: Path) -> None:
-    users = {f"@user{index}:example.test": 50.0 for index in range(200)}
-    config = _config(users=users, monthly_limit_usd=0)
-    paths = _paths(tmp_path)
+def test_decision_resolves_the_requester_once_regardless_of_stored_caps(tmp_path: Path) -> None:
+    config = _config(monthly_limit_usd=0)
+    monitor, _current = _monitor(tmp_path, config)
+    for index in range(200):
+        monitor.caps.set(f"@user{index}:example.test", 50, updated_by="test", now=OCTOBER)
+    paths = monitor.runtime_paths
 
     with patch.object(
         monitor_module,
         "resolve_human_requester_alias",
         wraps=monitor_module.resolve_human_requester_alias,
     ) as resolve:
-        assert budget_model(config, paths, None, ALICE_BRIDGE, "astra") == "luna"
-        assert budget_model(config, paths, None, "@user7:example.test", "astra") == "astra"
+        assert budget_model(config, paths, monitor, ALICE_BRIDGE, "astra") == "luna"
+        assert budget_model(config, paths, monitor, "@user7:example.test", "astra") == "astra"
 
     assert resolve.call_count == 2
 

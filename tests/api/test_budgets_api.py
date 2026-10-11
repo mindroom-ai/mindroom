@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _HEADERS = {"Authorization": "Bearer test-budget-key"}
+_NOW = datetime(2026, 10, 11, 12, tzinfo=UTC)
 
 
 def _client(temp_config_file: Path, tmp_path: Path) -> TestClient:
@@ -31,10 +33,11 @@ def _client(temp_config_file: Path, tmp_path: Path) -> TestClient:
     return TestClient(main.app)
 
 
-def _bind_monitor(client: TestClient, config: Config | None) -> None:
+def _bind_monitor(client: TestClient, config: Config | None) -> BudgetMonitor:
     state = config_lifecycle.app_state(client.app)
     runtime_paths = main._app_runtime_paths(client.app)
     state.budget_monitor = BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config)
+    return state.budget_monitor
 
 
 def _budgeted_config() -> Config:
@@ -43,13 +46,14 @@ def _budgeted_config() -> Config:
             "default": ModelConfig(provider="ollama", id="test-model", pricing=ModelPricing(input=5, output=30)),
             "luna": ModelConfig(provider="ollama", id="cheap", pricing=ModelPricing(input=0.2, output=1.25)),
         },
-        budgets=BudgetsConfig(fallback_model="luna", monthly_limit_usd=20, users={"@alice:example.org": 100}),
+        budgets=BudgetsConfig(fallback_model="luna", monthly_limit_usd=20),
     )
 
 
-def test_budget_status_lists_settings_and_configured_users(temp_config_file: Path, tmp_path: Path) -> None:
+def test_budget_status_lists_settings_and_users_with_caps(temp_config_file: Path, tmp_path: Path) -> None:
     client = _client(temp_config_file, tmp_path)
-    _bind_monitor(client, _budgeted_config())
+    monitor = _bind_monitor(client, _budgeted_config())
+    monitor.caps.set("@alice:example.org", 100, updated_by="budget-service", now=_NOW)
 
     try:
         response = client.get("/api/budgets", headers=_HEADERS)
@@ -64,7 +68,15 @@ def test_budget_status_lists_settings_and_configured_users(temp_config_file: Pat
     assert payload["fallback_model"] == "luna"
     assert payload["generated_at"] is None
     assert payload["users"] == [
-        {"user_id": "@alice:example.org", "spend_usd": 0.0, "limit_usd": 100.0, "over_budget": False},
+        {
+            "user_id": "@alice:example.org",
+            "spend_usd": 0.0,
+            "limit_usd": 100.0,
+            "over_budget": False,
+            "override_usd": 100.0,
+            "updated_at": "2026-10-11T12:00:00+00:00",
+            "updated_by": "budget-service",
+        },
     ]
 
 
