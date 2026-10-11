@@ -103,3 +103,8 @@ def _main() -> None:
 
 if __name__ == "__main__":
     _main()
+    # The result is delivered and exit releases all native memory, so skip the
+    # interpreter teardown (about 0.1 s with Chroma loaded) that the parent waits for.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
