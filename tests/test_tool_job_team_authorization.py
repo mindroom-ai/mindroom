@@ -14,6 +14,7 @@ from agno.team import Team
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
+from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
 from mindroom.tool_jobs.completion import join_conversation_jobs
@@ -193,6 +194,36 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         for control in (runtime.wait, runtime.cancel):
             with pytest.raises(JobAccessError):
                 await control(job.job_id, owner=owner, depth=0)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", ["inline", "profile"])
+async def test_a_child_with_an_authored_persona_is_judged_by_its_grant(
+    tmp_path: Path,
+    source_kind: PersonaSourceKind,
+) -> None:
+    """A saved child's persona reads back as one, so admission, discovery, and revocation judge the child's grant."""
+    config = managed_team_config(tmp_path)
+    coordinator = team_coordinator(tmp_path, config)
+    await coordinator.initialize()
+    paths, owner = coordinator.runtime_paths, completed_delegation_job().owner
+    child = prepare_child_turn("lead", "worker", "Work", owner=owner, config=config, runtime_paths=paths, depth=0)
+    child.persona = SubagentPersona(source_kind=source_kind, source_name="analyst", system_prompt="Analyze.")
+
+    async def operation() -> BackgroundOutcome:
+        child.status = "completed"
+        child.result = "saved answer"
+        return BackgroundOutcome("completed", child.result)
+
+    runtime = coordinator.runtime
+    register_background_runtime(paths, runtime)
+    try:
+        job = await start_delegation_job(runtime, child, owner=owner, operation=operation)
+        assert delegation_child(job).persona == child.persona
+        await runtime.cancel_revoked(denied=lambda saved: coordinator._grant(saved) == "denied")
+        assert [listed.job_id for listed in await runtime.list_jobs(owner=owner, depth=0)] == [job.job_id]
     finally:
         await runtime.shutdown()
 

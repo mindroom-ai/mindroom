@@ -35,7 +35,7 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     if job.kind != "delegation":
         msg = "Job does not represent a native delegation."
         raise SubagentSessionError(msg)
-    return DelegationChild(**job.adapter["child"])
+    return DelegationChild.from_dict(job.adapter["child"])
 
 
 def delegation_outcome(status: Literal["completed", "failed", "cancelled", "denied"], text: str) -> BackgroundOutcome:
