@@ -70,7 +70,9 @@ if TYPE_CHECKING:
 # Upstream PR: None identified.
 # Remove when: Agno can replay the session summary as a history message for new and continued runs; the summary
 # must still replay exactly once and be counted once.
-# Coverage: tests/test_history_summary_message.py.
+# Coverage: tests/test_history_summary_message.py::test_summary_is_the_first_history_message_for_new_runs;
+# tests/test_history_summary_message.py::test_summary_is_reinserted_on_synchronous_continuation;
+# tests/test_history_summary_message.py::test_approval_resume_replays_the_summary_once.
 
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()

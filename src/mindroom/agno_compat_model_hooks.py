@@ -330,7 +330,8 @@ def install_response_request_gate(
 # Remove when: Agno awaits a public callback before every provider request of its async streaming and
 # non-streaming loops, passing the mutable message list, the formatted tools, and the run; the owner's compaction
 # policy remains MindRoom's.
-# Coverage: tests/test_agno_compat_model_hooks.py.
+# Coverage: tests/test_agno_compat_model_hooks.py::test_request_preparation_runs_before_every_provider_request;
+# tests/test_agno_compat_model_hooks.py::test_tool_call_cap_installed_later_refuses_before_preparation.
 def install_request_preparation(model: Model, *, marker: str, prepare: _RequestPreparation) -> None:
     """Await ``prepare`` before every provider request of this model's async response loops.
 

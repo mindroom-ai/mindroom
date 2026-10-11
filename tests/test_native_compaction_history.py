@@ -37,7 +37,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
@@ -1041,3 +1041,38 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
     assert configured.native_compaction.route == route_for(rendered)
     if summary:
         assert configured.native_compaction.route != route_for(summary)
+
+
+def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> None:
+    """A checkpoint already covers the summary message before it, which the projection drops."""
+    route = "route-1"
+    checkpoint = Message(
+        role="assistant",
+        content="",
+        provider_data={
+            "mindroom_native_compaction": {
+                "route": route,
+                "threshold": 100,
+                "checkpoint_prefix": True,
+                "items": [{"type": "compaction", "content": "provider checkpoint"}],
+            },
+        },
+    )
+    runs = [_completed_run("run-1", messages=[Message(role="user", content="question"), checkpoint])]
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    _config_settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+
+    without_summary = estimate_prompt_visible_history_tokens(
+        session=_session("session", runs=runs),
+        scope=scope,
+        history_settings=_config_settings,
+        native_route=route,
+    )
+    with_summary = estimate_prompt_visible_history_tokens(
+        session=_session("session", runs=runs, summary=SessionSummary(summary="S" * 400)),
+        scope=scope,
+        history_settings=_config_settings,
+        native_route=route,
+    )
+
+    assert with_summary == without_summary

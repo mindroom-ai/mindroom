@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
-from agno.agent._messages import aget_run_messages, get_run_messages
+from agno.agent import _messages as agent_messages
 from agno.db.in_memory import InMemoryDb
 from agno.models.anthropic import Claude
 from agno.models.aws.claude import Claude as BedrockClaude
@@ -83,8 +83,14 @@ async def _agent_request(
         "run_context": RunContext(run_id="run", session_id=session_id, session_state={}),
         "input": "Write an introduction.",
         "session": session,
+        "add_history_to_context": True,
     }
-    run_messages = await aget_run_messages(agent, **kwargs) if async_mode else get_run_messages(agent, **kwargs)
+    # Module attributes, so the requests go through MindRoom's message-builder patch as live runs do.
+    run_messages = (
+        await agent_messages.aget_run_messages(agent, **kwargs)
+        if async_mode
+        else agent_messages.get_run_messages(agent, **kwargs)
+    )
     chat_messages, system_text = format_messages(run_messages.messages)
     model = agent.model
     assert isinstance(model, Claude)
@@ -122,7 +128,9 @@ async def test_agent_cache_prefix_survives_date_and_compaction_changes(tmp_path:
     assert "Write clear prose." in original["system"][0]["text"]
     assert original["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert "Current date: Monday" in original["system"][1]["text"]
-    assert "The user approved chapter one." in compacted["system"][1]["text"]
+    # The summary replays as the first history message, so it never changes the system prompt.
+    assert "The user approved chapter one." not in compacted_text
+    assert "The user approved chapter one." in str(compacted["messages"])
     assert "Editing chapter two." in compacted["system"][1]["text"]
     assert "cache_control" not in compacted["system"][1]
     assert "".join(block["text"] for block in original["system"]) == original_text

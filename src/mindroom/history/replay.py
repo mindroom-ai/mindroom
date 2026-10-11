@@ -73,6 +73,9 @@ def estimate_prompt_visible_history_tokens(
                 checkpoint_tokens += checkpoint_estimated_tokens(items)
             else:
                 history_messages.append(message)
+    if checkpoint_tokens:
+        # The checkpoint covers the summary message before it, which native projection drops.
+        summary_tokens = 0
     return (
         summary_tokens
         + checkpoint_tokens

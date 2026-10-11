@@ -32,6 +32,7 @@ from mindroom.history.prompt_tokens import (
 from mindroom.history.replay import (
     _estimate_history_messages_tokens,
     _estimate_session_summary_tokens,
+    compaction_summary_message,
     estimate_prompt_visible_history_tokens,
 )
 from mindroom.history.types import (
@@ -355,14 +356,7 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
         history_settings=history_settings,
     )
 
-    expected_wrapper = (
-        "Here is a brief summary of your previous interactions:\n\n"
-        "<summary_of_previous_interactions>\n"
-        "merged summary\n"
-        "</summary_of_previous_interactions>\n\n"
-        "Note: this information is from previous interactions and may be outdated. "
-        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
-    )
+    expected_wrapper = str(compaction_summary_message("merged summary", from_history=True).content)
 
     assert _estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens == estimate_text_tokens(expected_wrapper)

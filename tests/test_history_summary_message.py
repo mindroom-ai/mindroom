@@ -21,6 +21,7 @@ from agno.team import _messages as team_messages
 from agno.team import _run as team_run
 
 from mindroom.agents import create_agent
+from mindroom.execution_preparation import _prepared_history_with_scheduled_limit
 from mindroom.history import agno_compat_message_builder
 from mindroom.history.replay import (
     compaction_summary_message,
@@ -29,7 +30,13 @@ from mindroom.history.replay import (
     is_compaction_summary,
     plan_replay_that_fits,
 )
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    PreparedHistoryState,
+    ResolvedHistorySettings,
+    ResolvedReplayPlan,
+)
 from tests.test_agno_compat_message_builder import RecordingOpenAIChat, _paused_and_resumed_requests
 
 if TYPE_CHECKING:
@@ -348,3 +355,20 @@ def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() ->
         scope=scope,
         history_settings=settings,
     )
+
+
+def test_scheduled_history_limits_keep_or_drop_the_summary() -> None:
+    summary_only = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="disabled",
+            estimated_tokens=10,
+            add_history_to_context=True,
+            num_history_runs=0,
+        ),
+        replays_persisted_history=True,
+    )
+
+    assert _prepared_history_with_scheduled_limit(summary_only, 3) is summary_only
+    no_history = _prepared_history_with_scheduled_limit(summary_only, 0).replay_plan
+    assert no_history is not None
+    assert no_history.add_history_to_context is False
