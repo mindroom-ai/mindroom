@@ -58,6 +58,7 @@ from mindroom.matrix_rtc.call_tools import (
     CallAgentTooling,
     build_call_tools,
     matrix_message_available_during_call,
+    record_call_token_usage,
     record_call_voice_usage,
 )
 from mindroom.matrix_rtc.call_writeback import format_call_writeback, post_call_writeback
@@ -1483,6 +1484,12 @@ class CallManager:
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,
                 on_session_error=on_session_error,
+                record_usage=partial(
+                    record_call_token_usage,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                ),
             )
         if self._call_config.backend == "live":
             live_config = cast("LiveCallProfile", self._call_config)

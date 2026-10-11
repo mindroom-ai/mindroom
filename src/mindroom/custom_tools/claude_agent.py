@@ -10,7 +10,10 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, ClassVar, Literal, Protocol, cast, runtime_checkable
+from uuid import uuid4
 
+from agno.metrics import ModelMetrics, RunMetrics
+from agno.run.agent import RunOutput
 from agno.tools import Toolkit
 from claude_agent_sdk import (
     AssistantMessage,
@@ -22,7 +25,9 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
+from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
@@ -39,6 +44,7 @@ _MAX_STDERR_LINES = 12
 _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 logger = get_logger(__name__)
+_SYNTHETIC_MODEL = "<synthetic>"
 
 
 @runtime_checkable
@@ -119,6 +125,14 @@ class _ClaudeSessionState:
     stderr_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
+
+
+@dataclass
+class _ClaudeTurn:
+    """One Claude Code turn: the responses of its main conversation by message id, and its result."""
+
+    responses: dict[str, AssistantMessage] = field(default_factory=dict)
+    result: ResultMessage | None = None
 
 
 class _ClaudeSessionManager:
@@ -291,6 +305,76 @@ async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
         logger.warning("Claude session cleanup timed out", timeout_seconds=_START_CLEANUP_TIMEOUT_SECONDS)
     elif not owner.cancelled() and (error := owner.exception()) is not None:
         logger.warning("Claude session cleanup failed", error=str(error))
+
+
+async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> None:
+    """Count one Claude Code turn's main-conversation usage toward the conversation and requester that ran it.
+
+    The result's usage covers the turn's main conversation, including responses that sent no message, such as an
+    empty reply Claude Code retried. Each message-bearing response reports its own input and cache usage when it
+    starts, which splits the turn by model; the rest of the turn, and its output, which only the result reports,
+    go to the model that finished it. The result's model usage is a running total that also restores earlier spend
+    when a session resumes, so it is not used.
+    """
+    owner = get_helper_usage_owner()
+    responses = list(turn.responses.values())
+    finishing_model = responses[-1].model if responses else session_model
+    if owner is None or finishing_model is None:
+        return
+    models: dict[str, ModelMetrics] = {}
+    for response in responses:
+        usage = response.usage or {}
+        model = models.setdefault(response.model, ModelMetrics(id=response.model, provider="Anthropic"))
+        model.input_tokens += usage.get("input_tokens") or 0
+        model.cache_read_tokens += usage.get("cache_read_input_tokens") or 0
+        model.cache_write_tokens += usage.get("cache_creation_input_tokens") or 0
+    result_usage = (turn.result.usage if turn.result is not None else None) or {}
+    # A crashed turn's result can report zeroes, so the result only ever adds to what its messages reported.
+    unseen_input = (result_usage.get("input_tokens") or 0) - sum(model.input_tokens for model in models.values())
+    unseen_cache_reads = (result_usage.get("cache_read_input_tokens") or 0) - sum(
+        model.cache_read_tokens for model in models.values()
+    )
+    unseen_cache_writes = (result_usage.get("cache_creation_input_tokens") or 0) - sum(
+        model.cache_write_tokens for model in models.values()
+    )
+    finishing = models.setdefault(finishing_model, ModelMetrics(id=finishing_model, provider="Anthropic"))
+    finishing.input_tokens += max(unseen_input, 0)
+    finishing.cache_read_tokens += max(unseen_cache_reads, 0)
+    finishing.cache_write_tokens += max(unseen_cache_writes, 0)
+    finishing.output_tokens = result_usage.get("output_tokens") or 0
+    metrics = RunMetrics(details={"model": list(models.values())})
+    for model in models.values():
+        model.total_tokens = model.input_tokens + model.output_tokens
+        metrics.input_tokens += model.input_tokens
+        metrics.output_tokens += model.output_tokens
+        metrics.total_tokens += model.total_tokens
+        metrics.cache_read_tokens += model.cache_read_tokens
+        metrics.cache_write_tokens += model.cache_write_tokens
+    if not (metrics.total_tokens or metrics.cache_read_tokens or metrics.cache_write_tokens):
+        return
+    # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
+    requester_context = get_tool_runtime_context() or get_detached_requester_context()
+    invocation_id = uuid4().hex
+    await record_helper_usage(
+        RunOutput(run_id=invocation_id, metrics=metrics),
+        owner=owner,
+        invocation_id=invocation_id,
+        kind="claude_agent",
+        requester_id=requester_context.requester_id if requester_context is not None else None,
+    )
+
+
+def _response_text(text_parts: list[str], result: ResultMessage | None) -> str:
+    """Return Claude's reply text, falling back to the result summary and marking reported errors."""
+    response_text = "\n".join(part for part in text_parts if part).strip()
+    if not response_text:
+        if result is not None and result.result:
+            response_text = str(result.result).strip()
+        else:
+            response_text = "Claude session completed without text output."
+    if result is not None and result.is_error:
+        return f"Claude reported an error: {response_text}"
+    return response_text
 
 
 class ClaudeAgentTools(Toolkit):
@@ -569,13 +653,13 @@ class ClaudeAgentTools(Toolkit):
         normalized_resume = resume.strip() if isinstance(resume, str) else None
         response_text = ""
         tool_names: list[str] = []
-        msg_result: ResultMessage | None = None
+        turn = _ClaudeTurn()
         session_error: str | None = None
         async with session.lock:
             session.last_used_at = monotonic()
             try:
                 await session.client.query(trimmed_prompt)
-                response_text, tool_names, msg_result = await self._collect_response(session)
+                response_text, tool_names, turn = await self._collect_response(session)
                 session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
@@ -591,36 +675,37 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        return self._format_response_output(response_text, tool_names, msg_result)
+        try:
+            await _record_turn_usage(turn, resolved_model)
+        except Exception as error:
+            # Claude has already done the work, so a usage write failure must not hide its reply.
+            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
+        return self._format_response_output(response_text, tool_names, turn.result)
 
     async def _collect_response(
         self,
         session: _ClaudeSessionState,
-    ) -> tuple[str, list[str], ResultMessage | None]:
+    ) -> tuple[str, list[str], _ClaudeTurn]:
         text_parts: list[str] = []
         tool_names: list[str] = []
-        result: ResultMessage | None = None
+        turn = _ClaudeTurn()
 
         async for message in session.client.receive_response():
             if isinstance(message, AssistantMessage):
+                # Placeholder messages, such as a request that failed every retry, name no real model.
+                if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
+                    # Parallel tool uses split one response into messages that share its id and usage.
+                    turn.responses.setdefault(message.message_id, message)
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
                         text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_names.append(block.name)
             elif isinstance(message, ResultMessage):
-                result = message
+                turn.result = message
                 session.claude_session_id = message.session_id
 
-        response_text = "\n".join(part for part in text_parts if part).strip()
-        if not response_text:
-            if result is not None and result.result:
-                response_text = str(result.result).strip()
-            else:
-                response_text = "Claude session completed without text output."
-        if result is not None and result.is_error:
-            return f"Claude reported an error: {response_text}", tool_names, result
-        return response_text, tool_names, result
+        return _response_text(text_parts, turn.result), tool_names, turn
 
     def _format_response_output(
         self,
