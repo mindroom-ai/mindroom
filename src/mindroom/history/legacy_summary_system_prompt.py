@@ -22,7 +22,7 @@ _LEGACY_SUMMARY_BLOCK = re.compile(
 # Legacy format: A run paused for approval stores its system message, which Agno's builder rendered with
 # ``session.summary`` inside a ``<summary_of_previous_interactions>`` block when add_session_summary_to_context was on
 # (configured agents, teams, and authored subagents through the interim persona path).
-# Last legacy release: v2026.10.231; replacement: the next release renders the summary as the first history message.
+# Last legacy release: v2026.10.236; replacement: the next release renders the summary as the first history message.
 # Handling: Resuming such a run inserts no summary message, so its request keeps the single summary it was paused
 # with and the paused tool call's signed reasoning stays valid against an unchanged prefix. A mid-turn compaction
 # of that resumed request folds the paused tool call anyway, so it also removes the block from the system message.
