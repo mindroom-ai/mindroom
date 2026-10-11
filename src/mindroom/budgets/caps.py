@@ -44,7 +44,7 @@ class BudgetCaps:
     """Caps by canonical Matrix user ID, read lock-free and written atomically to one JSON file."""
 
     path: Path
-    _entries: Mapping[str, UserCap] = field(default_factory=dict, init=False)
+    _entries: Mapping[str, UserCap] = field(default_factory=lambda: MappingProxyType({}), init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @classmethod

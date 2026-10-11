@@ -619,13 +619,24 @@ export function Budgets() {
             budgets={budgets}
             updateConfigValue={updateConfigValue}
           />
-          {budgets != null && (
-            <UsersCard
-              budgets={budgets}
-              status={status}
-              statusError={query.isError ? query.error.message : undefined}
-            />
-          )}
+          {budgets != null &&
+            // Caps are stored by the running server, which accepts them only once budgets are saved on.
+            (query.data?.enabled === false ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Users</CardTitle>
+                  <CardDescription>
+                    Save to turn on budgets, then set per-user caps here.
+                  </CardDescription>
+                </CardHeader>
+              </Card>
+            ) : (
+              <UsersCard
+                budgets={budgets}
+                status={status}
+                statusError={query.isError ? query.error.message : undefined}
+              />
+            ))}
           {status != null && status.unpriced_models.length > 0 && (
             <Alert>
               <AlertTriangle className="h-4 w-4" aria-hidden="true" />

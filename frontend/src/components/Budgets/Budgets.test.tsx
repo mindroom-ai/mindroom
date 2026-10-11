@@ -390,6 +390,20 @@ describe("Budgets", () => {
     expect(within(bob).getByText("Waiting for spend")).toBeInTheDocument();
   });
 
+  it("asks to save budgets before per-user caps can be set", async () => {
+    vi.mocked(fetch).mockResolvedValue(respond({ enabled: false }));
+    renderBudgets();
+
+    expect(
+      await screen.findByText(
+        "Save to turn on budgets, then set per-user caps here.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add user" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("turns budgets on with the cheapest priced model as fallback", async () => {
     setStore(budgetConfig({ budgets: undefined }));
     vi.mocked(fetch).mockResolvedValue(respond({ enabled: false }));

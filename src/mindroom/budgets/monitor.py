@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.budgets.caps import BudgetCaps, budget_caps_path
+from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import price_table, provider_identity
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
 from mindroom.logging_config import get_logger
@@ -18,7 +18,6 @@ from mindroom.requester_identity import is_human_requester_id, resolve_human_req
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.budgets.caps import UserCap
     from mindroom.budgets.pricing import PricedModel
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -30,12 +29,11 @@ _MIN_SCAN_INTERVAL_SECONDS = 30.0
 _TICK_SECONDS = 300.0
 
 
-def _budget_limit_usd(config: Config, caps: BudgetCaps | None, canonical_user_id: str) -> float | None:
-    """Return a canonical requester's monthly cap in USD, or None when budgets are off or the user is uncapped."""
+def _budget_limit_usd(config: Config, cap: UserCap | None) -> float | None:
+    """Return the monthly cap in USD for a user with ``cap``, or None when budgets are off or the user is uncapped."""
     budgets = config.budgets
     if budgets is None:
         return None
-    cap = caps.get(canonical_user_id) if caps is not None else None
     return cap.limit_usd if cap is not None else budgets.monthly_limit_usd
 
 
@@ -75,7 +73,7 @@ def budget_model(
     if not is_human_requester_id(requester_id, config, runtime_paths):
         return model_name
     canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    limit = _budget_limit_usd(config, monitor.caps if monitor is not None else None, canonical_requester_id)
+    limit = _budget_limit_usd(config, monitor.caps.get(canonical_requester_id) if monitor is not None else None)
     if limit is None:
         return model_name
     spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
@@ -213,7 +211,8 @@ class BudgetMonitor:
             # Replies for agents and bridge bots are never swapped, so they have no budget to show.
             if not is_human_requester_id(user_id, config, self.runtime_paths):
                 continue
-            limit = _budget_limit_usd(config, self.caps, user_id)
+            cap = caps.get(user_id)
+            limit = _budget_limit_usd(config, cap)
             user_spend = spend.get(user_id, 0.0)
             users.append(
                 _BudgetUserStatus(
@@ -221,7 +220,7 @@ class BudgetMonitor:
                     spend_usd=user_spend,
                     limit_usd=limit,
                     over_budget=limit is not None and user_spend >= limit,
-                    cap=caps.get(user_id),
+                    cap=cap,
                 ),
             )
         return _BudgetStatus(

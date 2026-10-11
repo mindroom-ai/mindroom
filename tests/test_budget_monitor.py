@@ -188,16 +188,14 @@ async def test_stored_cap_beats_the_default_cap(tmp_path: Path, monkeypatch: pyt
     await monitor.stop()
 
 
-def test_budget_limit_uses_stored_caps_then_default(tmp_path: Path) -> None:
-    caps = BudgetCaps.load(tmp_path / "user_caps.json")
-    caps.set(ALICE, 100, updated_by="test", now=OCTOBER)
+def test_budget_limit_uses_the_users_cap_then_the_default() -> None:
+    cap = UserCap(limit_usd=100.0, updated_at=OCTOBER, updated_by="test")
     config = _config()
 
-    assert _budget_limit_usd(config, caps, ALICE) == 100.0
-    assert _budget_limit_usd(config, caps, BOB) == 10.0
-    assert _budget_limit_usd(config, None, ALICE) == 10.0
-    assert _budget_limit_usd(_config(monthly_limit_usd=None), caps, BOB) is None
-    assert _budget_limit_usd(Config(), caps, ALICE) is None
+    assert _budget_limit_usd(config, cap) == 100.0
+    assert _budget_limit_usd(config, None) == 10.0
+    assert _budget_limit_usd(_config(monthly_limit_usd=None), None) is None
+    assert _budget_limit_usd(Config(), cap) is None
 
 
 def test_monitor_loads_caps_stored_by_an_earlier_run(tmp_path: Path) -> None:

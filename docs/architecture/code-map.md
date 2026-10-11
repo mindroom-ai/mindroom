@@ -308,6 +308,7 @@ Persistent state lives under `mindroom_data/` by default (next to `config.yaml`,
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
 - `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
 - `credentials/` – JSON secrets synchronized from `.env`
+- `budgets/user_caps.json` – Per-user monthly budget caps set from the dashboard or the budget service
 - `encryption_keys/` – Matrix E2E encryption keys
 - `sync_continuity/` – Crash-atomic pending join/decrypt fences
 - `logs/` – Log files
