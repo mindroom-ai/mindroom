@@ -4463,7 +4463,7 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
                     await asyncio.sleep(0.005)
         except TimeoutError:
             if not boundaries:
-                pytest.fail("the reload no longer bounds apply_update_boundary with asyncio.wait_for")
+                pytest.fail("the reload never reached apply_update_boundary through asyncio.wait_for")
             raise
         # Give the cancellation loop turns to propagate; only the shield keeps the reload waiting through them.
         for _ in range(20):
