@@ -476,7 +476,7 @@ def test_warm_reader_runs_outside_the_terminal_process_group() -> None:
 
 
 def test_idle_reader_exits_quietly_when_its_input_closes(capfd: pytest.CaptureFixture[str]) -> None:
-    """A warm child whose parent exits or discards it leaves without a result or traceback."""
+    """A warm child whose parent exits leaves without a result or traceback."""
     reader = read_process._spawn_reader()
     output, _ = reader.communicate(timeout=30)
     assert (output, reader.returncode) == (b"", 0)

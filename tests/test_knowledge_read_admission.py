@@ -50,9 +50,6 @@ class _Child:
         self.reap.set()
         self.killed = Event()
 
-    def poll(self) -> int | None:
-        return self.returncode
-
     def kill(self) -> None:
         self.killed.set()
 

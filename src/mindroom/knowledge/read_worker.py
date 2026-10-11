@@ -77,7 +77,7 @@ def _main() -> None:
     with output:
         deadline = sys.stdin.buffer.readline()
         if not deadline:
-            return  # The parent exited or discarded this warm reader.
+            return  # The parent exited.
         timeout = float(deadline)
         if not math.isfinite(timeout) or timeout <= 0:
             message = "Knowledge reader deadline must be finite and positive"
