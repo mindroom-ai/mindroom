@@ -31,7 +31,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 - A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.
 - A background child that needs approval asks through cards its job posts, and the job stays `awaiting_approval` until the decisions arrive.
   A gated call of a top-level agent that can become a managed job asks the same way, as its job's first phase: it is marked `mindroom_job` instead of pausing the run, the reply waits up to `approval_wait_timeout` for the decision and then goes on, and the call runs only once approved.
-  A Stop recorded for its reply before the approval lands wins over that approval.
+  A Stop recorded for its reply before the approval lands wins over that approval; the card still shows the approval, though the call never runs.
   Such a call never runs inline: one that cannot become a job fails, and the agent CLI never offers it.
   Calls that must finish inside their run, tools whose own definition requires confirmation, excluded toolkits, subagents, and minimal mode keep the paused-run approval.
   Turning the feature off parks saved work.

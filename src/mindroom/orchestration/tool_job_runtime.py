@@ -403,7 +403,7 @@ class ToolJobRuntimeCoordinator:
         for _principal_id, reply in await journal.waiting_replies():
             bot = self.bot_provider(reply.entity_name)
             if bot is None or reply.hold_key is None:
-                # A removed entity's waiting reply ends without its bot.
+                # Entity removal ends a removed entity's waiting reply; a reply with no key waits for nothing here.
                 continue
             work = None if runtime is None else await conversation_work(runtime, HoldKey.decode(reply.hold_key))
             if work is None or work.ready or not work.jobs:

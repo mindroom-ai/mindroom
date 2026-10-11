@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 _CANCELLED_REASON = "The background job asking for this approval ended before a decision."
 # A Stop recorded for the reply while its job's cards were open wins over their approvals.
 STOPPED_BEFORE_APPROVED_CALL = "Stopped before the approved call ran."
-_UNASKED_REASON = "The runtime stopped while this call waited for its approval, so it did not run."
+_INTERRUPTED_APPROVAL_REASON = "The runtime stopped while this call waited for its approval, so it did not run."
 
 
 def _approval_run_id(job_id: str) -> str:
@@ -165,7 +165,7 @@ async def end_tool_call_approval(runtime: ToolJobRuntime, job: BackgroundJob) ->
     await settle_job_approvals(runtime, job.job_id)
     if job.status == "awaiting_approval" and job_stopped_by_shutdown():
         # The approval is the job's first phase, so unlike other interrupted work its call has no effects to check.
-        return BackgroundOutcome("interrupted", _UNASKED_REASON)
+        return BackgroundOutcome("interrupted", _INTERRUPTED_APPROVAL_REASON)
     return None
 
 
