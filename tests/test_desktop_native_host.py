@@ -931,8 +931,8 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
 
     async def terminate_after_two_replies(process: asyncio.subprocess.Process) -> None:
         # Termination may only finish once revoke and status replied, however slowly they are written.
-        # A revoke that waited for the command to stop would never reply; the bound lets the stream's
-        # own deadline fail the test and cleanup still stop the child.
+        # A revoke that waited for the command to stop would never reply; the stream's deadline then
+        # fails the test, and the bound lets termination still run so cleanup stops the child.
         with suppress(TimeoutError):
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await output.two_replies_written.wait()

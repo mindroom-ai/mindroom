@@ -634,7 +634,14 @@ async def test_write_failure_prevents_shell_and_inner_effects(
 
 
 def _run_cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["mindroom-agent", *argv], env=env, capture_output=True, text=True, timeout=5, check=False)
+    return subprocess.run(
+        ["mindroom-agent", *argv],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=SETTLE_TIMEOUT_SECONDS,
+        check=False,
+    )
 
 
 def _cli_call_until_settled(env: dict[str, str], *, separate_wait: bool) -> dict[str, object]:
@@ -736,7 +743,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         async with response_cli_lifetime() as lifetime:
             lifetime.bind_provider(owner.checkpoint, function)
             calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 bash_task = asyncio.create_task(
                     owner.execute_bash(
                         ToolKey("shell", "run_shell_command"),
