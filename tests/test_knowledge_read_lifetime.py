@@ -237,8 +237,9 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         assert collection_exists(str(space.storage_path), proxy.collection_name)
         if cancel:
             read_task.cancel()
+            assert (await asyncio.wait({read_task}, timeout=10))[0], "cancelling the read did not stop its reader"
             with pytest.raises(asyncio.CancelledError):
-                await read_task
+                read_task.result()
         else:
             reader.send_signal(signal.SIGUSR1)
             assert [document.content for document in await read_task] == ["original"]
