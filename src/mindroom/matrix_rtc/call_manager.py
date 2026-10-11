@@ -90,7 +90,7 @@ from mindroom.response_admission import (
     admitted_response_decision,
 )
 from mindroom.session_ids import create_session_id
-from mindroom.token_budget import approximate_o200k_tokens
+from mindroom.token_budget import approximate_o200k_tokens, o200k_encoding
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -237,13 +237,16 @@ def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") ->
     return "\n\n".join(part for part in parts if part)
 
 
-def preload_matrix_call_dependencies(config: Config) -> None:
-    """Load optional call SDKs before bots start syncing."""
+async def preload_matrix_call_dependencies(config: Config) -> None:
+    """Load optional call SDKs and the call token encoder before bots start syncing."""
     if not config.calls.enabled or not matrix_calls_dependencies_available():
         return
-    # LiveKit registers plugins on the main thread, so this import must not be offloaded.
     try:
+        # LiveKit registers plugins on the main thread, so this import must not be offloaded.
         from livekit.plugins import openai  # noqa: F401, PLC0415
+
+        # Call setup counts tokens; building the encoder on the loop would stall call audio.
+        await asyncio.to_thread(o200k_encoding)
     except Exception:
         logger.warning("calls_dependency_preload_failed", exc_info=True)
 

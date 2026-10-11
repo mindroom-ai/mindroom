@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sys
+import threading
 import time
 from datetime import timedelta
-from types import MethodType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,6 +40,7 @@ from mindroom.matrix_rtc.call_manager import (
     _build_call_instructions,
     _build_live_instructions,
     maybe_build_call_manager,
+    preload_matrix_call_dependencies,
 )
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
@@ -2365,6 +2368,27 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
         wait_for_admission_or_shutdown=_admission_available,
     )
     assert manager is None
+
+
+@pytest.mark.asyncio
+async def test_preload_builds_the_token_encoder_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup builds the call token encoder in a worker thread, and only when calls are enabled."""
+    livekit_plugins = ModuleType("livekit.plugins")
+    livekit_plugins.openai = ModuleType("livekit.plugins.openai")
+    monkeypatch.setitem(sys.modules, "livekit.plugins", livekit_plugins)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: True)
+    encoder_threads: list[int] = []
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.o200k_encoding",
+        lambda: encoder_threads.append(threading.get_ident()),
+    )
+
+    await preload_matrix_call_dependencies(_config(enabled=False))
+    assert encoder_threads == []
+
+    await preload_matrix_call_dependencies(_config())
+    assert len(encoder_threads) == 1
+    assert encoder_threads[0] != threading.get_ident()
 
 
 def test_voice_backend_availability_requires_runtime_credentials(
