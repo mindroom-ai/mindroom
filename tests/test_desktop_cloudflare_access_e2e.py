@@ -571,7 +571,7 @@ def _running_bridge(local: _LocalComputer) -> Iterator[list[str]]:
             process.kill()
             process.wait()
             reader.join(timeout=10)
-            pytest.fail(f"Desktop bridge ignored Ctrl-C for 30 seconds; its output:\n{''.join(lines)}")
+            pytest.fail(f"Desktop bridge did not stop within 30 seconds of Ctrl-C; its output:\n{''.join(lines)}")
         finally:
             if process.poll() is None:
                 process.kill()

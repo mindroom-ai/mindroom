@@ -244,8 +244,6 @@ async def _paused_case(  # noqa: PLR0915
     requires_human: bool,
 ) -> AsyncIterator[_ApprovalCase]:
     bot = _bot(tmp_path)
-    # Ownership checks must not start background embedding requests after a resume.
-    bot.config.agents["general"].memory_backend = "none"
     room_id, source_id, edit_id, answer_id = "!room:localhost", "$source", "$edit", "$answer"
     room = nio.MatrixRoom(room_id, bot.matrix_id.full_id)
     room.users["@user:localhost"] = nio.MatrixUser("@user:localhost", "User")

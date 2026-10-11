@@ -4449,7 +4449,7 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         boundary = asyncio.ensure_future(awaitable)
         boundaries.append(boundary)
         # The reload's pass deadline starts only once the revocation is accepted, however slow the runner.
-        await asyncio.to_thread(accepted.wait, SETTLE_TIMEOUT_SECONDS)
+        assert await asyncio.to_thread(accepted.wait, SETTLE_TIMEOUT_SECONDS), "the reload never accepted a revocation"
         return await wait_for(boundary, timeout)
 
     monkeypatch.setattr(asyncio, "wait_for", deadline_from_acceptance)

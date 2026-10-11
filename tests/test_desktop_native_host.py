@@ -931,7 +931,11 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
 
     async def terminate_after_two_replies(process: asyncio.subprocess.Process) -> None:
         # Termination may only finish once revoke and status replied, however slowly they are written.
-        await output.two_replies_written.wait()
+        # A revoke that waited for the command to stop never replies, so the wait is bounded and the
+        # assertions below report it.
+        with suppress(TimeoutError):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await output.two_replies_written.wait()
         await terminate(process)
 
     monkeypatch.setattr(shell_execution, "_terminate_process_group", terminate_after_two_replies)
@@ -950,7 +954,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
         )
         await asyncio.wait_for(execution, timeout=SETTLE_TIMEOUT_SECONDS)
         (revoked, revoke_active), (status, status_active), (stopped, _) = output.responses
-        # Both replies precede the end of termination: the TERM-resistant child still holds the command open.
+        # Both replies precede the end of termination, so the command is still active when each is written.
         assert (revoke_active, status_active) == ("shell-1", "shell-1")
         assert revoked["ok"] is True
         assert status["result"]["status"]["shell"]["auto_approve_remaining_seconds"] == 0
@@ -961,14 +965,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
         await restarted.deliver_pending()
         assert "was stopped" in bridge_transport.await_args.kwargs["content"]["error"]
         await host.shutdown()
-        for _ in range(400):
-            try:
-                os.kill(child, 0)
-            except ProcessLookupError:
-                break
-            await asyncio.sleep(0.005)
-        else:
-            pytest.fail("TERM-resistant child survived revoke and stop")
+        await _wait_until_gone(child)
     finally:
         if pid_file.exists() and pid_file.read_text():
             with suppress(ProcessLookupError):

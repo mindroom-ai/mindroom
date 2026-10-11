@@ -78,7 +78,6 @@ def _paused(run_id: str = "run-1", text: str = "Reading document") -> PausedAtte
 @asynccontextmanager
 async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterator[AgentBot]:
     bot = await _streaming_bot(tmp_path)
-    bot.config.agents["general"].memory_backend = "none"
     # Tool markers are not what these tests are about.
     bot.config.defaults.show_tool_calls = False
 
