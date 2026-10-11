@@ -3,23 +3,30 @@
 from __future__ import annotations
 
 import base64
-from typing import TYPE_CHECKING, Literal
+from copy import deepcopy
+from typing import TYPE_CHECKING, Literal, LiteralString
 
 import httpx
 import pytest
 from agno.media import File
 from agno.models.azure.openai_chat import AzureOpenAI
+from agno.models.base import MessageData
 from agno.models.deepseek import DeepSeek
 from agno.models.llama_cpp import LlamaCpp
 from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
+from agno.models.response import ModelResponse
 from openai import OpenAI
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
 from mindroom.attachment_media import attachment_records_to_media
 from mindroom.attachments import AttachmentRecord
+from mindroom.providers.agno_compat_openrouter_reasoning import (
+    _OPENROUTER_REASONING_DETAILS_BUFFER,
+    coalesced_openrouter_reasoning_details,
+)
 from mindroom.providers.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.providers.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.providers.openai_models import (
@@ -224,6 +231,264 @@ def test_openai_metrics_preserve_sdk_input_details(route: _OpenAIRoute, *, inclu
     assert metrics.audio_input_tokens == (11 if route == "chat" else 0)
     assert metrics.audio_output_tokens == (13 if route == "chat" else 0)
     assert metrics.audio_total_tokens == (24 if route == "chat" else 0)
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        (
+            [
+                {"type": "reasoning.text", "text": "first", "index": 0},
+                {"type": "reasoning.text", "text": " second", "index": 0},
+            ],
+            [{"type": "reasoning.text", "text": "first second", "index": 0}],
+        ),
+        (
+            [
+                {"type": "reasoning.text", "text": "first", "id": "reasoning-1"},
+                {"type": "reasoning.text", "text": " second", "id": "reasoning-1"},
+            ],
+            [{"type": "reasoning.text", "text": "first second", "id": "reasoning-1"}],
+        ),
+        (
+            [
+                {"type": "reasoning.text", "text": "a", "index": 0},
+                {"type": "reasoning.text", "text": "b", "index": 1},
+                {"type": "reasoning.text", "text": "c", "index": 0},
+            ],
+            [
+                {"type": "reasoning.text", "text": "a", "index": 0},
+                {"type": "reasoning.text", "text": "b", "index": 1},
+                {"type": "reasoning.text", "text": "c", "index": 0},
+            ],
+        ),
+        (
+            [
+                {"type": "reasoning.text", "text": "a", "index": 0, "id": "one"},
+                {"type": "reasoning.text", "text": "b", "index": 0, "id": "two"},
+                {"type": "reasoning.text", "text": "c", "index": 0, "signature": "one"},
+                {"type": "reasoning.text", "text": "d", "index": 0, "signature": "two"},
+                {"type": "reasoning.text", "text": "e", "index": 0},
+                {"type": "reasoning.text", "text": "f", "index": 0, "id": None},
+            ],
+            [
+                {"type": "reasoning.text", "text": "a", "index": 0, "id": "one"},
+                {"type": "reasoning.text", "text": "b", "index": 0, "id": "two"},
+                {"type": "reasoning.text", "text": "c", "index": 0, "signature": "one"},
+                {"type": "reasoning.text", "text": "d", "index": 0, "signature": "two"},
+                {"type": "reasoning.text", "text": "e", "index": 0},
+                {"type": "reasoning.text", "text": "f", "index": 0, "id": None},
+            ],
+        ),
+        (
+            [
+                {"type": "reasoning.text", "text": "a"},
+                {"type": "reasoning.text", "text": "b"},
+                {"type": "reasoning.text", "text": "c", "index": True},
+                {"type": "reasoning.text", "text": "d", "index": True},
+                {"type": "reasoning.text", "text": "e", "id": ""},
+                {"type": "reasoning.text", "text": "f", "id": ""},
+            ],
+            [
+                {"type": "reasoning.text", "text": "a"},
+                {"type": "reasoning.text", "text": "b"},
+                {"type": "reasoning.text", "text": "c", "index": True},
+                {"type": "reasoning.text", "text": "d", "index": True},
+                {"type": "reasoning.text", "text": "e", "id": ""},
+                {"type": "reasoning.text", "text": "f", "id": ""},
+            ],
+        ),
+        (
+            [
+                {"type": "reasoning.text", "text": "a", "index": 0},
+                {"type": "reasoning.text", "text": 1, "index": 0},
+                {"type": "reasoning.summary", "text": "summary", "index": 0},
+                "malformed",
+                None,
+            ],
+            [
+                {"type": "reasoning.text", "text": "a", "index": 0},
+                {"type": "reasoning.text", "text": 1, "index": 0},
+                {"type": "reasoning.summary", "text": "summary", "index": 0},
+                "malformed",
+                None,
+            ],
+        ),
+    ],
+)
+def test_openrouter_reasoning_details_coalesce_only_adjacent_compatible_text(
+    details: list[object],
+    expected: list[object],
+) -> None:
+    """Only unambiguously compatible text fragments may be joined."""
+    original = deepcopy(details)
+
+    normalized = coalesced_openrouter_reasoning_details(details)
+
+    assert normalized == expected
+    assert details == original
+
+
+@pytest.mark.parametrize("details", [None, "details", {"type": "reasoning.text"}, 1])
+def test_openrouter_reasoning_details_leave_non_lists_unchanged(details: object) -> None:
+    """Malformed provider payloads must pass through without interpretation."""
+    assert coalesced_openrouter_reasoning_details(details) is details
+
+
+def test_openrouter_reasoning_details_stream_coalesces_across_deltas_and_preserves_yields() -> None:
+    """Streaming storage stays compact without changing superclass output behavior."""
+    model = MindRoomOpenRouter(id="test/model", api_key="test-key")
+    stream_data = MessageData()
+    deltas = [
+        ModelResponse(
+            content="first",
+            provider_data={
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "a", "index": 0},
+                    {"type": "reasoning.text", "text": "b", "index": 0},
+                    {"type": "reasoning.text", "text": "c", "index": 1},
+                ],
+                "trace": ["one"],
+            },
+        ),
+        ModelResponse(
+            content=" second",
+            provider_data={
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "d", "index": 1},
+                    {"type": "reasoning.text", "text": "e", "index": 0},
+                ],
+                "trace": ["two"],
+            },
+        ),
+    ]
+
+    yielded = [item for delta in deltas for item in model._populate_stream_data(stream_data, delta)]
+
+    assert all(yielded_delta is original_delta for yielded_delta, original_delta in zip(yielded, deltas, strict=True))
+    assert [item.content for item in yielded] == ["first", " second"]
+    assert stream_data.response_content == "first second"
+    assistant = Message(role="assistant")
+    model._populate_assistant_message_from_stream_data(assistant, stream_data)
+    assert stream_data.response_provider_data == {
+        "reasoning_details": [
+            {"type": "reasoning.text", "text": "ab", "index": 0},
+            {"type": "reasoning.text", "text": "cd", "index": 1},
+            {"type": "reasoning.text", "text": "e", "index": 0},
+        ],
+        "trace": ["one", "two"],
+    }
+    assert assistant.provider_data["reasoning_details"] == stream_data.response_provider_data["reasoning_details"]
+
+
+def test_openrouter_reasoning_details_stream_joins_fragments_only_when_finalized() -> None:
+    """Streaming must collect text linearly, then persist one ordinary string."""
+
+    class NoConcatenationStr(str):
+        __slots__ = ()
+
+        def __add__(self, other: str, /) -> LiteralString:
+            message = "streaming concatenated reasoning fragments"
+            raise AssertionError(message)
+
+    model = MindRoomOpenRouter(id="test/model", api_key="test-key")
+    stream_data = MessageData()
+    details = [{"type": "reasoning.text", "text": NoConcatenationStr("x"), "index": 0} for _ in range(100)]
+
+    list(
+        model._populate_stream_data(
+            stream_data,
+            ModelResponse(provider_data={"reasoning_details": details}),
+        ),
+    )
+    buffered_blocks = getattr(stream_data, _OPENROUTER_REASONING_DETAILS_BUFFER)
+    assert len(buffered_blocks) == 1
+    assert not any(isinstance(block, dict) for block in buffered_blocks)
+    assistant = Message(role="assistant")
+    model._populate_assistant_message_from_stream_data(assistant, stream_data)
+
+    persisted_details = stream_data.response_provider_data["reasoning_details"]
+    assert persisted_details == [{"type": "reasoning.text", "text": "x" * 100, "index": 0}]
+    assert type(persisted_details[0]["text"]) is str
+    assert assistant.provider_data["reasoning_details"] == stream_data.response_provider_data["reasoning_details"]
+
+
+def test_openrouter_reasoning_details_stream_preserves_later_non_list_value() -> None:
+    """A malformed later provider value must retain Agno's replacement semantics."""
+    model = MindRoomOpenRouter(id="test/model", api_key="test-key")
+    stream_data = MessageData()
+
+    list(
+        model._populate_stream_data(
+            stream_data,
+            ModelResponse(
+                provider_data={
+                    "reasoning_details": [{"type": "reasoning.text", "text": "a", "index": 0}],
+                },
+            ),
+        ),
+    )
+    list(
+        model._populate_stream_data(
+            stream_data,
+            ModelResponse(provider_data={"reasoning_details": None}),
+        ),
+    )
+    model._populate_assistant_message_from_stream_data(Message(role="assistant"), stream_data)
+
+    assert stream_data.response_provider_data == {"reasoning_details": None}
+
+
+def test_openrouter_reasoning_details_stream_list_after_non_list_starts_a_new_sequence() -> None:
+    """A later valid list must replace the malformed value and discarded earlier list."""
+    model = MindRoomOpenRouter(id="test/model", api_key="test-key")
+    stream_data = MessageData()
+    provider_values: list[object] = [
+        [{"type": "reasoning.text", "text": "discarded", "index": 0}],
+        None,
+        [
+            {"type": "reasoning.text", "text": "kept", "index": 0},
+            {"type": "reasoning.text", "text": " together", "index": 0},
+        ],
+    ]
+
+    for provider_value in provider_values:
+        list(
+            model._populate_stream_data(
+                stream_data,
+                ModelResponse(provider_data={"reasoning_details": provider_value}),
+            ),
+        )
+    model._populate_assistant_message_from_stream_data(Message(role="assistant"), stream_data)
+
+    assert stream_data.response_provider_data == {
+        "reasoning_details": [{"type": "reasoning.text", "text": "kept together", "index": 0}],
+    }
+
+
+def test_openrouter_reasoning_details_replay_coalesces_without_mutating_history() -> None:
+    """Wire replay is normalized while persisted provider data remains untouched."""
+    model = MindRoomOpenRouter(id="test/model", api_key="test-key")
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        provider_data={
+            "reasoning_details": [
+                {"type": "reasoning.text", "text": "first", "index": 0},
+                {"type": "reasoning.text", "text": " second", "index": 0},
+            ],
+            "trace": {"request_id": "request-1"},
+        },
+    )
+    original_provider_data = deepcopy(assistant.provider_data)
+
+    formatted = model._format_message(assistant)
+
+    assert formatted["reasoning_details"] == [
+        {"type": "reasoning.text", "text": "first second", "index": 0},
+    ]
+    assert assistant.provider_data == original_provider_data
+    assert assistant.provider_data["trace"] == {"request_id": "request-1"}
 
 
 def _assistant_with_argumentless_tool_call() -> Message:

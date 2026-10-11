@@ -30,7 +30,9 @@ from mindroom.native_compaction import (
 from mindroom.providers.agno_compat_openai_chat import OpenAIChatProviderCompat as AgnoOpenAIChatProviderCompat
 from mindroom.providers.agno_compat_openai_responses import OpenAIResponsesProviderCompat
 from mindroom.providers.agno_compat_openai_responses_items import record_response_output, record_tool_search_items
+from mindroom.providers.agno_compat_openrouter_reasoning import OpenRouterReasoningDetailsCompat
 from mindroom.providers.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
+from mindroom.providers.legacy_openrouter_reasoning_replay import repair_legacy_openrouter_reasoning_details
 from mindroom.providers.openai_prompt_cache import (
     formatted_input_with_shared_system_prefix,
     supports_openai_cache_breakpoints,
@@ -128,8 +130,8 @@ class MindRoomOpenAILike(OpenAIChatProviderCompat, OpenAILike):
 
 
 @dataclass
-class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
-    """OpenRouter model with cross-provider tool replay and Claude prompt caching.
+class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouterReasoningDetailsCompat, OpenRouter):
+    """OpenRouter model with cross-provider tool replay, compact reasoning details, and Claude prompt caching.
 
     ``cache_system_prompt`` and ``extended_cache_time`` mirror the direct Claude
     providers' settings and only affect model IDs that route to Anthropic.
@@ -155,6 +157,10 @@ class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
             "AsyncOpenAIClient",
             with_prompt_cache_ladder(super().get_async_client(), self._prompt_cache_control),
         )
+
+    def _format_message(self, message: Message, compress_tool_results: bool = False) -> dict[str, Any]:
+        """Replay historical fragmented reasoning details as compact blocks without mutating history."""
+        return super()._format_message(repair_legacy_openrouter_reasoning_details(message), compress_tool_results)
 
 
 @dataclass

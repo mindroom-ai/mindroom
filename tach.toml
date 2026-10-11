@@ -7644,6 +7644,22 @@ expose = ["OpenAIChatProviderCompat"]
 
 
 [[modules]]
+path = "mindroom.providers.agno_compat_openrouter_reasoning"
+depends_on = []
+visibility = ["mindroom.providers.openai_models", "mindroom.providers.legacy_openrouter_reasoning_replay"]
+
+[[interfaces]]
+from = ["mindroom.providers.agno_compat_openrouter_reasoning"]
+expose = ["OpenRouterReasoningDetailsCompat", "coalesced_openrouter_reasoning_details"]
+
+
+[[modules]]
+path = "mindroom.providers.legacy_openrouter_reasoning_replay"
+depends_on = ["mindroom.providers.agno_compat_openrouter_reasoning"]
+visibility = ["mindroom.providers.openai_models"]
+
+
+[[modules]]
 path = "mindroom.providers.agno_compat_openai_responses"
 depends_on = ["mindroom.error_handling", "mindroom.usage.storage"]
 visibility = ["mindroom.providers.openai_models"]
