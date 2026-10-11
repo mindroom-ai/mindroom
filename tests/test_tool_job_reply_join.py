@@ -19,7 +19,6 @@ from mindroom.response_turn import (
 )
 from mindroom.tool_jobs.completion import (
     _JOB_JOIN_LIMIT,
-    HoldKey,
     _JobJoin,
     completion_prompt,
     delegated_child_context,
@@ -374,16 +373,9 @@ async def test_boundary_records_outstanding_work_for_the_message_to_hold(tmp_pat
         await start_job(runtime, "work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context):
             outstanding = await join_conversation_jobs(set(), joins=0)
+        # The key the span leaves is covered with the span in tests/test_tool_job_waits.py.
         assert outstanding.holds
         assert outstanding.prompt is None
-        assert outstanding.key == HoldKey(
-            recipient=owner.recipient,
-            room_id=owner.room_id,
-            thread_id=owner.resolved_thread_id,
-            requester_id=owner.requester_id,
-            silent=False,
-            participants=(owner.agent_name,),
-        )
         assert (await lookup(runtime, "work", owner=owner, depth=0)).status == "running"
         finish.set()
         await wait_for_status(runtime, "work", "completed")
@@ -419,9 +411,8 @@ async def test_boundary_holds_only_its_participants_work(tmp_path: Path, reply: 
                     assert await join_conversation_jobs(set(), joins=0) == _JobJoin()
                 return
             joined = await join_conversation_jobs(set(), joins=0, agent_names=("worker",) if reply == "team" else None)
+        # Only a team reply speaks for the member whose work is outstanding.
         assert joined.holds is (reply == "team")
-        assert joined.key is not None
-        assert joined.key.participants == (("lead", "worker") if reply == "team" else ("lead",))
     finally:
         finish.set()
         await runtime.shutdown()

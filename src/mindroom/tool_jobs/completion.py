@@ -42,7 +42,6 @@ class _JobJoin:
 
     prompt: str | None = None
     holds: bool = False
-    key: HoldKey | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +164,7 @@ async def join_conversation_jobs(
     if ready:
         attempted.update(job.job_id for job in work.ready)
         return _JobJoin(prompt=completion_prompt(work.ready))
-    return _JobJoin(holds=holds, key=key)
+    return _JobJoin(holds=holds)
 
 
 async def join_approval_jobs[RunT](
