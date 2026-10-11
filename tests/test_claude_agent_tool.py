@@ -105,7 +105,6 @@ _TWO_MODEL_USAGE = {
 class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client reporting Claude Code's running usage totals, one scripted result per turn."""
 
-    instances: ClassVar[list[_MeteredFakeClaudeSDKClient]] = []
     usage_totals: ClassVar[list[dict[str, Any]]] = []
 
     async def receive_response(
@@ -1197,6 +1196,8 @@ async def _send_metered_turns(
     monkeypatch: pytest.MonkeyPatch,
     usage_totals: list[dict[str, Any]],
     turns: list[tuple[str, str | None, str | None]],
+    *,
+    continue_conversation: bool = False,
 ) -> list[tuple[str | None, int, int, int]]:
     """Send (requester, session label, resume) turns; return each requester's input, output, and cache-read tokens."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _MeteredFakeClaudeSDKClient)
@@ -1211,7 +1212,7 @@ async def _send_metered_turns(
         runtime_paths=paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
-    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", continue_conversation=continue_conversation)
     try:
         for requester, label, resume in turns:
             with (
@@ -1336,3 +1337,24 @@ async def test_claude_reply_survives_a_failed_usage_write(
         storage.close()
 
     assert "Fixed it" in reply
+
+
+@pytest.mark.asyncio
+async def test_continued_claude_conversation_counts_only_new_usage(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new session continuing a conversation keeps its Claude session ID, whose totals were already counted."""
+    rows = await _send_metered_turns(
+        tmp_path,
+        monkeypatch,
+        [
+            {"claude-sonnet-5-5": _model_usage(1000, 200, 5000, 0)},
+            {"claude-sonnet-5-5": _model_usage(1500, 260, 9000, 0)},
+        ],
+        [("@alice:localhost", "first", None), ("@bob:localhost", "second", None)],
+        continue_conversation=True,
+    )
+
+    assert rows == [("@alice:localhost", 1000, 200, 5000), ("@bob:localhost", 500, 60, 4000)]

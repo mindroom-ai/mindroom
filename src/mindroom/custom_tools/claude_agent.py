@@ -665,7 +665,10 @@ class ClaudeAgentTools(Toolkit):
                         )
                         for model_id, usage in msg_result.model_usage.items()
                     }
-                    turn_usage = _turn_usage(session.usage_totals, totals)
+                    # A new session that continues a conversation keeps its Claude session ID, whose totals the
+                    # manager already counted; a cleared or brand-new conversation has a new ID and starts empty.
+                    previous = session.usage_totals or self._session_manager.usage_totals.get(msg_result.session_id, {})
+                    turn_usage = _turn_usage(previous, totals)
                     session.usage_totals = totals
                     self._session_manager.usage_totals[msg_result.session_id] = totals
             except ClaudeSDKError as exc:
