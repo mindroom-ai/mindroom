@@ -21,11 +21,14 @@ _.fetch_response  # Trafilatura spider download binding replaced by the server-f
 _.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)
 _._save_file_to_disk  # FileGenerationTools save step overridden to write inside the workspace (src/mindroom/tools/agno_compat_file_generation.py)
 _._run_context  # Agno reads the run context bound on a prepared Function (src/mindroom/agno_compat_prepared_tools.py)
+_.resolve_in_context  # Agno reads it before formatting a string system_message (src/mindroom/agents.py)
+check_research  # Plugin hook discovered by the plugin loader (src/mindroom/research_check/hooks.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)
 is_shared  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
 can_use  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
+mcp_available  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
 avatar  # FastAPI route (src/mindroom/api/connections.py)
 can_connect  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)

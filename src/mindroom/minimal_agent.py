@@ -50,6 +50,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
         context_documents: Sequence[str],
         deferred_toolkits: tuple[DeferredAgentToolkit, ...],
         toolkit_names: Sequence[str],
+        identity: str | None,
         minimal_instructions: Sequence[str],
         context_files: Sequence[str],
         memory_root: Path | None,
@@ -83,6 +84,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
         self.bootstrap_message = minimal_system_message(
             agent_name=self.id,
             display_name=self.name,
+            identity=identity,
             toolkit_names=[*toolkit_names, *(item.name for item in deferred_toolkits)],
             instructions=minimal_instructions,
             context_files=context_files,

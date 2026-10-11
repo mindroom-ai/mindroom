@@ -6,8 +6,6 @@ Each turn runs independently and returns its response as the tool result.
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -16,42 +14,35 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.lifecycle import (
-    authorize_delegation,
-    child_run_context,
-    finish_child_turn,
-    prepare_child_turn,
-    reserve_child_turn,
-    start_child_turn,
+from mindroom.delegation.direct import run_direct_child_turn
+from mindroom.delegation.lifecycle import authorize_delegation, live_delegation_config, prepare_child_turn
+from mindroom.delegation.personas import (
+    caller_toolkit_names,
+    follow_up_refusal,
+    list_profiles,
+    render_profile_listing,
+    resolve_persona_request,
 )
 from mindroom.delegation.recovery import resolve_subagent
-from mindroom.delegation.sessions import (
-    SubagentSessionError,
-    subagent_liveness,
-)
-from mindroom.logging_config import get_logger
+from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.minimal_mode_preflight import minimal_subagent_candidates
-from mindroom.response_turn import ResponsePausedForApproval
-from mindroom.tool_system.runtime_context import (
-    current_budget_monitor,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agno.run import RunContext
     from agno.tools.function import FunctionCall
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild
+    from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -103,6 +94,9 @@ class DelegateTools(Toolkit):
         execution_identity: ToolExecutionIdentity | None = None,
         delegation_depth: int = 0,
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+        workspace_root: Path | None = None,
+        persona_tools: tuple[str, ...] | None = None,
+        authored: bool = False,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
@@ -112,6 +106,13 @@ class DelegateTools(Toolkit):
         self._delegation_depth = delegation_depth
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(config, runtime_paths, delegate_to, execution_identity)
+        self._workspace_root = workspace_root
+        # An authored subagent's own tools cap the copies it authors, on every channel.
+        self._persona_tools = persona_tools
+        # An authored subagent must not see its configured role through its own target entry.
+        self._authored = authored
+        # A caller that may run itself may also author that copy's prompt, tools, or profile.
+        self._authoring = agent_name in delegate_to
 
         super().__init__(
             name="delegate",
@@ -120,12 +121,16 @@ class DelegateTools(Toolkit):
         )
         delegate_function = self.async_functions["run_subagent"]
         delegate_function.description = self._build_run_subagent_description()
-        if not self._minimal_targets:
-            # Offer no option that no allowed subagent can honor. Agno keeps explicitly set
+        hidden = {
+            *(() if self._minimal_targets else ("minimal",)),
+            *(() if self._authoring else ("system_prompt", "tools", "profile")),
+        }
+        if hidden:
+            # Offer no option this caller cannot use. Agno keeps explicitly set
             # parameters when it later processes the entrypoint, so derive them once here.
             derived = Function(name="run_subagent", entrypoint=self.run_subagent)
             derived.process_entrypoint()
-            properties = {name: value for name, value in derived.parameters["properties"].items() if name != "minimal"}
+            properties = {name: value for name, value in derived.parameters["properties"].items() if name not in hidden}
             delegate_function.parameters = {**derived.parameters, "properties": properties}
         for function in self.async_functions.values():
             function.pre_hook = _capture_direct_delegation_provenance
@@ -133,10 +138,12 @@ class DelegateTools(Toolkit):
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
-        lines: list[str] = []
-        for target_name in self._delegate_to:
-            description = describe_agent(target_name, self._config)
-            lines.append(description)
+        lines = [
+            f"{target_name}\n  - Yourself, run as a fresh copy."
+            if self._authored and target_name == self._agent_name
+            else describe_agent(target_name, self._config)
+            for target_name in self._delegate_to
+        ]
         return self._config.render_prompt(
             "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
@@ -171,9 +178,30 @@ class DelegateTools(Toolkit):
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
             "follow-ups keep the child's model and mode.\n"
             f"{minimal_guidance}"
+            f"{self._authoring_guidance()}"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
             "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."
         )
+
+    def _authoring_guidance(self) -> str:
+        if not self._authoring:
+            return ""
+        minimal = " or minimal=true" if self._agent_name in self._minimal_targets else ""
+        return (
+            "To author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, "
+            "and optionally tools, a subset of your toolkit names or toolkit.function entries; omit tools to keep all "
+            "of yours. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of "
+            "your configured role and instructions, and gets only those tools. "
+            "Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with "
+            "description and optional tools, model, and mode, then the system prompt as the body. "
+            f"An explicit model{minimal} overrides the profile. "
+            "Follow-ups keep the subagent's prompt even if its profile later changes.\n"
+            f"{self._profile_listing()}"
+        )
+
+    def _profile_listing(self) -> str:
+        listing = render_profile_listing(list_profiles(self._workspace_root)) if self._workspace_root else ""
+        return f"Saved profiles:\n{listing}\n" if listing else ""
 
     async def run_subagent(
         self,
@@ -181,6 +209,9 @@ class DelegateTools(Toolkit):
         agent_name: str | None = None,
         model: str | None = None,
         minimal: bool = False,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        profile: str | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
@@ -192,16 +223,40 @@ class DelegateTools(Toolkit):
             agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
             model: Configured model name from models; omitted or null uses normal model selection.
             minimal: True runs the child in token-efficient minimal mode, only for subagents listed as supporting it.
+            system_prompt: Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt.
+            tools: Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours.
+            profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt and tools.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
 
         """
-        return await self._run_child(
-            self._agent_name if agent_name is None else agent_name,
-            task,
+        target = self._agent_name if agent_name is None else agent_name
+        request = resolve_persona_request(
+            caller_name=self._agent_name,
+            agent_name=target,
+            system_prompt=system_prompt,
+            tools=tools,
+            profile=profile,
             model=model,
             minimal=minimal,
+            workspace_root=self._workspace_root,
+            # The copy runs one level deeper, where delegate may no longer be offered.
+            available_toolkits=lambda: caller_toolkit_names(
+                self._agent_name,
+                live_delegation_config(self._config),
+                delegation_depth=self._delegation_depth + 1,
+            ),
+            cap=self._persona_tools,
+        )
+        if isinstance(request, str):
+            return request
+        return await self._run_child(
+            target,
+            task,
+            model=request.model,
+            agent_mode=request.agent_mode,
+            persona=request.persona,
         )
 
     def _caller_identity(self) -> ToolExecutionIdentity:
@@ -263,12 +318,11 @@ class DelegateTools(Toolkit):
         task: str,
         *,
         model: str | None = None,
-        minimal: bool = False,
+        agent_mode: AgentMode = "standard",
+        persona: SubagentPersona | None = None,
         continuation: DelegationChild | None = None,
     ) -> str:
         """Run one direct child using the shared preparation and settlement owner."""
-        if continuation is not None:
-            minimal = continuation.agent_mode == "minimal"
         config = authorize_delegation(
             self._agent_name,
             agent_name,
@@ -282,6 +336,14 @@ class DelegateTools(Toolkit):
         )
         if isinstance(config, str):
             return config
+        refusal = continuation is not None and follow_up_refusal(
+            continuation.persona,
+            self._agent_name,
+            config,
+            delegation_depth=self._delegation_depth,
+        )
+        if refusal:
+            return refusal
         owner = self._caller_identity()
         provenance = _DIRECT_DELEGATION_PROVENANCE.get()
         parent = provenance[-1] if provenance else None
@@ -295,65 +357,23 @@ class DelegateTools(Toolkit):
             depth=self._delegation_depth,
             budget_monitor=current_budget_monitor(),
             model=model,
-            agent_mode="minimal" if minimal else "standard",
+            agent_mode=agent_mode,
             previous=continuation,
             parent_tool_call_id=(parent.tool_call_id or "") if parent is not None else "",
+            persona=persona,
         )
-        liveness = AsyncExitStack()
         try:
-            await liveness.enter_async_context(subagent_liveness(child, self._runtime_paths))
-            try:
-                await reserve_child_turn(child, owner=owner, runtime_paths=self._runtime_paths)
-            except SubagentSessionError as error:
-                return str(error)
-            await start_child_turn(
+            result = await run_direct_child_turn(
                 child,
+                owner=owner,
                 parent_run_id=parent.run_id if parent is not None else None,
                 config=config,
                 runtime_paths=self._runtime_paths,
-                caller_execution_identity=owner,
+                refresh_scheduler=self._refresh_scheduler,
             )
-            async with child_run_context(child, config=config, runtime_paths=self._runtime_paths):
-                response = await run_delegated_child_response(
-                    child,
-                    prompt=task,
-                    config=config,
-                    runtime_paths=self._runtime_paths,
-                    refresh_scheduler=self._refresh_scheduler,
-                    supports_native_tool_approval=False,
-                )
-        except asyncio.CancelledError:
-            await finish_child_turn(
-                child,
-                config=config,
-                runtime_paths=self._runtime_paths,
-                status="cancelled",
-                reason="Delegation cancelled.",
-            )
-            raise
-        except ResponsePausedForApproval:
-            raise
-        except Exception as error:
-            logger.exception("Delegation failed", from_agent=self._agent_name, to_agent=agent_name, error=str(error))
-            receipt = await finish_child_turn(
-                child,
-                config=config,
-                runtime_paths=self._runtime_paths,
-                status="failed",
-                reason=str(error),
-            )
-            return _result_with_receipt(f"Delegation to '{agent_name}' failed: {error}", receipt)
-        else:
-            receipt = await finish_child_turn(
-                child,
-                config=config,
-                runtime_paths=self._runtime_paths,
-                status="failed",
-                reason="Delegated run ended without a retained terminal outcome.",
-            )
-            return _result_with_receipt(response or "Agent completed the task but returned no content.", receipt)
-        finally:
-            await liveness.aclose()
+        except SubagentSessionError as error:
+            return str(error)
+        return _result_with_receipt(result.text, result.receipt)
 
 
 def _result_with_receipt(result: str, receipt: str) -> str:

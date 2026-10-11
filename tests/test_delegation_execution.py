@@ -35,7 +35,7 @@ from mindroom.delegation.execution import (
     drive_delegation_stream,
     drive_delegations,
 )
-from mindroom.delegation.lifecycle import note_child_run_id
+from mindroom.delegation.lifecycle import authorize_delegation, note_child_run_id
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import _cancel_delegations, cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
@@ -54,6 +54,7 @@ from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
 from tests.history_helpers import RecordingModel
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
+from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -962,3 +963,77 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
         assert executed == []
     finally:
         storage.close()
+
+
+def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
+    """A workflow persona child needs the caller's dynamic_workflow tool, not a self entry in delegate_to."""
+    paths = _runtime_paths(tmp_path)
+    with_workflow = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"])},
+        defaults=DefaultsConfig(tools=[]),
+    )
+    without_workflow = Config(
+        agents={"leader": AgentConfig(display_name="Leader")},
+        defaults=DefaultsConfig(tools=[]),
+    )
+    identity = _identity()
+    options = {"runtime_paths": paths, "execution_identity": identity, "depth": 0}
+
+    with tool_runtime_context(_delegate_runtime_context(with_workflow, paths, execution_identity=identity)):
+        granted = authorize_delegation(
+            "leader",
+            "leader",
+            "task",
+            config=with_workflow,
+            grant="dynamic_workflow",
+            **options,
+        )
+        other_agent = authorize_delegation(
+            "leader",
+            "child",
+            "task",
+            config=with_workflow,
+            grant="dynamic_workflow",
+            **options,
+        )
+        delegate_rule = authorize_delegation("leader", "leader", "task", config=with_workflow, **options)
+    with tool_runtime_context(_delegate_runtime_context(without_workflow, paths, execution_identity=identity)):
+        revoked = authorize_delegation(
+            "leader",
+            "leader",
+            "task",
+            config=without_workflow,
+            grant="dynamic_workflow",
+            **options,
+        )
+
+    assert isinstance(granted, Config)
+    assert isinstance(other_agent, str)
+    assert isinstance(delegate_rule, str)
+    assert isinstance(revoked, str)
+
+
+@pytest.mark.usefixtures("enforce_turn_authorization")
+def test_workflow_grant_runs_for_requester_the_caller_already_serves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow participant is the caller's own copy, so the caller's individual access is not rechecked.
+
+    A requester may reach a team member only through the team's access, which this check would refuse.
+    """
+    monkeypatch.setattr("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", lambda *_args: False)
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["dynamic_workflow"], delegate_to=["leader"])},
+        defaults=DefaultsConfig(tools=[]),
+    )
+    identity = _identity()
+    options = {"config": config, "runtime_paths": paths, "execution_identity": identity, "depth": 0}
+
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        workflow = authorize_delegation("leader", "leader", "task", grant="dynamic_workflow", **options)
+        delegate = authorize_delegation("leader", "leader", "task", **options)
+
+    assert isinstance(workflow, Config)
+    assert delegate == "Cannot delegate to 'leader': that agent is not allowed to reply to you."

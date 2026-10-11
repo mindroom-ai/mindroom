@@ -143,6 +143,23 @@ async def _delegate(
         storage.close()
 
 
+def test_authoring_guidance_mentions_minimal_only_when_offered(tmp_path: Path) -> None:
+    """A caller authoring its own copies is told minimal=true overrides a profile only when it can pass minimal."""
+    config = _config(helper_tools=["shell"])
+
+    def guidance() -> str:
+        toolkit = DelegateTools("helper", ["helper"], _paths(tmp_path, {}), config)
+        return toolkit.async_functions["run_subagent"].description or ""
+
+    # A local shell calls back through the running API, which this test starts only below.
+    assert "minimal=true" not in guidance()
+    set_api_server_address("0.0.0.0", 8765)  # noqa: S104 - the default bind address
+    try:
+        assert "minimal=true" in guidance()
+    finally:
+        clear_api_server_address()
+
+
 def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path) -> None:
     """The description recommends minimal mode, and the schema offers it, only where a subagent can run it."""
     config = _config(helper_tools=["shell"])

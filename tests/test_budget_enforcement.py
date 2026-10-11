@@ -7,7 +7,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -39,6 +39,10 @@ from tests.conftest import patch_response_runner_module, unwrap_extracted_collab
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
+from tests.test_delegation_direct_audit import _identity
+from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config
+from tests.test_dynamic_workflow_subagents import _spec as _subagent_workflow_spec
+from tests.test_dynamic_workflow_subagents import _Workflow as _SubagentWorkflow
 from tests.test_dynamic_workflows import _fake_stream_agent, _make_context, _make_multi_agent_context, _workflow_spec
 
 if TYPE_CHECKING:
@@ -408,23 +412,20 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_dynamic_workflow_ephemeral_participant_uses_fallback(tmp_path: Path) -> None:
-    context = _make_context(tmp_path)
-    _budget_context_config(context.config)
-    model = SyntheticModel(id="participant")
+async def test_dynamic_workflow_subagent_participant_uses_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _subagent_workflow_config()
+    _budget(config)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
 
-    with (
-        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model) as get_model,
-        patch.object(dynamic_workflow_module, "Agent", Mock(return_value=_fake_stream_agent(content="done"))),
-    ):
-        await dynamic_workflow_module._aexecute_ephemeral_agent_participant(
-            context,
-            {"id": "writer", "kind": "ephemeral_agent"},
-            "Write a report.",
-            run_scope="manual",
-        )
+    run = await workflow.run(
+        _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": [], "model": "default"}]),
+    )
 
-    assert get_model.call_args.args[2] == "luna"
+    assert run["status"] == "completed", run
+    assert workflow.models_loaded == ["luna"]
 
 
 @pytest.mark.parametrize("model", ["general", "team/super_team"])
@@ -453,26 +454,34 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
     response_finished.assert_called_once_with()
 
 
-def test_over_budget_caller_runs_saved_workflows_on_the_fallback(tmp_path: Path) -> None:
+async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) -> dict[str, object]:
+    """Create and run the workflow from a reply that runs on ``active_model_name``."""
+    spec = _subagent_workflow_spec([{"id": "writer", "system_prompt": "Write.", "tools": []}], models=["default-model"])
+    context = replace(
+        _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity()),
+        active_model_name=active_model_name,
+    )
+    with tool_runtime_context(context):
+        created = json.loads(await workflow.tools.acreate_workflow(spec))
+        assert created["status"] == "ok", created
+        return json.loads(await workflow.tools.arun_workflow(workflow_id="review", input={}))
+
+
+@pytest.mark.asyncio
+async def test_over_budget_caller_runs_saved_workflows_on_the_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A workflow that names the caller's priced model keeps working once the caller is over budget."""
-    context = _make_context(tmp_path)
-    _budget_context_config(context.config)
+    config = _subagent_workflow_config()
+    _budget(config)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+
     # The response runner hands tools the budgeted model of the reply.
-    context = replace(context, active_model_name="luna")
-    tool = DynamicWorkflowTools()
-    model = SyntheticModel(id="participant")
+    run = await _run_workflow_as(workflow, "luna")
 
-    with (
-        tool_runtime_context(context),
-        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model) as get_model,
-        patch.object(dynamic_workflow_module, "Agent", Mock(return_value=_fake_stream_agent(content="done"))),
-    ):
-        create_payload = json.loads(tool.create_workflow(_workflow_spec()))
-        run_payload = json.loads(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
-
-    assert create_payload["status"] == "ok"
-    assert run_payload["status"] == "completed"
-    assert get_model.call_args.args[2] == "luna"
+    assert run["status"] == "completed", run
+    assert workflow.models_loaded == ["luna"]
 
 
 def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) -> None:
@@ -494,22 +503,17 @@ def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Path) ->
     assert "not allowed by permissions.models" in payload["message"]
 
 
-def test_a_reply_that_crosses_the_cap_still_runs_its_workflow(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_a_reply_that_crosses_the_cap_still_runs_its_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The caller's reply started on the priced model; its workflow then runs on the fallback."""
-    context = _make_context(tmp_path)
-    _budget_context_config(context.config)
-    context = replace(context, active_model_name="default")
-    tool = DynamicWorkflowTools()
-    model = SyntheticModel(id="participant")
+    config = _subagent_workflow_config()
+    _budget(config)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
 
-    with (
-        tool_runtime_context(context),
-        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model) as get_model,
-        patch.object(dynamic_workflow_module, "Agent", Mock(return_value=_fake_stream_agent(content="done"))),
-    ):
-        create_payload = json.loads(tool.create_workflow(_workflow_spec()))
-        run_payload = json.loads(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+    run = await _run_workflow_as(workflow, "default")
 
-    assert create_payload["status"] == "ok"
-    assert run_payload["status"] == "completed"
-    assert get_model.call_args.args[2] == "luna"
+    assert run["status"] == "completed", run
+    assert workflow.models_loaded == ["luna"]

@@ -71,7 +71,7 @@ from mindroom.knowledge.registry import (
     source_root_for_published_index_key,
     source_root_for_refresh_target,
 )
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import get_logger, setup_subprocess_logging, subprocess_logging_env
 from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.tool_system.worker_routing import (
     SerializedToolExecutionIdentity,
@@ -333,6 +333,7 @@ async def _refresh_index_in_subprocess(  # noqa: PLR0915 - Keep process and resu
                 env = dict(runtime_env_values(runtime_paths))
                 env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
                 env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
+                env.update(subprocess_logging_env())
                 env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
                 # Parent and child derive the cross-process refresh lock from their temp
                 # root, so the child shares this one whatever the runtime env names.
@@ -1404,6 +1405,7 @@ def _parse_refresh_runner_args(argv: list[str] | None = None) -> argparse.Namesp
 def main(argv: list[str] | None = None) -> int:
     """Internal CLI used by scheduled knowledge refresh subprocesses."""
     _parse_refresh_runner_args(argv)
+    setup_subprocess_logging()
     payload = sys.stdin.buffer.read()
     # Native libraries and configured handlers can retain stdout's descriptor.
     with os.fdopen(os.dup(sys.stdout.fileno()), "wb") as output:

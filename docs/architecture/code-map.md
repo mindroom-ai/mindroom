@@ -56,6 +56,7 @@ Matrix sync callback
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
 | `mid_turn_judgment.py` | Bind the active request and agent settings to the shared LLM, TypeSafe, or OpenAI Decisions judgment backend |
 | `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
+| `research_check/` | Bundled plugin (`python:mindroom.research_check`) whose `message:after_response` hook judges a reply with its tool trace and posts one verification follow-up for unresearched claims |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
@@ -174,6 +175,8 @@ Matrix sync callback
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
+| `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool subset, `subagents/<name>.md` workspace profiles, and the caller tool-subset check |
+| `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
