@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import gc
 import inspect
+import subprocess
+import sys
+import textwrap
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Thread
@@ -18,11 +21,6 @@ from agno.session.summary import SessionSummary
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.history.compaction import (
-    _estimate_history_messages_tokens,
-    estimate_prompt_visible_history_tokens,
-    estimate_session_summary_tokens,
-)
 from mindroom.history.prompt_tokens import (
     _TOOL_SURFACE_CACHE,
     _prompt_tool_surface_for_tools,
@@ -30,6 +28,11 @@ from mindroom.history.prompt_tokens import (
     agent_static_token_estimator,
     agent_tool_definition_payloads_for_logging,
     estimate_agent_static_tokens,
+)
+from mindroom.history.replay import (
+    _estimate_history_messages_tokens,
+    _estimate_session_summary_tokens,
+    estimate_prompt_visible_history_tokens,
 )
 from mindroom.history.types import (
     HistoryPolicy,
@@ -361,18 +364,18 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
         "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
     )
 
-    assert estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
+    assert _estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens > 0
 
 
-def test_estimate_session_summary_tokens_none() -> None:
-    assert estimate_session_summary_tokens(None) == 0
+def test__estimate_session_summary_tokens_none() -> None:
+    assert _estimate_session_summary_tokens(None) == 0
 
 
-def test_estimate_session_summary_tokens_empty() -> None:
-    assert estimate_session_summary_tokens("") == 0
-    assert estimate_session_summary_tokens("   ") == 0
+def test__estimate_session_summary_tokens_empty() -> None:
+    assert _estimate_session_summary_tokens("") == 0
+    assert _estimate_session_summary_tokens("   ") == 0
 
 
 def _docs_toolkit() -> Toolkit:
@@ -470,6 +473,53 @@ def test_tool_surface_cache_evicts_entries_when_agent_is_collected() -> None:
     gc.collect()
 
     assert cache_key not in _TOOL_SURFACE_CACHE
+
+
+def test_tool_surface_cache_collection_during_insertion_does_not_deadlock() -> None:
+    """Collecting an old agent during cache allocation must not block a new one."""
+    # Isolate a potential deadlock from pytest: weakref callbacks swallow the
+    # exception raised by pytest-timeout, which can leave a worker stuck forever.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import faulthandler
+                import gc
+                from agno.agent import Agent
+                from mindroom.history import prompt_tokens
+
+                faulthandler.dump_traceback_later(10, exit=True)
+                gc.disable()
+                agent = Agent(metadata={})
+                agent.metadata["cycle"] = agent
+                prompt_tokens.agent_tool_definition_payloads_for_logging(agent)
+                cache_key = id(agent)
+                del agent
+                assert cache_key in prompt_tokens._TOOL_SURFACE_CACHE
+
+                original_ref = prompt_tokens.ref
+
+                def collect_during_allocation(entity, callback):
+                    # Weakref/tuple allocation can trigger cyclic GC while the
+                    # insertion holds the cache lock. Force that exact ordering.
+                    gc.collect()
+                    return original_ref(entity, callback)
+
+                prompt_tokens.ref = collect_during_allocation
+                new_agent = Agent()
+                assert prompt_tokens.agent_tool_definition_payloads_for_logging(new_agent) == []
+                assert cache_key not in prompt_tokens._TOOL_SURFACE_CACHE
+                assert id(new_agent) in prompt_tokens._TOOL_SURFACE_CACHE
+                faulthandler.cancel_dump_traceback_later()
+            """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_prompt_payloads_distinguish_strict_functions() -> None:

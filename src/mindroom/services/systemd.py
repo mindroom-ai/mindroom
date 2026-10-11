@@ -16,6 +16,7 @@ from mindroom.services.config import (
     UninstallResult,
     build_service_command,
     find_uv,
+    install_service_runtime,
     install_uv,
 )
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
@@ -68,6 +69,9 @@ def _get_recent_logs(num_lines: int = 10) -> list[str]:
 
 def _quote_environment_assignment(name: str, value: str) -> str:
     """Return one safely quoted systemd Environment assignment."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in f"{name}{value}"):
+        msg = f"Refusing to write {name} to the systemd unit: it contains a control character"
+        raise ValueError(msg)
     escaped_value = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
     return f'"{name}={escaped_value}"'
 
@@ -92,6 +96,24 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 """
+
+
+def _get_service_environment() -> dict[str, str]:
+    """Return the Environment= assignments saved in the installed unit, or nothing when it is absent."""
+    try:
+        lines = _get_unit_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    environment: dict[str, str] = {}
+    for line in lines:
+        key, separator, raw_assignments = line.partition("=")
+        if key.strip() != "Environment" or not separator:
+            continue
+        for assignment in shlex.split(raw_assignments):
+            name, separator, value = assignment.partition("=")
+            if separator:
+                environment[name] = value.replace("%%", "%")
+    return environment
 
 
 def _get_service_status() -> ServiceStatus:
@@ -126,6 +148,11 @@ def _get_service_status() -> ServiceStatus:
     return ServiceStatus(installed=True, running=running, pid=pid)
 
 
+def _systemd_running() -> bool:
+    """Whether systemd manages this machine, the same check as sd_booted(3); containers and WSL often lack it."""
+    return Path("/run/systemd/system").is_dir()
+
+
 def _install_service() -> InstallResult:
     """Install and start the systemd user service."""
     uv_path = find_uv(extra_paths=_LINUX_UV_PATHS)
@@ -135,12 +162,12 @@ def _install_service() -> InstallResult:
     unit_path = _get_unit_path()
     unit_name = _get_unit_name()
     try:
-        service_environment = resolve_service_environment(uv_path)
-    except ServiceConfigMissingError as exc:
+        unit_content = _generate_unit_file(uv_path, resolve_service_environment(uv_path))
+    except (ServiceConfigMissingError, ValueError) as exc:
         return InstallResult(success=False, message=str(exc))
 
     unit_path.parent.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text(_generate_unit_file(uv_path, service_environment), encoding="utf-8")
+    unit_path.write_text(unit_content, encoding="utf-8")
 
     subprocess.run(["systemctl", "--user", "stop", unit_name], capture_output=True, check=False)
 
@@ -237,14 +264,18 @@ def _check_uv_installed() -> tuple[bool, Path | None]:
 
 
 manager = ServiceManager(
+    description="systemd user service",
+    is_available=_systemd_running,
     check_uv_installed=_check_uv_installed,
     install_uv=install_uv,
+    install_runtime=install_service_runtime,
     install_service=_install_service,
     uninstall_service=_uninstall_service,
     start_service=_start_service,
     stop_service=_stop_service,
     restart_service=_restart_service,
     get_service_status=_get_service_status,
+    get_service_environment=_get_service_environment,
     get_log_command=_get_log_command,
     get_log_args=_get_log_args,
     get_recent_logs=_get_recent_logs,

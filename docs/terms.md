@@ -2,7 +2,6 @@
 icon: lucide/file-text
 ---
 
-<!-- This page exists for iOS App Store submission requirements. Not included in sidebar nav. -->
 
 # Terms of Service
 

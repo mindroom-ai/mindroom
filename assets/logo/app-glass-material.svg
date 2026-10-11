@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- A blurred face silhouette approximates a rounded glass surface.
+         Its two derivatives form an RG displacement map, neutral at 0.5.
+         Inspired by https://kube.io/blog/liquid-glass-css-svg/ . -->
+    <filter id="app-glass-pane" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3.2" result="height"/>
+      <feColorMatrix in="height" type="matrix" values="0 0 0 1 0  0 0 0 1 0  0 0 0 1 0  0 0 0 0 1" result="height-rgb"/>
+      <feConvolveMatrix in="height-rgb" order="3" kernelMatrix="0 0 0 -1 0 1 0 0 0" divisor="1" bias="0.5" preserveAlpha="true" result="dx"/>
+      <feColorMatrix in="dx" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0 1" result="red"/>
+      <feConvolveMatrix in="height-rgb" order="3" kernelMatrix="0 -1 0 0 0 0 0 1 0" divisor="1" bias="0.5" preserveAlpha="true" result="dy"/>
+      <feColorMatrix in="dy" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 0 1" result="green"/>
+      <feComposite in="red" in2="green" operator="arithmetic" k2="1" k3="1" result="normals"/>
+      <feDisplacementMap in="SourceGraphic" in2="normals" scale="16" xChannelSelector="R" yChannelSelector="G" result="refracted"/>
+      <!-- Keep the original face behind the displaced paint to prevent clear seams. -->
+      <feMerge result="solid-glass">
+        <feMergeNode in="SourceGraphic"/>
+        <feMergeNode in="refracted"/>
+      </feMerge>
+      <feSpecularLighting in="height" surfaceScale="7" specularConstant="0.6" specularExponent="35" lighting-color="#a4f5ff" result="specular">
+        <feDistantLight azimuth="225" elevation="50"/>
+      </feSpecularLighting>
+      <feBlend in="solid-glass" in2="specular" mode="screen" result="lit"/>
+      <feComposite in="lit" in2="SourceAlpha" operator="in"/>
+    </filter>
+    <!-- One broad light source per pane, with a continuous falloff into deep blue. -->
+    <radialGradient id="app-glass-leg-glow" cx="0%" cy="0%" r="110%">
+      <stop offset="0%" stop-color="#73fff4" stop-opacity="0.75"/>
+      <stop offset="45%" stop-color="#38dce8" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#19a9d0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="app-glass-foot-glow" cx="0%" cy="85%" r="110%">
+      <stop offset="0%" stop-color="#73fff4" stop-opacity="0.8"/>
+      <stop offset="45%" stop-color="#38dce8" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#19a9d0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="app-glass-tile" cx="48%" cy="24%" r="78%">
+      <stop offset="0%" stop-color="#103a50"/>
+      <stop offset="57%" stop-color="#041b30"/>
+      <stop offset="100%" stop-color="#010b1a"/>
+    </radialGradient>
+    <linearGradient id="app-glass-rim" x1="15%" y1="0%" x2="85%" y2="100%">
+      <stop offset="0%" stop-color="#8fe8f2"/>
+      <stop offset="20%" stop-color="#226180"/>
+      <stop offset="44%" stop-color="#04192c"/>
+      <stop offset="70%" stop-color="#15556c"/>
+      <stop offset="91%" stop-color="#36a2bc"/>
+      <stop offset="100%" stop-color="#031728"/>
+    </linearGradient>
+    <linearGradient id="app-glass-rim-light" x1="25%" y1="0%" x2="65%" y2="100%">
+      <stop offset="0%" stop-color="#e1feff"/>
+      <stop offset="18%" stop-color="#6defff" stop-opacity="0.5"/>
+      <stop offset="40%" stop-color="#44bedc" stop-opacity="0"/>
+      <stop offset="72%" stop-color="#2194ba" stop-opacity="0.15"/>
+      <stop offset="94%" stop-color="#aafaff" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#58bed7" stop-opacity="0.12"/>
+    </linearGradient>
+    <filter id="app-glass-rim-soft" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="2.2"/>
+    </filter>
+    <linearGradient id="app-glass-frame" x1="0%" y1="0%" x2="75%" y2="100%">
+      <stop offset="0%" stop-color="#397f9a"/>
+      <stop offset="20%" stop-color="#134e6b"/>
+      <stop offset="42%" stop-color="#092a42"/>
+      <stop offset="65%" stop-color="#11506a"/>
+      <stop offset="100%" stop-color="#021426"/>
+    </linearGradient>
+  </defs>
+  <!-- Inset rim sits inside the final system icon mask. -->
+  <g id="app-glass-tile-layer">
+    <rect x="8" y="8" width="1008" height="1008" rx="224" fill="url(#app-glass-rim)"/>
+    <rect x="24" y="24" width="976" height="976" rx="208" fill="url(#app-glass-tile)"/>
+    <rect x="16" y="16" width="992" height="992" rx="216" fill="none" stroke="url(#app-glass-rim-light)" stroke-width="10" opacity="0.9" filter="url(#app-glass-rim-soft)"/>
+    <rect x="16" y="16" width="992" height="992" rx="216" fill="none" stroke="url(#app-glass-rim-light)" stroke-width="2.2" opacity="0.9"/>
+    <rect x="28" y="28" width="968" height="968" rx="204" fill="none" stroke="url(#app-glass-rim-light)" stroke-width="1" opacity="0.2"/>
+  </g>
+</svg>

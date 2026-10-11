@@ -15,7 +15,6 @@ from nio.api import RelationshipType
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.event_journal import (
@@ -29,6 +28,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -39,20 +39,12 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
-
-
-def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
-    checkpoint = load_sync_checkpoint(storage_path, agent_name)
-    if checkpoint is None:
-        return None
-    return checkpoint.token
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
@@ -521,23 +513,6 @@ def _conversation_runtime_config() -> Config:
     )
 
 
-def _save_certified_sync_token(
-    bot: AgentBot,
-    token: str,
-) -> None:
-    """Persist one certified sync token for bot lifecycle tests.
-
-    Certified by the event journal: the token has to name the store that
-    consumed the events it covers.
-    """
-    save_sync_token(
-        bot.storage_path,
-        bot.agent_name,
-        token,
-        store_generation=bot._sync_checkpoint_trust.store_generation,
-    )
-
-
 class ThreadingBehaviorTestBase:
     """Shared fixtures and helpers for the split TestThreadingBehavior modules."""
 
@@ -552,13 +527,14 @@ class ThreadingBehaviorTestBase:
         )
 
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization=AuthorizationConfig(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="ollama", id="test-model")},
+                    router=RouterConfig(model="default"),
+                ),
             ),
             tmp_path,
         )
@@ -582,11 +558,6 @@ class ThreadingBehaviorTestBase:
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
-        # Sync checkpoints are certified by the event journal. Pinned so a test
-        # that saves one and restarts exercises the token logic rather than the
-        # first-open mint, which would rightly reject it.
-        bot._sync_checkpoint_trust.store_generation = "test-store-generation"
-
         # Initialize components that depend on client
 
         # Mock the agent to return a response

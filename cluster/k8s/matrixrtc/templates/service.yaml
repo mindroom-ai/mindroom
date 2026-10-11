@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mindroom-matrixrtc.livekitName" . }}
+  labels:
+    {{- include "mindroom-matrixrtc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: livekit
+spec:
+  type: ClusterIP
+  ports:
+    - name: signal
+      port: {{ .Values.livekit.port }}
+      targetPort: signal
+      protocol: TCP
+  selector:
+    {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "livekit") | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mindroom-matrixrtc.mediaServiceName" . }}
+  labels:
+    {{- include "mindroom-matrixrtc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: livekit
+  {{- with .Values.livekit.media.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # Clients reach WebRTC media directly on this address; LiveKit advertises it as rtc.node_ip.
+  type: LoadBalancer
+  {{- with .Values.livekit.media.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+  {{- end }}
+  loadBalancerIP: {{ .Values.livekit.media.loadBalancerIP | quote }}
+  ports:
+    - name: rtc-tcp
+      port: {{ .Values.livekit.media.ports.tcp }}
+      targetPort: rtc-tcp
+      protocol: TCP
+    - name: rtc-udp
+      port: {{ .Values.livekit.media.ports.udp }}
+      targetPort: rtc-udp
+      protocol: UDP
+  selector:
+    {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "livekit") | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mindroom-matrixrtc.authName" . }}
+  labels:
+    {{- include "mindroom-matrixrtc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auth
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.auth.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "auth") | nindent 4 }}

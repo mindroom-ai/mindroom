@@ -12,6 +12,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -24,6 +25,7 @@ from mindroom.tools import (
     memory,  # noqa: F401
     report_publishing,  # noqa: F401
     self_config,  # noqa: F401
+    skill_manage,  # noqa: F401
 )
 from mindroom.tools.agent_repository import agent_repository_tools
 from mindroom.tools.agentql import agentql_tools
@@ -31,6 +33,7 @@ from mindroom.tools.airflow import airflow_tools
 from mindroom.tools.apify import apify_tools
 from mindroom.tools.approved_egress import approved_egress_tools
 from mindroom.tools.arxiv import arxiv_tools
+from mindroom.tools.atlassian import atlassian_tools
 from mindroom.tools.attachments import attachments_tools
 from mindroom.tools.aws_lambda import aws_lambda_tools
 from mindroom.tools.aws_ses import aws_ses_tools
@@ -39,11 +42,13 @@ from mindroom.tools.bitbucket import bitbucket_tools
 from mindroom.tools.brandfetch import brandfetch_tools
 from mindroom.tools.brightdata import brightdata_tools
 from mindroom.tools.browser import browser_tools
+from mindroom.tools.browser_mcp import browser_mcp_tools
 from mindroom.tools.browserbase import browserbase_tools
 from mindroom.tools.cal_com import cal_com_tools
 from mindroom.tools.calculator import calculator_tools
 from mindroom.tools.callback_manager import callback_manager_tools
 from mindroom.tools.cartesia import cartesia_tools
+from mindroom.tools.chat_ui import chat_ui_tools
 from mindroom.tools.claude_agent import claude_agent_tools
 from mindroom.tools.clickup import clickup_tools
 from mindroom.tools.coding import coding_tools
@@ -53,9 +58,7 @@ from mindroom.tools.confluence import confluence_tools
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.csv import csv_tools
 from mindroom.tools.custom_api import custom_api_tools
-from mindroom.tools.dalle import dalle_tools
 from mindroom.tools.daytona import daytona_tools
-from mindroom.tools.desi_vocal import desi_vocal_tools
 from mindroom.tools.desktop import desktop_tools
 from mindroom.tools.discord import discord_tools
 from mindroom.tools.docker import docker_tools
@@ -82,6 +85,7 @@ from mindroom.tools.google_drive import google_drive_tools
 from mindroom.tools.google_maps import google_maps_tools
 from mindroom.tools.google_scholar import google_scholar_tools
 from mindroom.tools.google_sheets import google_sheets_tools
+from mindroom.tools.google_tasks import google_tasks_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.groq import groq_tools
 from mindroom.tools.hackernews import hackernews_tools
@@ -101,6 +105,7 @@ from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 from mindroom.tools.neo4j import neo4j_tools
 from mindroom.tools.newspaper4k import newspaper4k_tools
 from mindroom.tools.notion import notion_tools
+from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
 from mindroom.tools.openweather import openweather_tools
@@ -116,6 +121,7 @@ from mindroom.tools.replicate import replicate_tools
 from mindroom.tools.resend import resend_tools
 from mindroom.tools.scheduler import scheduler_tools
 from mindroom.tools.scrapegraph import scrapegraph_tools
+from mindroom.tools.script import script_tools
 from mindroom.tools.searxng import searxng_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
@@ -126,10 +132,10 @@ from mindroom.tools.sleep import sleep_tools
 from mindroom.tools.spider import spider_tools
 from mindroom.tools.spotify import spotify_tools
 from mindroom.tools.sql import sql_tools
-from mindroom.tools.subagents import subagents_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
+from mindroom.tools.thread_move import thread_move_tools
 from mindroom.tools.thread_resolution import thread_resolution_tools
 from mindroom.tools.thread_summary import register_thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
@@ -140,6 +146,7 @@ from mindroom.tools.trello import trello_tools
 from mindroom.tools.twilio import twilio_tools
 from mindroom.tools.unsplash import unsplash_tools
 from mindroom.tools.update_awareness import update_awareness_tools
+from mindroom.tools.usage_stats import usage_stats_tools
 from mindroom.tools.visualization import visualization_tools
 from mindroom.tools.web_browser_tools import web_browser_tools
 from mindroom.tools.webex import webex_tools
@@ -164,6 +171,7 @@ __all__ = [
     "apify_tools",
     "approved_egress_tools",
     "arxiv_tools",
+    "atlassian_tools",
     "attachments_tools",
     "aws_lambda_tools",
     "aws_ses_tools",
@@ -171,12 +179,14 @@ __all__ = [
     "bitbucket_tools",
     "brandfetch_tools",
     "brightdata_tools",
+    "browser_mcp_tools",
     "browser_tools",
     "browserbase_tools",
     "cal_com_tools",
     "calculator_tools",
     "callback_manager_tools",
     "cartesia_tools",
+    "chat_ui_tools",
     "claude_agent_tools",
     "clickup_tools",
     "coding_tools",
@@ -186,9 +196,7 @@ __all__ = [
     "crawl4ai_tools",
     "csv_tools",
     "custom_api_tools",
-    "dalle_tools",
     "daytona_tools",
-    "desi_vocal_tools",
     "desktop_tools",
     "discord_tools",
     "docker_tools",
@@ -215,6 +223,7 @@ __all__ = [
     "google_maps_tools",
     "google_scholar_tools",
     "google_sheets_tools",
+    "google_tasks_tools",
     "googlesearch_tools",
     "groq_tools",
     "hackernews_tools",
@@ -234,6 +243,7 @@ __all__ = [
     "neo4j_tools",
     "newspaper4k_tools",
     "notion_tools",
+    "oauth_connections_tools",
     "openai_tools",
     "openbb_tools",
     "openweather_tools",
@@ -250,6 +260,7 @@ __all__ = [
     "resend_tools",
     "scheduler_tools",
     "scrapegraph_tools",
+    "script_tools",
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",
@@ -260,10 +271,10 @@ __all__ = [
     "spider_tools",
     "spotify_tools",
     "sql_tools",
-    "subagents_tools",
     "tavily_tools",
     "telegram_tools",
     "thread_model_tools",
+    "thread_move_tools",
     "thread_resolution_tools",
     "thread_tags_tools",
     "todo_tools",
@@ -273,6 +284,7 @@ __all__ = [
     "twilio_tools",
     "unsplash_tools",
     "update_awareness_tools",
+    "usage_stats_tools",
     "visualization_tools",
     "web_browser_tools",
     "webex_tools",
@@ -290,12 +302,13 @@ __all__ = [
 
 @register_tool_with_metadata(
     name="openclaw_compat",
+    file_access=ToolFileAccess.NONE,
     display_name="OpenClaw Compat",
     description="Convenience bundle that implies shell, coding, browser, and other common tools",
     category=ToolCategory.DEVELOPMENT,
     icon="Workflow",
     icon_color="text-orange-500",
-    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
+    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
 )
 def _openclaw_compat_tools() -> type[Toolkit]:
     """Return an empty toolkit — the real tools are loaded via tool preset expansion."""
@@ -306,6 +319,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
 
 @register_tool_with_metadata(
     name="homeassistant",
+    file_access=ToolFileAccess.NONE,
     display_name="Home Assistant",
     description="Control and monitor smart home devices",
     category=ToolCategory.SMART_HOME,
@@ -314,6 +328,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
     dependencies=["httpx"],
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     managed_init_args=(
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
@@ -368,8 +383,10 @@ def _homeassistant_tools() -> type[Toolkit]:
 
 @register_tool_with_metadata(
     name="agent_vault_access",
+    file_access=ToolFileAccess.NONE,
+    requires_primary_runtime=True,
     display_name="Agent Vault Access",
-    description="Grant yourself UI access to manage this agent's Agent Vault secrets",
+    description="Get a link to manage this agent's passwords and API keys in Agent Vault",
     category=ToolCategory.INTEGRATIONS,
     icon="Lock",
     icon_color="text-amber-600",

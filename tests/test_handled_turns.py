@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import constants
 from mindroom.event_journal.store import TurnRecordStore
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -22,9 +21,11 @@ from mindroom.handled_turns import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
+from mindroom.turn_record import RevisionReplay
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from _collections_abc import dict_values
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore
@@ -67,10 +68,93 @@ async def _reload_ledger(
     return await _open_ledger(journal_store, agent_name, legacy_responses_file=legacy_responses_file)
 
 
+class _ScanCountingRecords(dict[str, TurnRecord]):
+    """Measure full-ledger traversal without machine-dependent timing assertions."""
+
+    scanned_records: int = 0
+
+    def values(self) -> dict_values[str, TurnRecord]:
+        """Count records exposed by a whole-map traversal."""
+        self.scanned_records += len(self)
+        return super().values()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reloaded", [False, True])
+async def test_scoped_lookup_does_not_scan_unrelated_history(
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+    reloaded: bool,
+) -> None:
+    """Ordinary lookups must visit relevant records only, including after restart."""
+    ledger = await _open_ledger(journal_store, "scoped_lookup")
+    for ordinal in range(25):
+        event_id = f"$unrelated-{ordinal}"
+        await ledger.record_handled_turn(
+            TurnRecord.create(
+                [event_id],
+                conversation_target=MessageTarget.resolve("!other:example.org", event_id, event_id),
+            ),
+        )
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$one")
+    await ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$one", "$two"],
+            discovery_event_ids=["$alias"],
+            redacted_source_event_ids=["$one"],
+            conversation_target=target,
+            completed=False,
+        ),
+    )
+    if reloaded:
+        ledger = await _reload_ledger(journal_store, "scoped_lookup")
+    counted = _ScanCountingRecords(ledger._responses)
+    monkeypatch.setattr(ledger._state, "responses", counted)
+
+    records = ledger.turn_records_for_conversation(session_id=target.session_id)
+    assert len(records) == 1
+    assert records[0].source_event_ids == ("$one", "$two")
+    assert counted.scanned_records == 0
+
+
+@pytest.mark.asyncio
+async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJournalStore) -> None:
+    """Moving a turn must reach siblings, reloads, and eviction."""
+    ledger = await _open_ledger(journal_store, "scoped_updates")
+    sibling = await _open_ledger(journal_store, "scoped_updates")
+    original = MessageTarget.resolve("!room:example.org", "$old-thread", "$one")
+    moved = MessageTarget.resolve("!room:example.org", "$new-thread", "$one")
+    await ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$one", "$two"],
+            conversation_target=original,
+            completed=False,
+        ),
+    )
+    assert len(sibling.turn_records_for_conversation(session_id=original.session_id)) == 1
+    await ledger.update_handled_turn(
+        ("$one",),
+        lambda current: replace(
+            current["$one"],
+            conversation_target=moved,
+            response_event_id="$reply",
+            completed=True,
+            timestamp=0,
+        ),
+    )
+    for reader in (sibling, await _reload_ledger(journal_store, "scoped_updates")):
+        assert reader.turn_records_for_conversation(session_id=original.session_id) == ()
+        records = reader.turn_records_for_conversation(session_id=moved.session_id)
+        assert len(records) == 1
+        assert records[0].response_event_id == "$reply"
+        await reader._cleanup_old_events(max_events=0)
+        assert reader.turn_records_for_conversation(session_id=moved.session_id) == ()
+
+
 def _write_legacy_ledger(path: Path, records: dict[str, dict[str, object]]) -> Path:
     """Write one pre-database JSON ledger exactly as the retired writer left it."""
     path.write_text(
-        json.dumps({"schema_version": TurnRecordCodec.schema_version(), "records": records}),
+        json.dumps({"schema_version": 1, "records": records}),
         encoding="utf-8",
     )
     return path
@@ -139,9 +223,6 @@ async def _seed_records(
             if isinstance(raw_record.get("response_owner"), str)
             else None,
             requester_id=raw_record.get("requester_id") if isinstance(raw_record.get("requester_id"), str) else None,
-            correlation_id=raw_record.get("correlation_id")
-            if isinstance(raw_record.get("correlation_id"), str)
-            else None,
             history_scope=HistoryScope.from_metadata(raw_record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(raw_record.get("conversation_target")),
             timestamp=float(raw_record.get("timestamp", 0.0)),
@@ -167,7 +248,6 @@ async def _record_handled_turn(
     source_event_prompts: dict[str, str] | None = None,
     response_owner: str | None = None,
     requester_id: str | None = None,
-    correlation_id: str | None = None,
     history_scope: HistoryScope | None = None,
     conversation_target: MessageTarget | None = None,
 ) -> None:
@@ -179,7 +259,6 @@ async def _record_handled_turn(
             source_event_prompts=source_event_prompts,
             response_owner=response_owner,
             requester_id=requester_id,
-            correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         ),
@@ -284,7 +363,6 @@ def test_turn_record_create_normalizes_coupled_source_state() -> None:
         ["source", "source", ""],
         discovery_event_ids=["source", "edit", "edit"],
         redacted_source_event_ids=["missing", "edit"],
-        pending_redaction_cleanup_event_ids=["source", "edit"],
         source_event_prompts={"source": "prompt"},
         source_event_revisions={"edit": [4, "edit-event"]},
     )
@@ -292,7 +370,6 @@ def test_turn_record_create_normalizes_coupled_source_state() -> None:
     assert record.source_event_ids == ("source",)
     assert record.discovery_event_ids == ("edit",)
     assert record.redacted_source_event_ids == ("edit",)
-    assert record.pending_redaction_cleanup_event_ids == ("edit",)
     assert record.source_event_prompts == {"source": "prompt"}
     assert record.source_event_revisions is None
 
@@ -307,11 +384,9 @@ def test_canonicalize_turn_record_prunes_new_redactions() -> None:
     updated = canonicalize_turn_record(
         record,
         redacted_source_event_ids=("first",),
-        pending_redaction_cleanup_event_ids=("first", "second"),
     )
 
     assert updated.redacted_source_event_ids == ("first",)
-    assert updated.pending_redaction_cleanup_event_ids == ("first",)
     assert updated.source_event_prompts == {"second": "two"}
 
 
@@ -346,18 +421,16 @@ def test_turn_record_preserves_response_context() -> None:
     assert handled_turn.conversation_target == conversation_target
 
 
-def test_turn_record_preserves_requester_and_correlation() -> None:
-    """The handled-turn carrier should keep requester and correlation ids intact."""
+def test_turn_record_preserves_requester() -> None:
+    """The handled-turn carrier should keep the requester intact."""
     handled_turn = TurnRecord.create(
         ["$event:example.com"],
         requester_id="@user:example.com",
-        correlation_id="corr-123",
     )
 
     updated = replace(handled_turn, response_owner="agent")
 
     assert updated.requester_id == "@user:example.com"
-    assert updated.correlation_id == "corr-123"
 
 
 @pytest.mark.asyncio
@@ -596,6 +669,61 @@ def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
         record.response_event_id = "$replacement"  # type: ignore[misc]
 
 
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        (TurnRecord.create(["$single"], requester_id="@bob:localhost"), True),
+        (TurnRecord.create(["$single"]), False),
+        (
+            TurnRecord.create(
+                ["$first", "$second"],
+                source_event_metadata={
+                    "$first": SourceEventMetadata(sender="@bob:localhost"),
+                    "$second": SourceEventMetadata(sender="@bob:localhost"),
+                },
+            ),
+            True,
+        ),
+        (
+            TurnRecord.create(
+                ["$first", "$second"],
+                source_event_metadata={
+                    "$first": SourceEventMetadata(sender="@alice:localhost"),
+                    "$second": SourceEventMetadata(sender="@bob:localhost"),
+                },
+            ),
+            False,
+        ),
+        (
+            TurnRecord.create(
+                ["$first", "$second"],
+                redacted_source_event_ids=["$first"],
+                source_event_metadata={
+                    "$first": SourceEventMetadata(sender="@alice:localhost"),
+                    "$second": SourceEventMetadata(sender="@bob:localhost"),
+                },
+            ),
+            True,
+        ),
+        (
+            TurnRecord.create(
+                ["$first"],
+                redacted_source_event_ids=["$first"],
+                requester_id="@bob:localhost",
+            ),
+            False,
+        ),
+    ],
+)
+def test_turn_record_proves_all_replay_sources_belong_to_requester(
+    record: TurnRecord,
+    *,
+    expected: bool,
+) -> None:
+    """Whole-turn decisions must fail closed unless every live source has the requester."""
+    assert record.replay_sources_all_from_requester("@bob:localhost") is expected
+
+
 @pytest.mark.asyncio
 async def test_command_execution_checkpoint_persists_across_restart(journal_store: EventJournalStore) -> None:
     """Command effect and result evidence must survive process replacement."""
@@ -606,6 +734,13 @@ async def test_command_execution_checkpoint_persists_across_restart(journal_stor
             completed=False,
             command_execution_started=True,
             command_result_text="✅ Applied once",
+            command_result_extra_content={
+                "io.mindroom.model_selection_result": {
+                    "command_event_id": "$command",
+                    "status": "applied",
+                    "override": "default",
+                },
+            },
         ),
     )
 
@@ -616,6 +751,13 @@ async def test_command_execution_checkpoint_persists_across_restart(journal_stor
     assert recovered.completed is False
     assert recovered.command_execution_started
     assert recovered.command_result_text == "✅ Applied once"
+    assert recovered.command_result_extra_content == {
+        "io.mindroom.model_selection_result": {
+            "command_event_id": "$command",
+            "status": "applied",
+            "override": "default",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -643,37 +785,50 @@ async def test_source_event_revisions_persist_across_restart_and_run_recovery(
     assert reloaded is not None
     assert reloaded.source_event_revisions == revisions
 
-    run_metadata = TurnRecordCodec.to_run_metadata(record)
-    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = "$second"
-    run_metadata[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = "$response"
-    recovered = TurnRecordCodec.from_run_metadata(run_metadata)
-
-    assert recovered is not None
-    assert recovered.source_event_revisions == revisions
-    assert recovered.requester_id == "@user:example.com"
-
 
 @pytest.mark.asyncio
-async def test_user_stop_state_persists_across_restart(journal_store: EventJournalStore) -> None:
-    """Durable STOP order and visible completion survive outside run metadata."""
-    tracker = await _open_ledger(journal_store, "test_user_stop_cutoff")
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$source"],
-            response_event_id="$response",
-            latest_edit_receipt_order=6,
-            user_stop_receipt_order=7,
-            user_stop_settled_receipt_order=7,
-        ),
+async def test_v2026_9_42_turn_record_restores_revision_replay_through_store_reopen(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A released summary-only row restores edit provenance through both store opens."""
+    old_record_json = (
+        '{"anchor_event_id":"$source","source_event_ids":["$source"],'
+        '"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        '"response_event_id":"$answer","completed":true,"timestamp":1000.011,'
+        '"source_event_prompts":{"$source":"edited prompt"},'
+        '"source_event_revisions":{"$source":[1000022,"$edit"]},'
+        '"suppressed_source_event_revisions":{"$source":[1000033,"$suppressed-edit"]}}'
+    )
+    agent_name = "summary_only_replay"
+    first_store = journal_database()
+    await first_store.turn_records(agent_name).upsert(
+        index_event_ids=("$source",),
+        anchor_event_id="$source",
+        record_json=old_record_json,
     )
 
-    reloaded = await _reload_ledger(journal_store, "test_user_stop_cutoff")
-    recovered = reloaded.get_turn_record("$source")
+    first = await _open_ledger(first_store, agent_name)
+    first_record = first.get_turn_record("$source")
+    assert first_record is not None
+    assert first_record.source_event_prompts == {"$source": "edited prompt"}
+    assert first_record.suppressed_source_event_revisions == {
+        "$source": (1_000_033, "$suppressed-edit"),
+    }
+    assert first_record.revision_replay == {
+        "$edit": RevisionReplay(
+            source_event_id="$source",
+            timestamp_ms=1_000_022,
+            legacy_summary_provenance=True,
+        ),
+    }
 
-    assert recovered is not None
-    assert recovered.latest_edit_receipt_order == 6
-    assert recovered.user_stop_receipt_order == 7
-    assert recovered.user_stop_settled_receipt_order == 7
+    await first_store.close()
+    reopened_store = journal_database()
+    reopened = await _open_ledger(reopened_store, agent_name)
+    reopened_record = reopened.get_turn_record("$source")
+    assert reopened_record is not None
+    assert reopened_record.revision_replay == first_record.revision_replay
+    assert reopened_record.suppressed_source_event_revisions == first_record.suppressed_source_event_revisions
 
 
 @pytest.mark.asyncio
@@ -860,7 +1015,7 @@ class _FailingWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-    ) -> None:
+    ) -> str | None:
         """Hold the write open, then fail it, leaving the database untouched."""
         _ = (index_event_ids, anchor_event_id, record_json)
         self.started.set()
@@ -917,16 +1072,415 @@ class _CommittingWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-    ) -> None:
+    ) -> str | None:
         """Hold the write open, then let it land exactly as the real one would."""
         self.started.set()
         await self.released.wait()
-        await TurnRecordStore.upsert(
+        return await TurnRecordStore.upsert(
             self,
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
             record_json=record_json,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _DelayedFirstWriteStore(TurnRecordStore):
+    """Delay one selected write, retaining real persistence for every other write."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+    fail: bool = False
+
+    async def upsert(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> str | None:
+        """Let the test decide the first selected write's definite outcome."""
+        if "$slow" in index_event_ids and not self.started.is_set():
+            self.started.set()
+            await self.released.wait()
+            if self.fail:
+                msg = "selected write failed before commit"
+                raise RuntimeError(msg)
+        return await TurnRecordStore.upsert(
+            self,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_scoped_lookup_tracks_provisional_write_outcome(
+    journal_store: EventJournalStore,
+    fail: bool,
+    cancel: bool,
+) -> None:
+    """A failed or cancelled write must leave lookups agreeing with durable ownership."""
+    agent = "scoped_write_outcome"
+    original = MessageTarget.resolve("!room:example.org", "$old-thread", "$slow")
+    moved = MessageTarget.resolve("!room:example.org", "$new-thread", "$slow")
+    sibling = await _open_ledger(journal_store, agent)
+    await sibling.record_handled_turn(
+        TurnRecord.create(["$slow", "$survivor"], completed=False, conversation_target=original),
+    )
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent, fail=fail)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    writing = asyncio.create_task(
+        ledger.update_handled_turn(
+            ("$slow",),
+            lambda current: replace(
+                current["$slow"],
+                conversation_target=moved,
+                redacted_source_event_ids=("$slow",),
+                timestamp=0,
+            ),
+        ),
+    )
+    try:
+        await asyncio.wait_for(records.started.wait(), timeout=5)
+        assert sibling.turn_records_for_conversation(session_id=original.session_id) == ()
+        assert len(sibling.turn_records_for_conversation(session_id=moved.session_id)) == 1
+        if cancel:
+            writing.cancel()
+            await asyncio.sleep(0)
+        records.released.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await writing
+        elif fail:
+            with pytest.raises(RuntimeError, match="selected write failed before commit"):
+                await writing
+        else:
+            await writing
+        for reader in (sibling, await _reload_ledger(journal_store, agent)):
+            kept, removed = (original, moved) if fail else (moved, original)
+            assert reader.turn_records_for_conversation(session_id=removed.session_id) == ()
+            assert len(reader.turn_records_for_conversation(session_id=kept.session_id)) == 1
+            assert reader.get_turn_record("$slow").redacted_source_event_ids == (() if fail else ("$slow",))
+    finally:
+        records.released.set()
+        await asyncio.gather(writing, return_exceptions=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _DelayedForgetStore(TurnRecordStore):
+    """Pause cleanup after durable deletion but before its cache replacement."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def forget(self, *, index_event_ids: Sequence[str]) -> None:
+        """Expose the interval where durable rows are gone and the old cache remains."""
+        await TurnRecordStore.forget(self, index_event_ids=index_event_ids)
+        self.started.set()
+        await self.released.wait()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_turn_is_durable_while_another_write_waits(journal_store: EventJournalStore) -> None:
+    """An unrelated turn must not inherit another turn's persistence latency."""
+    agent = "independent_writes"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    sibling = _ledger(journal_store, agent)
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"])))
+    await records.started.wait()
+    fast = asyncio.create_task(sibling.record_handled_turn(TurnRecord.create(["$fast"], response_event_id="$reply")))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        persisted = await _read_persisted_records(journal_store, agent)
+        assert set(persisted) == {"$fast"}
+        assert persisted["$fast"]["response_event_id"] == "$reply"
+        assert not slow.done()
+        assert ledger.get_turn_record("$fast") == sibling.get_turn_record("$fast")
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, fast)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lookup", ["$slow", "$alias"])
+async def test_related_update_waits_while_unrelated_turns_persist(
+    journal_store: EventJournalStore,
+    lookup: str,
+) -> None:
+    """Source and discovery aliases must derive after the prior write settles."""
+    agent = "related_writes"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$slow"], discovery_event_ids=["$alias"], completed=False)),
+    )
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.update_handled_turn(
+            (lookup,),
+            lambda current: replace(current[lookup], visible_echo_event_id="$echo", timestamp=0),
+        ),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        provisional = ledger.get_turn_record("$slow")
+        assert provisional is not None
+        assert provisional.visible_echo_event_id is None
+        assert not dependent.done()
+        records.released.set()
+        await asyncio.gather(slow, dependent)
+        loaded = await _reload_ledger(journal_store, agent)
+        for event_id in ("$slow", "$alias"):
+            record = loaded.get_turn_record(event_id)
+            assert record is not None
+            assert record.visible_echo_event_id == "$echo"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_declined_update_does_not_publish_or_persist(journal_store: EventJournalStore) -> None:
+    """A callback can decline after inspecting settled conflicting identities."""
+    agent = "declined_update"
+    ledger = await _open_ledger(journal_store, agent)
+    await ledger.record_handled_turn(TurnRecord.create(["$alias"], completed=False))
+    existing = ledger.get_turn_record("$alias")
+    assert existing is not None
+
+    result = await ledger.update_handled_turn(("$source", "$alias"), lambda _current: None)
+
+    assert result is None
+    assert ledger.get_turn_record("$source") is None
+    assert ledger.get_turn_record("$alias") == existing
+    loaded = await _reload_ledger(journal_store, agent)
+    assert loaded.get_turn_record("$source") is None
+    assert loaded.get_turn_record("$alias") == existing
+
+
+@pytest.mark.asyncio
+async def test_reanchoring_orders_writes_reusing_the_previous_anchor(journal_store: EventJournalStore) -> None:
+    """An upsert deleting old anchor rows must precede a new user of that anchor."""
+    agent = "old_anchor_writes"
+    ledger = await _open_ledger(journal_store, agent)
+    await ledger.record_handled_turn(TurnRecord.create(["$slow"], anchor_event_id="$old", completed=False))
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    sibling = HandledTurnLedger(agent, records=records)
+    slow = asyncio.create_task(
+        sibling.record_handled_turn(TurnRecord.create(["$slow"], anchor_event_id="$new", completed=False)),
+    )
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$other"], anchor_event_id="$old", completed=False)),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        assert ledger.get_turn_record("$other") is None
+        assert not dependent.done()
+        records.released.set()
+        await asyncio.gather(slow, dependent)
+        persisted = await _read_persisted_records(journal_store, agent)
+        assert set(persisted) == {"$slow", "$other", "$fast"}
+        assert persisted["$slow"]["anchor_event_id"] == "$new"
+        assert persisted["$other"]["anchor_event_id"] == "$old"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_dependent_update_derives_after_failed_publication_is_removed(journal_store: EventJournalStore) -> None:
+    """A failed write must not supply provisional aliases to its successor."""
+    agent = "failed_related_write"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent, fail=True)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$slow"], discovery_event_ids=["$alias"], completed=False)),
+    )
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.update_handled_turn(
+            ("$alias",),
+            lambda current: replace(
+                current.get("$alias", TurnRecord.create(["$alias"])),
+                response_event_id="$reply",
+                completed=True,
+                timestamp=0,
+            ),
+        ),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        records.released.set()
+        with pytest.raises(RuntimeError, match="selected write failed before commit"):
+            await slow
+        await dependent
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.get_turn_record("$slow") is None
+        record = loaded.get_turn_record("$alias")
+        assert record is not None
+        assert record.source_event_ids == ("$alias",)
+        assert record.response_event_id == "$reply"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_fails", [False, True])
+async def test_candidate_conflict_waits_even_when_lookup_ids_are_unrelated(
+    journal_store: EventJournalStore,
+    owner_fails: bool,
+) -> None:
+    """A provisional completed owner cannot permanently reject another candidate."""
+    agent = "candidate_conflict"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent, fail=owner_fails)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"], response_event_id="$reply")))
+    await records.started.wait()
+    derived = asyncio.Event()
+
+    def derive(_current: Mapping[str, TurnRecord]) -> TurnRecord:
+        derived.set()
+        return TurnRecord.create(["$slow"], anchor_event_id="$new", completed=False)
+
+    dependent = asyncio.create_task(ledger.update_handled_turn(("$lookup",), derive))
+    try:
+        await asyncio.wait_for(derived.wait(), timeout=5)
+        assert not dependent.done()
+        records.released.set()
+        if owner_fails:
+            with pytest.raises(RuntimeError, match="selected write failed before commit"):
+                await slow
+        else:
+            await slow
+        result = await dependent
+        loaded = await _reload_ledger(journal_store, agent)
+        record = loaded.get_turn_record("$slow")
+        assert record is not None
+        if owner_fails:
+            assert result == record
+            assert record.anchor_event_id == "$new"
+            assert not record.completed
+        else:
+            assert result is None
+            assert record.response_event_id == "$reply"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("owner_cancellations", "cancel_waiter"), [(0, True), (2, False)])
+async def test_cancellation_keeps_conflicting_write_ownership_until_settlement(
+    journal_store: EventJournalStore,
+    owner_cancellations: int,
+    cancel_waiter: bool,
+) -> None:
+    """Cancelling an owner or its waiter cannot release an unresolved write."""
+    agent = "cancelled_related_write"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"])))
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.update_handled_turn(
+            ("$slow",),
+            lambda current: replace(current["$slow"], visible_echo_event_id="$echo", timestamp=0),
+        ),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        for _ in range(owner_cancellations):
+            slow.cancel()
+            await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        assert not slow.done()
+        assert not dependent.done()
+        if cancel_waiter:
+            dependent.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await dependent
+        records.released.set()
+        if owner_cancellations:
+            with pytest.raises(asyncio.CancelledError):
+                await slow
+        else:
+            await slow
+        if not cancel_waiter:
+            await dependent
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.has_responded("$slow")
+        record = loaded.get_turn_record("$slow")
+        assert record is not None
+        assert record.visible_echo_event_id == (None if cancel_waiter else "$echo")
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_waits_for_active_write_and_excludes_new_reservations(journal_store: EventJournalStore) -> None:
+    """Cleanup must not be overtaken by a delayed commit that resurrects its rows."""
+    agent = "cleanup_active_write"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"])))
+    await records.started.wait()
+    cleanup = asyncio.create_task(ledger._cleanup_old_events(max_events=0, max_age_days=0))
+    await asyncio.sleep(0)
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.sleep(0)
+        assert ledger.get_turn_record("$fast") is None
+        records.released.set()
+        await asyncio.gather(slow, cleanup, fast)
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.get_turn_record("$slow") is None
+        assert loaded.has_responded("$fast")
+        assert set(await _read_persisted_records(journal_store, agent)) == {"$fast"}
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, cleanup, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_settled_read_waits_for_cleanup_cache_replacement(journal_store: EventJournalStore) -> None:
+    """A settled read cannot return a cache row cleanup already deleted durably."""
+    agent = "settled_read_during_cleanup"
+    records = _DelayedForgetStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    await ledger.record_handled_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+    cleanup = asyncio.create_task(ledger._cleanup_old_events(max_events=0, max_age_days=0))
+    await records.started.wait()
+    settled_read = asyncio.create_task(ledger.get_settled_turn_record("$event"))
+    try:
+        await asyncio.sleep(0)
+        assert not settled_read.done()
+        assert await _read_persisted_records(journal_store, agent) == {}
+        records.released.set()
+        await cleanup
+        assert await settled_read is None
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.get_turn_record("$event") is None
+    finally:
+        records.released.set()
+        await asyncio.gather(cleanup, settled_read, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -996,15 +1550,104 @@ async def test_discovery_alias_persists_without_becoming_a_coalesced_source(
 
 
 @pytest.mark.asyncio
-async def test_discovery_alias_redaction_and_cleanup_intent_persist(journal_store: EventJournalStore) -> None:
-    """Selection aliases must retain both their tombstone and owed cleanup across restart."""
+@pytest.mark.parametrize("retention", ["age", "count"])
+async def test_retention_keeps_conversation_redaction_tombstones(
+    journal_store: EventJournalStore,
+    retention: str,
+) -> None:
+    """History cleanup derives from these tombstones when the journal no longer has them."""
+    tracker = await _open_ledger(journal_store, f"tombstone_retention_{retention}")
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$source")
+    old_timestamp = time.time() - (40 * 24 * 60 * 60) if retention == "age" else time.time() - 10
+    await tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$source"],
+            redacted_source_event_ids=["$source"],
+            conversation_target=target,
+            timestamp=old_timestamp,
+        ),
+    )
+    await tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$edited"],
+            response_event_id="$edited-reply",
+            revision_replay={"$edit": RevisionReplay("$edited", 100, redacted=True)},
+            conversation_target=target,
+            timestamp=old_timestamp,
+        ),
+    )
+    await tracker.record_handled_turn(
+        TurnRecord.create(["$ordinary"], conversation_target=target, timestamp=old_timestamp),
+    )
+
+    await tracker._cleanup_old_events(max_events=100 if retention == "age" else 0, max_age_days=30)
+
+    assert tracker.get_turn_record("$source") is not None
+    assert tracker.get_turn_record("$edited") is not None
+    assert tracker.get_turn_record("$ordinary") is None
+
+
+@pytest.mark.asyncio
+async def test_stored_cleanup_obligations_are_ignored_on_read(journal_store: EventJournalStore) -> None:
+    """Records an earlier release stored with cleanup obligations load as plain tombstones."""
+    record = TurnRecord.create(["$source"], redacted_source_event_ids=["$source"], completed=False)
+    raw = TurnRecordCodec._to_ledger_record(record)
+    raw["pending_redaction_cleanup_event_ids"] = ["$source"]
+    raw["revision_replay"] = {
+        "$edit": {"source_event_id": "$source", "timestamp_ms": 10, "redacted": True, "cleanup_pending": True},
+    }
+    await journal_store.turn_records("legacy_obligations").upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id="$source",
+        record_json=json.dumps(raw),
+    )
+
+    ledger = await _reload_ledger(journal_store, "legacy_obligations")
+    loaded = ledger.get_turn_record("$source")
+
+    assert loaded is not None
+    assert loaded.redacted_source_event_ids == ("$source",)
+    assert loaded.revision_replay["$edit"].redacted
+    rewritten = TurnRecordCodec._to_ledger_record(loaded)
+    assert "pending_redaction_cleanup_event_ids" not in rewritten
+    assert "cleanup_pending" not in rewritten["revision_replay"]["$edit"]
+
+
+@pytest.mark.asyncio
+async def test_stored_stop_and_edit_order_keys_are_ignored_on_read(journal_store: EventJournalStore) -> None:
+    """Stop, edit order, and correlation keys an earlier release stored load as nothing and go on the next write."""
+    record = TurnRecord.create(["$source"], response_event_id="$answer", completed=True)
+    raw = TurnRecordCodec._to_ledger_record(record)
+    legacy_keys = {
+        "user_stop_receipt_order": 3,
+        "user_stop_settled_receipt_order": 3,
+        "latest_edit_receipt_order": 2,
+        "correlation_id": "$source",
+    }
+    raw.update(legacy_keys)
+    await journal_store.turn_records("legacy_stop_keys").upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id="$source",
+        record_json=json.dumps(raw),
+    )
+
+    ledger = await _reload_ledger(journal_store, "legacy_stop_keys")
+    loaded = ledger.get_turn_record("$source")
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$answer"
+    assert legacy_keys.keys().isdisjoint(TurnRecordCodec._to_ledger_record(loaded))
+
+
+@pytest.mark.asyncio
+async def test_discovery_alias_redaction_persists(journal_store: EventJournalStore) -> None:
+    """Selection aliases must retain their tombstone across restart."""
     tracker = await _open_ledger(journal_store, "test_discovery_redaction")
     await tracker.record_handled_turn(
         TurnRecord.create(
             ["$question"],
             discovery_event_ids=["$selection"],
             redacted_source_event_ids=["$selection"],
-            pending_redaction_cleanup_event_ids=["$selection"],
             completed=False,
         ),
     )
@@ -1014,8 +1657,6 @@ async def test_discovery_alias_redaction_and_cleanup_intent_persist(journal_stor
 
     assert record is not None
     assert record.redacted_source_event_ids == ("$selection",)
-    assert record.pending_redaction_cleanup_event_ids == ("$selection",)
-    assert reloaded.pending_redaction_cleanup_event_ids() == ("$selection",)
     assert reloaded.has_responded("$selection") is True
     assert reloaded.has_responded("$question") is False
 
@@ -1056,17 +1697,16 @@ async def test_persistence_round_trip_preserves_response_context(journal_store: 
 
 
 @pytest.mark.asyncio
-async def test_persistence_round_trip_preserves_requester_and_correlation(
+async def test_persistence_round_trip_preserves_requester(
     journal_store: EventJournalStore,
 ) -> None:
-    """Reloaded ledgers should preserve requester and correlation ids."""
+    """Reloaded ledgers should preserve the requester."""
     tracker1 = await _open_ledger(journal_store, "test_persist_request_context")
     await _record_handled_turn(
         tracker1,
         ["$original", "$reply"],
         response_event_id="$response",
         requester_id="@user:example.com",
-        correlation_id="corr-123",
     )
 
     tracker2 = await _reload_ledger(journal_store, "test_persist_request_context")
@@ -1074,12 +1714,11 @@ async def test_persistence_round_trip_preserves_requester_and_correlation(
     turn_record = tracker2.get_turn_record("$reply")
     assert turn_record is not None
     assert turn_record.requester_id == "@user:example.com"
-    assert turn_record.correlation_id == "corr-123"
 
 
 @pytest.mark.asyncio
-async def test_record_without_requester_or_correlation_loads_cleanly(journal_store: EventJournalStore) -> None:
-    """Requester and correlation IDs remain optional record context."""
+async def test_record_without_requester_loads_cleanly(journal_store: EventJournalStore) -> None:
+    """The requester remains optional record context."""
     await _seed_records(
         journal_store,
         "missing_request_context",
@@ -1097,7 +1736,6 @@ async def test_record_without_requester_or_correlation_loads_cleanly(journal_sto
     assert turn_record is not None
     assert turn_record.response_event_id == "$response"
     assert turn_record.requester_id is None
-    assert turn_record.correlation_id is None
 
 
 def test_current_codec_rejects_incomplete_ledger_records() -> None:
@@ -1255,28 +1893,6 @@ async def test_cleanup_by_age_removes_old_records(journal_store: EventJournalSto
 
 
 @pytest.mark.asyncio
-async def test_cleanup_by_age_retains_pending_redaction_intent(journal_store: EventJournalStore) -> None:
-    """Age retention must not discard cleanup work before the next response."""
-    tracker = await _open_ledger(journal_store, "test_pending_age_cleanup")
-    old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$pending"],
-            redacted_source_event_ids=["$pending"],
-            pending_redaction_cleanup_event_ids=["$pending"],
-            timestamp=old_timestamp,
-        ),
-    )
-    await tracker.record_handled_turn(TurnRecord.create(["$ordinary"], timestamp=old_timestamp))
-
-    await tracker._cleanup_old_events(max_events=100, max_age_days=30)
-
-    assert tracker.get_turn_record("$pending") is not None
-    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
-    assert tracker.get_turn_record("$ordinary") is None
-
-
-@pytest.mark.asyncio
 async def test_cleanup_by_age_retains_incomplete_turn(journal_store: EventJournalStore) -> None:
     """Age cleanup must not discard a turn whose durable work is unfinished."""
     tracker = await _open_ledger(journal_store, "test_incomplete_age_cleanup")
@@ -1323,35 +1939,6 @@ async def test_cleanup_by_age_retains_terminal_turn_for_unsettled_source(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_by_age_retains_only_unsettled_user_stop(journal_store: EventJournalStore) -> None:
-    """A STOP-owned turn remains until its visible terminal edit is settled."""
-    tracker = await _open_ledger(journal_store, "test_unsettled_stop_age_cleanup")
-    old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$unsettled-stop"],
-            response_event_id="$unsettled-response",
-            user_stop_receipt_order=2,
-            timestamp=old_timestamp,
-        ),
-    )
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$settled-stop"],
-            response_event_id="$settled-response",
-            user_stop_receipt_order=3,
-            user_stop_settled_receipt_order=3,
-            timestamp=old_timestamp,
-        ),
-    )
-
-    await tracker.cleanup()
-
-    assert tracker.get_turn_record("$unsettled-stop") is not None
-    assert tracker.get_turn_record("$settled-stop") is None
-
-
-@pytest.mark.asyncio
 async def test_cleanup_by_age_removes_terminal_redaction_only_turn(journal_store: EventJournalStore) -> None:
     """A fully redacted turn without cleanup or dispatch work must not live forever."""
     tracker = await _open_ledger(journal_store, "test_redacted_age_cleanup")
@@ -1367,27 +1954,6 @@ async def test_cleanup_by_age_removes_terminal_redaction_only_turn(journal_store
     await tracker.cleanup()
 
     assert tracker.get_turn_record("$redacted") is None
-
-
-@pytest.mark.asyncio
-async def test_cleanup_by_count_retains_pending_redaction_intent(journal_store: EventJournalStore) -> None:
-    """Count retention may exceed its limit rather than lose owed cleanup work."""
-    tracker = await _open_ledger(journal_store, "test_pending_count_cleanup")
-    await tracker.record_handled_turn(
-        TurnRecord.create(
-            ["$pending"],
-            redacted_source_event_ids=["$pending"],
-            pending_redaction_cleanup_event_ids=["$pending"],
-            timestamp=time.time() - 2,
-        ),
-    )
-    await tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
-
-    await tracker._cleanup_old_events(max_events=1, max_age_days=30)
-
-    assert tracker.get_turn_record("$pending") is not None
-    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
-    assert tracker.get_turn_record("$newest") is not None
 
 
 @pytest.mark.asyncio
@@ -1484,6 +2050,37 @@ async def test_get_turn_record_returns_none_for_unknown_source(journal_store: Ev
 
 
 @pytest.mark.asyncio
+async def test_released_unversioned_ledger_cutoff_preserves_bytes_without_adoption(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """The intentional pre-schema cutoff processes the file without adopting rows."""
+    old_bytes = b'{"$source":{"timestamp":1000.0,"response_event_id":"$answer","completed":true}}'
+    legacy_file = tmp_path / "agent_responded.json"
+    legacy_file.write_bytes(old_bytes)
+
+    first = await _open_ledger(
+        journal_store,
+        "released_unversioned_cutoff",
+        legacy_responses_file=legacy_file,
+    )
+
+    imported_marker = legacy_file.with_suffix(".json.imported")
+    assert first.get_turn_record("$source") is None
+    assert await _read_persisted_records(journal_store, "released_unversioned_cutoff") == {}
+    assert not legacy_file.exists()
+    assert imported_marker.read_bytes() == old_bytes
+
+    reopened = await _reload_ledger(
+        journal_store,
+        "released_unversioned_cutoff",
+        legacy_responses_file=legacy_file,
+    )
+    assert reopened.get_turn_record("$source") is None
+    assert imported_marker.read_bytes() == old_bytes
+
+
+@pytest.mark.asyncio
 async def test_a_pre_database_ledger_is_adopted_on_first_load(
     journal_store: EventJournalStore,
     tmp_path: Path,
@@ -1572,6 +2169,95 @@ async def test_a_partly_stored_legacy_turn_keeps_both_halves(
     assert _get_response_event_id(tracker, "$first") == "$current", "the newer record was overwritten"
     assert _get_response_event_id(tracker, "$second") == "$legacy", "the unrecorded source was not adopted"
     assert not legacy_file.exists(), "the file must still be retired"
+
+
+@dataclass(frozen=True, slots=True)
+class _FailSecondLegacyAdoptionStore(TurnRecordStore):
+    """Persist one old row, then interrupt the next adoption attempt."""
+
+    calls: list[tuple[str, ...]] = field(default_factory=list)
+
+    async def adopt_missing(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> int:
+        """Retain real first-write effects and fail before the second write."""
+        self.calls.append(tuple(index_event_ids))
+        if len(self.calls) == 2:
+            msg = "interrupted before the second legacy row"
+            raise RuntimeError(msg)
+        return await TurnRecordStore.adopt_missing(
+            self,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+
+@pytest.mark.asyncio
+async def test_interrupted_legacy_ledger_import_retries_missing_indexes_before_rename(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """A partial import remains retryable without replacing its adopted row."""
+    old_bytes = (
+        b'{"schema_version":1,"records":{'
+        b'"$first":{"anchor_event_id":"$first","source_event_ids":["$first"],'
+        b'"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        b'"response_event_id":"$legacy-first","completed":true,"timestamp":1000.0},'
+        b'"$second":{"anchor_event_id":"$second","source_event_ids":["$second"],'
+        b'"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        b'"response_event_id":"$legacy-second","completed":true,"timestamp":1001.0}}}'
+    )
+    legacy_file = tmp_path / "agent_responded.json"
+    legacy_file.write_bytes(old_bytes)
+    agent_name = "interrupted_legacy_import"
+    failing_records = _FailSecondLegacyAdoptionStore(
+        _backend=journal_store.backend,
+        _agent_name=agent_name,
+    )
+    interrupted = HandledTurnLedger(
+        agent_name,
+        records=failing_records,
+        legacy_responses_file=legacy_file,
+    )
+
+    with pytest.raises(RuntimeError, match="interrupted before the second legacy row"):
+        await interrupted.load()
+
+    after_failure = await _read_persisted_records(journal_store, agent_name)
+    assert after_failure["$first"]["response_event_id"] == "$legacy-first"
+    assert "$second" not in after_failure
+    assert legacy_file.read_bytes() == old_bytes
+    assert not legacy_file.with_suffix(".json.imported").exists()
+
+    current_record_json = (
+        '{"anchor_event_id":"$first","source_event_ids":["$first"],'
+        '"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        '"response_event_id":"$current-first","completed":true,"timestamp":2000.0,'
+        '"source_event_prompts":{"$first":"newer prompt"}}'
+    )
+    await journal_store.turn_records(agent_name).upsert(
+        index_event_ids=("$first",),
+        anchor_event_id="$first",
+        record_json=current_record_json,
+    )
+    retried = await _open_ledger(
+        journal_store,
+        agent_name,
+        legacy_responses_file=legacy_file,
+    )
+
+    assert _get_response_event_id(retried, "$first") == "$current-first"
+    current = retried.get_turn_record("$first")
+    assert current is not None
+    assert current.source_event_prompts == {"$first": "newer prompt"}
+    assert _get_response_event_id(retried, "$second") == "$legacy-second"
+    assert not legacy_file.exists()
+    assert legacy_file.with_suffix(".json.imported").read_bytes() == old_bytes
 
 
 @pytest.mark.asyncio

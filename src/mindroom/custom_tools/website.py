@@ -15,6 +15,8 @@ from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes_sync
+from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
     ServerFetchUrlError,
@@ -55,6 +57,9 @@ _LOW_VALUE_NAME_PATTERN = re.compile(r"(?:^|[-_])(nav|navbar|menu|search|modal|h
 _FAILED_CRAWL_CONTENT = "Failed to extract any content"
 _FAILED_STARTING_URL = "Failed to crawl starting URL"
 _TOO_MANY_REDIRECTS = "Too many redirects while crawling website"
+_MAX_PAGE_BYTES = 2 * 1024 * 1024
+# The codings httpx decodes, plus the legacy `x-gzip` alias; any of them lets a small body stand for a huge one.
+_COMPRESSED_CONTENT_CODINGS = frozenset({"gzip", "x-gzip", "deflate", "br", "zstd"})
 _MAX_REDIRECTS = 10
 
 
@@ -153,13 +158,27 @@ def _server_fetch_get(
     follow_redirects: bool,
     proxy: str | None = None,
 ) -> httpx.Response:
-    """Fetch a URL through the server-fetch transport when no proxy is configured."""
-    if proxy:
-        # With a configured proxy, URL and redirect validation happen before this handoff.
-        # The proxy owns target DNS resolution and egress policy from here.
-        return httpx.get(url, timeout=timeout, proxy=proxy, follow_redirects=follow_redirects)
-    with httpx.Client(transport=ServerFetchHTTPTransport(), follow_redirects=follow_redirects) as client:
-        return client.get(url, timeout=timeout)
+    """Fetch a URL through the server-fetch transport when no proxy is configured.
+
+    The body is requested uncompressed and read raw up to a limit, so no page is inflated or buffered whole.
+    """
+    # With a configured proxy, URL and redirect validation happen before this handoff.
+    # The proxy owns target DNS resolution and egress policy from here.
+    route: dict[str, Any] = {"proxy": proxy} if proxy else {"transport": ServerFetchHTTPTransport()}
+    with (
+        httpx.Client(follow_redirects=follow_redirects, headers={"Accept-Encoding": "identity"}, **route) as client,
+        client.stream("GET", url, timeout=timeout) as response,
+    ):
+        codings = {value.strip().lower() for value in response.headers.get_list("content-encoding", split_commas=True)}
+        if not codings.isdisjoint(_COMPRESSED_CONTENT_CODINGS):
+            msg = "The page must use identity content encoding."
+            raise httpx.DecodingError(msg, request=response.request)
+        try:
+            body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_PAGE_BYTES)
+        except ByteLimitExceededError as error:
+            msg = f"The page exceeds {_MAX_PAGE_BYTES} bytes."
+            raise httpx.DecodingError(msg, request=response.request) from error
+    return httpx.Response(response.status_code, headers=response.headers, content=body, request=response.request)
 
 
 def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
@@ -190,9 +209,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
             ):
                 continue
 
-            full_url_str = str(full_url)
-            if full_url_str not in self._visited and (full_url_str, current_depth + 1) not in self._urls_to_crawl:
-                self._urls_to_crawl.append((full_url_str, current_depth + 1))
+            queue_crawl_url(self, str(full_url), current_depth + 1)
 
     def _should_skip_crawl_url(
         self,
@@ -205,8 +222,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
     ) -> bool:
         """Return whether a queued crawl URL is outside the current crawl budget."""
         return (
-            current_url in self._visited
-            or not _url_matches_crawl_host(current_url, crawl_host)
+            not _url_matches_crawl_host(current_url, crawl_host)
             or (current_depth > self.max_depth and current_url != starting_url)
             or num_links >= self.max_links
         )
@@ -324,32 +340,26 @@ class _MindRoomWebsiteReader(WebsiteReader):
     def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
         starting_url = validate_server_fetch_url(url)
-        num_links = 0
-        crawler_result: dict[str, str] = {}
         crawl_host = _normalized_hostname(starting_url)
-
-        self._visited = set()
-        self._urls_to_crawl = [(starting_url, starting_depth)]
-        while self._urls_to_crawl:
-            current_url, current_depth = self._urls_to_crawl.pop(0)
-            if self._should_skip_crawl_url(
+        crawler_result = crawl_with_callbacks(
+            self,
+            starting_url,
+            starting_depth,
+            should_skip=lambda current_url, current_depth, num_links: self._should_skip_crawl_url(
                 current_url=current_url,
                 starting_url=starting_url,
                 current_depth=current_depth,
                 num_links=num_links,
                 crawl_host=crawl_host,
-            ):
-                continue
-
-            self._visited.add(current_url)
-            self.delay()
-            num_links += self._record_current_url(
+            ),
+            record=lambda current_url, current_depth, crawler_result: self._record_current_url(
                 current_url=current_url,
                 current_depth=current_depth,
                 starting_url=starting_url,
                 crawler_result=crawler_result,
                 crawl_host=crawl_host,
-            )
+            ),
+        )
 
         if not crawler_result:
             raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)

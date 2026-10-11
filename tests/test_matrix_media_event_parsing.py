@@ -10,6 +10,7 @@ import pytest
 
 import mindroom.matrix.media as media_module
 from mindroom.matrix.room_history_reads import parse_room_message_event
+from tests.conftest import serve_media_from_download
 
 _SYNTHETIC_FILE_KEY = "SYNTHETIC_FILE_JWK_KEY_DO_NOT_USE"
 _SYNTHETIC_FILE_IV = "SYNTHETIC_FILE_IV_DO_NOT_USE"
@@ -103,6 +104,7 @@ async def test_parsed_encrypted_media_still_downloads_and_decrypts() -> None:
     parsed_event = media_module.parse_matrix_media_event_source(_encrypted_media_source())
     assert isinstance(parsed_event, nio.RoomEncryptedImage)
     client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(client)
     client.download.return_value = nio.DownloadResponse(
         body=b"synthetic-ciphertext",
         content_type="application/octet-stream",
@@ -116,7 +118,7 @@ async def test_parsed_encrypted_media_still_downloads_and_decrypts() -> None:
         media_bytes = await media_module.download_media_bytes(client, parsed_event)
 
     assert media_bytes == b"synthetic-plaintext"
-    client.download.assert_awaited_once_with(_SYNTHETIC_FILE_MXC)
+    client.download.assert_awaited_once_with(mxc=_SYNTHETIC_FILE_MXC)
     decrypt_attachment.assert_called_once_with(
         b"synthetic-ciphertext",
         _SYNTHETIC_FILE_KEY,
@@ -213,14 +215,14 @@ async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert isinstance(parsed_event, nio.BadEvent)
-    assert "'url' is a required property" in captured_logs
-    assert "instance['content']['file']" in captured_logs
+    assert "ValidationError" in captured_logs
+    assert "harmless-invalid-encrypted.png" not in captured_logs
 
 
-def test_plain_media_validation_warning_keeps_harmless_diagnostic(
+def test_plain_media_validation_warning_preserves_cause_without_payload(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The encrypted-media exception should not erase useful warnings for malformed plaintext."""
+    """Malformed plaintext is rejected with its diagnostic cause and no event body."""
     event_source = {
         "type": "m.room.message",
         "event_id": "$harmless-invalid:example.test",
@@ -237,5 +239,5 @@ def test_plain_media_validation_warning_keeps_harmless_diagnostic(
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert isinstance(parsed_event, nio.BadEvent)
-    assert "'url' is a required property" in captured_logs
-    assert "harmless-missing-url.png" in captured_logs
+    assert "ValidationError" in captured_logs
+    assert "harmless-missing-url.png" not in captured_logs

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
-from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.indexing_config import IndexingSettings, published_index_settings_compatible
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -60,6 +60,14 @@ class PublishedIndexState:
     updated_at: str | None = None
     last_refresh_at: str | None = None
     consecutive_refresh_failures: int = 0
+
+    def queryable_for(self, expected: IndexingSettings) -> bool:
+        """Whether this publication can safely serve the retained reader settings."""
+        return (
+            self.status == "complete"
+            and self.collection is not None
+            and published_index_settings_compatible(self.settings, expected)
+        )
 
 
 def load_published_index_state(metadata_path: Path) -> PublishedIndexState | None:

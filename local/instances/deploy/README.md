@@ -5,6 +5,7 @@
 ### Prerequisites
 - Docker and Docker Compose installed
 - Python 3.12+ installed
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) installed and available in your shell; `deploy.py` and `bridge.py` use its script launcher
 - API keys for LLM providers (OpenAI, Anthropic, etc.)
 - Optional for HTTPS/domain routing: a Traefik container attached to the external Docker network `mynetwork`
 - HTTPS/domain routes only work when Traefik exposes entrypoint names and a certresolver that match the instance labels.
@@ -27,7 +28,7 @@ cd local/instances/deploy
 # Basic instance (no Matrix server, no auth)
 ./deploy.py create myapp
 
-# Instance with production-ready authentication (Authelia)
+# Instance with Authelia (account setup required before starting)
 ./deploy.py create myapp --auth authelia
 
 # Instance with lightweight Tuwunel Matrix server
@@ -58,6 +59,30 @@ GOOGLE_API_KEY=...
 # etc.
 ```
 
+#### Authelia accounts (required with `--auth authelia`)
+
+`create --auth authelia` copies an enabled public example `admin` account to `<data-dir>/authelia/users_database.yml` (by default, `instance_data/{instance_name}/authelia/users_database.yml`).
+It does not generate a unique login password or prompt for user credentials.
+Before running `start` or exposing the instance, configure intended users there: replace the example `admin` password hash and email, or remove/disable that account (`disabled: true`) after adding your own user.
+Do not leave any enabled account using the public template credentials.
+Full-instance `start` and `restart` refuse to launch while any enabled account still uses the public example hash, even if the account was renamed.
+The check also recognizes equivalent Argon2 encodings, including YAML block-scalar newlines and LDAP hash prefixes.
+Quote usernames that YAML interprets as non-string values, such as `"on"` or `"yes"`; launch checks reject non-string account keys.
+Matrix-only launches (`--only-matrix`) skip this check because they do not start Authelia.
+
+Generate a new password hash with the interactive prompt documented in [Authelia's password guide](https://www.authelia.com/reference/guides/passwords/):
+
+```bash
+docker run --rm -it authelia/authelia:latest authelia crypto hash generate argon2
+
+# Edit the user database in the instance's data directory
+nano instance_data/myapp/authelia/users_database.yml
+```
+
+Copy only the value after `Digest:` into the user's quoted `password` field, and set their `displayname`, `email`, and `groups`.
+Use the data directory printed by `create` if you changed the default data location.
+Complete this account setup and the required HTTPS/Traefik configuration before production use.
+
 ### 3. Start Your Instance
 
 ```bash
@@ -66,15 +91,30 @@ GOOGLE_API_KEY=...
 
 This will start:
 - MindRoom on its bundled dashboard/API port (automatically assigned, e.g., 8765)
+- The sandbox runner used by the default shell, file, and Python tool routing
+- A relay that forwards MindRoom's calls to the sandbox runner port
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
 - Authelia authentication server if enabled
 - PostgreSQL and Redis (if using Synapse)
+
+Before starting the sandbox runner, Compose initializes its scratch volume ownership using `UID` and `GID` (both default to `1000`).
+
+The sandbox runner joins only its own `sandbox-network`, so tool code cannot open connections to MindRoom, PostgreSQL, Redis, Authelia, or the homeserver over Docker networking.
+The `sandbox-relay` container joins both networks, forwards only the runner port, caps connections per address, and does not route other traffic.
+The runner keeps outbound internet access for package installs and web requests, so like any other client it can reach public routes and every port that any instance or other host service publishes on the host's interfaces.
+`MINDROOM_API_KEY` protects the MindRoom API on those paths, and PostgreSQL and Redis publish no host ports.
 
 ### 4. Access Your Instance
 
 After starting, these direct host-port endpoints are exposed on the host:
 - **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
+
+The dashboard asks for the `MINDROOM_API_KEY` stored in `envs/{instance_name}.env`, including after an Authelia login, and API clients send it as a bearer token.
+Containers on the shared `mynetwork` can reach the runtime by container name, so this key is what protects the dashboard from other instances on the same host.
+
+The dashboard accepts browser changes only from its public origin, `https://{DOMAIN}` by default.
+Without Traefik, set `MINDROOM_PUBLIC_URL=http://localhost:{MINDROOM_PORT}` in `envs/{instance_name}.env` and restart before editing through that port.
 
 Some services, especially Synapse, can take a moment before they answer requests on those ports.
 
@@ -103,6 +143,9 @@ To find your ports:
 # Fully remove instance (including data)
 ./deploy.py remove myapp
 ```
+
+`remove` requests Docker Compose teardown with `down -v`, including named-volume removal, before deleting the instance data directory and environment file.
+`stop` omits `-v` and keeps persistent data.
 
 ## Managing Multiple Instances
 
@@ -165,6 +208,18 @@ nano envs/test.env  # Add API keys
 - **Command**: (default, no flag needed)
 - **Features**: Just MindRoom on the bundled dashboard/API port
 
+### Matrix Registration
+Both homeservers refuse anonymous self-registration, because the instance publishes them on the host's interfaces and through Traefik.
+MindRoom registers its own accounts with `MATRIX_REGISTRATION_SHARED_SECRET` on Synapse and `MATRIX_REGISTRATION_TOKEN` on Tuwunel, which `create` writes to `envs/{instance_name}.env`.
+Synapse also keeps its default registration rate limit and limits login attempts.
+Create your own Synapse account with `docker exec -it {instance_name}-synapse register_new_matrix_user -c /data/homeserver.yaml http://localhost:8008`.
+On Tuwunel, register in a Matrix client with `MATRIX_REGISTRATION_TOKEN` as the registration token; anyone you give that token can register too.
+
+### Synapse Federation
+Synapse instances on a public domain keep Synapse's default refusal to send federation, `.well-known`, and identity server requests to loopback, private, and link-local addresses, so a remote server cannot point them at services inside the host's networks.
+Their `homeserver.yaml` allows one private address, Docker's default host gateway `172.17.0.1`, through which they reach peer instances on the same host; change it there if your Docker daemon sets a different `bip` or `host-gateway-ip`.
+Only `.localhost` development instances may federate to any private address.
+
 ## Testing Your Matrix Server
 
 After starting an instance with Matrix:
@@ -184,20 +239,29 @@ The instance manager ensures no port conflicts.
 
 ## Data Storage
 
-Each instance has its own data directory:
+Core MindRoom and Matrix bind mounts use each instance's data directory (`DATA_DIR`):
 ```
 local/instances/deploy/instance_data/
 ├── myapp/
-│   ├── config/       # MindRoom configuration
-│   ├── tmp/          # Temporary files
-│   ├── logs/         # Application logs
-│   ├── synapse/      # Synapse data (if using Synapse)
-│   ├── tuwunel/      # Tuwunel data (if using Tuwunel)
-│   ├── postgres/     # PostgreSQL data (if using Synapse)
-│   └── redis/        # Redis data (if using Synapse)
+│   ├── config/         # config.yaml mounted at /app/config.yaml
+│   ├── mindroom_data/  # Persistent MindRoom state mounted at /app/mindroom_data
+│   ├── logs/           # Mounted at /app/logs
+│   ├── synapse/        # Synapse config and media mounted at /data (if enabled)
+│   └── tuwunel/        # Tuwunel data mounted at /var/lib/tuwunel (if enabled)
 └── another-instance/
     └── ...
 ```
+
+Synapse's PostgreSQL and Redis data live in Docker named volumes, outside this directory:
+
+| Docker volume | Container mount |
+|---------------|-----------------|
+| `<instance>-postgres-data` | `/var/lib/postgresql/data` |
+| `<instance>-redis-data` | `/data` |
+
+The setup helper also creates `postgres/` and `redis/` host directories, but these are not mounted into those services.
+Backing up only the instance directory therefore omits the PostgreSQL and Redis volumes.
+The shared sandbox also stores its workspace in the Compose-managed `sandbox-workspace` named volume.
 
 ## Troubleshooting
 
@@ -228,6 +292,10 @@ docker system prune -a
 ### Matrix Server Issues
 
 #### Synapse Permission Issues
+`deploy.py` writes secret-bearing files owner-only: `envs/<name>.env`, copied credentials, and Synapse's `homeserver.yaml`, which it also gives to UID 1000, the user Synapse runs as.
+It also keeps the Authelia directory, which holds Authelia's secrets and user password hashes, owner-only.
+Run `deploy.py` as UID 1000 or as root so that ownership change succeeds; it changes only the owner, not the group, and otherwise still makes the files owner-only and asks you to run `deploy.py start` for the instance as root.
+Do not fix these files with a manual `sudo chown` or `sudo chmod`, because those follow a link a container may have put in place of the file.
 If Synapse fails with permission errors:
 ```bash
 # If not, files might need proper ownership
@@ -296,7 +364,34 @@ INSTANCE_DOMAIN=myapp.localhost
 # Matrix configuration (if enabled)
 MATRIX_PORT=8448
 MATRIX_SERVER_NAME=m-myapp.localhost
+
+# Random per-instance secrets
+MINDROOM_API_KEY=...
+MINDROOM_SANDBOX_PROXY_TOKEN=...
+# Synapse only
+POSTGRES_PASSWORD=...
+REDIS_PASSWORD=...
+MATRIX_REGISTRATION_SHARED_SECRET=...
+# Tuwunel only
+MATRIX_REGISTRATION_TOKEN=...
 ```
+
+`create` generates these values, and Synapse's `homeserver.yaml` receives the same PostgreSQL and Redis passwords and registration shared secret.
+Without `MINDROOM_SANDBOX_PROXY_TOKEN` the sandbox runner rejects every tool call, and without `MINDROOM_API_KEY` the MindRoom API accepts unauthenticated requests.
+
+### Upgrading Instances Created by Older Versions
+
+No manual steps are required, except closing registration and federation to private addresses on Synapse instances as described below.
+`start` and `restart` add a random `MINDROOM_API_KEY` and `MINDROOM_SANDBOX_PROXY_TOKEN` to an env file that lacks them and print the file path, after which the dashboard asks for that key.
+On Tuwunel instances they also add a random `MATRIX_REGISTRATION_TOKEN`, after which registration requires that token.
+Compose then creates `sandbox-network` and the relay, recreates the runner on the new network, and reuses the existing `mindroom-network`, so attached bridges stay connected.
+Synapse instances keep their existing PostgreSQL password and unauthenticated Redis, which the runner can no longer reach.
+To enable Redis authentication on such an instance anyway, set one new value as `REDIS_PASSWORD` in the env file and as `redis.password` in `{DATA_DIR}/synapse/homeserver.yaml`, then restart it.
+Synapse instances also keep the open registration of their existing `homeserver.yaml`.
+To close it, set `enable_registration: false`, remove `enable_registration_without_verification`, and add `registration_shared_secret` with one new random value in `{DATA_DIR}/synapse/homeserver.yaml`, set the same value as `MATRIX_REGISTRATION_SHARED_SECRET` in the env file, then restart the instance.
+Synapse instances on a public domain also keep `federation_ip_range_blacklist: []` in their existing `homeserver.yaml`; replace that line with `ip_range_whitelist: ["172.17.0.1"]` and restart the instance.
+When you run Docker Compose directly with an older env file, run `./deploy.py start <name>` once or add random values for both `MINDROOM_API_KEY` and `MINDROOM_SANDBOX_PROXY_TOKEN`, and for Tuwunel `MATRIX_REGISTRATION_TOKEN`, yourself.
+Without the token the runner rejects every tool call, without the API key tool code can call the MindRoom API through its published host port, and without a registration token Tuwunel refuses to start.
 
 ## Examples
 
@@ -329,6 +424,8 @@ nano envs/prod.env
 # The provided compose files use Traefik labels, not nginx configuration.
 ./deploy.py list
 ```
+
+The homeserver refuses anonymous self-registration; create your own account as described in [Matrix Registration](#matrix-registration).
 
 ### Testing Setup
 ```bash

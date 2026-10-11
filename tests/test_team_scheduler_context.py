@@ -3,33 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
-from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from tests.bot_helpers import make_test_agent_bot
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
+    make_matrix_client_mock,
     message_origin,
     patch_response_runner_module,
     runtime_paths_for,
@@ -69,14 +70,15 @@ def _response_envelope() -> MessageEnvelope:
 def _make_bot(tmp_path: Path) -> AgentBot:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General Agent", rooms=["!team:localhost"]),
-                "research": AgentConfig(display_name="Research Agent", rooms=["!team:localhost"]),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="General Agent", rooms=["!team:localhost"]),
+                    "research": AgentConfig(display_name="Research Agent", rooms=["!team:localhost"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         ),
         runtime_paths,
     )
@@ -95,9 +97,7 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         runtime_paths=runtime_paths_for(config),
         rooms=["!team:localhost"],
     )
-    bot.client = AsyncMock()
-    bot.client.user_id = agent_user.user_id
-    bot.client.rooms = {"!team:localhost": MagicMock(room_id="!team:localhost")}
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     bot.orchestrator = MagicMock(config=config)
     return install_runtime_journal_support(bot)
 
@@ -143,6 +143,10 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please coordinate and schedule a reminder",
                 user_id="@user:localhost",
@@ -158,32 +162,14 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path) -> None:
     """Generic team interruptions should replace the thinking placeholder with an interruption note."""
     bot = _make_bot(tmp_path)
+    unique_room_send_responses(bot.client)
     team_agents = _team_agents(bot)
-
-    async def fake_run_cancellable_response(**kwargs: object) -> None:
-        response_function = kwargs["response_function"]
-        with suppress(asyncio.CancelledError):
-            await response_function("$thinking")
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError
 
     with (
-        patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
-        patch(
-            "mindroom.delivery_gateway.edit_message_outcome",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$thinking",
-                    content_sent={"body": _INTERRUPTED_RESPONSE_NOTE},
-                ),
-            ),
-        ) as mock_edit,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
@@ -191,6 +177,10 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please coordinate and schedule a reminder",
                 user_id="@user:localhost",
@@ -201,41 +191,25 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             team_mode="coordinate",
         )
 
-    assert mock_edit.await_args.args[2] == "$thinking"
-    assert mock_edit.await_args.args[4] == _INTERRUPTED_RESPONSE_NOTE
-    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    # The team reply's placeholder is edited into the interruption note.
+    edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$sent1"}
+    assert edit["m.new_content"]["body"] == _INTERRUPTED_RESPONSE_NOTE
+    assert edit["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
 @pytest.mark.asyncio
 async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_note(tmp_path: Path) -> None:
     """Sync restarts should mark team placeholders as interrupted, not user-cancelled."""
     bot = _make_bot(tmp_path)
+    unique_room_send_responses(bot.client)
     team_agents = _team_agents(bot)
-
-    async def fake_run_cancellable_response(**kwargs: object) -> None:
-        response_function = kwargs["response_function"]
-        with suppress(asyncio.CancelledError):
-            await response_function("$thinking")
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
     with (
-        patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
-        patch(
-            "mindroom.delivery_gateway.edit_message_outcome",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$thinking",
-                    content_sent={"body": build_restart_interrupted_body("")},
-                ),
-            ),
-        ) as mock_edit,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             team_response=fake_team_response,
@@ -243,6 +217,10 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please coordinate and schedule a reminder",
                 user_id="@user:localhost",
@@ -253,9 +231,11 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
             team_mode="coordinate",
         )
 
-    assert mock_edit.await_args.args[2] == "$thinking"
-    assert mock_edit.await_args.args[4] == build_restart_interrupted_body("")
-    assert mock_edit.await_args.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    # The team reply's placeholder is edited into the interruption note.
+    edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$sent1"}
+    assert edit["m.new_content"]["body"] == build_restart_interrupted_body("")
+    assert edit["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
 
 @pytest.mark.asyncio
@@ -308,6 +288,10 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please collaborate and schedule a reminder",
                 user_id="@user:localhost",
@@ -320,9 +304,10 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: Path) -> None:
-    """Late cancellation should still cancel the team path while post-effects are running."""
+async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effects_finish(tmp_path: Path) -> None:
+    """A cancel that arrives while a visible team answer's post-effects run does not lose the answer or its effects."""
     bot = _make_bot(tmp_path)
+    unique_room_send_responses(bot.client)
     team_agents = _team_agents(bot)
     started = asyncio.Event()
     release = asyncio.Event()
@@ -352,6 +337,10 @@ async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: P
         task = asyncio.create_task(
             bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$user_event",),
+                        logical_source_event_ids=("$user_event",),
+                    ),
                     thread_history=[],
                     prompt="Please coordinate and schedule a reminder",
                     user_id="@user:localhost",
@@ -365,5 +354,4 @@ async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: P
         await started.wait()
         task.cancel()
         release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert await task is not None

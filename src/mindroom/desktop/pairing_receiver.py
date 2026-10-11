@@ -7,6 +7,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from nio import AuthenticatedToDeviceEvent
+
 from mindroom.desktop.pairing import DesktopPairingError, claim_desktop_pairing
 from mindroom.desktop.protocol import (
     DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
@@ -18,8 +20,12 @@ from mindroom.desktop.protocol import (
     event_content,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice, send_encrypted_to_device
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+from mindroom.matrix.olm_to_device import (
+    OlmToDeviceError,
+    PinnedMatrixDevice,
+    authenticated_sender_is_current,
+    send_encrypted_to_device,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -49,14 +55,10 @@ class DesktopPairingReceiver:
         except DesktopProtocolError as exc:
             logger.warning("desktop_pairing_claim_malformed", agent=self.agent_name, reason=str(exc))
             return
-        olm = self.client.olm
-        if olm is None:
-            logger.warning("desktop_pairing_claim_rejected", agent=self.agent_name, reason="missing_olm")
-            return
-        device = olm.device_store[event.sender].get(event.authenticated_device_id)
-        if device is None or device.blacklisted:
+        if not authenticated_sender_is_current(self.client, event):
             logger.warning("desktop_pairing_claim_rejected", agent=self.agent_name, reason="untrusted_device")
             return
+        identity = event.authenticated_sender
         try:
             await asyncio.to_thread(
                 claim_desktop_pairing,
@@ -64,8 +66,8 @@ class DesktopPairingReceiver:
                 token=claim.token,
                 agent_name=self.agent_name,
                 device_user_id=event.sender,
-                device_id=event.authenticated_device_id,
-                device_ed25519=device.ed25519,
+                device_id=identity.device_id,
+                device_ed25519=identity.ed25519,
             )
         except DesktopPairingError as exc:
             logger.warning("desktop_pairing_claim_rejected", agent=self.agent_name, reason=str(exc))
@@ -73,14 +75,14 @@ class DesktopPairingReceiver:
         except sqlite3.Error:
             logger.exception("desktop_pairing_claim_db_error", agent=self.agent_name)
             return
-        verification = desktop_pairing_verification(claim.token, device.ed25519)
+        verification = desktop_pairing_verification(claim.token, identity.ed25519)
         try:
             await send_encrypted_to_device(
                 self.client,
                 PinnedMatrixDevice(
                     user_id=event.sender,
-                    device_id=event.authenticated_device_id,
-                    ed25519=device.ed25519,
+                    device_id=identity.device_id,
+                    ed25519=identity.ed25519,
                 ),
                 event_type=DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
                 content=DesktopPairingAccepted(verification).to_content(),

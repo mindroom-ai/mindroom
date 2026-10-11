@@ -4,8 +4,10 @@ Config reloads and MCP catalog replacements must not hand new responses to
 entities they are about to stop and recreate. ``ConfigReloadLifecycle``
 serializes those flows behind one admission owner, waits up to 600 seconds for
 active responses to drain, and then force-applies if the runtime never becomes
-idle. MCP notifications schedule their replacement asynchronously so the
-triggering admitted tool call can release its own slot first.
+idle. A config reload that restarts nothing and changes no reply-authorization
+input skips that wait and closes admission only for its apply. MCP
+notifications schedule their replacement asynchronously so the triggering
+admitted tool call can release its own slot first.
 
 Matrix reply surfaces reserve admission before their final authorization check
 and keep it through direct side effects or the response-runner handoff. This
@@ -40,6 +42,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from mindroom.response_activity import ResponseIdentity
+
 
 class ResponseAdmissionRefusedError(Exception):
     """Raised when a response waiting through replacement loses its runtime.
@@ -57,6 +61,7 @@ class ResponseAdmissionRefusedError(Exception):
 class ResponseAdmissionGate:
     """Track in-flight responses and close admission while a replacement runs."""
 
+    response_identities: set[ResponseIdentity] = field(default_factory=set, init=False, repr=False)
     _in_flight_response_count: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
     _open_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)

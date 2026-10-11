@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.config import stripe
+from backend.config import STRIPE_WEBHOOK_SECRET, stripe
 from backend.deps import ensure_supabase
 from backend.models import HealthResponse
 from fastapi import APIRouter
@@ -21,6 +21,8 @@ async def health_check() -> dict[str, Any]:
     except Exception:
         supabase_ok = False
 
-    overall_status = "ok" if (supabase_ok and bool(stripe.api_key)) else "degraded"
+    # Stripe is only healthy when inbound webhooks can be verified.
+    stripe_ok = bool(stripe.api_key) and bool(STRIPE_WEBHOOK_SECRET)
+    overall_status = "ok" if (supabase_ok and stripe_ok) else "degraded"
 
-    return {"status": overall_status, "supabase": supabase_ok, "stripe": bool(stripe.api_key)}
+    return {"status": overall_status, "supabase": supabase_ok, "stripe": stripe_ok}

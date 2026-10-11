@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
+import gc
 import json
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import traceback
+import weakref
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from io import BufferedIOBase
 from pathlib import Path
 from threading import Event, get_ident
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -35,7 +40,7 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
-from mindroom import embedder_health, file_locks
+from mindroom import file_locks
 from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.background_tasks import wait_for_background_tasks
@@ -46,10 +51,10 @@ from mindroom.constants import (
     DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
     KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_embedder_api_key
-from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
-from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import get_embedder_api_key
+from mindroom.embeddings import embedder_health
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
 from mindroom.knowledge.collections import build_vector_db, candidate_collection_name
@@ -59,8 +64,10 @@ from mindroom.knowledge.file_listing import (
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
+from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
-from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.knowledge.indexing_config import IndexingSettings, knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
@@ -69,7 +76,9 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
-from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
+from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
+from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.registry import (
     PublishedIndexState,
     get_published_index,
@@ -79,12 +88,14 @@ from mindroom.knowledge.registry import (
     resolve_published_index_key,
     save_published_index_state,
 )
-from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.logging_config import subprocess_logging_env
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
     _Client,
     _Collection,
@@ -98,7 +109,7 @@ from tests.knowledge_test_support import (
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
@@ -455,7 +466,6 @@ def _record_git_sync(
     *relative_paths: str,
 ) -> GitSyncResult:
     """Record a faked sync's outcome the way a real one would, then return it."""
-    source._last_synced_head = result.head
     source._tracked_relative_paths = set(relative_paths)
     return result
 
@@ -521,6 +531,108 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     scheduler.schedule_refresh.assert_called_once()
     assert scheduler.schedule_refresh.call_args.args == ("docs",)
     assert scheduler.schedule_refresh.call_args.kwargs["config"] is config
+
+
+def test_unpublished_knowledge_logs_info_and_keeps_semantic_availability_notice(tmp_path: Path) -> None:
+    """A new scope is awaiting publication, not a failed lookup or completed search."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+
+    with capture_logs() as logs:
+        resolution = resolve_agent_knowledge_access("helper", config, runtime_paths_for(config))
+
+    assert resolution.knowledge is None
+    assert resolution.unavailable == {
+        "docs": KnowledgeAvailabilityDetail(availability=KnowledgeAvailability.INITIALIZING, search_available=False),
+    }
+    notice = knowledge_utils.format_knowledge_availability_notice(resolution.unavailable)
+    assert notice is not None
+    assert "unavailable for semantic search" in notice
+    assert "Do not claim to have searched it" in notice
+    assert not [entry for entry in logs if entry["log_level"] in {"warning", "error"}]
+    assert any(entry["log_level"] == "info" and entry.get("knowledge_bases") == ["docs"] for entry in logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_knowledge_binding_failure_is_not_reported_as_initializing(tmp_path: Path, asynchronous: bool) -> None:
+    """A rejected private binding must not look like normal first-publication delay."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="workspace",
+                        knowledge=AgentPrivateKnowledgeConfig(path="knowledge"),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    assert base_id is not None
+    with pytest.raises(ValueError, match="requires an active execution identity"):
+        get_published_index(base_id, config=config, runtime_paths=runtime_paths)
+
+    with capture_logs() as logs:
+        resolution = (
+            await knowledge_utils.resolve_agent_knowledge_access_async("helper", config, runtime_paths)
+            if asynchronous
+            else resolve_agent_knowledge_access("helper", config, runtime_paths)
+        )
+
+    assert resolution.knowledge is None
+    assert resolution.unavailable[base_id].availability is KnowledgeAvailability.REFRESH_FAILED
+    assert not resolution.unavailable[base_id].search_available
+    assert not [entry for entry in logs if entry["log_level"] == "info" and "knowledge_bases" in entry]
+    warning = next(entry for entry in logs if entry.get("event") == "Knowledge bases not available for agent")
+    assert warning["log_level"] == "warning"
+    assert warning["availability"] == {base_id: "refresh_failed"}
+    notice = knowledge_utils.format_knowledge_availability_notice(resolution.unavailable)
+    assert notice is not None
+    assert "unavailable for semantic search" in notice
+    assert "initializing" not in notice
+
+
+@pytest.mark.parametrize("failure", ["refresh_failed", "config_mismatch", "corrupt_metadata"])
+def test_failed_knowledge_still_warns_alongside_unpublished_scope(tmp_path: Path, failure: str) -> None:
+    """A cold scope must not hide a real failure in another assigned knowledge base."""
+    config = _config(
+        tmp_path,
+        bases={"cold": tmp_path / "cold", "broken": tmp_path / "broken"},
+        agent_bases=["cold", "broken"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("broken", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    if failure == "corrupt_metadata":
+        metadata_path.parent.mkdir(parents=True)
+        metadata_path.write_text("{", encoding="utf-8")
+    else:
+        settings = (
+            replace(key.indexing_settings, chunk_size="1") if failure == "config_mismatch" else key.indexing_settings
+        )
+        save_published_index_state(
+            metadata_path,
+            PublishedIndexState(settings=settings, status="failed" if failure == "refresh_failed" else "indexing"),
+        )
+
+    with capture_logs() as logs:
+        resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+
+    expected_availability = (
+        KnowledgeAvailability.CONFIG_MISMATCH if failure == "config_mismatch" else KnowledgeAvailability.REFRESH_FAILED
+    )
+    assert resolution.knowledge is None
+    assert resolution.unavailable["broken"].availability is expected_availability
+    warning = next(entry for entry in logs if entry.get("event") == "Knowledge bases not available for agent")
+    assert warning["log_level"] == "warning"
+    assert warning["knowledge_bases"] == ["broken"]
+    assert warning["availability"] == {"broken": expected_availability.value}
 
 
 def test_file_mode_knowledge_skips_semantic_lookup_and_refresh(
@@ -756,11 +868,13 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
         git_configs={"docs": git_config},
         modes={"docs": "files"},
     )
+    git_dir = knowledge_git_dir(runtime_paths_for(config).storage_root, docs_path)
 
     before = _knowledge_source_signature(
         config,
         "docs",
         docs_path,
+        git_dir=git_dir,
         tracked_relative_paths={"guide.md", "diagram.png"},
     )
     diagram.write_bytes(b"after")
@@ -770,6 +884,7 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
             config,
             "docs",
             docs_path,
+            git_dir=git_dir,
             tracked_relative_paths={"guide.md", "diagram.png"},
         )
         != before
@@ -924,8 +1039,8 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("shared local new", encoding="utf-8")
     monkeypatch.setattr(
-        "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
-        refresh_knowledge_binding,
+        "mindroom.knowledge.refresh_runner._refresh_index_in_subprocess",
+        knowledge_refresh_runner._refresh_resolved_knowledge_binding,
     )
     scheduler = KnowledgeRefreshScheduler()
 
@@ -1051,7 +1166,7 @@ async def test_config_mode_round_trip_marks_semantic_index_stale_after_file_mode
     ready_lookup = get_published_index("docs", config=semantic_config, runtime_paths=runtime_paths)
     assert ready_lookup.availability is KnowledgeAvailability.READY
 
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
     response = client.put("/api/config/save", json=file_config.authored_model_dump())
     assert response.status_code == 200
     doc.write_text("semantic new", encoding="utf-8")
@@ -1338,7 +1453,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
-        response = TestClient(main.app).delete("/api/knowledge/bases/docs/files/guide.md")
+        response = TestClient(main.app, base_url="http://localhost").delete("/api/knowledge/bases/docs/files/guide.md")
     finally:
         config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     assert response.status_code == 200
@@ -1382,7 +1497,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
-        response = TestClient(main.app).post(
+        response = TestClient(main.app, base_url="http://localhost").post(
             "/api/knowledge/bases/docs/upload",
             files=[("files", ("guide.md", b"replacement content", "text/markdown"))],
         )
@@ -1446,7 +1561,7 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         with pytest.raises(RuntimeError, match="same-source stale write failed"):
-            TestClient(main.app).delete("/api/knowledge/bases/research/files/guide.md")
+            TestClient(main.app, base_url="http://localhost").delete("/api/knowledge/bases/research/files/guide.md")
     finally:
         config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
 
@@ -1608,7 +1723,7 @@ def test_bases_endpoint_counts_files_without_building_the_file_listing(
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     monkeypatch.setattr(knowledge_api, "_list_file_info", _unexpected_list_file_info)
-    response = TestClient(main.app).get("/api/knowledge/bases")
+    response = TestClient(main.app, base_url="http://localhost").get("/api/knowledge/bases")
 
     assert response.status_code == 200
     entry = next(base for base in response.json()["bases"] if base["name"] == "docs")
@@ -1626,7 +1741,7 @@ def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) 
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    response = TestClient(main.app).get("/api/knowledge/bases/docs/files")
+    response = TestClient(main.app, base_url="http://localhost").get("/api/knowledge/bases/docs/files")
 
     assert response.status_code == 200
     payload = response.json()
@@ -1637,21 +1752,118 @@ def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) 
     assert payload["files"][0]["modified"]
 
 
-def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
-    """The guard must reject "..", which pathlib's lexical ``relative_to`` lets through.
+def _committed_git_checkout(path: Path, git_dir: Path) -> None:
+    """Commit ``doc.md`` in a checkout whose Git directory lives apart, as MindRoom keeps one."""
+    path.mkdir()
+    git_dir.parent.mkdir(parents=True, exist_ok=True)
+    (path / "doc.md").write_text("body", encoding="utf-8")
+    env = {**os.environ, "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(path)}
+    for args in (
+        ("init", "-b", "main"),
+        ("add", "doc.md"),
+        ("-c", "user.email=tests@example.com", "-c", "user.name=MindRoom Tests", "commit", "-m", "doc"),
+    ):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True, env=env)
 
-    This is the containment control that replaced ``resolve(strict=True)``. Without
-    it a "../*.md" include pattern yields a listing target at the parent directory
-    whose candidates pass every remaining per-file safety check.
+
+def test_dashboard_git_listing_never_runs_checkout_fsmonitor(tmp_path: Path) -> None:
+    """Dashboard reads must not run a program a .git inside the checkout names.
+
+    A shared checkout may live in an agent workspace, where agent tools can write
+    a ``.git`` beside the knowledge files, while the dashboard lists it from the
+    primary process.
+    """
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    runtime_paths = runtime_paths_for(config)
+    _committed_git_checkout(docs_path, knowledge_git_dir(runtime_paths.storage_root, docs_path))
+    marker = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmonitor-hook"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(["git", "init", "--quiet"], cwd=docs_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=docs_path, check=True, capture_output=True)
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    client = TestClient(main.app, base_url="http://localhost")
+    bases = client.get("/api/knowledge/bases")
+    files = client.get("/api/knowledge/bases/docs/files")
+    status = client.get("/api/knowledge/bases/docs/status")
+
+    assert bases.status_code == files.status_code == status.status_code == 200
+    assert [entry["path"] for entry in files.json()["files"]] == ["doc.md"]
+    assert status.json()["git"]["repo_present"] is True
+    assert not marker.exists()
+
+
+def test_git_listing_runs_git_without_caller_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing must not hand the primary process' secrets or relative PATH entries to Git."""
+    docs_path = tmp_path / "docs"
+    git_dir = tmp_path / "docs.git"
+    _committed_git_checkout(docs_path, git_dir)
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
+    monkeypatch.setenv("PATH", os.pathsep.join(["relative-bin", os.environ["PATH"]]))
+    original_run = subprocess.run
+    envs: list[dict[str, str]] = []
+
+    def _recording_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        envs.append(cast("dict[str, str]", kwargs["env"]))
+        return original_run(*args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(knowledge_file_listing_module.subprocess, "run", _recording_run)
+
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == [docs_path.resolve() / "doc.md"]
+    assert len(envs) == 1
+    env = envs[0]
+    assert "dashboard-secret" not in str(env)
+    assert env["GIT_DIR"] == str(git_dir)
+    assert env["GIT_ALLOW_PROTOCOL"] == ""
+    assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
+
+
+def test_read_only_git_refuses_transports_that_repository_config_allows(tmp_path: Path) -> None:
+    """Repository config re-allowing a protocol must not open a transport for a local command."""
+    remote = tmp_path / "remote"
+    _committed_git_checkout(remote, remote / ".git")
+    docs_path = tmp_path / "docs"
+    git_dir = tmp_path / "docs.git"
+    _committed_git_checkout(docs_path, git_dir)
+    subprocess.run(["git", f"--git-dir={git_dir}", "config", "protocol.file.allow", "always"], check=True)
+
+    result = subprocess.run(
+        hardened_git_command(["ls-remote", remote.resolve().as_uri()]),
+        cwd=docs_path,
+        env=hardened_git_env(git_dir=git_dir, work_tree=docs_path),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+    )
+
+    assert result.returncode != 0
+    assert "not allowed" in result.stderr
+
+
+def test_listing_targets_never_walk_out_through_parent_traversal(tmp_path: Path) -> None:
+    """A ".." listing target, which pathlib's lexical ``relative_to`` lets through, yields nothing.
+
+    Without this a "../*.md" include pattern that bypassed config validation yields a
+    listing target at the parent directory.
     """
     root = tmp_path / "docs"
     root.mkdir()
-    guard = knowledge_file_listing_module._DirectoryGuard(root=root)
+    (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
+    target = knowledge_file_listing_module._ListingTarget(root / "..", "dir")
 
-    assert guard.is_safe(root) is True
-    assert guard.is_safe(root / "..") is False
-    assert guard.is_safe(root / ".." / "..") is False
-    assert guard.is_safe(root / "nested" / ".." / ".." / "outside") is False
+    with knowledge_file_listing_module._pinned_directory(root) as root_fd:
+        assert list(knowledge_file_listing_module._iter_target_files(root_fd, target, root)) == []
 
 
 def test_tracked_path_listing_rejects_parent_traversal_escape(tmp_path: Path) -> None:
@@ -1751,14 +1963,14 @@ async def test_reindex_publishes_surviving_files_when_one_vanishes_mid_refresh(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    original_signature = KnowledgeManager._file_signature
+    original_signature = knowledge_manager_module._file_signature
 
-    def vanishing_signature(self: KnowledgeManager, file_path: Path) -> object:
+    def vanishing_signature(file_path: Path, snapshot: Path | None = None) -> object:
         if file_path == doomed:
             doomed.unlink(missing_ok=True)
-        return original_signature(self, file_path)
+        return original_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", vanishing_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", vanishing_signature)
 
     assert await manager.reindex_all() == RefreshOutcome(indexed_count=1, published=True, error=None)
     assert manager._has_vectors_for_source_path("kept.md", knowledge=manager._knowledge)
@@ -1811,18 +2023,18 @@ def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
     )
 
     walked_roots: list[Path] = []
-    original_walk = knowledge_file_listing_module.os.walk
+    original_walk = knowledge_file_listing_module._walk_relative_files
 
-    def recording_walk(top: object, *args: object, **kwargs: object) -> object:
-        walked_roots.append(Path(top))
-        return original_walk(top, *args, **kwargs)
+    def recording_walk(root_fd: int, base: Path) -> list[Path]:
+        walked_roots.append(base)
+        return original_walk(root_fd, base)
 
-    monkeypatch.setattr(knowledge_file_listing_module.os, "walk", recording_walk)
+    monkeypatch.setattr(knowledge_file_listing_module, "_walk_relative_files", recording_walk)
 
     files = list_knowledge_files(config, "docs", docs_path)
 
     assert files == [memory_file.resolve()]
-    assert walked_roots == [memory_dir.resolve()]
+    assert walked_roots == [Path("memory")]
 
 
 def test_extra_extensions_extend_default_semantic_set(tmp_path: Path) -> None:
@@ -2620,17 +2832,57 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
     ]
 
 
-def test_config_rejects_parent_child_knowledge_roots(tmp_path: Path) -> None:
+def test_config_knowledge_overlap_checks_scale_with_root_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated roots must not cause quadratic path ancestry checks during validation."""
+    bases = {f"kb-{index}": tmp_path / f"kb-{index}" for index in range(55)}
+    original = Path.is_relative_to
+    comparisons = 0
+
+    def count_comparisons(self: Path, other: Path) -> bool:
+        nonlocal comparisons
+        comparisons += 1
+        return original(self, other)
+
+    monkeypatch.setattr(Path, "is_relative_to", count_comparisons)
+    config = _config(tmp_path, bases=bases, agent_bases=["kb-0"])
+
+    assert len(config.knowledge_bases) == len(bases)
+    assert comparisons <= 2 * len(bases)
+
+
+@pytest.mark.parametrize(
+    "root_names",
+    [["parent", "child"], ["child", "parent"], ["child", "sibling", "parent"], ["alias", "child", "parent"]],
+)
+def test_config_rejects_parent_child_knowledge_roots(tmp_path: Path, root_names: list[str]) -> None:
     """Configured local knowledge roots may be exact aliases, but not overlapping subtrees."""
     parent = tmp_path / "docs"
     child = parent / "nested"
+    roots = {"parent": parent, "child": child, "sibling": tmp_path / "docs-archive", "alias": parent}
 
     with pytest.raises(ValueError, match="knowledge_bases paths must not overlap"):
         _config(
             tmp_path,
-            bases={"parent": parent, "child": child},
+            bases={name: roots[name] for name in root_names},
             agent_bases=["parent"],
         )
+
+
+def test_config_rejects_knowledge_overlap_through_symlink(tmp_path: Path) -> None:
+    """Compare resolved roots so differently named symlink paths cannot conceal overlap."""
+    parent = tmp_path / "docs"
+    parent.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="knowledge_bases paths must not overlap"):
+        _config(tmp_path, bases={"child": link / "nested", "parent": parent}, agent_bases=["parent"])
 
 
 def test_config_rejects_exact_duplicate_roots_with_mixed_git_ownership(tmp_path: Path) -> None:
@@ -3429,6 +3681,7 @@ async def test_publish_metadata_save_finishes_before_repeated_cancellation_escap
             candidate_vector_db=candidate_vector_db,
             indexed_count=0,
             source_signature="source-signature",
+            published_revision=None,
         ),
     )
     await save_started.wait()
@@ -3472,6 +3725,7 @@ async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
             candidate_vector_db=candidate_vector_db,
             indexed_count=0,
             source_signature="source-signature",
+            published_revision=None,
         ),
     )
     await save_started.wait()
@@ -3526,6 +3780,7 @@ async def test_publishing_states_every_field_of_the_state_file(tmp_path: Path) -
             candidate_vector_db=candidate_vector_db,
             indexed_count=4,
             source_signature="new-signature",
+            published_revision=None,
         )
         is False
     )
@@ -5176,7 +5431,7 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.delete("/api/knowledge/bases/docs/files/guide.md")
     unavailable: dict[str, KnowledgeAvailability] = {}
@@ -5212,7 +5467,7 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post(
         "/api/knowledge/bases/docs/upload",
@@ -5254,7 +5509,7 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     monkeypatch.setattr("mindroom.api.knowledge._MAX_UPLOAD_BYTES", 5)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post(
         "/api/knowledge/bases/docs/upload",
@@ -5313,7 +5568,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     )
     await started.wait()
     try:
-        client = TestClient(main.app)
+        client = TestClient(main.app, base_url="http://localhost")
         response = client.get("/api/knowledge/bases/docs/status")
     finally:
         release.set()
@@ -5361,9 +5616,127 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
     await scheduler.shutdown()
 
 
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_refresh_turn_owner", default=None)
+
+
 @pytest.mark.asyncio
+async def test_refresh_scheduled_during_a_turn_does_not_retain_the_turn_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh can outlive the tool call that schedules it, whose turn context holds the turn's Agent."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+
+    class _TurnAgent:
+        pass
+
+    agent = _TurnAgent()
+    agent_ref = weakref.ref(agent)
+    token = _TURN_OWNER.set(agent)
+    try:
+        scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    finally:
+        _TURN_OWNER.reset(token)
+    del agent
+    await asyncio.wait_for(started.wait(), timeout=5)
+    gc.collect()
+
+    try:
+        assert agent_ref() is None
+    finally:
+        release.set()
+        await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refresh_deferred_behind_a_direct_refresh_does_not_retain_the_turn_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claim retries while a direct refresh runs must not keep the scheduling turn's Agent alive."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
+    scheduler = KnowledgeRefreshScheduler()
+    started = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        started.set()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+
+    class _TurnAgent:
+        pass
+
+    agent = _TurnAgent()
+    agent_ref = weakref.ref(agent)
+    knowledge_refresh_locks.mark_refresh_active(refresh_target)
+    direct_claim_active = True
+    token = _TURN_OWNER.set(agent)
+    try:
+        scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    finally:
+        _TURN_OWNER.reset(token)
+    del agent
+
+    try:
+        # Let a few claim retries run while the direct refresh still holds the claim.
+        await asyncio.sleep(3 * knowledge_refresh_scheduler._REFRESH_CLAIM_RETRY_SECONDS)
+        assert not started.is_set()
+        gc.collect()
+        assert agent_ref() is None
+        knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        direct_claim_active = False
+        await asyncio.wait_for(started.wait(), timeout=1)
+    finally:
+        if direct_claim_active:
+            knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_does_not_deep_copy_config_on_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduling a refresh must not deep-copy the full config on the event loop."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    refreshed = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        refreshed.set()
+
+    def _unexpected_copy(_self: Config, **_kwargs: object) -> Config:
+        pytest.fail("schedule_refresh deep-copied the config")
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr(Config, "model_copy", _unexpected_copy)
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(refreshed.wait(), timeout=5)
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True])
 async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure(
     tmp_path: Path,
+    manual: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A refresh that persisted REFRESH_FAILED triggers one embedder health probe."""
@@ -5374,8 +5747,7 @@ async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure
     scheduler = KnowledgeRefreshScheduler()
     probe_reasons: list[str] = []
 
-    async def _fake_refresh(base_id: str, **_kwargs: object) -> None:
-        key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths, create=True)
+    async def _fake_refresh(key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> None:
         knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(
             key,
             error="Indexed 0 of 3 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
@@ -5391,10 +5763,14 @@ async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure
         assert health_recorder is not None
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
-    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await scheduler.refresh_now(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    ) if manual else scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     for _ in range(200):
         if probe_reasons:
             break
@@ -5431,8 +5807,8 @@ async def test_refresh_scheduler_skips_probe_for_non_embedder_subprocess_failure
         del health_recorder
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     for _ in range(200):
@@ -5471,8 +5847,8 @@ async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
         msg = f"unexpected embedder probe: {reason}"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await asyncio.wait_for(refreshed.wait(), timeout=5)
@@ -5481,8 +5857,10 @@ async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True])
 async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
     tmp_path: Path,
+    manual: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful child refresh repairs stale main-process health."""
@@ -5507,11 +5885,15 @@ async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
         assert health_recorder is not None
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     try:
-        scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+        await scheduler.refresh_now(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        ) if manual else scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
         for _ in range(200):
             if probe_reasons:
                 break
@@ -5552,8 +5934,8 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
         del health_recorder
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await started.wait()
@@ -5631,7 +6013,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
             second_started.set()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await first_started.wait()
@@ -5654,7 +6036,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
 
 
 @pytest.mark.asyncio
-async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
+async def test_refresh_scheduler_refresh_now_uses_subprocess_with_force_reindex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5677,7 +6059,7 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     result = await scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
 
@@ -5685,16 +6067,35 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
     assert seen_force_reindex == [True]
 
 
+def _write_subprocess_result(kwargs: dict[str, object]) -> None:
+    """Model the small worker result alongside the existing process lifecycle fakes."""
+    output = kwargs["stdout"]
+    assert isinstance(output, BufferedIOBase)
+    output.write(b'{"indexed_count":0,"index_published":true,"availability":"ready","last_error":null}')
+    output.flush()
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_runtime_path", [False, True], ids=["launcher-fallback", "runtime-override"])
 async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    explicit_runtime_path: bool,
 ) -> None:
-    """The subprocess helper sends the scheduled config snapshot via stdin."""
+    """The subprocess gets its config snapshot and the correct executable path."""
+    launcher_bin = tmp_path / "nix-profile" / "bin"
+    runtime_bin = tmp_path / "runtime-bin"
+    monkeypatch.setenv("PATH", str(launcher_bin))
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
     runtime_paths = runtime_paths_for(config)
+    runtime_overrides = {"PATH": str(runtime_bin), "TMPDIR": str(tmp_path / "runtime-tmp")}
+    path_overrides = ({}, runtime_overrides)[explicit_runtime_path]
+    runtime_paths = replace(
+        runtime_paths,
+        process_env={**runtime_paths.process_env, **path_overrides},
+    )
     captured_request: dict[str, object] = {}
     captured_args: tuple[object, ...] = ()
     captured_env: dict[str, str] = {}
@@ -5726,6 +6127,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
 
     async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _Process:
         nonlocal captured_args, captured_env, captured_stdin
+        _write_subprocess_result(kwargs)
         captured_args = args
         raw_env = kwargs["env"]
         assert isinstance(raw_env, dict)
@@ -5749,9 +6151,12 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
         execution_identity=_identity("@alice:localhost"),
     )
 
-    assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
+    assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge.refresh_entrypoint")
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_env["TMPDIR"] == tempfile.gettempdir()
+    assert captured_env.items() >= subprocess_logging_env().items()
+    assert captured_env["PATH"] == str((launcher_bin, runtime_bin)[explicit_runtime_path])
     assert captured_stdin is not None
     captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))
     assert captured_request["base_id"] == "docs"
@@ -5761,6 +6166,324 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
     assert captured_request["runtime_knowledge_base"] is None
     assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_serializes_request_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large config serialization must not block the control-plane event loop."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    event_loop_thread = get_ident()
+    serialization_threads: list[int] = []
+    process = MagicMock(returncode=0)
+    process.wait = AsyncMock(return_value=0)
+    process.stdin.drain = AsyncMock()
+    process.stdin.wait_closed = AsyncMock()
+
+    def _fake_serialize(*_args: object, **_kwargs: object) -> bytes:
+        serialization_threads.append(get_ident())
+        return b"{}"
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        _write_subprocess_result(_kwargs)
+        return process
+
+    async def _fake_terminate(_process: object) -> None:
+        pass
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_serialize_subprocess_refresh_request", _fake_serialize)
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert serialization_threads
+    assert serialization_threads[0] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_scheduled_refreshes_reuse_parent_github_app_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consecutive refresh workers must receive one runtime-cached App token."""
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={
+            "docs": KnowledgeGitConfig(
+                repo_url="https://github.com/example/private.git",
+                credentials_service="github_app",
+            ),
+        },
+    )
+    runtime_paths = runtime_paths_for(config)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "github_app",
+        {
+            "auth_type": "github_app",
+            "app_id": 12345,
+            "installation_id": 67890,
+            "private_key_file": str(tmp_path / "github-app.pem"),
+        },
+    )
+    mint_count = 0
+    payloads: list[dict[str, object]] = []
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="parent-cached-token",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    process = MagicMock(returncode=0)
+    process.wait = AsyncMock(return_value=0)
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        _write_subprocess_result(_kwargs)
+        return process
+
+    async def _fake_send(_process: object, payload: bytes) -> None:
+        payloads.append(json.loads(payload))
+
+    async def _fake_terminate(_process: object) -> None:
+        pass
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_send_subprocess_refresh_request", _fake_send)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert mint_count == 1
+    assert [payload["github_app_token"]["token"] for payload in payloads] == [
+        "parent-cached-token",
+        "parent-cached-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_primes_parent_github_app_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh child must use its parent-provided token without reminting."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://github.com/example/private.git",
+        credentials_service="github_app",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    credentials = {
+        "auth_type": "github_app",
+        "app_id": 12345,
+        "installation_id": 67890,
+        "private_key_file": str(tmp_path / "github-app.pem"),
+    }
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("github_app", credentials)
+    raw_payload = json.loads(
+        knowledge_refresh_runner._serialize_subprocess_refresh_request(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            force_reindex=False,
+        ),
+    )
+    raw_payload["github_app_token"] = {
+        "token": "parent-cached-token",
+        "expires_at_epoch": 4_070_908_800,
+        "binding": {
+            "app_id": 12345,
+            "installation_id": 67890,
+            "owner": "example",
+            "repository": "private",
+            "private_key_file": str(tmp_path / "github-app.pem"),
+        },
+    }
+    mint_count = 0
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="unexpected-remint",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    async def _fake_refresh(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        resolved = await manager.git_source._github_app_token_provider.resolve(
+            git_config.repo_url,
+            credentials,
+        )
+        assert resolved == ("x-access-token", "parent-cached-token")
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+            indexed_count=0,
+            index_published=False,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert mint_count == 0
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child must not bind an App token to credentials changed after minting."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://github.com/example/private.git",
+        credentials_service="github_app",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    parent_credentials = {
+        "auth_type": "github_app",
+        "app_id": 12345,
+        "installation_id": 67890,
+        "private_key_file": str(tmp_path / "parent.pem"),
+    }
+    current_credentials = {
+        "auth_type": "github_app",
+        "app_id": 54321,
+        "installation_id": 9876,
+        "private_key_file": str(tmp_path / "current.pem"),
+    }
+    credentials_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("github_app", parent_credentials)
+    raw_payload = json.loads(
+        knowledge_refresh_runner._serialize_subprocess_refresh_request(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            force_reindex=False,
+        ),
+    )
+    raw_payload["github_app_token"] = {
+        "token": "parent-cached-token",
+        "expires_at_epoch": 4_070_908_800,
+        "binding": {
+            "app_id": 12345,
+            "installation_id": 67890,
+            "owner": "example",
+            "repository": "private",
+            "private_key_file": str(tmp_path / "parent.pem"),
+        },
+    }
+    credentials_manager.save_credentials("github_app", current_credentials)
+    mint_count = 0
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="current-token",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    async def _fake_refresh(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        resolved = await manager.git_source._github_app_token_provider.resolve(
+            git_config.repo_url,
+            current_credentials,
+        )
+        assert resolved == ("x-access-token", "current-token")
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+            indexed_count=0,
+            index_published=False,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert mint_count == 1
 
 
 @pytest.mark.asyncio
@@ -5815,7 +6538,7 @@ async def test_subprocess_applies_runtime_knowledge_base_after_authored_validati
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_runner._run_subprocess_refresh_request(payload)
 
@@ -5905,6 +6628,7 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
             return self.returncode or 0
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -5985,6 +6709,7 @@ async def test_successful_refresh_subprocess_drains_its_process_group(
             return 0
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(_process: _Process) -> None:
@@ -6093,6 +6818,7 @@ async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
             raise AssertionError
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -6157,6 +6883,7 @@ async def test_blocked_refresh_request_is_terminated_after_timeout(
             raise AssertionError(msg)
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -6230,6 +6957,7 @@ async def test_timeout_cleanup_finishes_before_cancellation_propagates(
             raise AssertionError
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -6371,6 +7099,7 @@ async def test_failed_subprocess_refresh_reconciles_running_state(
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     terminated: list[_Process] = []
@@ -6446,6 +7175,7 @@ async def test_failed_subprocess_refresh_does_not_overwrite_newer_success(
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(_process: _Process) -> None:
@@ -6519,6 +7249,7 @@ async def test_failed_subprocess_refresh_reconciles_running_state_after_newer_pu
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(_process: _Process) -> None:
@@ -6576,6 +7307,7 @@ async def test_refresh_subprocess_receives_conservative_thread_env(
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **kwargs: object) -> _Process:
+        _write_subprocess_result(kwargs)
         captured_env.update(kwargs["env"])
         return _Process()
 
@@ -6640,7 +7372,7 @@ async def test_refresh_scheduler_does_not_schedule_after_shutdown(
         calls += 1
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_knowledge_binding", _fake_refresh)
 
     await scheduler.shutdown()
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -7122,8 +7854,10 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     scheduler.schedule_refresh.assert_called_once()
 
 
-def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
+def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Private index, lock, and refresh-cooldown registries should be pruned."""
+    # Hundreds of private identities each fsync their records; disk flush latency on a busy host is not under test.
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -7587,6 +8321,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
 
     monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+    _install_git_revisions(monkeypatch, ["rev-git"])
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7601,6 +8336,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
         config,
         "docs",
         docs_path,
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
         tracked_relative_paths={"doc.md"},
     )
     assert "ghp_secret" not in metadata_text
@@ -7664,10 +8400,17 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
         base_id: str,
         knowledge_root: Path,
         *,
+        git_dir: Path,
         tracked_relative_paths: Iterable[str] | None = None,
     ) -> str:
         counter.calls += 1
-        return original_signature(config, base_id, knowledge_root, tracked_relative_paths=tracked_relative_paths)
+        return original_signature(
+            config,
+            base_id,
+            knowledge_root,
+            git_dir=git_dir,
+            tracked_relative_paths=tracked_relative_paths,
+        )
 
     monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)
     return counter
@@ -7699,6 +8442,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
         return await original_reindex(self, force_reindex=force_reindex)
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+    _install_git_revisions(monkeypatch, ["rev-a"])
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7733,6 +8477,7 @@ async def test_git_noop_refresh_skips_corpus_hash_when_revision_is_unchanged(
             GitSyncResult(head="rev-a", updated=False),
         ],
     )
+    _install_git_revisions(monkeypatch, ["rev-a"])
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
@@ -7801,6 +8546,199 @@ async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_track
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed_files", "expected_scanned"),
+    [
+        pytest.param(frozenset({"second.md"}), [("second.md",)], id="reliable-delta"),
+        pytest.param(None, [("first.md", "second.md", "third.md")], id="full-scan-fallback"),
+    ],
+)
+async def test_git_update_uses_reliable_delta_for_file_signature_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_files: frozenset[str] | None,
+    expected_scanned: list[tuple[str, ...]],
+) -> None:
+    """A revision-matched Git delta should avoid hashing every unchanged file."""
+    names = ("first.md", "second.md", "third.md")
+    config, runtime_paths = _git_noop_config(tmp_path, files=names)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+        tracked=names,
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-b", "rev-b"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "second.md").write_text("changed", encoding="utf-8")
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        assert before_head == "rev-a"
+        assert after_head == "rev-b"
+        return changed_files
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+
+    scanned: list[tuple[str, ...]] = []
+    original_file_signatures_for = KnowledgeManager._file_signatures_for
+
+    async def _record_scanned_files(
+        self: KnowledgeManager,
+        files: Sequence[Path],
+    ) -> dict[str, tuple[tuple[int, int, str], Path]]:
+        scanned.append(tuple(sorted(path.name for path in files)))
+        return await original_file_signatures_for(self, files)
+
+    monkeypatch.setattr(KnowledgeManager, "_file_signatures_for", _record_scanned_files)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+    assert scanned == expected_scanned
+
+
+@pytest.mark.asyncio
+async def test_git_candidate_cancelled_before_reconciliation_rescans_on_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled refresh must not checkpoint an unreconciled Git revision."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+            GitSyncResult(head="rev-b", updated=False),
+        ],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-b", "rev-b"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "doc.md").write_text("changed", encoding="utf-8")
+
+    delta_calls = 0
+
+    async def _cancel_once(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str]:
+        nonlocal delta_calls
+        delta_calls += 1
+        if delta_calls == 1:
+            raise asyncio.CancelledError
+        return frozenset({"doc.md"}) if (before_head, after_head) == ("rev-a", "rev-b") else frozenset()
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _cancel_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_git_delta_targets_the_revision_verified_by_the_refresh_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first reconciliation delta must cover the round's exact Git revision."""
+    names = ("first.md", "second.md")
+    config, runtime_paths = _git_noop_config(tmp_path, files=names)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+        tracked=names,
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-c", "rev-c"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "first.md").write_text("changed in rev-b", encoding="utf-8")
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        _before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str]:
+        (tmp_path / "docs" / "second.md").write_text("changed in rev-c", encoding="utf-8")
+        if after_head == "rev-c":
+            return frozenset(names)
+        return frozenset({"first.md"})
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 2
+
+
+@pytest.mark.asyncio
+async def test_git_publish_records_verified_revision_before_later_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published metadata must identify the revision whose vectors were verified."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-c", "rev-c", "rev-b", "rev-b"])
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        if before_head is None:
+            return None
+        return frozenset({"doc.md"}) if before_head != after_head else frozenset()
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    docs_path = tmp_path / "docs"
+    (docs_path / "doc.md").write_text("content at rev-c", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state_at_rev_c = load_published_index_state(published_index_metadata_path(key))
+
+    (docs_path / "doc.md").write_text("content at rev-b", encoding="utf-8")
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state_at_rev_b = load_published_index_state(published_index_metadata_path(key))
+
+    assert state_at_rev_c is not None
+    assert state_at_rev_c.published_revision == "rev-c"
+    assert state_at_rev_b is not None
+    assert state_at_rev_b.published_revision == "rev-b"
+    assert state_at_rev_b.source_signature == _knowledge_source_signature(
+        config,
+        "docs",
+        docs_path,
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
+        tracked_relative_paths={"doc.md"},
+    )
+    assert result.index_published is True
+
+
+@pytest.mark.asyncio
 async def test_reindex_skips_live_corpus_hash_when_revision_is_stable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -7845,16 +8783,16 @@ async def test_reindex_does_not_publish_a_corpus_truncated_by_a_transient_error(
     )
     _install_git_revisions(monkeypatch, ["rev-a"])
 
-    original_file_signature = KnowledgeManager._file_signature
+    original_file_signature = knowledge_manager_module._file_signature
     remaining_failures = {"flaky.md": 1}
 
-    def _flaky_signature(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+    def _flaky_signature(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
         if remaining_failures.get(file_path.name):
             remaining_failures[file_path.name] -= 1
             raise OSError(116, "Stale file handle")
-        return original_file_signature(self, file_path)
+        return original_file_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", _flaky_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _flaky_signature)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -7904,6 +8842,24 @@ async def test_reindex_hashes_live_corpus_for_non_git_bases(
 
     assert counter.calls >= 1
     assert result.index_published is True
+
+
+@pytest.mark.asyncio
+async def test_non_git_refresh_publishes_when_file_and_directory_share_a_stem(tmp_path: Path) -> None:
+    """Stable corpora publish when a file and directory share a stem."""
+    docs_path = tmp_path / "docs"
+    nested_path = docs_path / "topic"
+    nested_path.mkdir(parents=True)
+    (docs_path / "topic.md").write_text("top-level topic", encoding="utf-8")
+    (nested_path / "details.md").write_text("nested topic details", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.indexed_count == 2
 
 
 @pytest.mark.asyncio
@@ -8438,8 +9394,12 @@ async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
 
 
 @pytest.mark.asyncio
-async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_status(tmp_path: Path) -> None:
-    """Git worktree checkouts use a .git file and must still count as present repositories."""
+async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path) -> None:
+    """A .git pointer file is never followed: its target could be any repository.
+
+    Earlier releases ran Git in such a checkout, which let whoever could write
+    the pointer choose the repository whose config and hooks Git executed.
+    """
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
@@ -8491,19 +9451,22 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
     resolved_git_config = manager.git_source._git_config()
     assert resolved_git_config is not None
 
-    cloned = await manager.git_source._ensure_repository(resolved_git_config)
+    with pytest.raises(RuntimeError, match="is a link or a file, not a Git directory"):
+        await manager.git_source._ensure_repository(resolved_git_config)
+    git_dir = manager.git_source.git_dir
 
-    assert cloned is False
-    assert git_checkout_present(docs_path)
-    assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
+    assert (docs_path / ".git").is_file()
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "worktree checkout content"
+    assert not git_checkout_present(docs_path, git_dir)
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == []
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
     response = client.get("/api/knowledge/bases/docs/status")
 
     assert response.status_code == 200
-    assert response.json()["git"]["repo_present"] is True
+    assert response.json()["git"]["repo_present"] is False
 
 
 @pytest.mark.asyncio
@@ -8519,13 +9482,13 @@ async def test_candidate_indexing_hashes_content_off_event_loop(
     runtime_paths = runtime_paths_for(config)
     event_loop_thread = get_ident()
     signature_threads: list[int] = []
-    original_file_signature = KnowledgeManager._file_signature
+    original_file_signature = knowledge_manager_module._file_signature
 
-    def _record_signature_thread(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+    def _record_signature_thread(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
         signature_threads.append(get_ident())
-        return original_file_signature(self, file_path)
+        return original_file_signature(file_path, snapshot)
 
-    monkeypatch.setattr(KnowledgeManager, "_file_signature", _record_signature_thread)
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _record_signature_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -8600,7 +9563,7 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_knowledge_binding", _fake_refresh)
     monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
@@ -8760,7 +9723,8 @@ async def test_malformed_json_falls_back_to_text_and_publishes(
 
     def _count_source_reads(path: Path, *args: object, **kwargs: object) -> str:
         nonlocal source_reads
-        if path == source_path:
+        # Readers open a private same-name snapshot of the listed source.
+        if path.name == source_path.name:
             source_reads += 1
         return original_read_text(path, *args, **kwargs)
 
@@ -8991,3 +9955,135 @@ def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
     replaces the Git failure it was called to sanitise.
     """
     assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
+
+
+def test_redacting_basic_secrets_scrubs_a_secret_that_contains_another_whole() -> None:
+    """Decoded Basic credentials are scrubbed wherever else they appear, the longest first."""
+    entries = [("alice", "hunter2"), ("bob", "hunter2-extra"), ("carol", "plain")]
+    headers = [
+        f"Authorization: Basic {base64.b64encode(f'{user}:{password}'.encode()).decode()}" for user, password in entries
+    ]
+    text = "\n".join([*headers, "echo hunter2-extra and hunter2 and alice:plain and carol:plain"])
+
+    assert redact_credentials_in_text(text).splitlines() == [
+        *["Authorization: Basic ***"] * len(entries),
+        "echo *** and *** and alice:*** and ***",
+    ]
+
+
+@pytest.mark.parametrize("lead", ["", "-", "1.", "+x9-"])
+def test_redacting_a_url_finds_its_scheme_after_other_scheme_characters(lead: str) -> None:
+    """A URL starts at the first letter of the scheme-character run that ends at ``://``."""
+    text = f"fatal: {lead}https://user:token@example.com/repo.git failed"
+
+    assert redact_credentials_in_text(text) == f"fatal: {lead}https://***@example.com/repo.git failed"
+
+
+def test_redacting_a_long_run_of_scheme_characters_stays_within_a_cpu_budget() -> None:
+    """A stored Git error is re-redacted on every knowledge API read, so a long non-URL run must not stall the loop."""
+    text = "remote: " + "A" * 100_000
+
+    with cpu_budget(0.5):
+        redacted = redact_credentials_in_text(text)
+
+    assert redacted == text
+
+
+@pytest.mark.asyncio
+async def test_refresh_subprocess_returns_exact_result(tmp_path: Path) -> None:
+    """A real child returns the manual refresh result without rebuilding it from metadata."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "one.md").write_text("one", encoding="utf-8")
+    (docs / "two.md").write_text("two", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
+    config.knowledge_bases["docs"].mode = "files"
+    runtime_paths = runtime_paths_for(config)
+    result = await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+    assert result.indexed_count == 0  # Files mode does not index vectors.
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.last_error is None
+    assert result.key == resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_manual_refresh_returns_failed_candidate_result_and_tracks_parent_activity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The child outcome, including a failed candidate's count, is authoritative."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    target = knowledge_registry.refresh_target_for_published_index_key(key)
+    process = MagicMock(returncode=0)
+    process.stdin.drain = AsyncMock()
+    process.stdin.wait_closed = AsyncMock()
+    process.wait = AsyncMock(return_value=0)
+
+    async def spawn(*_args: object, **kwargs: object) -> MagicMock:
+        assert knowledge_refresh_locks.is_refresh_active(target)
+        output = kwargs["stdout"]
+        assert isinstance(output, BufferedIOBase)
+        output.write(
+            json.dumps(
+                {
+                    "indexed_count": 7,
+                    "index_published": False,
+                    "availability": "refresh_failed",
+                    "last_error": "embedding unavailable",
+                },
+            ).encode(),
+        )
+        output.flush()
+        return process
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", AsyncMock())
+    result = await KnowledgeRefreshScheduler().refresh_now(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+    assert result == knowledge_refresh_runner.KnowledgeRefreshResult(
+        key=key,
+        indexed_count=7,
+        index_published=False,
+        availability=KnowledgeAvailability.REFRESH_FAILED,
+        last_error="embedding unavailable",
+    )
+    assert not knowledge_refresh_locks.is_refresh_active(target)
+
+
+@pytest.mark.asyncio
+async def test_refresh_spawn_failure_updates_persisted_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed interpreter launch is still a failed refresh with released parent ownership."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(
+        knowledge_refresh_runner.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(side_effect=OSError("spawn refused")),
+    )
+    with pytest.raises(OSError, match="spawn refused"):
+        await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.last_error == "spawn refused"
+    assert (
+        knowledge_registry.published_index_availability_for_state(key=key, state=state)
+        is KnowledgeAvailability.REFRESH_FAILED
+    )
+    assert not knowledge_refresh_locks.is_refresh_active(knowledge_registry.refresh_target_for_published_index_key(key))

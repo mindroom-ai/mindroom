@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.db.base import BaseDb, SessionType
+from agno.db.base import BaseDb
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
@@ -15,6 +16,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom import ai_runtime
 from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
@@ -26,20 +28,37 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history.runtime import ScopeSessionContext
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from tests.conftest import make_turn_context
+from mindroom.timing import DispatchPipelineTiming
+from tests.conftest import make_turn_context, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.media_inputs import MediaInputs
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+
+@pytest.fixture
+def media_preparation_times(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Observe real input copying/attachment before each Agno invocation."""
+    completed_at: list[float] = []
+    attach_media = ai_runtime.attach_media_to_run_input
+
+    def attach(run_input: ai_runtime.ModelRunInput, media: MediaInputs) -> list[Message]:
+        prepared = attach_media(run_input, media)
+        completed_at.append(time.perf_counter())
+        return prepared
+
+    monkeypatch.setattr(ai_runtime, "attach_media_to_run_input", attach)
+    return completed_at
 
 
 def _config() -> Config:
@@ -143,7 +162,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
             created_at=1,
             updated_at=1,
         )
-        storage.upsert_session(session)
+        seed_session(storage, session)
         scope_context = ScopeSessionContext(
             scope=HistoryScope(kind="agent", scope_id="general"),
             storage=storage,
@@ -154,7 +173,6 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
             scope_context=scope_context,
             session_id="session-1",
             run_id="run-empty",
-            session_type=SessionType.AGENT,
             entity_name="general",
             output_tokens=2,
         )
@@ -167,6 +185,50 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
         assert [run.run_id for run in persisted.runs] == ["run-good"]
     finally:
         storage.close()
+
+
+def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
+    """Agno persists the run through its own session object; the scope session loaded before it lacks the run."""
+    storage = create_state_storage(
+        "general",
+        tmp_path,
+        subdir="sessions",
+        session_table="general_sessions",
+    )
+    try:
+        live_session = seed_session(
+            storage,
+            AgentSession(
+                session_id="session-1",
+                agent_id="general",
+                runs=[_completed_run("run-good", "First response")],
+                metadata={},
+                created_at=1,
+                updated_at=1,
+            ),
+        )
+        # What agno's run does behind the live session's back.
+        storage.upsert_run(run=_completed_run("run-empty", None), session_id="session-1")
+
+        discard_empty_completed_run(
+            scope_context=ScopeSessionContext(
+                scope=HistoryScope(kind="agent", scope_id="general"),
+                storage=storage,
+                session=live_session,
+            ),
+            session_id="session-1",
+            run_id="run-empty",
+            entity_name="general",
+            output_tokens=2,
+        )
+
+        assert [run.run_id for run in live_session.runs or []] == ["run-good"]
+        persisted = get_agent_session(storage, "session-1")
+    finally:
+        storage.close()
+
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["run-good"]
 
 
 def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(tmp_path: Path) -> None:
@@ -184,12 +246,13 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
             runs=[
                 _completed_team_run_output("run-good", "First response"),
                 _completed_team_run_output("run-empty", None),
+                RunOutput(run_id="member-of-empty", agent_id="general", parent_run_id="run-empty"),
             ],
             metadata={},
             created_at=1,
             updated_at=1,
         )
-        storage.upsert_session(session)
+        seed_session(storage, session)
         scope_context = ScopeSessionContext(
             scope=HistoryScope(kind="team", scope_id="team_general"),
             storage=storage,
@@ -200,7 +263,6 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
             scope_context=scope_context,
             session_id="session-1",
             run_id="run-empty",
-            session_type=SessionType.TEAM,
             entity_name="team_general",
             output_tokens=2,
         )
@@ -216,10 +278,14 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
 
 
 @pytest.mark.asyncio
-async def test_ai_response_retries_once_after_empty_completed_run(tmp_path: Path) -> None:
+async def test_ai_response_retries_once_after_empty_completed_run(
+    tmp_path: Path,
+    media_preparation_times: list[float],
+) -> None:
     """One empty completed response should trigger exactly one fresh model attempt."""
     empty_agent = _mock_agent(_completed_run("run-empty", None))
     recovered_agent = _mock_agent(_completed_run("run-good", "Recovered"))
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
         mock_prepare.side_effect = [
@@ -232,11 +298,15 @@ async def test_ai_response_retries_once_after_empty_completed_run(tmp_path: Path
             prompt="test",
             runtime_paths=_runtime_paths(tmp_path),
             config=_config(),
+            pipeline_timing=timing,
         )
 
     assert result == "Recovered"
     empty_agent.arun.assert_called_once()
     recovered_agent.arun.assert_called_once()
+    assert media_preparation_times[0] <= timing.marks["first_model_request_sent"]
+    assert media_preparation_times[-1] <= timing.marks["model_request_sent"]
+    assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
 
 
 @pytest.mark.asyncio
@@ -265,11 +335,14 @@ async def test_ai_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_p
 
 @pytest.mark.asyncio
 async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_path: Path) -> None:
-    """Two consecutive empty responses should surface a visible notice, never a blank reply."""
+    """Two consecutive empty responses surface a visible notice, and neither empty run is kept."""
     first_agent = _mock_agent(_completed_run("run-empty-1", None))
     second_agent = _mock_agent(_completed_run("run-empty-2", ""))
 
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+    with (
+        patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.ai.ai_runtime.discard_empty_completed_run") as mock_discard,
+    ):
         mock_prepare.side_effect = [
             _prepared_prompt_result(first_agent),
             _prepared_prompt_result(second_agent),
@@ -285,6 +358,8 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_
     assert result == EMPTY_RESPONSE_NOTICE
     first_agent.arun.assert_called_once()
     second_agent.arun.assert_called_once()
+    # The retry's empty run is discarded too; the notice is delivery-only.
+    assert [call.kwargs["run_id"] for call in mock_discard.call_args_list] == ["run-empty-1", "run-empty-2"]
 
 
 @pytest.mark.asyncio
@@ -314,7 +389,10 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_response_retries_once_after_empty_completed_stream(tmp_path: Path) -> None:
+async def test_stream_agent_response_retries_once_after_empty_completed_stream(
+    tmp_path: Path,
+    media_preparation_times: list[float],
+) -> None:
     """One empty completed stream should trigger exactly one fresh streaming attempt."""
 
     async def empty_stream() -> AsyncIterator[object]:
@@ -326,6 +404,7 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
 
     empty_agent = _mock_streaming_agent(empty_stream())
     recovered_agent = _mock_streaming_agent(recovered_stream())
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
         mock_prepare.side_effect = [
@@ -340,6 +419,7 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
+                pipeline_timing=timing,
             )
         ]
 
@@ -347,6 +427,9 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
     assert contents == ["Recovered"]
     empty_agent.arun.assert_called_once()
     recovered_agent.arun.assert_called_once()
+    assert media_preparation_times[0] <= timing.marks["first_model_request_sent"]
+    assert media_preparation_times[-1] <= timing.marks["model_request_sent"]
+    assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
 
 
 @pytest.mark.asyncio

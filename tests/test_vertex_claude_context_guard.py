@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from agno.exceptions import ContextWindowExceededError
 from agno.media import Image
+from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -16,14 +18,14 @@ from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
 
-from mindroom.claude_prompt_cache import (
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
+from mindroom.providers.claude_wire_blocks import (
     SERVER_TOOL_USE_BLOCK_TYPE,
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_TYPE,
 )
-from mindroom.claude_stream_retry import install_claude_stream_retry_hook
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
-from mindroom.vertex_claude_compat import (
+from mindroom.providers.stream_retry import install_provider_stream_retry_hook
+from mindroom.providers.vertex_claude_compat import (
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
     _request_for_vertex_token_count,
@@ -35,7 +37,7 @@ if TYPE_CHECKING:
 
 def _model() -> MindroomVertexAIClaude:
     return MindroomVertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=False,
@@ -68,7 +70,7 @@ def _safeguard_refusal_message() -> AnthropicMessage:
     return AnthropicMessage(
         id="msg-refusal",
         content=[],
-        model="claude-fable-5",
+        model="claude-fable-5-1",
         role="assistant",
         stop_reason="refusal",
         stop_sequence=None,
@@ -139,10 +141,10 @@ def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:
 
     with (
         patch(
-            "mindroom.vertex_claude_compat.approximate_o200k_tokens",
+            "mindroom.providers.vertex_claude_compat.approximate_o200k_tokens",
             return_value=30,
         ) as estimator,
-        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
+        patch("mindroom.providers.vertex_claude_compat.count_schema_tokens", return_value=5),
     ):
         estimated_tokens = model._estimate_request_input_tokens(
             _tool_loop_messages(),
@@ -164,7 +166,7 @@ def test_estimate_requires_exact_count_for_images() -> None:
         Message(role="user", content="what is in this picture?", images=[Image(content=image_bytes)]),
     ]
 
-    with patch("mindroom.vertex_claude_compat.approximate_o200k_tokens") as estimator:
+    with patch("mindroom.providers.vertex_claude_compat.approximate_o200k_tokens") as estimator:
         estimated_tokens = model._estimate_request_input_tokens(
             messages,
             tools=None,
@@ -200,7 +202,7 @@ def test_estimate_requires_exact_count_for_base64_documents() -> None:
 
     with (
         patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
-        patch("mindroom.vertex_claude_compat.approximate_o200k_tokens") as estimator,
+        patch("mindroom.providers.vertex_claude_compat.approximate_o200k_tokens") as estimator,
     ):
         estimated_tokens = model._estimate_request_input_tokens(
             [Message(role="user", content="summarize")],
@@ -231,7 +233,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
         },
     }
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [
             {
                 "role": "assistant",
@@ -297,7 +299,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
 def test_vertex_token_count_adapts_search_history_without_current_search_tool() -> None:
     """Replayed search blocks remain countable after the current tool surface changes."""
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [
             {
                 "role": "assistant",
@@ -327,7 +329,7 @@ def test_vertex_token_count_adapts_search_history_without_current_search_tool() 
 def test_vertex_token_count_request_leaves_regular_requests_unchanged() -> None:
     """Requests without native search keep their original count payload."""
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [{"role": "user", "content": "hello"}],
         "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
     }
@@ -357,7 +359,7 @@ async def test_exact_count_uses_vertex_compatible_tool_search_payload() -> None:
     with (
         patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
         patch.object(model, "get_async_client", return_value=client),
-        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
+        patch("mindroom.providers.vertex_claude_compat.count_schema_tokens", return_value=5),
     ):
         input_tokens = await model._count_request_input_tokens(
             [Message(role="user", content="hello")],
@@ -506,7 +508,7 @@ async def test_fit_request_messages_skips_exact_count_below_half_budget() -> Non
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_not_awaited()
 
 
@@ -528,7 +530,7 @@ async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_awaited_once()
 
 
@@ -550,7 +552,7 @@ async def test_fit_request_messages_counts_media_exactly() -> None:
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_awaited_once()
 
 
@@ -576,7 +578,7 @@ async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> No
 async def test_stream_retry_does_not_repeat_current_turn_fit_failure() -> None:
     """The installed stream wrapper preserves one typed local fit failure."""
     model = _model()
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
     counter = AsyncMock(return_value=90)
 
     with (
@@ -594,3 +596,20 @@ async def test_stream_retry_does_not_repeat_current_turn_fit_failure() -> None:
 
     assert raised.value.message == "Vertex Claude current turn uses more than the 80-token input limit."
     estimator.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_attempt_forgets_earlier_start_usage_before_fitting() -> None:
+    """A Stop while a retry fits its request must not settle the earlier attempt's start usage."""
+    model = _model()
+    model._stream_start_usage = MessageMetrics(input_tokens=1200, cache_read_tokens=48000)
+
+    async def stopped_while_fitting(*_args: object, **_kwargs: object) -> list[Message]:
+        raise asyncio.CancelledError
+
+    model._fit_request_messages = stopped_while_fitting  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in model.ainvoke_stream(_tool_loop_messages(), Message(role="assistant")):
+            pass
+
+    assert model.take_unfinished_stream_usage() is None

@@ -1,12 +1,14 @@
 export type ToolOverrides = Record<string, unknown>;
 
+type NamedToolEntry = {
+  name: string;
+  overrides?: ToolOverrides | null;
+  defer?: boolean;
+  initial?: boolean;
+};
+
 export type ToolEntry =
-  | string
-  | {
-      name: string;
-      overrides?: ToolOverrides | null;
-    }
-  | Record<string, ToolOverrides | null>;
+  string | NamedToolEntry | Record<string, ToolOverrides | null>;
 
 function cloneOverrideValue(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -38,14 +40,21 @@ function parseToolEntry(entry: ToolEntry): {
   }
 
   if ("name" in entry && typeof entry.name === "string") {
+    const named = entry as NamedToolEntry;
+    // The explicit form keeps lazy-loading flags beside its overrides; the
+    // compact form this module writes stores them inside the mapping.
+    const overrides = {
+      ...(named.overrides != null &&
+      typeof named.overrides === "object" &&
+      !Array.isArray(named.overrides)
+        ? cloneOverrides(named.overrides)
+        : {}),
+      ...(named.defer === true ? { defer: true } : {}),
+      ...(named.initial === true ? { initial: true } : {}),
+    };
     return {
-      name: entry.name,
-      overrides:
-        entry.overrides != null &&
-        typeof entry.overrides === "object" &&
-        !Array.isArray(entry.overrides)
-          ? cloneOverrides(entry.overrides)
-          : null,
+      name: named.name,
+      overrides: Object.keys(overrides).length > 0 ? overrides : null,
     };
   }
 

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import io
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 
 from mindroom import yaml_io
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _SAMPLE_DOCUMENT = """\
 thread:
@@ -39,6 +43,54 @@ def test_safe_load_accepts_bytes_and_binary_streams() -> None:
     document_bytes = _SAMPLE_DOCUMENT.encode()
     assert yaml_io.safe_load(document_bytes) == yaml.safe_load(document_bytes)
     assert yaml_io.safe_load(io.BytesIO(b"a: 1")) == {"a": 1}
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("x: 1" + ":1" * 32, id="base-60-int"),
+        pytest.param("x: !!int '1" + ":1" * 32 + "'", id="tagged-base-60-int"),
+        pytest.param("x: !!int {=: '1" + ":1" * 32 + "'}", id="mapping-base-60-int"),
+        pytest.param("{" + "<<: {}, " * 65 + "a: 1}", id="merge-keys"),
+        pytest.param("{" + "".join(f"{k}: 0, " for k in range(1025)) + "}", id="int-keys"),
+        pytest.param("{" + "".join(f"{k}.5: 0, " for k in range(1025)) + "}", id="float-keys"),
+        pytest.param("{<<: {0: 0}, " + "".join(f"{k}: 0, " for k in range(1, 1025)) + "}", id="merged-int-keys"),
+        pytest.param("!!set {" + "".join(f"{k}, " for k in range(1025)) + "}", id="int-set"),
+        pytest.param("x: 0000-01-01", id="year-0-date"),
+        pytest.param("x: !!bool maybe", id="mistagged-bool"),
+    ],
+)
+def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document: str) -> None:
+    """Worker-written YAML must not take superlinear time to build or escape callers that catch only YAML errors."""
+    with pytest.raises(yaml.YAMLError):
+        yaml_io.safe_load_without_aliases(document)
+
+
+@pytest.mark.parametrize("line_break", ["\n", "\r", "\x85", "\u2028", "\u2029"])
+def test_safe_load_without_aliases_counts_directives_before_parsing(line_break: str) -> None:
+    """Libyaml compares each directive with every earlier one, so too many are refused before parsing starts."""
+    document = "".join(f"%TAG !t{k}! x{line_break}" for k in range(17)) + "--- a\n"
+    with pytest.raises(yaml.YAMLError, match="directives at most"):
+        yaml_io.safe_load_without_aliases(document)
+
+
+def test_safe_load_without_aliases_refuses_tag_directives_before_composing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``%TAG`` prefix is copied into every node naming its handle, so a short document is refused before it is composed."""
+    composed: list[object] = []
+    monkeypatch.setattr(yaml, "load", lambda stream, **_kwargs: composed.append(stream))
+    document = "%TAG !t! " + "A" * 4096 + "\r---\n" + "- !t!a\n" * 100
+    with pytest.raises(yaml.YAMLError, match="%TAG directives are not allowed"):
+        yaml_io.safe_load_without_aliases(document)
+    assert composed == []
+
+
+def test_safe_load_without_aliases_builds_values_at_the_limits() -> None:
+    """A directive, short base-60 integers, a few merge keys, and many numeric keys still load exactly like ``safe_load``."""
+    numeric_keys = "".join(f"{k}: 0, " for k in range(1024))
+    document = (
+        "%YAML 1.1\n---\nx: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
+    )
+    assert yaml_io.safe_load_without_aliases(document) == yaml_io.safe_load(document)
 
 
 def test_safe_dump_roundtrips() -> None:
@@ -87,9 +139,22 @@ def test_safe_dump_rejects_unsafe_types_like_safe_dump() -> None:
         yaml_io.safe_dump({"bad": Unrepresentable()})
 
 
+def test_write_text_atomic_replaces_content_and_preserves_mode(tmp_path: Path) -> None:
+    """Atomic text replacement must retain file permissions and leave no temp file."""
+    path = tmp_path / "config.yaml"
+    path.write_text("old\n", encoding="utf-8")
+    path.chmod(0o640)
+
+    yaml_io.write_text_atomic(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert list(tmp_path.iterdir()) == [path]
+
+
 def test_prefers_libyaml_classes_when_available() -> None:
     """When PyYAML was built with libyaml, the C classes must be selected."""
     if not getattr(yaml, "__with_libyaml__", False):
         pytest.skip("PyYAML built without libyaml")
-    assert yaml_io._SAFE_LOADER is yaml.CSafeLoader
+    assert yaml_io.SafeLoader is yaml.CSafeLoader
     assert yaml_io._SAFE_DUMPER is yaml.CSafeDumper

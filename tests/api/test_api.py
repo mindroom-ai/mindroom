@@ -8,6 +8,8 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -16,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+import httpx
 import jwt
 import pytest
 import yaml
@@ -29,17 +32,25 @@ from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integra
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
+from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
-from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.embedder_health import capture_embedder_health_recorder
+from mindroom.config.main import Config, dashboard_config_schema
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.custom_tools.homeassistant import HomeAssistantTools
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
+from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
+from mindroom.oauth.credential_store import oauth_credential_transaction
+from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.oauth_test_utils import publish_oauth_credentials
 
 TEST_WORKER_AUTH = "token"
 
@@ -87,11 +98,12 @@ def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None)
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
-    authorization: dict[str, Any] | None = None,
+    allowed_users: list[str] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
     payload: dict[str, Any] = {
-        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "administrators": ["@owner:example.org"],
+        "models": {"default": {"provider": "openai", "id": "gpt-5.6-luna"}},
         "agents": {
             "general": {
                 "display_name": "General",
@@ -99,6 +111,8 @@ def _config_with_worker_scope(
                 "tools": ["homeassistant"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
+                "access": {"users": allowed_users or []},
+                "credential_managers": allowed_users or [],
             },
         },
         "defaults": {
@@ -106,8 +120,6 @@ def _config_with_worker_scope(
             "worker_grantable_credentials": worker_grantable_credentials,
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
@@ -115,7 +127,7 @@ def _config_with_worker_scope(
 
 def _authored_config_payload(agent_name: str) -> dict[str, Any]:
     return {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             agent_name: {
@@ -238,12 +250,16 @@ class _ContextSwapLock:
         return None
 
 
+def _supabase_settings(url: str | None, anon_key: str | None) -> auth._ApiAuthSettings:
+    return auth._ApiAuthSettings(supabase_url=url, supabase_anon_key=anon_key, account_id=None, mindroom_api_key=None)
+
+
 def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
     """Supabase auth should stay disabled when credentials are incomplete."""
     runtime_paths = _runtime_paths(tmp_path)
-    assert auth._init_supabase_auth(runtime_paths, None, None) is None
-    assert auth._init_supabase_auth(runtime_paths, "https://supabase.test", None) is None
-    assert auth._init_supabase_auth(runtime_paths, None, "anon-key") is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings(None, None)) is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", None)) is None
+    assert auth._init_supabase_auth(runtime_paths, _supabase_settings(None, "anon-key")) is None
 
 
 def test_init_supabase_auth_raises_when_auto_install_disabled(
@@ -267,7 +283,7 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
-        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert install_calls == ["supabase"]
 
@@ -290,7 +306,7 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
-        auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+        auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
@@ -326,7 +342,7 @@ def test_init_supabase_auth_retries_import_after_auto_install(
     monkeypatch.setattr(auth.importlib, "import_module", import_module)
     monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
 
-    supabase_auth = auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+    supabase_auth = auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
     assert isinstance(supabase_auth, FakeClient)
     assert imported_modules == ["supabase", "supabase"]
@@ -359,7 +375,6 @@ def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytes
     auth_state = auth.ApiAuthState(
         runtime_paths=_runtime_paths(tmp_path),
         settings=auth._ApiAuthSettings(
-            platform_login_url="https://platform.example.com/login",
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",
             account_id=None,
@@ -387,7 +402,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     def _fake_run(command: list[str], *, check: bool, cwd: Path) -> None:
         assert check is True
         commands.append((command, cwd))
-        if command[1:] == ["run", "vite", "build"]:
+        if command[1:] == ["run", "build"]:
             frontend_dist_dir.mkdir()
 
     monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
@@ -400,8 +415,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     assert frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path)) == frontend_dist_dir
     assert commands == [
         (["/usr/bin/bun", "install", "--frozen-lockfile"], frontend_source_dir),
-        (["/usr/bin/bun", "run", "tsc"], frontend_source_dir),
-        (["/usr/bin/bun", "run", "vite", "build"], frontend_source_dir),
+        (["/usr/bin/bun", "run", "build"], frontend_source_dir),
     ]
 
 
@@ -538,6 +552,24 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
+def test_runtime_path_swap_clears_script_broker_and_worker_keepalive(tmp_path: Path) -> None:
+    """An API app cannot retain script capabilities from another runtime root."""
+    fresh_app = FastAPI()
+    initial_runtime = _runtime_paths(tmp_path / "first")
+    refreshed_runtime = _runtime_paths(tmp_path / "second")
+    main.initialize_api_app(fresh_app, initial_runtime)
+    main.bind_script_runtime(
+        fresh_app,
+        broker=MagicMock(),
+        touch_live_workers=MagicMock(),
+    )
+
+    main.initialize_api_app(fresh_app, refreshed_runtime)
+
+    assert fresh_app.state.script_tool_broker is None
+    assert config_lifecycle.app_state(fresh_app).script_worker_keepalive is None
+
+
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
     """Swapping an app to a different config file should drop the previous cached payload."""
     first_dir = tmp_path / "first"
@@ -557,7 +589,7 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     first_runtime.config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
                 "defaults": {"markdown": True},
             },
@@ -567,7 +599,7 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     second_runtime.config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"second": {"display_name": "Second", "role": "r", "rooms": ["lobby"]}},
                 "defaults": {"markdown": True},
             },
@@ -594,7 +626,7 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     runtime_one.config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
                 "defaults": {"markdown": True},
             },
@@ -629,7 +661,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     second_runtime.config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"second": {"display_name": "Second", "role": "valid", "rooms": []}},
             },
@@ -702,7 +734,7 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     first_runtime.config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"first": {"display_name": "First", "role": "old", "rooms": []}},
             },
@@ -712,7 +744,7 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     second_runtime.config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"second": {"display_name": "Second", "role": "new", "rooms": []}},
             },
@@ -742,7 +774,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"only_alt": {"display_name": "OnlyAlt", "role": "alt", "rooms": []}},
             },
@@ -769,7 +801,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="http://localhost") as client:
         response = client.post("/api/config/load")
 
     assert response.status_code == 200
@@ -799,7 +831,7 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
 
     await asyncio.sleep(0.02)
     first_timestamp = time.time() + 1
-    first_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    first_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(first_config_path, (first_timestamp, first_timestamp))
     await asyncio.wait_for(load_event.wait(), timeout=1)
     assert loaded_paths == [first_config_path]
@@ -808,7 +840,7 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
     load_event.clear()
     await asyncio.sleep(0.02)
     second_timestamp = first_timestamp + 1
-    second_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    second_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(second_config_path, (second_timestamp, second_timestamp))
     await asyncio.wait_for(load_event.wait(), timeout=1)
     assert loaded_paths == [first_config_path, second_config_path]
@@ -847,10 +879,12 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         runtime_paths: constants.RuntimePaths,
         *,
         runtime_config: object | None = None,
-        worker_grantable_credentials: frozenset[str] | None = None,
+        touch_live_workers: Callable[[WorkerBackend], None] | None = None,
+        computer_worker_keys: frozenset[str] = frozenset(),
     ) -> int:
         del runtime_config
-        assert worker_grantable_credentials == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+        assert touch_live_workers is None
+        assert computer_worker_keys == frozenset()
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
@@ -879,6 +913,32 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
 
     assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
+
+
+def test_worker_cleanup_touches_live_script_workers_before_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active script workers must have their leases refreshed before idle cleanup."""
+    actions: list[str] = []
+    worker_manager = MagicMock()
+    worker_manager.backend_name = "test"
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
+    monkeypatch.setattr(
+        main,
+        "maintain_workers",
+        lambda _backend: actions.append("maintain") or WorkerMaintenanceResult(cleaned=(), reconciled=()),
+    )
+
+    main._cleanup_workers_once(
+        main._app_runtime_paths(main.app),
+        touch_live_workers=lambda backend: actions.append("touch") if backend is worker_manager else None,
+    )
+
+    assert actions == ["touch", "maintain"]
 
 
 def test_health_check(test_client: TestClient) -> None:
@@ -1110,29 +1170,7 @@ def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None
 
 def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Background worker cleanup should no-op when no backend is configured."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: False)
-
-    assert (
-        main._cleanup_workers_once(
-            main._app_runtime_paths(main.app),
-            worker_grantable_credentials=constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-        )
-        == 0
-    )
-
-
-def test_worker_cleanup_once_skips_kubernetes_without_committed_runtime_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kubernetes cleanup should skip the cycle when no committed runtime config is available."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-
-    def _unexpected_get_primary_worker_manager(*_args: object, **_kwargs: object) -> object:
-        msg = "cleanup should not build a Kubernetes worker manager without a committed snapshot"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(main, "get_primary_worker_manager", _unexpected_get_primary_worker_manager)
+    monkeypatch.setattr(main, "lease_configured_primary_worker_manager", lambda *_args, **_kwargs: None)
 
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
@@ -1161,34 +1199,16 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
             assert now is None
             return WorkerMaintenanceResult(cleaned=tuple(self.cleanup_idle_workers()), reconciled=())
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    captured_kwargs: dict[str, object] = {}
-
-    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
-        captured_kwargs.update(kwargs)
-        return _FakeWorkerManager()
-
-    monkeypatch.setattr(main, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+    worker_manager = _FakeWorkerManager()
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
 
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    assert (
-        main._cleanup_workers_once(
-            runtime_paths,
-            runtime_config=runtime_config,
-            worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
-        )
-        == 1
-    )
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
-    assert captured_kwargs["kubernetes_config_snapshot"] == (
-        main.serialized_kubernetes_worker_config_snapshot(runtime_config)
-    )
-    assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
+    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
 
 
 def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1207,19 +1227,14 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
             return WorkerMaintenanceResult(cleaned=(), reconciled=())
 
     worker_manager = _FakeWorkerManager()
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    main._cleanup_workers_once(
-        runtime_paths,
-        runtime_config=runtime_config,
-        worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
-    )
+    main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config)
 
     assert maintained_managers == [worker_manager]
 
@@ -1244,21 +1259,11 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                 ),
             ]
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    captured_kwargs: dict[str, object] = {}
-
-    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
-        captured_kwargs.update(kwargs)
-        return _FakeWorkerManager()
-
+    worker_manager = _FakeWorkerManager()
     monkeypatch.setattr(
         workers_api,
-        "get_primary_worker_manager",
-        _fake_get_primary_worker_manager,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
 
     response = test_client.get("/api/workers")
@@ -1266,18 +1271,17 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.status_code == 200
     assert response.json()["workers"][0]["worker_key"] == "worker-key"
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
-    assert captured_kwargs["kubernetes_config_snapshot"] is not None
-    assert captured_kwargs["worker_grantable_credentials"] == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 
 
 def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The dashboard should expose manual idle-worker cleanup."""
+    """Manual cleanup refreshes live-script workers before applying the idle cutoff."""
+    actions: list[tuple[str, object]] = []
 
     class _FakeWorkerManager:
         idle_timeout_seconds = 60.0
 
         def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            actions.append(("cleanup", self))
             return [
                 WorkerHandle(
                     worker_id="worker-1",
@@ -1291,16 +1295,32 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
+    worker_manager = _FakeWorkerManager()
+
+    class _Lease:
+        released = False
+
+        def __enter__(self) -> _FakeWorkerManager:
+            return worker_manager
+
+        def __exit__(self, *_args: object) -> None:
+            self.released = True
+
+    lease = _Lease()
+    monkeypatch.setattr(
+        workers_api,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: lease,
+    )
+    config_lifecycle.ensure_app_state(cast("FastAPI", test_client.app)).script_worker_keepalive = lambda manager: (
+        actions.append(("touch", manager))
+    )
 
     response = test_client.post("/api/workers/cleanup")
 
     assert response.status_code == 200
+    assert actions == [("touch", worker_manager), ("cleanup", worker_manager)]
+    assert lease.released is True
     assert response.json()["idle_timeout_seconds"] == 60.0
     assert response.json()["cleaned_workers"][0]["status"] == "idle"
 
@@ -1472,6 +1492,12 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "category" in first_tool
     assert "icon_color" in first_tool  # New field we added
 
+    # Presets and control-plane tools reject defer/initial, so the dashboard hides lazy loading for them.
+    lazy_loading = {tool["name"]: tool["lazy_loading_supported"] for tool in data["tools"]}
+    assert lazy_loading["calculator"] is True
+    assert lazy_loading["dynamic_tools"] is False
+    assert lazy_loading["openclaw_compat"] is False
+
     shell_tool = next(tool for tool in data["tools"] if tool["name"] == "shell")
     assert shell_tool["agent_override_fields"] == [
         {
@@ -1504,7 +1530,8 @@ def test_get_tools(test_client: TestClient) -> None:
     assert calculator_tool["agent_override_fields"] is None
 
 
-def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
     """Custom non-OAuth auth providers should still use ordinary credential presence."""
     runtime_paths = _runtime_paths(tmp_path)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
@@ -1534,7 +1561,7 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
         },
     ]
 
-    tools_api._update_tools_statuses(tools, context)
+    await tools_api._update_tools_statuses(tools, context)
 
     assert tools[0]["status"] == "available"
 
@@ -1546,6 +1573,7 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
         ("google_calendar", "shared", frozenset({"google_calendar"})),
         ("google_docs", "shared", frozenset({"google_docs"})),
         ("google_sheets", "shared", frozenset({"google_sheets"})),
+        ("google_tasks", "shared", frozenset({"google_tasks"})),
         ("gmail", "shared", frozenset({"gmail"})),
         # Agent-scoped OAuth token services no longer inject themselves into the
         # shared allowlist; they fall through to the context allowlist unchanged.
@@ -1595,6 +1623,7 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     assert tools_by_name["google_calendar"]["execution_scope_supported"] is True
     assert tools_by_name["google_docs"]["execution_scope_supported"] is True
     assert tools_by_name["google_sheets"]["execution_scope_supported"] is True
+    assert tools_by_name["google_tasks"]["execution_scope_supported"] is True
     assert "calculator" in tools_by_name
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
@@ -1704,7 +1733,7 @@ def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "shared",
-        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        allowed_users=["@alice:example.org"],
     )
     tools = [
         {
@@ -1855,7 +1884,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=app_runtime_paths.config_path,
         storage_path=app_runtime_paths.storage_root,
-        process_env={},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -1915,21 +1944,34 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["name"] == "google_drive"
     assert tool["status"] == "requires_config"
 
-    manager.for_primary_runtime_agent_scope("general").save_credentials(
-        "google_drive_oauth",
-        {
-            "token": "drive-token",
-            "refresh_token": "drive-refresh-token",
-            "client_id": "client-id",
-            "scopes": [
-                "openid",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
-                "https://www.googleapis.com/auth/drive",
-            ],
-            "_source": "oauth",
-        },
+    worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
+    credential_context = resolve_oauth_credential_context(
+        google_drive_oauth_provider(),
+        runtime_paths,
+        manager,
+        worker_target,
     )
+
+    async def publish_oauth_credentials() -> None:
+        async with oauth_credential_transaction(credential_context) as transaction:
+            await transaction.publish(
+                {
+                    "token": "drive-token",
+                    "refresh_token": "drive-refresh-token",
+                    "client_id": "client-id",
+                    "scopes": [
+                        "openid",
+                        "https://www.googleapis.com/auth/userinfo.email",
+                        "https://www.googleapis.com/auth/userinfo.profile",
+                        "https://www.googleapis.com/auth/drive",
+                    ],
+                    "_source": "oauth",
+                },
+                advance_connection_generation=True,
+            )
+            await transaction.commit()
+
+    asyncio.run(publish_oauth_credentials())
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
@@ -1948,7 +1990,7 @@ def test_get_tools_non_requester_oauth_keeps_non_authoritative_shared_preview(
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "user",
-        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        allowed_users=["@alice:example.org"],
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -2024,6 +2066,7 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
         storage_path=app_runtime_paths.storage_root,
         process_env={
             "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
         },
     )
     tools = [
@@ -2096,11 +2139,7 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "user_agent",
-        authorization={
-            "agent_reply_permissions": {
-                "general": ["@alice:example.org", "@bob:example.org"],
-            },
-        },
+        allowed_users=["@alice:example.org", "@bob:example.org"],
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     alice_identity = ToolExecutionIdentity(
@@ -2119,6 +2158,7 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
         {"access_token": manual_secret, "base_url": "https://api.github.com"},
         credentials_manager=manager,
         worker_target=alice_target,
+        primary_built_tool=True,
     )
     tools = [
         {
@@ -2172,7 +2212,7 @@ def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         None,
-        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        allowed_users=["@alice:example.org"],
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -2190,8 +2230,8 @@ def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test
     )
     oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
     oauth_secret = "github-oauth-secret"  # noqa: S105
-    save_scoped_credentials(
-        "github_oauth",
+    publish_oauth_credentials(
+        github_oauth_provider(),
         {
             "token": oauth_secret,
             "refresh_token": "github-refresh-secret",
@@ -2345,8 +2385,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
 ) -> None:
     """Home Assistant OAuth should save only the final token payload, not temp callback state."""
     config = _config_with_worker_scope("shared")
-    target = MagicMock()
-    target.target_manager = MagicMock()
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
@@ -2365,10 +2404,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         config.model_dump(),
     )
 
-    with (
-        patch("mindroom.api.homeassistant_integration.resolve_request_credentials_target", return_value=target),
-        patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
-    ):
+    with patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
@@ -2395,18 +2431,96 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         },
         timeout=10.0,
     )
-    target.target_manager.save_credentials.assert_called_once_with(
-        "homeassistant",
-        {
-            "instance_url": "http://127.0.0.1:8123",
-            "client_id": "client-id",
-            "access_token": "ha-access",
-            "refresh_token": "ha-refresh",
-            "expires_in": 3600,
-            "allow_private_url": True,
-            "_source": "ui",
-        },
+    assert get_runtime_credentials_manager(runtime_paths).shared_manager().load_credentials("homeassistant") == {
+        "instance_url": "http://127.0.0.1:8123",
+        "client_id": "client-id",
+        "access_token": "ha-access",
+        "refresh_token": "ha-refresh",
+        "expires_in": 3600,
+        "allow_private_url": True,
+        "_source": "ui",
+    }
+    assert not list((runtime_paths.storage_root / "workers").rglob("homeassistant_credentials.json"))
+
+
+def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(api_key_client: TestClient) -> None:
+    """Shared-scope Home Assistant tokens must stay out of the worker store, where only worker code would see them."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    toolkit = HomeAssistantTools(
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=resolve_worker_target("shared", "general", execution_identity=None),
     )
+
+    with patch(
+        "mindroom.api.homeassistant_integration._test_connection",
+        new_callable=AsyncMock,
+        return_value={"version": "2026.9"},
+    ):
+        connect_response = api_key_client.post(
+            "/api/homeassistant/connect/token?agent_name=general",
+            json={"instance_url": "http://93.184.216.34:8123", "long_lived_token": "ha-token"},
+        )
+        status_response = api_key_client.get("/api/homeassistant/status?agent_name=general")
+    stored_config = toolkit._load_config()
+    assert not list((runtime_paths.storage_root / "workers").rglob("homeassistant_credentials.json"))
+    disconnect_response = api_key_client.post("/api/homeassistant/disconnect?agent_name=general")
+
+    assert connect_response.status_code == 200
+    assert status_response.json()["connected"] is True
+    assert stored_config == {
+        "instance_url": "http://93.184.216.34:8123",
+        "long_lived_token": "ha-token",
+        "allow_private_url": False,
+        "_source": "ui",
+    }
+    assert disconnect_response.status_code == 200
+    assert toolkit._load_config() is None
+
+
+def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: TestClient) -> None:
+    """The status probe renews a rejected OAuth access token, saves it, and reports the connection."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
+    oauth_config = {
+        "instance_url": "http://93.184.216.34:8123",
+        "client_id": "http://dashboard.test",
+        "access_token": "expired-token",
+        "refresh_token": "ha-refresh",
+        "allow_private_url": False,
+        "_source": "ui",
+    }
+    shared_manager.save_credentials("homeassistant", oauth_config)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/auth/token":
+            assert parse_qs(request.content.decode()) == {
+                "grant_type": ["refresh_token"],
+                "refresh_token": ["ha-refresh"],
+                "client_id": ["http://dashboard.test"],
+            }
+            return httpx.Response(200, json={"access_token": "renewed-token", "expires_in": 1800})
+        if request.headers["authorization"] != "Bearer renewed-token":
+            return httpx.Response(401)
+        responses = {"/api/": {"message": "API running"}, "/api/config": {"version": "2026.10"}, "/api/states": []}
+        return httpx.Response(200, json=responses[request.url.path])
+
+    with patch(
+        "mindroom.api.homeassistant_integration.ServerFetchAsyncHTTPTransport",
+        lambda **_kwargs: httpx.MockTransport(handler),
+    ):
+        status_response = api_key_client.get("/api/homeassistant/status?agent_name=general")
+
+    assert status_response.json()["connected"] is True
+    assert status_response.json()["version"] == "2026.10"
+    assert shared_manager.load_credentials("homeassistant") == {**oauth_config, "access_token": "renewed-token"}
 
 
 def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
@@ -2475,7 +2589,11 @@ def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_clie
         )
 
     assert response.status_code == 200
-    test_connection.assert_awaited_once_with("http://127.0.0.1:8123", "ha-token", allow_private_url=True)
+    assert test_connection.await_args.args[0] == {
+        "instance_url": "http://127.0.0.1:8123",
+        "long_lived_token": "ha-token",
+        "allow_private_url": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -2486,13 +2604,16 @@ async def test_homeassistant_connection_failure_does_not_return_response_body() 
     api_response = MagicMock()
     api_response.status_code = 500
     api_response.text = provider_body
-    async_client.__aenter__.return_value.get.return_value = api_response
+    async_client.__aenter__.return_value.request.return_value = api_response
 
     with (
         patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
         pytest.raises(HTTPException) as exc_info,
     ):
-        await homeassistant_integration._test_connection("http://93.184.216.34:8123", "ha-token")
+        await homeassistant_integration._test_connection(
+            {"instance_url": "http://93.184.216.34:8123", "long_lived_token": "ha-token"},
+            MagicMock(spec=RequestCredentialsTarget),
+        )
 
     assert exc_info.value.status_code == 500
     assert provider_body not in str(exc_info.value.detail)
@@ -2502,6 +2623,7 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     api_key_client: TestClient,
 ) -> None:
     """Home Assistant connect must reject draft-only execution-scope overrides."""
+    api_key_client.headers["Origin"] = "http://localhost"
     config = _config_with_worker_scope("user")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -2549,7 +2671,6 @@ def test_spotify_connect_uses_pending_oauth_state(
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -2582,6 +2703,7 @@ def test_spotify_connect_uses_pending_oauth_state(
 
 def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
     """Spotify connect must reject draft-only execution-scope overrides."""
+    api_key_client.headers["Origin"] = "http://localhost"
     config = _config_with_worker_scope("user")
 
     main.initialize_api_app(
@@ -2599,7 +2721,6 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -2673,7 +2794,6 @@ def test_spotify_callback_preserves_runtime_validation_error(
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -2707,6 +2827,267 @@ def test_spotify_callback_preserves_runtime_validation_error(
 
     assert callback_response.status_code == 422
     assert callback_response.json()["detail"] == invalid_detail
+
+
+def _publish_spotify_shared_runtime(
+    api_app: FastAPI,
+    *,
+    worker_grantable_credentials: list[str] | None = None,
+) -> constants.RuntimePaths:
+    """Publish a shared-scope config whose runtime has Spotify OAuth client settings."""
+    current_paths = main._app_runtime_paths(api_app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=current_paths.config_path,
+        storage_path=current_paths.storage_root,
+        process_env={
+            **dict(current_paths.process_env),
+            "SPOTIFY_CLIENT_ID": "client-id",
+            "SPOTIFY_CLIENT_SECRET": "client-secret",
+        },
+    )
+    config = _config_with_worker_scope("shared", worker_grantable_credentials=worker_grantable_credentials)
+    _publish_committed_runtime_config(api_app, runtime_paths, config.model_dump())
+    return runtime_paths
+
+
+def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestClient) -> None:
+    """Shared-scope Spotify tokens must stay out of the worker store, where only worker code would see them."""
+
+    class _FakeSpotifyOAuth:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_authorize_url(self, state: str | None = None) -> str:
+            return f"https://accounts.spotify.test/authorize?state={state}"
+
+        def get_access_token(self, _code: str) -> dict[str, Any]:
+            return {"access_token": "spotify-token", "refresh_token": "spotify-refresh"}
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": "Spotify User"}
+
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app)
+
+    with patch(
+        "mindroom.api.integrations._ensure_spotify_packages",
+        return_value=(_FakeSpotify, _FakeSpotifyOAuth),
+    ):
+        connect_response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = test_client.get(
+            f"/api/integrations/spotify/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+        assert not list((runtime_paths.storage_root / "workers").rglob("spotify_credentials.json"))
+        connected_status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+        disconnect_response = test_client.post("/api/integrations/spotify/disconnect?agent_name=general")
+        disconnected_status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert callback_response.status_code in {302, 307}
+    assert connected_status.json()["connected"] is True
+    assert disconnect_response.status_code == 200
+    assert disconnected_status.json()["connected"] is False
+
+
+def test_spotify_connect_and_callback_keep_blocking_calls_off_the_event_loop(test_client: TestClient) -> None:
+    """Package setup, the token exchange, and the profile lookup run in worker threads, not on the event loop."""
+    on_event_loop: list[tuple[str, bool]] = []
+
+    def _record(step: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_event_loop.append((step, False))
+        else:
+            on_event_loop.append((step, True))
+
+    class _FakeSpotifyOAuth:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_authorize_url(self, state: str | None = None) -> str:
+            return f"https://accounts.spotify.com/authorize?state={state}"
+
+        def get_access_token(self, _code: str) -> dict[str, Any]:
+            _record("token")
+            return {"access_token": "spotify-token", "refresh_token": "spotify-refresh"}
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            _record("profile")
+            return {"display_name": "Spotify User"}
+
+    def _ensure_packages(_runtime_paths: constants.RuntimePaths) -> tuple[type, type]:
+        _record("packages")
+        return _FakeSpotify, _FakeSpotifyOAuth
+
+    _publish_spotify_shared_runtime(test_client.app)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", side_effect=_ensure_packages):
+        connect_response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = test_client.get(
+            f"/api/integrations/spotify/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+
+    assert callback_response.status_code in {302, 307}
+    assert on_event_loop == [("packages", False), ("packages", False), ("token", False), ("profile", False)]
+
+
+def test_spotify_status_renews_an_expiring_token(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Status renews a token that expires within a minute and saves it with Spotify's rotated refresh token."""
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app)
+    agent_store = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_agent_scope("general")
+    agent_store.save_credentials(
+        "spotify",
+        {
+            "access_token": "expired-token",
+            "refresh_token": "old-refresh",
+            "expires_at": int(time.time()),
+            "_source": "ui",
+        },
+    )
+    renewals: list[dict[str, object]] = []
+
+    def _post(url: str, **kwargs: object) -> httpx.Response:
+        renewals.append({"url": url, **kwargs})
+        token = {"access_token": "renewed-token", "refresh_token": "new-refresh", "expires_in": 3600}
+        return httpx.Response(200, json=token, request=httpx.Request("POST", url))
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            assert self.auth == "renewed-token"
+            return {"display_name": "Listener"}
+
+    monkeypatch.setattr("mindroom.spotify_tokens.httpx.post", _post)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", return_value=(_FakeSpotify, object)):
+        status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert status.json()["details"]["username"] == "Listener"
+    assert renewals == [
+        {
+            "url": "https://accounts.spotify.com/api/token",
+            "data": {"grant_type": "refresh_token", "refresh_token": "old-refresh"},
+            "auth": ("client-id", "client-secret"),
+            "timeout": 30.0,
+        },
+    ]
+    saved = agent_store.load_credentials("spotify")
+    assert saved is not None
+    assert (saved["access_token"], saved["refresh_token"]) == ("renewed-token", "new-refresh")
+    assert saved["expires_at"] >= int(time.time()) + 3500
+
+
+def test_spotify_status_does_not_renew_a_connection_shared_through_the_worker_grant(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted installation-wide connection is shown but not renewed, so it is never copied into the agent's store."""
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app, worker_grantable_credentials=["spotify"])
+    manager = get_runtime_credentials_manager(runtime_paths)
+    shared_connection = {
+        "access_token": "shared-token",
+        "refresh_token": "shared-refresh",
+        "expires_at": int(time.time()),
+        "_source": "ui",
+    }
+    manager.save_credentials("spotify", shared_connection)
+    renewals: list[str] = []
+
+    def _post(url: str, **_kwargs: object) -> httpx.Response:
+        renewals.append(url)
+        token = {"access_token": "renewed-token", "expires_in": 3600}
+        return httpx.Response(200, json=token, request=httpx.Request("POST", url))
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": f"Listener with {self.auth}"}
+
+    monkeypatch.setattr("mindroom.spotify_tokens.httpx.post", _post)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", return_value=(_FakeSpotify, object)):
+        status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert status.json()["details"]["username"] == "Listener with shared-token"
+    assert renewals == []
+    assert manager.for_primary_runtime_agent_scope("general").load_credentials("spotify") is None
+    assert manager.load_credentials("spotify") == shared_connection
+
+
+def test_spotify_reconnect_saves_the_newly_authorized_account(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each Spotify callback must exchange its own code instead of reusing a token spotipy cached on disk."""
+    exchanged_codes: list[str] = []
+
+    class _TokenResponse:
+        def __init__(self, code: str) -> None:
+            self._code = code
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"access_token": f"token-{self._code}", "refresh_token": "refresh", "expires_in": 3600}
+
+    def _post(_session: object, _url: str, *, data: dict[str, str], **_kwargs: object) -> _TokenResponse:
+        exchanged_codes.append(data["code"])
+        return _TokenResponse(data["code"])
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": f"user-{self.auth}"}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("requests.Session.post", _post)
+    monkeypatch.setattr("spotipy.Spotify", _FakeSpotify)
+    _publish_spotify_shared_runtime(test_client.app)
+
+    for code in ("account-a", "account-b"):
+        connect_response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = test_client.get(
+            f"/api/integrations/spotify/callback?code={code}&state={state}",
+            follow_redirects=False,
+        )
+        assert callback_response.status_code in {302, 307}
+    status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert exchanged_codes == ["account-a", "account-b"]
+    assert status.json()["details"]["username"] == "user-token-account-b"
+    assert not (tmp_path / ".cache").exists()
+
+
+def test_spotify_connect_requests_playlist_and_playback_scopes(test_client: TestClient) -> None:
+    """The dashboard connect flow must request the scopes the toolkit's playlist and playback functions need."""
+    _publish_spotify_shared_runtime(test_client.app)
+
+    response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+
+    scopes = set(parse_qs(urlparse(response.json()["auth_url"]).query)["scope"][0].split())
+    assert {
+        "playlist-read-private",
+        "playlist-modify-public",
+        "playlist-modify-private",
+        "user-modify-playback-state",
+    } <= scopes
 
 
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
@@ -2765,6 +3146,7 @@ def test_get_tools_marks_agent_repository_unsupported_for_user_scope(test_client
     """Requester-wide workers cannot own one repository for a specific agent."""
     config = Config.model_validate(
         {
+            "administrators": ["@owner:example.org"],
             "agent_repositories": {"organization": "example-org", "prefix": "MindRoom"},
             "agents": {"general": {"display_name": "General", "worker_scope": "shared"}},
         },
@@ -2936,7 +3318,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
             },
@@ -2965,11 +3347,11 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="http://localhost") as client:
         response = client.put(
             "/api/config/save",
             json={
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
                 "mindroom_user": {"username": "mindroom_assistant_prod1", "display_name": "Owner"},
@@ -3005,7 +3387,7 @@ def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
     response = test_client.put(
         "/api/config/save",
         json={
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "router": {"model": "default"},
             "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
             "plugins": ["./plugins/broken-hooks"],
@@ -3019,6 +3401,19 @@ def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
     assert detail[0]["type"] == "value_error"
 
 
+def test_save_config_validation_error_omits_submitted_api_keys(test_client: TestClient) -> None:
+    """Validation errors must describe the problem without echoing secrets from the payload."""
+    model = {"provider": "openai", "id": "model", "api_key": "sk-secret1", "extra_kwargs": {"api_key": "sk-secret2"}}
+    response = test_client.put(
+        "/api/config/save",
+        json={"models": {"default": model}, "router": {"model": "default"}, "agents": {}},
+    )
+
+    assert response.status_code == 422
+    assert "either api_key or extra_kwargs.api_key" in response.text
+    assert "sk-secret" not in response.text
+
+
 def test_save_config_can_recover_from_invalid_reload(
     test_client: TestClient,
     temp_config_file: Path,
@@ -3029,7 +3424,7 @@ def test_save_config_can_recover_from_invalid_reload(
     assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     valid_config = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "recovered_agent": {
@@ -3068,6 +3463,14 @@ def test_get_raw_config_source_returns_current_invalid_file(
     assert response.json() == {"source": invalid_source, "uses_includes": False}
 
 
+def test_get_config_schema_returns_annotated_config_schema(test_client: TestClient) -> None:
+    """Dashboard editors render forms from the configuration JSON schema."""
+    response = test_client.get("/api/config/schema")
+
+    assert response.status_code == 200
+    assert response.json() == dashboard_config_schema()
+
+
 def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(
     test_client: TestClient,
     temp_config_file: Path,
@@ -3096,7 +3499,7 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
 
     valid_source = yaml.safe_dump(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "router": {"model": "default"},
             "agents": {
                 "recovered_agent": {
@@ -3307,7 +3710,7 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     temp_config_file.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/missing"],
@@ -3318,7 +3721,7 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post("/api/config/load")
 
@@ -3333,7 +3736,7 @@ def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) 
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.load_config_into_app(runtime_paths, main.app)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post("/api/config/load")
 
@@ -3347,7 +3750,7 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.load_config_into_app(runtime_paths, main.app)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     initial_response = client.post("/api/config/load")
     assert initial_response.status_code == 200
@@ -3405,7 +3808,7 @@ def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
     response = api_key_client.put(
         "/api/config/models/default",
         headers={"Authorization": "Bearer test-key"},
-        json={"provider": "openai", "id": "gpt-5.4"},
+        json={"provider": "openai", "id": "gpt-6-astra"},
     )
 
     assert response.status_code == 422
@@ -3457,7 +3860,7 @@ def test_load_config_into_app_omits_legacy_null_optional_sections(tmp_path: Path
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "agents: {}\n"
         "teams: null\n"
         "plugins: null\n"
@@ -3775,6 +4178,12 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
     assert location.path == "/login"
     assert parse_qs(location.query) == {"next": ["/"]}
 
+    response = api_key_client.get("/%09/evil.com", follow_redirects=False)
+    assert response.status_code == 307
+    location = urlparse(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query) == {"next": ["/"]}
+
 
 def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:
     """Standalone API-key auth should expose a simple login form."""
@@ -3800,6 +4209,16 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
     assert "&amp;execution_scope" not in response.text
 
 
+def test_frontend_login_page_drops_tab_bearing_next_path(api_key_client: TestClient) -> None:
+    """Browsers strip ASCII tabs before parsing, so a tab-bearing target must not survive."""
+    response = api_key_client.get("/login?next=/%09/evil.com")
+
+    assert response.status_code == 200
+    next_path_line = next(line for line in response.text.splitlines() if "const nextPath =" in line)
+    assert next_path_line.strip() == 'const nextPath = "/";'
+    assert 'target.origin === window.location.origin ? target.href : "/"' in response.text
+
+
 @pytest.mark.parametrize(
     ("next_path", "expected"),
     [
@@ -3820,6 +4239,14 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
         ("/%255Cexample.com", "/"),
         ("/%252Fexample.com", "/"),
         ("/agents/%5Cprofile", "/agents/%5Cprofile"),
+        ("/\t/evil.com", "/"),
+        ("/\n/evil.com", "/"),
+        ("/\r/evil.com", "/"),
+        ("/%09/evil.com", "/"),
+        ("/%0a/evil.com", "/"),
+        ("/%0d/evil.com", "/"),
+        ("/%2509/evil.com", "/"),
+        ("/agents\t", "/"),
     ],
 )
 def test_sanitize_next_path_blocks_protocol_relative_variants(
@@ -3838,7 +4265,6 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
     main._app_context(api_key_client.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -3854,13 +4280,59 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
     assert "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, 403),
+        ({"Origin": "null"}, 403),
+        ({"Origin": "https://other.example.org"}, 403),
+        ({"Origin": "http://localhost", "Sec-Fetch-Site": "cross-site"}, 403),
+        ({"Origin": "http://localhost"}, 200),
+        ({"Authorization": "Bearer "}, 403),
+        ({"Authorization": "Basic test-key"}, 403),
+        ({"Authorization": "Bearer test-key"}, 200),
+    ],
+)
+def test_cookie_mutations_require_browser_origin(
+    api_key_client: TestClient,
+    headers: dict[str, str],
+    expected: int,
+) -> None:
+    """Only a validated bearer credential can bypass the browser mutation guard."""
+    api_key_client.cookies.set("mindroom_api_key", "test-key")
+    response = api_key_client.post("/api/config/load", headers=headers)
+    assert response.status_code == expected, response.text
+
+
+@pytest.mark.parametrize(
+    ("public_url", "origin", "expected"),
+    [
+        ("https://public.example.org/dashboard", "https://public.example.org", 200),
+        ("https://public.example.org", "http://localhost", 403),
+        ("missing-scheme", "://", 403),
+    ],
+)
+def test_cookie_mutations_use_configured_public_origin(
+    api_key_client: TestClient,
+    public_url: str,
+    origin: str,
+    expected: int,
+) -> None:
+    """A configured origin overrides the request host and must fail closed when invalid."""
+    state = main._app_context(api_key_client.app)
+    state.auth_state = replace(state.auth_state, settings=replace(state.auth_state.settings, public_url=public_url))
+    api_key_client.cookies.set("mindroom_api_key", "test-key")
+    response = api_key_client.post("/api/config/load", headers={"Origin": origin})
+    assert response.status_code == expected, response.text
+
+
 def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
     """A valid standalone auth session cookie should work without bearer headers."""
     response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert response.status_code == 200
     assert response.cookies.get("mindroom_api_key") == "test-key"
 
-    response = api_key_client.post("/api/config/load")
+    response = api_key_client.post("/api/config/load", headers={"Origin": "http://localhost"})
     assert response.status_code == 200
 
 
@@ -3942,6 +4414,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": False,
                 "private_agent_knowledge_enabled": False,
+                "private_root": None,
             },
             "leader": {
                 "agent_name": "leader",
@@ -3954,6 +4427,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": False,
                 "private_agent_knowledge_enabled": False,
+                "private_root": None,
             },
             "mind": {
                 "agent_name": "mind",
@@ -3966,6 +4440,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": True,
                 "private_agent_knowledge_enabled": False,
+                "private_root": None,
             },
         },
     }
@@ -4063,7 +4538,7 @@ def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
         "role": "Updated role",
         "agents": ["test_agent", "new_agent"],
         "rooms": ["test-room", "new-room"],
-        "model": "gpt-4",
+        "model": "gpt-6-astra",
         "mode": "collaborate",
     }
 
@@ -4160,7 +4635,7 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
     """Test updating room-specific model overrides."""
     test_client.post("/api/config/load")
 
-    room_models = {"lobby": "gpt-4", "tech-room": "claude-3", "general": "default"}
+    room_models = {"lobby": "gpt-6-astra", "tech-room": "claude-sonnet-5", "general": "default"}
 
     response = test_client.put("/api/config/room-models", json=room_models)
     assert response.status_code == 200
@@ -4170,15 +4645,15 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
         saved_config = yaml.safe_load(f)
 
     assert "room_models" in saved_config
-    assert saved_config["room_models"]["lobby"] == "gpt-4"
-    assert saved_config["room_models"]["tech-room"] == "claude-3"
+    assert saved_config["room_models"]["lobby"] == "gpt-6-astra"
+    assert saved_config["room_models"]["tech-room"] == "claude-sonnet-5"
 
     # Verify we can retrieve the updated room models
     response = test_client.get("/api/config/room-models")
     assert response.status_code == 200
     retrieved_models = response.json()
-    assert retrieved_models["lobby"] == "gpt-4"
-    assert retrieved_models["tech-room"] == "claude-3"
+    assert retrieved_models["lobby"] == "gpt-6-astra"
+    assert retrieved_models["tech-room"] == "claude-sonnet-5"
 
 
 # ---------------------------------------------------------------------------
@@ -4189,12 +4664,14 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 @pytest.fixture
 def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+    )
     main.initialize_api_app(main.app, runtime_paths)
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -4203,7 +4680,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
         supabase_auth=None,
     )
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
-    return TestClient(main.app)
+    return TestClient(main.app, base_url="http://localhost")
 
 
 def test_api_key_health_stays_open(api_key_client: TestClient) -> None:
@@ -4245,7 +4722,7 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
         process_env={"MINDROOM_API_KEY": "key-b"},
     )
     payload_a = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "assistant": {
@@ -4256,7 +4733,7 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
         },
     }
     payload_b = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "assistant": {
@@ -4535,7 +5012,7 @@ def test_trusted_upstream_headers_ignored_when_disabled(tmp_path: Path) -> None:
     """Trusted identity headers must do nothing unless explicitly enabled."""
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path))
 
-    with TestClient(api_app) as client:
+    with TestClient(api_app, base_url="http://localhost") as client:
         response = client.get(
             "/whoami",
             headers={
@@ -4839,6 +5316,7 @@ def test_trusted_upstream_strict_jwt_derives_matrix_from_verified_email_without_
     token = _trusted_upstream_jwt(private_key, email="alice@example.com", user_id="user_123")
     env = _trusted_upstream_strict_jwt_env(tmp_path)
     env.pop("MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER")
+    env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"] = "example.com"
     env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=env))
 
@@ -5045,7 +5523,22 @@ def test_trusted_upstream_auth_prefers_matrix_header_over_email_template(tmp_pat
     assert response.json()["matrix_user_id"] == "@alice:example.org"
 
 
-def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("email_domain", "email", "expected"),
+    [
+        ("example.com", "alice@example.com", 200),
+        ("example.com", "alice@EXAMPLE.COM", 200),
+        ("example.com", "alice@another.example.com", 401),
+        ("example.com", "alice@other.example", 401),
+        ("", "alice@example.com", 500),
+    ],
+)
+def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(
+    tmp_path: Path,
+    email_domain: str,
+    email: str,
+    expected: int,
+) -> None:
     """Trusted email-only deployments may derive the Matrix identity from a template."""
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -5054,6 +5547,7 @@ def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(tmp_p
             "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": email_domain,
         },
     )
     api_app = _trusted_auth_test_app(runtime_paths)
@@ -5063,12 +5557,13 @@ def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(tmp_p
             "/whoami",
             headers={
                 "X-Trusted-User": "alice",
-                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Email": email,
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["matrix_user_id"] == "@alice:example.org"
+    assert response.status_code == expected, response.text
+    if expected == 200:
+        assert response.json()["matrix_user_id"] == "@alice:example.org"
 
 
 def test_trusted_upstream_auth_email_template_requires_email_header_config(tmp_path: Path) -> None:
@@ -5126,7 +5621,7 @@ def test_trusted_upstream_auth_email_template_requires_exactly_one_localpart_pla
 
     assert response.status_code == 500
     assert response.json()["detail"] == (
-        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"
+        "Trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"
     )
 
 
@@ -5152,8 +5647,10 @@ def test_trusted_upstream_auth_rejects_invalid_derived_matrix_user_id(tmp_path: 
             },
         )
 
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid trusted upstream Matrix user id"
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "Trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"
+    )
 
 
 @pytest.mark.parametrize("matrix_user_id", ["@Alice:example.org", "@:example.org"])
@@ -5255,15 +5752,20 @@ def test_api_key_keeps_oauth_callbacks_open(
     assert "OAuth state is invalid or expired" in response.json()["detail"]
 
 
+_PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
+_OTHER_INSTANCE_SSO_SECRET = "another-instance-platform-sso-secret-0002"  # noqa: S105
+
+
 def _set_platform_auth(
     *,
     valid_tokens: set[str],
-    platform_login_url: str = "https://platform.example.com/login",
+    platform_sso_url: str = "https://platform.example.com/instance-sso/authorize",
     public_url: str | None = None,
     account_id: str | None = None,
     user_id: str = "user-123",
+    platform_sso_secret: str | None = _PLATFORM_SSO_SECRET,
 ) -> None:
-    """Configure the API module for platform-managed cookie auth tests."""
+    """Configure the API module for platform-managed login tests."""
 
     class _FakeUser:
         id = user_id
@@ -5285,27 +5787,221 @@ def _set_platform_auth(
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=platform_login_url,
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",
             account_id=account_id,
             mindroom_api_key=None,
             public_url=public_url,
+            platform_sso_url=platform_sso_url,
+            platform_sso_secret=platform_sso_secret,
         ),
         supabase_auth=_FakeClient(),
     )
 
 
-def test_supabase_cookie_auth_allows_access(
-    test_client: TestClient,
-) -> None:
-    """Platform requests should authenticate from the mindroom_jwt cookie."""
-    valid_cookie_token = "valid-cookie-token"  # noqa: S105
-    _set_platform_auth(valid_tokens={valid_cookie_token})
-    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
+def _platform_sso_token(
+    token_type: str,
+    *,
+    audience: str = "http://localhost",
+    subject: str = "user-123",
+    secret: str = _PLATFORM_SSO_SECRET,
+    lifetime_seconds: int = 60,
+) -> str:
+    """Sign a platform login ticket or session the way the platform and runtime do."""
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "typ": token_type,
+            "aud": audience,
+            "sub": subject,
+            "email": "user@example.com",
+            "iat": now,
+            "exp": now + lifetime_seconds,
+            "jti": uuid4().hex,
+        },
+        secret,
+        algorithm="HS256",
+    )
 
-    response = test_client.post("/api/config/load")
-    assert response.status_code == 200
+
+def _platform_ticket(**kwargs: Any) -> str:  # noqa: ANN401
+    return _platform_sso_token(auth._PLATFORM_SSO_TICKET_TYPE, **kwargs)
+
+
+def _platform_session(**kwargs: Any) -> str:  # noqa: ANN401
+    return _platform_sso_token(auth._PLATFORM_SESSION_TYPE, **kwargs)
+
+
+def _use_platform_session(test_client: TestClient, session_token: str) -> None:
+    test_client.cookies.clear()
+    test_client.cookies.set(auth._PLATFORM_SESSION_COOKIE_NAME, session_token)
+
+
+def test_platform_sso_ticket_exchange_sets_host_only_session(test_client: TestClient) -> None:
+    """A valid ticket becomes a host-only session cookie that authenticates dashboard calls."""
+    _set_platform_auth(valid_tokens=set(), account_id="user-123")
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(), "next": "/agents?tab=1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/agents?tab=1"
+    set_cookie = response.headers["set-cookie"]
+    assert set_cookie.startswith(f"{auth._PLATFORM_SESSION_COOKIE_NAME}=")
+    set_cookie_lower = set_cookie.lower()
+    assert "domain=" not in set_cookie_lower
+    assert "path=/" in set_cookie_lower
+    assert "secure" in set_cookie_lower
+    assert "httponly" in set_cookie_lower
+    assert "samesite=lax" in set_cookie_lower
+
+    session_token = set_cookie.split(";", 1)[0].split("=", 1)[1]
+    _use_platform_session(test_client, session_token)
+    assert test_client.post("/api/config/load", headers={"Origin": "http://localhost"}).status_code == 200
+
+
+def test_platform_sso_ticket_is_single_use(test_client: TestClient) -> None:
+    """A captured ticket cannot be exchanged a second time."""
+    _set_platform_auth(valid_tokens=set())
+    ticket = _platform_ticket()
+
+    first = test_client.get("/api/auth/platform-sso", params={"ticket": ticket}, follow_redirects=False)
+    second = test_client.get("/api/auth/platform-sso", params={"ticket": ticket}, follow_redirects=False)
+
+    assert first.status_code == 307
+    assert second.status_code == 401
+
+
+def test_platform_sso_prunes_expired_ticket_ids_and_keeps_redirects_in_app(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replay cache drops expired IDs, and a ticket exchange never redirects off the instance."""
+    used_ticket_ids = {"expired-ticket": int(time.time()) - 3600}
+    monkeypatch.setattr(auth, "_used_platform_sso_ticket_ids", used_ticket_ids)
+    _set_platform_auth(valid_tokens=set())
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(), "next": "//evil.example.test/steal"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/"
+    assert "expired-ticket" not in used_ticket_ids
+    assert len(used_ticket_ids) == 1
+
+
+@pytest.mark.parametrize(
+    "ticket_kwargs",
+    [
+        {"secret": _OTHER_INSTANCE_SSO_SECRET},
+        {"audience": "https://other-tenant.example.test"},
+        {"lifetime_seconds": -60},
+    ],
+    ids=["other-instance-key", "other-instance-audience", "expired"],
+)
+def test_platform_sso_rejects_tickets_for_other_instances(
+    test_client: TestClient,
+    ticket_kwargs: dict[str, Any],
+) -> None:
+    """Tickets signed for another instance, naming another instance, or expired are rejected."""
+    _set_platform_auth(valid_tokens=set())
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(**ticket_kwargs)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+    assert "set-cookie" not in response.headers
+
+
+def test_platform_sso_tickets_and_sessions_are_not_interchangeable(test_client: TestClient) -> None:
+    """A ticket is not a session, and a session is not a ticket."""
+    _set_platform_auth(valid_tokens=set())
+
+    _use_platform_session(test_client, _platform_ticket())
+    assert test_client.post("/api/config/load", headers={"Origin": "http://localhost"}).status_code == 401
+
+    test_client.cookies.clear()
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_session()},
+        follow_redirects=False,
+    )
+    assert response.status_code == 401
+
+
+def test_platform_sso_rejects_other_account_ticket(test_client: TestClient) -> None:
+    """The instance only admits its configured account."""
+    _set_platform_auth(valid_tokens=set(), account_id="account-owner")
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(subject="other-account")},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert "set-cookie" not in response.headers
+
+
+def test_platform_sso_is_disabled_without_instance_secret(test_client: TestClient) -> None:
+    """Without the instance SSO key the runtime neither exchanges tickets nor trusts sessions."""
+    _set_platform_auth(valid_tokens=set(), platform_sso_secret=None)
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket()},
+        follow_redirects=False,
+    )
+    assert response.status_code == 404
+
+    _use_platform_session(test_client, _platform_session())
+    assert test_client.post("/api/config/load", headers={"Origin": "http://localhost"}).status_code == 401
+
+
+def test_platform_runtime_ignores_platform_api_cookie(test_client: TestClient) -> None:
+    """Tenant runtimes must not treat the platform's Supabase cookie as a dashboard credential."""
+    supabase_token = "valid-supabase-token"  # noqa: S105
+    _set_platform_auth(valid_tokens={supabase_token})
+    test_client.cookies.set("mindroom_jwt", supabase_token)
+
+    response = test_client.post("/api/config/load", headers={"Origin": "http://localhost"})
+
+    assert response.status_code == 401
+
+
+def test_platform_session_mutations_require_same_origin(test_client: TestClient) -> None:
+    """Cookie sessions remain subject to the browser mutation origin check."""
+    _set_platform_auth(valid_tokens=set())
+    _use_platform_session(test_client, _platform_session())
+
+    response = test_client.post("/api/config/load", headers={"Origin": "https://evil.example.test"})
+
+    assert response.status_code == 403
+
+
+def test_platform_auth_settings_read_sso_environment(tmp_path: Path) -> None:
+    """The runtime reads the SSO endpoint and instance key that the instance chart provides."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_PLATFORM_SSO_URL": "https://api.example.test/instance-sso/authorize",
+            "MINDROOM_PLATFORM_SSO_SECRET": _PLATFORM_SSO_SECRET,
+        },
+    )
+
+    settings = auth._build_auth_settings(runtime_paths)
+
+    assert settings.platform_sso_url == "https://api.example.test/instance-sso/authorize"
+    assert settings.platform_sso_secret == _PLATFORM_SSO_SECRET
 
 
 def test_platform_frontend_redirects_to_login_when_cookie_missing(
@@ -5313,7 +6009,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Platform deployments should redirect unauthenticated dashboard requests to the platform login."""
+    """Platform deployments should redirect unauthenticated dashboard requests to platform SSO."""
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
@@ -5321,12 +6017,35 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
-        platform_login_url="https://app.example.com/auth/login",
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
 
     response = test_client.get("/agents", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+    assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
+
+
+def test_platform_frontend_skips_sso_redirect_without_instance_secret(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without the instance key, a platform redirect would only end in an unusable ticket."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _set_platform_auth(
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
+        platform_sso_secret=None,
+    )
+
+    response = test_client.get("/agents", follow_redirects=False)
+
+    assert response.status_code == 401
+    assert "location" not in response.headers
 
 
 def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
@@ -5342,7 +6061,7 @@ def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
-        platform_login_url="https://app.example.com/auth/login",
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
         public_url="https://tenant42.example.test",
     )
 
@@ -5392,24 +6111,24 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Invalid platform cookies must redirect to login instead of serving the SPA shell."""
+    """Invalid platform sessions must redirect to login instead of serving the SPA shell."""
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
-        valid_tokens={"valid-cookie-token"},
-        platform_login_url="https://app.example.com/auth/login",
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
-    test_client.cookies.set("mindroom_jwt", "definitely-invalid")
+    _use_platform_session(test_client, _platform_session(secret=_OTHER_INSTANCE_SSO_SECRET))
 
     response = test_client.get(
         "/agents",
         follow_redirects=False,
     )
     assert response.status_code == 307
-    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+    assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
 
 
 def test_platform_frontend_serves_dashboard_with_valid_cookie(
@@ -5417,18 +6136,17 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Valid platform cookies should grant access to the bundled dashboard."""
-    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+    """Valid platform sessions should grant access to the bundled dashboard."""
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
-        valid_tokens={valid_cookie_token},
-        platform_login_url="https://app.example.com/auth/login",
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
-    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
+    _use_platform_session(test_client, _platform_session())
 
     response = test_client.get("/")
     assert response.status_code == 200
@@ -5441,26 +6159,24 @@ def test_platform_frontend_redirects_when_cookie_account_mismatches(
     tmp_path: Path,
 ) -> None:
     """Platform frontend access must enforce the instance account id."""
-    valid_cookie_token = "valid-cookie-token"  # noqa: S105
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
-        valid_tokens={valid_cookie_token},
-        platform_login_url="https://app.example.com/auth/login",
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
         account_id="account-owner",
-        user_id="other-account",
     )
-    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
+    _use_platform_session(test_client, _platform_session(subject="other-account"))
 
     response = test_client.get(
         "/",
         follow_redirects=False,
     )
     assert response.status_code == 307
-    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+    assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
 
 
 def test_health_startup_grace_expires_after_stale_threshold(
@@ -5521,3 +6237,18 @@ def test_health_repeated_restarts_do_not_extend_first_sync_grace(test_client: Te
 
     reset_matrix_sync_health()
     reset_runtime_state()
+
+
+def test_response_activity_probe_stays_open(api_key_client: TestClient) -> None:
+    """Aggregate activity has the same unauthenticated probe access as readiness."""
+    response = api_key_client.get("/api/responses/activity")
+    assert response.status_code == 503
+    assert response.json()["status"] == "unavailable"
+
+
+def test_response_activity_probe_needs_no_trusted_proxy_identity(test_client: TestClient) -> None:
+    """In-container checks must not need proxy identity headers."""
+    use_trusted_upstream_runtime(main.app)
+    response = test_client.get("/api/responses/activity")
+    assert response.status_code == 503
+    assert response.json()["status"] == "unavailable"

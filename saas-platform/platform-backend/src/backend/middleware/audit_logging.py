@@ -1,125 +1,70 @@
-"""Audit logging middleware for tracking admin and user actions."""
+"""Audit logging middleware for accepted state-changing requests."""
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from backend.utils.audit import AuditActor
     from fastapi import Request, Response
 
 from backend.config import logger, supabase
-from backend.tasks.usage_metrics import update_realtime_metrics
+from backend.deps import client_ip_from_request
 from backend.utils.audit import redact_audit_details
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request as StarletteRequest
 
 
 class AuditLoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware to log important actions to audit_logs table."""
+    """Write an audit row for every state-changing request that a route accepted with a 2xx status.
 
-    # Actions to audit
-    AUDIT_METHODS: ClassVar[set[str]] = {"POST", "PUT", "PATCH", "DELETE"}
+    Rows hold request metadata only: the method, path, status, the account an auth dependency verified,
+    and the client IP. Request bodies are never read here; routes that need their data in the audit log,
+    such as the admin routes, write explicit entries.
+    """
 
-    # Path patterns to audit
-    AUDIT_PATHS: ClassVar[list[str]] = [
-        "/admin/",  # All admin actions
-        "/api/accounts",  # Account modifications
-        "/api/subscriptions",  # Subscription changes
-        "/api/instances",  # Instance management
-        "/stripe/",  # Stripe webhooks
-    ]
+    AUDIT_METHODS: ClassVar[frozenset[str]] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-    # Map of path patterns to resource types
+    # Path fragments mapped to resource types; the first match wins.
     RESOURCE_TYPES: ClassVar[dict[str, str]] = {
-        "accounts": "account",
-        "subscriptions": "subscription",
-        "instances": "instance",
-        "admin": "admin_action",
+        "account": "account",
+        "gdpr": "account",
+        "subscription": "subscription",
+        "instance": "instance",
+        "provision": "instance",
         "stripe": "payment",
-        "auth": "authentication",
+        "sso": "authentication",
+        "oidc": "authentication",
+        "admin": "admin_action",
     }
 
-    async def dispatch(  # noqa: C901
-        self, request: Request, call_next: Callable
-    ) -> Response:
-        """Process request and log if needed."""
-        # Skip non-auditable requests
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        """Process request and log it when a route accepted a state-changing request."""
         if request.method not in self.AUDIT_METHODS:
             return await call_next(request)
 
-        # Check if path should be audited
-        path = str(request.url.path)
-        should_audit = any(pattern in path for pattern in self.AUDIT_PATHS)
-
-        if not should_audit:
-            return await call_next(request)
-
-        # Get user from request state if available
-        # Note: Authentication happens at route level via dependencies,
-        # so these may not be set yet in the middleware
-        user_id = getattr(request.state, "user_id", None)
-        user_email = getattr(request.state, "user_email", None)
-
-        # Determine action and resource type
-        action = self._get_action(request.method)
-        resource_type = self._get_resource_type(path)
-        resource_id = self._extract_resource_id(path)
-
-        # Get request body for details (be careful with sensitive data)
-        details = {}
-        if request.method in {"POST", "PUT", "PATCH"}:
-            try:
-                # Store the body for later use
-                body = await request.body()
-                # Recreate the request with the stored body
-                # Create a new request with the body we read
-                request = StarletteRequest(
-                    scope={**request.scope, "body": body}, receive=request.receive, send=request._send
-                )
-
-                # Parse body for audit details (remove sensitive fields)
-                if body:
-                    try:
-                        data = json.loads(body)
-                    except json.JSONDecodeError:
-                        details = {"body": "non-json"}
-                    else:
-                        details = redact_audit_details(data)
-            except Exception as e:
-                logger.warning(f"Failed to parse request body for audit: {e}")
-
-        # Get client IP
-        client_ip = request.client.host if request.client else None
-
-        # Process the request
+        request.state.audit_actor = None
         response = await call_next(request)
+        if not 200 <= response.status_code < 300:
+            return response
 
-        # Only log successful operations
-        if response.status_code < 400:
-            await self._create_audit_log(
-                account_id=user_id,
-                action=action,
-                resource_type=resource_type,
-                resource_id=resource_id,
-                details=details,
-                ip_address=client_ip,
-                user_email=user_email,
-                path=path,
-                status_code=response.status_code,
-            )
-
-            # Track API usage metrics
-            if user_id:
-                await update_realtime_metrics(user_id, "api_calls", 1)
-
-                # Track specific actions as messages
-                if resource_type == "message" or action in ["send", "message", "chat"]:
-                    await update_realtime_metrics(user_id, "messages_sent", 1)
-
+        path = request.url.path
+        actor: AuditActor | None = request.state.audit_actor
+        await self._create_audit_log(
+            account_id=actor.account_id if actor else None,
+            action=self._get_action(request.method),
+            resource_type=self._get_resource_type(path),
+            resource_id=self._extract_resource_id(path),
+            ip_address=client_ip_from_request(request),
+            details={
+                "method": request.method,
+                "path": path,
+                "status_code": response.status_code,
+                "user_email": actor.email if actor else None,
+            },
+        )
         return response
 
     def _get_action(self, method: str) -> str:
@@ -152,30 +97,25 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
 
     async def _create_audit_log(
         self,
+        *,
         account_id: str | None,
         action: str,
         resource_type: str,
         resource_id: str | None,
-        details: Any,  # noqa: ANN401
-        ip_address: str | None,
-        user_email: str | None = None,
-        path: str | None = None,
-        status_code: int | None = None,
+        ip_address: str,
+        details: dict[str, Any],
     ) -> None:
         """Create audit log entry in database."""
         try:
             if not supabase:
                 return
 
-            normalized_details = details if isinstance(details, dict) else {"body": details}
             log_entry = {
                 "account_id": account_id,
                 "action": action,
                 "resource_type": resource_type,
                 "resource_id": resource_id,
-                "details": redact_audit_details(
-                    {**normalized_details, "path": path, "status_code": status_code, "user_email": user_email}
-                ),
+                "details": redact_audit_details({key: value for key, value in details.items() if value is not None}),
                 "ip_address": ip_address,
                 "created_at": datetime.now(UTC).isoformat(),
             }

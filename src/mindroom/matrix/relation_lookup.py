@@ -23,9 +23,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import nio
+from aiohttp import ClientResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -169,7 +171,8 @@ class RelationLookup:
         existing. A caller resolving a reply target cannot tell an event that
         was deleted from one the homeserver merely refused to serve, and
         silently treating the second as the first would attach the turn to the
-        wrong conversation.
+        wrong conversation. A refusal no retry can change raises
+        ``RelatedEventUnavailableError``.
         """
         memo = _TURN_EVENT_INFO.get()
         key = (room_id, event_id.strip())
@@ -191,4 +194,24 @@ class RelationLookup:
             return None
         detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
         msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
+        if isinstance(response, nio.RoomGetEventError) and _refuses_event(response):
+            raise RelatedEventUnavailableError(msg)
         raise RuntimeError(msg)
+
+
+def _refuses_event(response: nio.RoomGetEventError) -> bool:
+    """Return whether the homeserver's refusal holds for every later request for this event.
+
+    Only two answers are about the event itself: ``M_FORBIDDEN`` (hidden
+    from this account, for example history from before it joined) and a
+    plain 400 for an event ID the server rejects as malformed. A missing
+    event (404 ``M_NOT_FOUND``) never reaches here. Every other answer --
+    another 403 or 404 errcode such as ``M_CONSENT_NOT_GIVEN`` or
+    ``M_UNRECOGNIZED``, 401, 408, 429, a server error -- is about the
+    account, the deployment, or the moment, and may change on retry.
+    """
+    if response.status_code == "M_FORBIDDEN":
+        return True
+    transport = response.transport_response
+    status = transport.status if isinstance(transport, ClientResponse) else None
+    return status == 400 and response.status_code != "M_UNRECOGNIZED"

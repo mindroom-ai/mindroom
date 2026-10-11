@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import math
 import secrets
@@ -11,43 +13,163 @@ import time
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
+import idna
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
-from httpx import HTTPError, HTTPStatusError
+from httpx import HTTPError, HTTPStatusError, ReadError, ReadTimeout, RemoteProtocolError
 
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, is_oauth_client_config_service
-from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
+from mindroom.credentials.manager import get_runtime_credentials_manager, validate_service_name
+from mindroom.credentials.policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    is_oauth_client_config_service,
+    is_oauth_token_service,
+)
+from mindroom.logging_config import get_logger
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
+# Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
 warnings.filterwarnings(
     "ignore",
     category=AuthlibDeprecationWarning,
     module="authlib._joserfc_helpers",
 )
-from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: E402
-from authlib.integrations.requests_client import OAuth2Session  # noqa: E402
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 _PKCECodeChallengeMethod = Literal["S256"]
 _TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
 _DEFAULT_REFRESH_SKEW_SECONDS = 60.0
+# The request was sent, so the provider may have redeemed the refresh token even though its response was lost.
+_REFRESH_RESPONSE_LOST_ERRORS = (ReadTimeout, ReadError, RemoteProtocolError)
+# Wall-clock budget for every refresh grant attempt together. The grant runs inside the credential store's write
+# transaction, so it must end well before a waiting same-credential writer gives up on the lock
+# (`credential_store._LOCK_WAIT_TIMEOUT_SECONDS`); tests pin that relationship.
+_REFRESH_GRANT_DEADLINE_SECONDS = 25.0
+# Skip the repeat after a lost response when less than this much of the budget remains.
+_REFRESH_REPEAT_MIN_SECONDS = 2.0
+# A token endpoint answered with a body that is not JSON text.
+_TOKEN_RESPONSE_DECODE_ERRORS = (json.JSONDecodeError, UnicodeDecodeError)
 _DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "client_secret_post"  # noqa: S105
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "none"  # noqa: S105
 _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
-_OAUTH_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES = (
+    "alt",
+    "arpa",
+    "example",
+    "example.com",
+    "example.net",
+    "example.org",
+    "internal",
+    "invalid",
+    "local",
+    "localdomain",
+    "localhost",
+    "onion",
+    "test",
+)
+
+
+def _is_loopback_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an IP address, including an IPv4-mapped address, is loopback."""
+    return address.is_loopback or (
+        isinstance(address, ipaddress.IPv6Address)
+        and address.ipv4_mapped is not None
+        and address.ipv4_mapped.is_loopback
+    )
+
+
+def _hostname_ends_in_ipv4_number(hostname: str) -> bool:
+    """Return whether browser URL parsing treats the final label as an IPv4 number."""
+    final_label = hostname.rsplit(".", maxsplit=1)[-1]
+    return final_label.isdigit() or (
+        final_label.startswith("0x") and all(character in "0123456789abcdef" for character in final_label[2:])
+    )
 
 
 def is_oauth_loopback_hostname(hostname: str | None) -> bool:
-    """Return whether a hostname is supported by local loopback OAuth flows."""
-    return hostname is not None and hostname.casefold() in _OAUTH_LOOPBACK_HOSTNAMES
+    """Return whether a hostname resolves by definition to the local loopback interface."""
+    if hostname is None or "%" in hostname or not hostname.isascii():
+        return False
+    normalized_hostname = hostname.rstrip(".").casefold()
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        return False
+    return _is_loopback_address(address)
+
+
+def is_valid_hosted_oauth_callback_for_request(callback_uri: str, request_hostname: str | None) -> bool:
+    """Return whether a hosted callback uses the initiating public ASCII DNS host."""
+    if (
+        request_hostname is None
+        or not request_hostname.isascii()
+        or request_hostname.endswith(".")
+        or not callback_uri.isascii()
+        or "?" in callback_uri
+        or "#" in callback_uri
+        or "\\" in callback_uri
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in callback_uri)
+    ):
+        return False
+    try:
+        parsed_callback = urlparse(callback_uri)
+        _ = parsed_callback.port
+        callback_hostname = parsed_callback.hostname
+    except ValueError:
+        return False
+    if (
+        parsed_callback.scheme.casefold() != "https"
+        or not parsed_callback.netloc
+        or parsed_callback.username is not None
+        or parsed_callback.password is not None
+        or "[" in parsed_callback.netloc
+        or "]" in parsed_callback.netloc
+        or "%" in parsed_callback.netloc
+        or callback_hostname is None
+        or callback_hostname.endswith(".")
+    ):
+        return False
+    callback_hostname = callback_hostname.casefold()
+    try:
+        ipaddress.ip_address(callback_hostname)
+    except ValueError:
+        is_ip_literal = False
+    else:
+        is_ip_literal = True
+    try:
+        idna.decode(callback_hostname, strict=True, uts46=False, std3_rules=True)
+    except idna.IDNAError:
+        is_valid_dns_name = False
+    else:
+        is_valid_dns_name = True
+    return (
+        callback_hostname == request_hostname.casefold()
+        and len(callback_hostname) <= 253
+        and not is_ip_literal
+        and is_valid_dns_name
+        and "." in callback_hostname
+        and not any(
+            callback_hostname == suffix or callback_hostname.endswith(f".{suffix}")
+            for suffix in _NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES
+        )
+        and not _hostname_ends_in_ipv4_number(callback_hostname)
+    )
 
 
 def oauth_connect_url_requires_host_browser(connect_url: str | None) -> bool:
@@ -73,9 +195,41 @@ class OAuthProviderError(RuntimeError):
 class OAuthRefreshRejectedError(OAuthProviderError):
     """Raised when a provider rejects a refresh-token grant."""
 
+    refresh_had_token: bool | None = None
+    refresh_expires_at: float | None = None
+
 
 class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
+
+
+_TERMINAL_REFRESH_ERROR_CODES = frozenset({"bad_refresh_token", "invalid_grant", "invalid_refresh_token"})
+
+
+def is_terminal_oauth_refresh_error_code(value: object) -> bool:
+    """Return whether a provider code permanently rejects token refresh."""
+    return isinstance(value, str) and value.strip().lower() in _TERMINAL_REFRESH_ERROR_CODES
+
+
+def token_endpoint_origin(token_url: object) -> str | None:
+    """Return a token endpoint's scheme and host for logs, without userinfo, path, or query."""
+    if not isinstance(token_url, str):
+        return None
+    try:
+        parsed = urlparse(token_url)
+    except ValueError:
+        return None
+    host = parsed.netloc.rpartition("@")[2]
+    return f"{parsed.scheme}://{host}" if parsed.scheme and host else None
+
+
+class OAuthTokenEndpointChangedError(OAuthRefreshRejectedError):
+    """Raised before a token request whose credentials or client are bound to a different token endpoint."""
+
+    def __init__(self, stored_token_url: object, current_token_url: str) -> None:
+        super().__init__("OAuth token endpoint binding is missing or changed since authorization")
+        self.stored_token_endpoint_origin = token_endpoint_origin(stored_token_url)
+        self.current_token_endpoint_origin = token_endpoint_origin(current_token_url)
 
 
 class OAuthClaimValidationError(OAuthProviderError):
@@ -92,11 +246,13 @@ class OAuthConnectionRequired(OAuthProviderError):  # noqa: N818
         provider_id: str | None = None,
         connect_url: str | None = None,
         reason: str | None = None,
+        reset_required: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider_id = provider_id
         self.connect_url = connect_url
         self.reason = reason
+        self.reset_required = reset_required
 
 
 def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str, object]:
@@ -109,6 +265,8 @@ def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str,
     }
     if exc.reason is not None:
         payload["reason"] = exc.reason
+    if exc.reset_required:
+        payload["reset_required"] = True
     if oauth_connect_url_requires_host_browser(exc.connect_url):
         payload["requires_host_browser"] = True
     return payload
@@ -130,6 +288,8 @@ class OAuthRuntimeEndpoints:
     authorization_url: str
     token_url: str
     token_endpoint_auth_method: _TokenEndpointAuthMethod | None = None
+    # Discovered token endpoints are dialed through the server-fetch address guard; None keeps fixed endpoints unguarded.
+    token_fetch_allow_private_networks: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +299,9 @@ class OAuthClientConfigResolution:
     config: OAuthClientConfig
     service: str
     custom: bool = True
+    dynamically_registered: bool = False
+    registered_redirect_uri: str | None = None
+    registered_token_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,21 +385,15 @@ def _default_token_parser(
         msg = "OAuth provider did not return an access token"
         raise OAuthProviderError(msg)
 
-    scopes = provider.scopes
-    response_scope = token_response.get("scope")
-    if isinstance(response_scope, str) and response_scope.strip():
-        scopes = tuple(response_scope.split())
-
     token_data: dict[str, Any] = {
         "token": access_token,
-        "token_uri": token_response.get("_mindroom_token_url")
-        if isinstance(token_response.get("_mindroom_token_url"), str)
-        else provider.token_url,
         "client_id": client_config.client_id,
-        "scopes": list(scopes),
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
+    response_scope = token_response.get("scope")
+    if isinstance(response_scope, str) and response_scope.strip():
+        token_data["scopes"] = response_scope.split()
     refresh_token = token_response.get("refresh_token")
     if isinstance(refresh_token, str) and refresh_token:
         token_data["refresh_token"] = refresh_token
@@ -261,19 +418,39 @@ def _token_result_with_core_metadata(
     result: OAuthTokenResult,
     *,
     client_id: str | None = None,
+    fallback_scopes: Sequence[str] | None = None,
+    token_url: str | None = None,
 ) -> OAuthTokenResult:
     token_data = dict(result.token_data)
     if client_id is not None:
         token_data["client_id"] = client_id
     token_data["_source"] = "oauth"
     token_data["_oauth_provider"] = provider.id
+    if token_url is not None:
+        token_data["token_uri"] = token_url
     if not isinstance(token_data.get("scopes"), list):
-        token_data["scopes"] = list(provider.scopes)
+        token_data["scopes"] = list(provider.scopes if fallback_scopes is None else fallback_scopes)
     return OAuthTokenResult(
         token_data=token_data,
         claims=dict(result.claims),
         claims_verified=result.claims_verified,
     )
+
+
+def _refresh_fallback_scopes(
+    token_data: Mapping[str, Any],
+    token_response: Mapping[str, Any],
+    requested_scope: str,
+) -> list[Any]:
+    """Resolve refresh scopes without inferring grants from current configuration."""
+    for scope in (token_response.get("scope"), requested_scope):
+        if isinstance(scope, str) and scope.strip():
+            return scope.split()
+    stored_scopes = token_data.get("scopes")
+    if isinstance(stored_scopes, list):
+        return list(stored_scopes)
+    stored_scope = token_data.get("scope")
+    return stored_scope.split() if isinstance(stored_scope, str) else []
 
 
 def _verified_claims_for_storage(claims: Mapping[str, Any]) -> dict[str, Any]:
@@ -318,7 +495,7 @@ def _token_data_needs_refresh(
 
 def _oauth_error_fields(error: object, description: object) -> tuple[str | None, str | None, str | None]:
     """Return safe OAuth error code and detail from standard non-secret response fields."""
-    error_code = error.strip() if isinstance(error, str) and error.strip() else None
+    error_code = error.strip().lower() if isinstance(error, str) and error.strip() else None
     error_description = description.strip() if isinstance(description, str) and description.strip() else None
     parts = [value.strip() for value in (error, description) if isinstance(value, str) and value.strip()]
     return error_code, error_description, ": ".join(parts) if parts else None
@@ -335,7 +512,20 @@ def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, s
     return _oauth_error_fields(payload.get("error"), payload.get("error_description"))
 
 
-def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderError:
+def _token_client_transport(endpoints: OAuthRuntimeEndpoints) -> dict[str, Any]:
+    """Return the guarded transport option for a discovered token endpoint."""
+    if endpoints.token_fetch_allow_private_networks is None:
+        return {}
+    return {
+        "transport": ServerFetchAsyncHTTPTransport(
+            allow_private_networks=endpoints.token_fetch_allow_private_networks,
+        ),
+    }
+
+
+def _oauth_refresh_error(
+    exc: AuthlibBaseError | HTTPError | TimeoutError | ValueError,
+) -> OAuthProviderError:
     """Build a safe refresh failure with provider OAuth reason fields when available."""
     error_code: str | None = None
     error_description: str | None = None
@@ -347,22 +537,20 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
 
     msg = "OAuth token refresh failed"
     if detail is not None:
-        if error_code == "invalid_grant":
+        if is_terminal_oauth_refresh_error_code(error_code):
             return OAuthRefreshRejectedError(
-                f"{msg}: {detail}",
+                msg,
                 oauth_error=error_code,
-                oauth_error_description=error_description,
             )
         return OAuthProviderError(
             f"{msg}: {detail}",
             oauth_error=error_code,
             oauth_error_description=error_description,
         )
-    if error_code == "invalid_grant":
+    if is_terminal_oauth_refresh_error_code(error_code):
         return OAuthRefreshRejectedError(
-            f"{msg}: {error_code}",
+            msg,
             oauth_error=error_code,
-            oauth_error_description=error_description,
         )
     return OAuthProviderError(msg)
 
@@ -420,8 +608,17 @@ class OAuthProvider:
                 "must not end with '_oauth_client'"
             )
             raise ValueError(msg)
+        if not is_oauth_token_service(self.credential_service):
+            msg = f"OAuth provider '{self.id}' credential_service '{self.credential_service}' must end with '_oauth'"
+            raise ValueError(msg)
         if self.tool_config_service is not None:
             validate_service_name(self.tool_config_service)
+            if is_oauth_token_service(self.tool_config_service):
+                msg = (
+                    f"OAuth provider '{self.id}' tool_config_service '{self.tool_config_service}' "
+                    "must not end with '_oauth'"
+                )
+                raise ValueError(msg)
             if is_oauth_client_config_service(self.tool_config_service):
                 msg = (
                     f"OAuth provider '{self.id}' tool_config_service '{self.tool_config_service}' "
@@ -484,10 +681,21 @@ class OAuthProvider:
             credentials = manager.load_credentials(service)
             config = self._stored_client_config_from_service(runtime_paths, credentials, True)
             if config is not None:
+                credentials = credentials or {}
+                runtime_bootstrapped = credentials.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is True
+                registered_redirect_uri = credentials.get(OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY)
+                registered_token_url = credentials.get(OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY)
                 return OAuthClientConfigResolution(
                     config=config,
                     service=service,
-                    custom=(credentials or {}).get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True,
+                    custom=not runtime_bootstrapped,
+                    dynamically_registered=(
+                        runtime_bootstrapped and credentials.get("_source") == OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE
+                    ),
+                    registered_redirect_uri=(
+                        registered_redirect_uri if isinstance(registered_redirect_uri, str) else None
+                    ),
+                    registered_token_url=registered_token_url if isinstance(registered_token_url, str) else None,
                 )
         for service in self.shared_client_config_services:
             credentials = manager.load_credentials(service)
@@ -505,13 +713,13 @@ class OAuthProvider:
         runtime_paths: RuntimePaths,
     ) -> OAuthClientConfigResolution | None:
         """Return stored client settings, after any lazy runtime bootstrap."""
-        resolution = self.client_config_resolution(runtime_paths)
+        resolution = await asyncio.to_thread(self.client_config_resolution, runtime_paths)
         if resolution is not None:
             return resolution
         if self.runtime_bootstrapper is None:
             return None
         await self.runtime_endpoints(runtime_paths)
-        return self.client_config_resolution(runtime_paths)
+        return await asyncio.to_thread(self.client_config_resolution, runtime_paths)
 
     def _stored_client_config_from_service(
         self,
@@ -545,6 +753,19 @@ class OAuthProvider:
         if resolution is not None:
             return resolution.config
         raise self._missing_client_config_error()
+
+    async def _require_client_config_for_token_url(
+        self,
+        runtime_paths: RuntimePaths,
+        token_url: str,
+    ) -> OAuthClientConfig:
+        """Return client settings, refusing a dynamic registration issued for a different token endpoint."""
+        resolution = await self.client_config_resolution_async(runtime_paths)
+        if resolution is None:
+            raise self._missing_client_config_error()
+        if resolution.dynamically_registered and resolution.registered_token_url != token_url:
+            raise OAuthTokenEndpointChangedError(resolution.registered_token_url, token_url)
+        return resolution.config
 
     def _missing_client_config_error(self) -> _OAuthProviderNotConfiguredError:
         """Build one safe client-configuration error."""
@@ -597,13 +818,15 @@ class OAuthProvider:
     async def authorization_uri_async(
         self,
         runtime_paths: RuntimePaths,
+        endpoints: OAuthRuntimeEndpoints,
         *,
         state: str,
         code_verifier: str | None = None,
     ) -> str:
-        """Build the provider authorization URL, resolving lazy runtime metadata first."""
-        endpoints = await self.runtime_endpoints(runtime_paths)
+        """Build the provider authorization URL from endpoints the caller resolved and bound to the state."""
         client_config = await self.require_client_config_async(runtime_paths)
+        from authlib.integrations.requests_client import OAuth2Session  # noqa: PLC0415
+
         client = OAuth2Session(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,
@@ -633,23 +856,42 @@ class OAuthProvider:
         code: str,
         runtime_paths: RuntimePaths,
         *,
+        token_url: str,
         code_verifier: str | None = None,
     ) -> OAuthTokenResult:
-        """Exchange an authorization code for normalized credentials."""
+        """Exchange an authorization code at the token endpoint bound when the authorization URL was built."""
         endpoints = await self.runtime_endpoints(runtime_paths)
-        client_config = await self.require_client_config_async(runtime_paths)
+        if endpoints.token_url != token_url:
+            msg = "OAuth token endpoint changed since authorization"
+            raise OAuthProviderError(msg)
+        client_config = await self._require_client_config_for_token_url(runtime_paths, token_url)
         if self.pkce_code_challenge_method is not None and not code_verifier:
             msg = "OAuth provider requires a PKCE code verifier"
             raise OAuthProviderError(msg)
         if self.token_exchanger is not None:
-            result = self.token_exchanger(self, code, client_config, runtime_paths, code_verifier)
+            result = await asyncio.to_thread(
+                self.token_exchanger,
+                self,
+                code,
+                client_config,
+                runtime_paths,
+                code_verifier,
+            )
             if isinstance(result, OAuthTokenResult):
-                return _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
+                return _token_result_with_core_metadata(
+                    self,
+                    result,
+                    client_id=client_config.client_id,
+                    token_url=token_url,
+                )
             return _token_result_with_core_metadata(
                 self,
                 await cast("Awaitable[OAuthTokenResult]", result),
                 client_id=client_config.client_id,
+                token_url=token_url,
             )
+
+        from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: PLC0415
 
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
@@ -658,6 +900,7 @@ class OAuthProvider:
             redirect_uri=client_config.redirect_uri,
             token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+            **_token_client_transport(endpoints),
         ) as client:
             try:
                 fetch_kwargs: dict[str, Any] = {
@@ -668,10 +911,10 @@ class OAuthProvider:
                 if self.pkce_code_challenge_method is not None:
                     fetch_kwargs["code_verifier"] = code_verifier
                 token_response = await client.fetch_token(
-                    endpoints.token_url,
+                    token_url,
                     **fetch_kwargs,
                 )
-            except (AuthlibBaseError, HTTPError) as exc:
+            except (AuthlibBaseError, HTTPError, ServerFetchUrlError, *_TOKEN_RESPONSE_DECODE_ERRORS) as exc:
                 msg = "OAuth token exchange failed"
                 raise OAuthProviderError(msg) from exc
         if not isinstance(token_response, Mapping):
@@ -679,12 +922,46 @@ class OAuthProvider:
             raise OAuthProviderError(msg)
         parser = self.token_parser or _default_token_parser
         token_response = dict(token_response)
-        token_response["_mindroom_token_url"] = endpoints.token_url
+        result = await asyncio.to_thread(parser, self, token_response, client_config, runtime_paths)
         return _token_result_with_core_metadata(
             self,
-            parser(self, token_response, client_config, runtime_paths),
+            result,
             client_id=client_config.client_id,
+            token_url=token_url,
         )
+
+    async def _request_refresh_grant(self, request_refresh: Callable[[], Awaitable[object]]) -> object:
+        """Send one refresh grant, repeating it once within a shared deadline when its response is lost."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _REFRESH_GRANT_DEADLINE_SECONDS
+        try:
+            async with asyncio.timeout_at(deadline):
+                try:
+                    return await request_refresh()
+                except _REFRESH_RESPONSE_LOST_ERRORS as exc:
+                    if deadline - loop.time() < _REFRESH_REPEAT_MIN_SECONDS:
+                        raise
+                    # Providers that rotate refresh tokens, such as Slack, honor a just-redeemed token only for a
+                    # short grace period, so repeat the grant right away to recover the rotated token it returns.
+                    logger.info(
+                        "oauth_refresh_retrying_after_lost_response",
+                        provider_id=self.id,
+                        credential_service=self.credential_service,
+                        error_type=next(
+                            error_type.__name__
+                            for error_type in _REFRESH_RESPONSE_LOST_ERRORS
+                            if isinstance(exc, error_type)
+                        ),
+                    )
+                    return await request_refresh()
+        except (
+            AuthlibBaseError,
+            HTTPError,
+            ServerFetchUrlError,
+            TimeoutError,
+            *_TOKEN_RESPONSE_DECODE_ERRORS,
+        ) as exc:
+            raise _oauth_refresh_error(exc) from exc
 
     async def refresh_token_data(
         self,
@@ -697,28 +974,39 @@ class OAuthProvider:
         refresh_token = cast("str", token_data["refresh_token"])
 
         endpoints = await self.runtime_endpoints(runtime_paths)
-        client_config = await self.require_client_config_async(runtime_paths)
+        stored_token_url = token_data.get("token_uri")
+        # LEGACY_COMPAT: OAuth credentials stored without a `token_uri` endpoint binding.
+        # Legacy format: stored credentials whose mapping has no `token_uri`, produced by plugin `token_exchanger` or
+        # `token_parser` results that core did not stamp; built-in parsers have written `token_uri` since v2026.5.3.
+        # Last legacy release: v2026.9.358 for unstamped plugin output (unversioned external input); the unreleased
+        # replacement stamps the authorization-bound endpoint on every exchange and refresh result.
+        # Handling: reject before building a client or sending the refresh token; the lifecycle deletes the
+        # credential, logs `token_endpoint_changed`, and the user reconnects.
+        # Coverage: tests/test_mcp_oauth.py::test_mcp_oauth_refresh_rejects_token_endpoint_discovered_after_authorization
+        if stored_token_url != endpoints.token_url:
+            raise OAuthTokenEndpointChangedError(stored_token_url, endpoints.token_url)
+        client_config = await self._require_client_config_for_token_url(runtime_paths, endpoints.token_url)
+        from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: PLC0415
+
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,
-            scope=self.scopes,
             token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+            **_token_client_transport(endpoints),
         ) as client:
-            try:
-                token_response = await client.refresh_token(
-                    endpoints.token_url,
-                    refresh_token=refresh_token,
-                    **self.extra_token_params,
-                )
-            except (AuthlibBaseError, HTTPError) as exc:
-                raise _oauth_refresh_error(exc) from exc
+            request_refresh = partial(
+                client.refresh_token,
+                endpoints.token_url,
+                refresh_token=refresh_token,
+                **self.extra_token_params,
+            )
+            token_response = await self._request_refresh_grant(request_refresh)
         if not isinstance(token_response, Mapping):
             msg = "OAuth token refresh failed"
             raise OAuthProviderError(msg)
 
         refresh_response = dict(token_response)
-        refresh_response["_mindroom_token_url"] = endpoints.token_url
         response_refresh_token = refresh_response.get("refresh_token")
         existing_refresh_token = token_data.get("refresh_token")
         if (
@@ -742,7 +1030,7 @@ class OAuthProvider:
         ):
             refresh_response["_oauth_claims_verified"] = True
         parser = self.token_parser or _default_token_parser
-        result = parser(self, refresh_response, client_config, runtime_paths)
+        result = await asyncio.to_thread(parser, self, refresh_response, client_config, runtime_paths)
         verified_claims = refresh_response.get("_oauth_claims")
         if (
             not result.claims_verified
@@ -754,8 +1042,18 @@ class OAuthProvider:
                 claims=dict(verified_claims),
                 claims_verified=True,
             )
-        result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
-        self.validate_claims(result, runtime_paths)
+        result = _token_result_with_core_metadata(
+            self,
+            result,
+            client_id=client_config.client_id,
+            token_url=endpoints.token_url,
+            fallback_scopes=_refresh_fallback_scopes(
+                token_data,
+                refresh_response,
+                self.extra_token_params.get("scope", ""),
+            ),
+        )
+        await asyncio.to_thread(self.validate_claims, result, runtime_paths)
         return self.token_result_with_safe_claims(result).token_data
 
     def resolved_allowed_email_domains(self, runtime_paths: RuntimePaths) -> tuple[str, ...]:

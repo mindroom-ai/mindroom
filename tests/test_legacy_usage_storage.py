@@ -1,0 +1,267 @@
+"""One-time migration imports available usage without reconstructing missing history."""
+
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import sqlite3
+import time
+from typing import TYPE_CHECKING
+from unittest.mock import Mock
+
+import pytest
+from structlog.testing import capture_logs
+
+from mindroom.constants import resolve_runtime_paths
+from mindroom.usage import legacy_usage_storage
+from tests.conftest import create_agno_2_sessions_db
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _usage(path: Path) -> list[tuple[str | None, object]]:
+    with sqlite3.connect(path) as connection:
+        return [
+            (run_id, json.loads(data) if data is not None else None)
+            for run_id, data in connection.execute("SELECT run_id, usage_data FROM code_sessions_usage ORDER BY id")
+        ]
+
+
+def _skipped_paths(logs: list[dict[str, object]]) -> list[object]:
+    return [entry["path"] for entry in logs if entry["event"] == "usage_migration_skipped_unreadable_store"]
+
+
+def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
+    """Current run rows win; absent historical dates and IDs must not be synthesized."""
+    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ?",
+            (
+                json.dumps(
+                    [
+                        {"run_id": "overlap", "created_at": 2, "metrics": {"total_tokens": 10}},
+                        {"metrics": {"total_tokens": 3}, "content": "private history"},
+                        {"run_id": "legacy", "metrics": {"total_tokens": 4}},
+                    ],
+                ),
+            ),
+        )
+        connection.execute(
+            "CREATE TABLE code_sessions_runs (session_id TEXT, run_id TEXT, run_data TEXT, created_at INTEGER)",
+        )
+        connection.execute(
+            "INSERT INTO code_sessions_runs VALUES (?, ?, ?, ?)",
+            (
+                "session-1",
+                "overlap",
+                json.dumps({"run_id": "overlap", "created_at": 99, "metrics": {"total_tokens": 20}}),
+                1,
+            ),
+        )
+    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    before = path.read_bytes()
+    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+
+    assert path.read_bytes() == before
+    rows = dict(_usage(path))
+    assert len(rows) == 3
+    assert rows["overlap"]["metrics"]["total_tokens"] == 20
+    assert rows["overlap"]["created_at"] == 1
+    assert "created_at" not in rows[None]
+    assert "user_id" not in rows[None]
+    assert "private history" not in json.dumps(rows)
+
+
+def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed first import cannot publish an empty or partially seeded usage table."""
+    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    project = legacy_usage_storage.project_usage
+    calls = 0
+
+    def interrupt(run: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            message = "interrupted seed"
+            raise RuntimeError(message)
+        return project(run)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(legacy_usage_storage, "project_usage", interrupt)
+        with pytest.raises(RuntimeError, match="interrupted seed"):
+            legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    with sqlite3.connect(path) as connection:
+        assert not connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'code_sessions_usage'").fetchall()
+
+    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    assert len(_usage(path)) == 3
+
+
+def test_malformed_history_keeps_valid_records_and_a_gap(tmp_path: Path) -> None:
+    """A malformed entry cannot discard adjacent facts or silently become zero usage."""
+    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ?",
+            (
+                json.dumps(
+                    [
+                        {"run_id": "valid", "metrics": {"total_tokens": 5}},
+                        "malformed",
+                    ],
+                ),
+            ),
+        )
+    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    rows = _usage(path)
+    assert rows[0][1]["metrics"]["total_tokens"] == 5
+    assert rows[1] == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_startup_migrates_dormant_stores_and_skips_aliases(tmp_path: Path) -> None:
+    """Inventory is independent of config, honors the session root, and never follows symlinks."""
+    root = tmp_path / "sessions"
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": "sessions"},
+    )
+    stores = [
+        create_agno_2_sessions_db(root / relative / "code.db")
+        for relative in (
+            "agents/code/sessions",
+            "private_instances/dormant/code/sessions",
+            "teams/code/sessions",
+        )
+    ]
+    untouched = create_agno_2_sessions_db(tmp_path / "state/agents/code/sessions/code.db")
+    outside = create_agno_2_sessions_db(tmp_path / "outside/code/sessions/code.db")
+    (root / "agents/alias").symlink_to(outside.parent.parent, target_is_directory=True)
+    (root / "private_instances/alias").symlink_to(root / "private_instances/dormant", target_is_directory=True)
+    before = untouched.read_bytes(), outside.read_bytes()
+
+    await legacy_usage_storage.migrate_usage_storage(paths)
+    await legacy_usage_storage.migrate_usage_storage(paths)
+
+    assert [len(_usage(path)) for path in stores] == [3, 3, 3]
+    assert (untouched.read_bytes(), outside.read_bytes()) == before
+
+
+def test_missing_database_and_empty_database_stay_empty(tmp_path: Path) -> None:
+    """Migration must not create new stores or force Agno's lazy tables into existence."""
+    path = tmp_path / "code.db"
+    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    assert not path.exists()
+    with sqlite3.connect(path):
+        pass
+    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["api", "orchestrator"])
+async def test_unreadable_session_database_does_not_stop_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """Worker code can corrupt one session database; both entry points still import the rest and continue."""
+
+    class _NextStartupStepError(Exception):
+        pass
+
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
+    corrupt = paths.storage_root / "agents/broken/sessions/broken.db"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"not a database")
+    healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
+    monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
+    with capture_logs() as logs:
+        if entrypoint == "api":
+            monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
+            with pytest.raises(_NextStartupStepError):
+                async with module._lifespan(module.app):
+                    pytest.fail("API admitted runtime work")
+        else:
+            with pytest.raises(_NextStartupStepError):
+                await module.main("ERROR", paths, api=False)
+
+    assert len(_usage(healthy)) == 3
+    assert corrupt.read_bytes() == b"not a database"
+    assert _skipped_paths(logs) == [str(corrupt)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize(
+    ("blocked", "skipped"),
+    [
+        ("agents/broken", "agents/broken/sessions/broken.db"),
+        ("agents/broken/sessions", "agents/broken/sessions/broken.db"),
+        ("private_instances/scope", "private_instances/scope"),
+    ],
+)
+async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path, blocked: str, skipped: str) -> None:
+    """Worker code can make a store directory unsearchable; startup skips the stores beneath it and imports the rest."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
+    for store in ("agents/broken", "private_instances/scope/broken"):
+        (paths.storage_root / store / "sessions").mkdir(parents=True)
+    healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    blocked_dir = paths.storage_root / blocked
+    blocked_dir.chmod(0)
+    try:
+        with capture_logs() as logs:
+            await legacy_usage_storage.migrate_usage_storage(paths)
+    finally:
+        blocked_dir.chmod(0o755)
+
+    assert len(_usage(healthy)) == 3
+    assert _skipped_paths(logs) == [str(paths.storage_root / skipped)]
+
+
+@pytest.mark.asyncio
+async def test_locked_store_is_skipped_quickly_and_imported_by_its_owner(tmp_path: Path) -> None:
+    """Startup skips a store worker code keeps locked without waiting, and its owner still imports it later."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
+    locked = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    holder = sqlite3.connect(locked, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        started = time.monotonic()
+        with capture_logs() as logs:
+            await legacy_usage_storage.migrate_usage_storage(paths)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    assert elapsed < 10
+    assert _skipped_paths(logs) == [str(locked)]
+    legacy_usage_storage.migrate_usage_database(locked, "code_sessions")
+    assert len(_usage(locked)) == 3
+
+
+def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:
+    """Invalid nested classification must never promote a child into top-level usage."""
+    path = create_agno_2_sessions_db(tmp_path / "code.db")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ?",
+            (
+                json.dumps(
+                    [
+                        {"run_id": "child", "parent_run_id": {"private": "parent"}, "metrics": {"total_tokens": 500}},
+                    ],
+                ),
+            ),
+        )
+    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    payload = _usage(path)[0][1]
+    assert payload["parent_run_id"] is False
+    assert "private" not in json.dumps(payload)

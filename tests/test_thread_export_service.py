@@ -2,29 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
 
 import pytest
 
-from mindroom.event_journal import (
-    EventClass,
-    EventJournalStore,
-    EventKind,
-    InboundEvent,
-    ProjectedEvent,
-)
-from mindroom.event_journal_open import (
-    EventJournalBinding,
-    EventJournalBindingError,
-    write_event_journal_binding,
-)
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
-from mindroom.thread_export import ThreadExportTarget, export_threads_once, export_threads_to_targets_once
-from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportGroupFailure, ThreadExportRoom
-from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME
+from mindroom.thread_export import (
+    ThreadExportSource,
+    ThreadExportTarget,
+    export_threads_once,
+    export_threads_to_sources,
+    export_threads_to_targets_once,
+)
+from mindroom.thread_export import service as thread_export_service
+from mindroom.thread_export.models import ThreadExportGroup, ThreadExportRoom
+from mindroom.thread_export.projected_history import export_conversation_reader
+from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT
 from tests.conftest import runtime_paths_for
 from tests.thread_export_helpers import (
     mark_thread_export_root,
@@ -34,46 +32,24 @@ from tests.thread_export_helpers import (
     write_thread_export_matrix_state,
 )
 
-if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
+
+def _client_for_group(_group: ThreadExportGroup) -> Mock:
+    return Mock()
 
 
-async def _admit_as_running_bot(runtime_paths: RuntimePaths, principal_id: str, event_id: str) -> None:
-    """Write one projected message the way the running bot for that account would."""
-    journal_file = runtime_paths.storage_root / "tracking" / "event_journal.db"
-    journal_file.parent.mkdir(parents=True, exist_ok=True)
-    content: dict[str, object] = {"msgtype": "m.text", "body": "written by the running bot"}
-    store = EventJournalStore.open_sqlite(journal_file)
-    try:
-        await store.principal(principal_id).admit(
-            InboundEvent(
-                event_id=event_id,
-                room_id="!lobby:localhost",
-                thread_id=None,
-                kind=EventKind.MESSAGE,
-                event_class=EventClass.ACTIONABLE,
-                sender="@alice:localhost",
-                origin_server_ts=1,
-                source={"event_id": event_id, "content": content},
-            ),
-            ProjectedEvent(
-                event_id=event_id,
-                room_id="!lobby:localhost",
-                thread_id=None,
-                sender="@alice:localhost",
-                origin_server_ts=1,
-                content=content,
-                replaces_event_id=None,
-                redacts_event_id=None,
-            ),
-        )
-    finally:
-        await store.close()
+def _source_for_group(group: ThreadExportGroup) -> ThreadExportSource:
+    return ThreadExportSource(
+        client=_client_for_group(group),
+        reader=Mock(),
+        rooms=group.rooms,
+        entity_name=group.entity_name,
+        membership_index=AgentReplyMembershipIndex(),
+    )
 
 
 @pytest.mark.asyncio
-async def test_export_threads_once_records_group_failure_and_closes_resources(tmp_path: Path) -> None:
-    """An unexpected group failure should close resources and return room failures."""
+async def test_export_threads_once_records_group_failure_without_closing_borrowed_resources(tmp_path: Path) -> None:
+    """An unexpected group failure should keep borrowed resources open and return room failures."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
@@ -81,57 +57,17 @@ async def test_export_threads_once_records_group_failure_and_closes_resources(tm
     client.close = AsyncMock()
 
     with (
-        patch("mindroom.thread_export.selection.select_export_account", return_value=Mock()),
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
+        patch("tests.test_thread_export_service._client_for_group", new=Mock(return_value=client)),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=RuntimeError("export failed")),
         ),
     ):
-        stats = await export_threads_once(config=config, runtime_paths=runtime_paths)
+        stats = await export_threads_once(source_provider=_source_for_group, config=config, runtime_paths=runtime_paths)
 
-    client.close.assert_awaited_once()
+    client.close.assert_not_awaited()
     assert stats.failures == 2
     assert all("Export group failed: export failed" in failure.error for failure in stats.failed_items)
-
-
-@pytest.mark.asyncio
-async def test_export_refuses_a_journal_this_install_is_not_bound_to(tmp_path: Path) -> None:
-    """Export runs in its own process, so it is the opener most likely to read a stranger.
-
-    It also fails the quietest way: reading someone else's projection reports
-    the wrong history rather than raising, and the operator gets a plausible
-    file full of conversations that never happened here.
-    """
-    config = thread_export_config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path, account_keys=("agent_general",))
-
-    journal_file = runtime_paths.storage_root / "tracking" / "event_journal.db"
-    journal_file.parent.mkdir(parents=True, exist_ok=True)
-    stranger = EventJournalStore.open_sqlite(journal_file)
-    try:
-        await stranger.generation(new_generation="another-install")
-    finally:
-        await stranger.close()
-    write_event_journal_binding(
-        runtime_paths.storage_root,
-        EventJournalBinding(generation="ours", database="sqlite tracking/event_journal.db"),
-    )
-
-    client = Mock()
-    client.close = AsyncMock()
-    with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
-        patch(
-            "mindroom.thread_export.service.export_threads_for_targets_for_client",
-            new=AsyncMock(side_effect=successful_group_result),
-        ) as export_group,
-        pytest.raises(EventJournalBindingError),
-    ):
-        await export_threads_once(config=config, runtime_paths=runtime_paths)
-
-    export_group.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -145,22 +81,22 @@ async def test_export_threads_once_exports_invited_rooms_with_entity_account(tmp
     client.close = AsyncMock()
 
     with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)) as login,
+        patch("tests.test_thread_export_service._client_for_group", new=Mock(return_value=client)) as login,
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
         ) as export_group,
     ):
-        stats = await export_threads_once(config=config, runtime_paths=runtime_paths)
+        stats = await export_threads_once(source_provider=_source_for_group, config=config, runtime_paths=runtime_paths)
 
     group_room_ids = [[room.room_id for room in call.kwargs["rooms"]] for call in export_group.await_args_list]
     assert group_room_ids == [
         ["!lobby:localhost", "!dev:localhost"],
         ["!user-room:localhost"],
     ]
-    assert [call.args[1].agent_name for call in login.await_args_list] == ["general", "general"]
+    assert [call.args[0].entity_name for call in login.call_args_list] == ["router", "general"]
     assert stats.rooms_exported == 2
-    assert client.close.await_count == 2
+    client.close.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -174,13 +110,13 @@ async def test_export_threads_once_deduplicates_invited_rooms_already_in_state(t
     client.close = AsyncMock()
 
     with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
+        patch("tests.test_thread_export_service._client_for_group", new=Mock(return_value=client)),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
         ) as export_group,
     ):
-        await export_threads_once(config=config, runtime_paths=runtime_paths)
+        await export_threads_once(source_provider=_source_for_group, config=config, runtime_paths=runtime_paths)
 
     export_group.assert_awaited_once()
     assert [room.room_id for room in export_group.await_args.kwargs["rooms"]] == [
@@ -203,7 +139,7 @@ async def test_export_threads_once_retracts_discovered_invited_room_when_disable
     include_state_rooms: bool,
     room_filter: str | None,
 ) -> None:
-    """Invited-only and filtered passes should retract excluded persisted rooms without login."""
+    """Invited-only and filtered passes should retract excluded persisted rooms without acquiring a source."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(
@@ -223,27 +159,28 @@ async def test_export_threads_once_retracts_discovered_invited_room_when_disable
     )
 
     with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock()) as login,
+        patch("tests.test_thread_export_service._client_for_group", new=Mock()) as login,
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(),
         ) as export_group,
     ):
         stats = await export_threads_once(
+            source_provider=_source_for_group,
             config=config,
             runtime_paths=runtime_paths,
             room_filter=room_filter,
             include_invited_rooms=False,
         )
 
-    login.assert_not_awaited()
+    login.assert_not_called()
     export_group.assert_not_awaited()
     assert stats.failures == 0
     assert not invited_export_dir.exists()
 
 
 @pytest.mark.asyncio
-async def test_export_threads_once_continues_after_one_account_login_failure(tmp_path: Path) -> None:
+async def test_export_threads_once_continues_after_one_owner_is_unavailable(tmp_path: Path) -> None:
     """A broken account group should not prevent a later group from exporting."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
@@ -251,27 +188,28 @@ async def test_export_threads_once_continues_after_one_account_login_failure(tmp
     write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
     client = Mock()
     client.close = AsyncMock()
-    login = AsyncMock(side_effect=[RuntimeError("expired token"), client])
+    login = Mock(side_effect=[RuntimeError("owner unavailable"), client])
 
     with (
-        patch("mindroom.thread_export.service.login_agent_user", new=login),
+        patch("tests.test_thread_export_service._client_for_group", new=login),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
         ) as export_group,
     ):
         stats = await export_threads_to_targets_once(
+            source_provider=_source_for_group,
             config=config,
             runtime_paths=runtime_paths,
             targets=(ThreadExportTarget(output_dir=tmp_path / "exports"),),
         )
 
-    assert login.await_count == 2
+    assert login.call_count == 2
     export_group.assert_awaited_once()
     assert [room.room_id for room in export_group.await_args.kwargs["rooms"]] == ["!user-room:localhost"]
     assert stats[0].rooms_exported == 1
     assert stats[0].failures == 2
-    assert all("Matrix login failed: expired token" in failure.error for failure in stats[0].failed_items)
+    assert all("owner unavailable" in failure.error for failure in stats[0].failed_items)
 
 
 @pytest.mark.asyncio
@@ -285,13 +223,14 @@ async def test_export_threads_once_room_filter_selects_invited_room(tmp_path: Pa
     client.close = AsyncMock()
 
     with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
+        patch("tests.test_thread_export_service._client_for_group", new=Mock(return_value=client)),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
         ) as export_group,
     ):
         stats = await export_threads_once(
+            source_provider=_source_for_group,
             config=config,
             runtime_paths=runtime_paths,
             room_filter="!user-room:localhost",
@@ -304,14 +243,15 @@ async def test_export_threads_once_room_filter_selects_invited_room(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_an_unassignable_account_group_fails_only_the_targets_that_wanted_it(tmp_path: Path) -> None:
-    """A room no account can reach fails the targets that requested it and no others."""
+async def test_an_unavailable_owner_fails_only_the_targets_that_wanted_it(tmp_path: Path) -> None:
+    """An unavailable room owner fails the targets that requested it and no others."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path, account_keys=(INTERNAL_USER_ACCOUNT_KEY,))
     write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
 
     stats = await export_threads_to_targets_once(
+        source_provider=Mock(side_effect=RuntimeError("owner unavailable")),
         config=config,
         runtime_paths=runtime_paths,
         targets=(
@@ -323,6 +263,7 @@ async def test_an_unassignable_account_group_fails_only_the_targets_that_wanted_
 
     assert stats[0].failures == 1
     assert stats[0].failed_items[0].room_id == "!user-room:localhost"
+    assert "owner unavailable" in stats[0].failed_items[0].error
     assert stats[1].failures == 0
 
 
@@ -343,15 +284,22 @@ async def test_full_pass_retains_scoped_exports_when_account_group_cannot_run(tm
         room_dir.mkdir()
         (room_dir / "old.yaml").write_text("secret", encoding="utf-8")
 
-    group_failure = ThreadExportGroupFailure(rooms=rooms, error="No usable Matrix account")
-    with patch("mindroom.thread_export.service.build_export_groups", return_value=[group_failure]):
+    group_failure = ThreadExportGroup(rooms=rooms, entity_name="router")
+    with (
+        patch("mindroom.thread_export.service.build_export_groups", return_value=[group_failure]),
+        patch(
+            "tests.test_thread_export_service._client_for_group",
+            side_effect=RuntimeError("No usable Matrix account"),
+        ),
+    ):
         stats = await export_threads_to_targets_once(
+            source_provider=_source_for_group,
             config=config,
             runtime_paths=runtime_paths,
             targets=(
                 ThreadExportTarget(
                     output_dir=output_dir,
-                    required_member_user_id="@alice:localhost",
+                    required_member_user_ids=("@alice:localhost",),
                 ),
             ),
         )
@@ -359,6 +307,80 @@ async def test_full_pass_retains_scoped_exports_when_account_group_cannot_run(tm
     assert stats[0].failures == 2
     assert all("No usable Matrix account" in failure.error for failure in stats[0].failed_items)
     assert all((output_dir / room.key / "old.yaml").read_text(encoding="utf-8") == "secret" for room in rooms)
+
+
+@pytest.mark.asyncio
+async def test_disjoint_target_validation_uses_linear_ancestry_checks(tmp_path: Path) -> None:
+    """A growing set of workspaces must not trigger all-pairs ancestry checks."""
+    config = thread_export_config(tmp_path)
+    targets = tuple(
+        ThreadExportTarget(tmp_path / f"agent-{index}" / "workspace" / "thread_exports") for index in range(64)
+    )
+    ancestry_checks = 0
+    original_is_relative_to = Path.is_relative_to
+
+    def counted_is_relative_to(path: Path, other: Path) -> bool:
+        nonlocal ancestry_checks
+        ancestry_checks += 1
+        return original_is_relative_to(path, other)
+
+    with patch.object(Path, "is_relative_to", counted_is_relative_to):
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            sources=(),
+            targets=targets,
+            full_pass=False,
+        )
+
+    assert len(stats) == len(targets)
+    assert all(item.failures == 0 for item in stats)
+    assert ancestry_checks <= 2 * len(targets)
+    assert all((target.output_dir / _ROOT_MARKER_FILENAME).is_file() for target in targets)
+
+
+@pytest.mark.asyncio
+async def test_mixed_target_overlaps_preserve_every_conflict_in_input_order(tmp_path: Path) -> None:
+    """Nested, duplicate and sibling roots retain complete ordered diagnostics."""
+    config = thread_export_config(tmp_path)
+    root = tmp_path / "exports"
+    output_dirs = (
+        root / "branch" / "leaf",
+        tmp_path / "exports-neighbor",
+        root / "sibling",
+        root,
+        root / "branch",
+        root,
+        tmp_path / "unique",
+    )
+    expected_conflicts = {
+        0: (3, 4, 5),
+        2: (3, 5),
+        3: (0, 2, 4, 5),
+        4: (0, 3, 5),
+        5: (0, 2, 3, 4),
+    }
+
+    stats = await export_threads_to_sources(
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        sources=(),
+        targets=tuple(ThreadExportTarget(output_dir) for output_dir in output_dirs),
+        full_pass=False,
+    )
+
+    assert tuple(item.output_dir for item in stats) == output_dirs
+    for index, item in enumerate(stats):
+        if index not in expected_conflicts:
+            assert item.failures == 0
+            assert (item.output_dir / _ROOT_MARKER_FILENAME).is_file()
+            continue
+        assert item.failures == 1
+        conflicting = ", ".join(str(output_dirs[other]) for other in expected_conflicts[index])
+        assert item.failed_items[0].error == (
+            f"output directory resolving to {output_dirs[index]} overlaps another enabled target: {conflicting}"
+        )
+    assert not root.exists()
 
 
 @pytest.mark.asyncio
@@ -384,6 +406,7 @@ async def test_aliased_target_output_directories_are_all_skipped(tmp_path: Path)
         patch("mindroom.thread_export.service.logger.warning") as warning,
     ):
         stats = await export_threads_to_targets_once(
+            source_provider=_source_for_group,
             config=config,
             runtime_paths=runtime_paths,
             targets=targets,
@@ -398,6 +421,42 @@ async def test_aliased_target_output_directories_are_all_skipped(tmp_path: Path)
     assert str(targets[0].output_dir) in stats[1].failed_items[0].error
     assert warning.call_count == 2
     build_export_groups.assert_not_called()
+
+
+@pytest.mark.parametrize("link_target", ["sibling_export", "agents_directory"])
+@pytest.mark.asyncio
+async def test_a_link_planted_below_the_trusted_root_fails_only_its_own_target(
+    tmp_path: Path,
+    link_target: str,
+) -> None:
+    """Worker code linking its own export folder elsewhere cannot take another agent's exports down with it."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    agents_dir = runtime_paths.storage_root / "agents"
+    victim_output_dir = agents_dir / "victim" / "workspace" / "thread_exports"
+    victim_output_dir.mkdir(parents=True)
+    planted_output_dir = agents_dir / "planter" / "workspace" / "thread_exports"
+    planted_output_dir.parent.mkdir(parents=True)
+    planted_output_dir.symlink_to(
+        victim_output_dir if link_target == "sibling_export" else agents_dir,
+        target_is_directory=True,
+    )
+    targets = (
+        ThreadExportTarget(planted_output_dir, trusted_root=runtime_paths.storage_root),
+        ThreadExportTarget(victim_output_dir, trusted_root=runtime_paths.storage_root),
+    )
+
+    stats = await export_threads_to_sources(
+        config=config,
+        runtime_paths=runtime_paths,
+        sources=(),
+        targets=targets,
+        full_pass=False,
+    )
+
+    assert [item.failures for item in stats] == [1, 0]
+    assert "Refusing symlinked thread export root" in stats[0].failed_items[0].error
+    assert (victim_output_dir / _ROOT_MARKER_FILENAME).is_file()
 
 
 @pytest.mark.parametrize("nested_first", [False, True])
@@ -415,6 +474,7 @@ async def test_nested_target_output_directories_are_all_skipped(
     ordered_dirs = (nested_output_dir, parent_output_dir) if nested_first else (parent_output_dir, nested_output_dir)
 
     stats = await export_threads_to_targets_once(
+        source_provider=_source_for_group,
         config=config,
         runtime_paths=runtime_paths,
         targets=tuple(ThreadExportTarget(output_dir) for output_dir in ordered_dirs),
@@ -440,6 +500,7 @@ async def test_symlink_loop_target_output_directory_fails_closed(tmp_path: Path)
     output_dir = first_link / "thread_exports"
 
     stats = await export_threads_to_targets_once(
+        source_provider=_source_for_group,
         config=config,
         runtime_paths=runtime_paths,
         targets=(ThreadExportTarget(output_dir),),
@@ -464,6 +525,7 @@ async def test_symlinked_final_target_is_skipped_without_touching_destination(tm
     output_dir.symlink_to(outside, target_is_directory=True)
 
     stats = await export_threads_to_targets_once(
+        source_provider=_source_for_group,
         config=config,
         runtime_paths=runtime_paths,
         targets=(ThreadExportTarget(output_dir),),
@@ -473,6 +535,53 @@ async def test_symlinked_final_target_is_skipped_without_touching_destination(tm
     assert "symlinked thread export root" in stats[0].failed_items[0].error
     assert victim.read_text(encoding="utf-8") == "secret"
     assert output_dir.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_trusted_root_target_rejects_parent_replaced_after_validation(
+    tmp_path: Path,
+) -> None:
+    """Replacing a validated parent cannot redirect an anchored export target."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    instance_root = tmp_path / "private_instances" / "scope" / "agent"
+    output_dir = instance_root / "workspace" / "thread_exports"
+    instance_root.mkdir(parents=True)
+    saved_instance_root = instance_root.with_name("agent-saved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_prepare = thread_export_service.prepare_export_root
+    swapped = False
+
+    def swap_before_prepare(path: Path, *, trusted_root: Path | None = None) -> None:
+        nonlocal swapped
+        instance_root.rename(saved_instance_root)
+        instance_root.symlink_to(outside, target_is_directory=True)
+        swapped = True
+        original_prepare(path, trusted_root=trusted_root)
+
+    with patch(
+        "mindroom.thread_export.service.prepare_export_root",
+        side_effect=swap_before_prepare,
+    ):
+        stats = await export_threads_to_targets_once(
+            source_provider=_source_for_group,
+            config=config,
+            runtime_paths=runtime_paths,
+            targets=(
+                ThreadExportTarget(
+                    output_dir,
+                    trusted_root=runtime_paths.storage_root,
+                ),
+            ),
+        )
+
+    assert swapped is True
+    assert stats[0].failures == 1
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not (outside / "workspace" / "thread_exports").exists()
 
 
 @pytest.mark.parametrize(
@@ -497,6 +606,7 @@ async def test_terminal_traversal_output_directory_is_rejected(
     monkeypatch.chdir(tmp_path)
 
     stats = await export_threads_to_targets_once(
+        source_provider=_source_for_group,
         config=config,
         runtime_paths=runtime_paths,
         targets=(ThreadExportTarget(authored_output_dir),),
@@ -521,6 +631,7 @@ async def test_explicit_broad_output_directory_is_rejected(tmp_path: Path) -> No
     cache_file.write_text("cache", encoding="utf-8")
 
     stats = await export_threads_to_targets_once(
+        source_provider=_source_for_group,
         config=config,
         runtime_paths=runtime_paths,
         targets=(ThreadExportTarget(tmp_path),),
@@ -562,13 +673,14 @@ async def test_aliased_targets_are_skipped_while_unique_target_completes(
     client.close = AsyncMock()
 
     with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
+        patch("tests.test_thread_export_service._client_for_group", new=Mock(return_value=client)),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
         ) as export_group,
     ):
         stats = await export_threads_to_targets_once(
+            source_provider=_source_for_group,
             config=config,
             runtime_paths=runtime_paths,
             targets=targets,
@@ -594,11 +706,11 @@ async def test_full_pass_with_zero_exported_rooms_skips_reconciliation(tmp_path:
 
     with (
         patch("mindroom.thread_export.service.build_export_groups", return_value=[]),
-        patch("mindroom.thread_export.service.select_export_account"),
         patch("mindroom.thread_export.service.reconcile_room_directories") as reconcile,
         patch("mindroom.thread_export.service.logger.warning") as warning,
     ):
         stats = await export_threads_to_targets_once(
+            source_provider=_source_for_group,
             config=config,
             runtime_paths=runtime_paths,
             targets=(ThreadExportTarget(output_dir),),
@@ -616,43 +728,165 @@ async def test_full_pass_with_zero_exported_rooms_skips_reconciliation(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_the_export_reader_is_bound_to_the_principal_the_running_bot_writes(tmp_path: Path) -> None:
-    """Reading the wrong principal does not fail; it reports every room as empty.
-
-    So the identity is pinned literally, in the same ``agent_name@matrix_id``
-    spelling ``AgentBot`` derives, rather than being recomputed from whatever
-    the export happened to log in as.
-    """
+async def test_export_threads_to_sources_exports_each_source_and_reconciles(tmp_path: Path) -> None:
+    """The in-process path validates targets, records unreadable rooms, and reconciles a full pass."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path, account_keys=("agent_router",))
-    await _admit_as_running_bot(runtime_paths, "router@@agent_router:localhost", "$router-wrote-this")
-    client = Mock()
-    client.close = AsyncMock()
-    # The store is closed when the export returns, so the read that proves which
-    # principal it is bound to has to happen while the export still holds it.
-    read_back: list[object] = []
+    output_dir = tmp_path / "out"
+    lobby = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
+    dev = ThreadExportRoom(key="dev", room_id="!dev:localhost", alias="", name="Dev")
+    source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(lobby,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+    )
 
-    async def read_while_open(**kwargs: object) -> tuple[ThreadExportAccumulator, ...]:
-        reader = kwargs["reader"]
-        read_back.append(await reader.reader.store.load_event("$router-wrote-this"))
-        return successful_group_result(**kwargs)  # type: ignore[arg-type]
-
-    with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
-        patch(
-            "mindroom.thread_export.service.export_threads_for_targets_for_client",
-            new=AsyncMock(side_effect=read_while_open),
-        ) as export_group,
-    ):
-        await export_threads_to_targets_once(
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        stats = await export_threads_to_sources(
             config=config,
             runtime_paths=runtime_paths,
-            targets=(ThreadExportTarget(tmp_path / "exports"),),
+            sources=(source,),
+            targets=(ThreadExportTarget(output_dir=output_dir),),
+            unreadable_rooms=(((dev,), "Bot 'code' is not running"),),
+            full_pass=True,
         )
 
-    projection = export_group.await_args.kwargs["reader"]
-    assert [event.event_id for event in read_back if event is not None] == ["$router-wrote-this"]
-    # Both halves answer for one principal, so proving the reader is enough.
-    assert projection.completeness is projection.reader.store
-    assert projection.reader.hydrator.self_sender == "@agent_router:localhost"
+    export_source.assert_awaited_once()
+    assert export_source.await_args is not None
+    assert export_source.await_args.kwargs["client"] is source.client
+    assert export_source.await_args.kwargs["rooms"] == (lobby,)
+    assert stats[0].rooms_exported == 1
+    assert [failure.error for failure in stats[0].failed_items] == ["Bot 'code' is not running"]
+    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+@pytest.mark.asyncio
+async def test_export_threads_to_sources_honors_each_sources_targets(tmp_path: Path) -> None:
+    """Each live source exports only to the targets explicitly bound to it."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
+    code_target = ThreadExportTarget(output_dir=tmp_path / "code")
+    other_target = ThreadExportTarget(output_dir=tmp_path / "other")
+    code_source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(room,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+        target_output_dirs=(code_target.output_dir,),
+    )
+    other_source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(room,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+        target_output_dirs=(other_target.output_dir,),
+    )
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(code_source, other_source),
+            targets=(code_target, other_target),
+            full_pass=False,
+        )
+
+    assert export_source.await_count == 2
+    assert [call.kwargs["targets"] for call in export_source.await_args_list] == [
+        (code_target,),
+        (other_target,),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_export_threads_to_sources_skips_matrix_work_without_valid_targets(tmp_path: Path) -> None:
+    """A target that fails validation is reported and never triggers a source read."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    target = ThreadExportTarget(output_dir=tmp_path / "trailing" / "..")
+    source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+        target_output_dirs=(target.output_dir,),
+    )
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(source,),
+            targets=(target,),
+            full_pass=False,
+        )
+
+    export_source.assert_not_awaited()
+    assert stats[0].failures == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_export_drains_its_shielded_hydration(tmp_path: Path) -> None:
+    """Cancelling an export cannot leave its private history walk using borrowed resources."""
+    config = thread_export_config(tmp_path)
+    client = Mock(close=AsyncMock())
+    reader = export_conversation_reader(client=client, config=config, store=Mock(), self_sender="@router:localhost")
+    source = ThreadExportSource(
+        client=client,
+        reader=reader,
+        rooms=(ThreadExportRoom("lobby", "!lobby", "", ""),),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+    )
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def hydrate() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
+
+    async def exporting(**_kwargs: object) -> None:
+        hydrator = reader.reader.hydrator
+        await hydrator._shared(hydrator._in_flight, ("!lobby", None), hydrate, name="test_export_hydration")
+
+    with patch("mindroom.thread_export.service.export_threads_for_targets_for_client", side_effect=exporting):
+        task = asyncio.create_task(
+            export_threads_to_sources(
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                sources=(source,),
+                targets=(ThreadExportTarget(tmp_path / "out"),),
+                full_pass=True,
+            ),
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        try:
+            assert finished.is_set()
+            assert not reader.reader.hydrator._in_flight
+            client.close.assert_not_awaited()
+        finally:
+            tasks = tuple(reader.reader.hydrator._in_flight.values())
+            for child in tasks:
+                child.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

@@ -14,9 +14,9 @@ from typing import Any
 
 from mindroom.matrix import event_types as matrix_event_types
 
-CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
+CALL_MEMBER_EVENT_TYPE = matrix_event_types.CALL_MEMBER_EVENT_TYPE
 CALL_ENCRYPTION_KEYS_EVENT_TYPE = matrix_event_types.CALL_ENCRYPTION_KEYS_EVENT_TYPE
-RTC_NOTIFICATION_EVENT_TYPE = "org.matrix.msc4075.rtc.notification"
+RTC_NOTIFICATION_EVENT_TYPE = matrix_event_types.RTC_NOTIFICATION_EVENT_TYPE
 
 _CALL_APPLICATION = "m.call"
 _ROOM_CALL_ID = ""

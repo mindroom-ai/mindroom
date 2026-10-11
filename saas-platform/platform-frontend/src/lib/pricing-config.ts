@@ -1,11 +1,22 @@
+import type { PricingConfig } from '@/lib/api'
+
 // Type definitions for pricing plans
 export type PlanId = 'free' | 'byok' | 'hobby' | 'pro' | 'enterprise'
 
-// Plan gradient colors for UI display
-export const PLAN_GRADIENTS: Record<PlanId, string> = {
-  free: 'from-gray-500 to-gray-600',
-  byok: 'from-slate-500 to-slate-700',
-  hobby: 'from-orange-500 to-orange-600',
-  pro: 'from-purple-500 to-purple-600',
-  enterprise: 'from-yellow-500 to-yellow-600',
+// Plans from smallest to largest; the no-plan `free` state has no place in it
+const PLAN_ORDER: PlanId[] = ['byok', 'hobby', 'pro', 'enterprise']
+
+/** A plan's position from smallest to largest, or -1 for a plan outside the order. */
+export function planRank(plan: string): number {
+  return PLAN_ORDER.indexOf(plan as PlanId)
+}
+
+/** Whether choosing `candidate` would move an account on `currentTier` to a smaller plan. */
+export function isDowngrade(currentTier: PlanId | null, candidate: string): boolean {
+  return currentTier !== null && planRank(candidate) < planRank(currentTier)
+}
+
+/** Days of free trial a customer's first plan starts with, or 0 when trials are off. */
+export function trialDays(pricing: Pick<PricingConfig, 'trial'>): number {
+  return pricing.trial.enabled ? pricing.trial.days : 0
 }

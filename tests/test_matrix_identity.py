@@ -378,18 +378,37 @@ class TestHelperFunctions:
                     "agent_general": {
                         "username": "mindroom_general_oldns",
                         "password": "pw",
+                        "device_id": "DEVICE",
+                        "access_token": "secret-token",
                         "known_user_ids": ["@mindroom_general_oldns:legacy.example.com"],
                     },
                 },
+                "rooms": {
+                    "general": {
+                        "room_id": "!general:legacy.example.com",
+                        "alias": "#general:legacy.example.com",
+                        "name": "General",
+                        "created_at": "2026-04-01T12:00:00+00:00",
+                    },
+                },
+                "space_room_id": "!space:legacy.example.com",
             },
         )
 
         state = MatrixState.load(runtime_paths=runtime_paths)
 
-        assert state.accounts["agent_general"].domain == self.config.get_domain(runtime_paths)
+        account = state.accounts["agent_general"]
+        assert account.domain == self.config.get_domain(runtime_paths)
+        assert account.device_id == "DEVICE"
+        assert account.access_token == "secret-token"  # noqa: S105
+        assert state.rooms["general"].room_id == "!general:legacy.example.com"
+        assert state.rooms["general"].alias == "#general:legacy.example.com"
+        assert state.rooms["general"].name == "General"
+        assert state.space_room_id == "!space:legacy.example.com"
         migrated_data = yaml.safe_load(state_file.read_text())
         assert migrated_data["accounts"]["agent_general"]["domain"] == self.config.get_domain(runtime_paths)
         assert "known_user_ids" not in migrated_data["accounts"]["agent_general"]
+        assert MatrixState.load(runtime_paths=runtime_paths) == state
 
     def test_matrix_state_load_preserves_persisted_account_domain(self, tmp_path: Path) -> None:
         """Loading current state must preserve actual provisioned account domains."""
@@ -415,6 +434,7 @@ class TestHelperFunctions:
         assert managed_account_user_id("agent_general", self.config.get_domain(runtime_paths), runtime_paths) == (
             "@actual_general:matrix.example"
         )
+        assert MatrixState.load(runtime_paths=runtime_paths) == state
 
     def test_matrix_state_load_migrates_without_advisory_lock(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="newspaper",
+    file_access=ToolFileAccess.NONE,
     display_name="Newspaper",
     description="Read and extract content from news articles using advanced web scraping",
     category=ToolCategory.RESEARCH,
@@ -21,13 +22,6 @@ if TYPE_CHECKING:
     icon="FaNewspaper",
     icon_color="text-blue-600",
     config_fields=[
-        ConfigField(
-            name="include_summary",
-            label="Include Summary",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
         ConfigField(
             name="article_length",
             label="Article Length",
@@ -55,7 +49,10 @@ if TYPE_CHECKING:
     function_names=("get_article_data", "read_article"),
 )
 def newspaper4k_tools() -> type[Newspaper4kTools]:
-    """Return Newspaper4k tools for news article extraction."""
+    """Return Newspaper4k tools whose downloads follow the server-fetch policy."""
     from agno.tools.newspaper4k import Newspaper4kTools
 
+    from mindroom.tools.agno_compat_newspaper4k import install_server_fetch_guard
+
+    install_server_fetch_guard()
     return Newspaper4kTools

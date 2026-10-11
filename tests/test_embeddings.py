@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,16 +13,22 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import mindroom.embeddings.signatures as embedding_helpers
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.embeddings import (
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.signatures import (
     create_sentence_transformers_embedder,
     effective_knowledge_embedder_signature,
     effective_mem0_embedder_signature,
 )
 from mindroom.model_defaults import OPENAI_EMBEDDING_LARGE, SENTENCE_TRANSFORMERS_DEFAULT
-from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sentence_transformer_client_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(embedding_helpers, "_SENTENCE_TRANSFORMER_CLIENT", None)
 
 
 def _mock_openai_client() -> MagicMock:
@@ -33,7 +41,7 @@ def test_custom_host_non_openai_model_omits_dimensions() -> None:
     """OpenAI-compatible custom models should not inherit OpenAI's 1536-d fallback."""
     client = _mock_openai_client()
     embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-001",
+        id="gemini-embedding-2",
         api_key="sk-test",
         base_url="http://example.com/v1",
         openai_client=client,
@@ -80,7 +88,7 @@ def test_custom_host_explicit_dimensions_override_is_preserved() -> None:
     """Explicit dimensions should still be forwarded for custom-host models."""
     client = _mock_openai_client()
     embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-001",
+        id="gemini-embedding-2",
         api_key="sk-test",
         base_url="http://example.com/v1",
         dimensions=3072,
@@ -107,7 +115,7 @@ async def test_custom_host_batch_embedding_omits_dimensions() -> None:
         ),
     )
     embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-001",
+        id="gemini-embedding-2",
         api_key="sk-test",
         base_url="http://example.com/v1",
         async_client=async_client,
@@ -131,13 +139,14 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     class DummyEmbedder:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
+            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
 
     def _ensure(runtime_paths: object) -> None:
         captured["installed"] = runtime_paths
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", _ensure)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", _ensure)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder) if name else None,
     )
 
@@ -153,6 +162,141 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
         "id": SENTENCE_TRANSFORMERS_DEFAULT,
         "dimensions": 384,
     }
+
+
+def test_sentence_transformers_embedder_reuses_one_model_client_across_concurrent_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent index handles should share one expensive local model client."""
+    construction_lock = threading.Lock()
+    dependency_checks_active = 0
+    max_dependency_checks_active = 0
+    model_constructions = 0
+
+    def _ensure(_runtime_paths: object) -> None:
+        nonlocal dependency_checks_active, max_dependency_checks_active
+        with construction_lock:
+            dependency_checks_active += 1
+            max_dependency_checks_active = max(max_dependency_checks_active, dependency_checks_active)
+        time.sleep(0.02)
+        with construction_lock:
+            dependency_checks_active -= 1
+
+    class DummyEmbedder:
+        def __init__(
+            self,
+            *,
+            sentence_transformer_client: object | None = None,
+            **kwargs: object,
+        ) -> None:
+            nonlocal model_constructions
+            self.id = kwargs["id"]
+            self.dimensions = kwargs.get("dimensions")
+            if sentence_transformer_client is None:
+                with construction_lock:
+                    model_constructions += 1
+                time.sleep(0.02)
+                sentence_transformer_client = object()
+            self.sentence_transformer_client = sentence_transformer_client
+
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", _ensure)
+    monkeypatch.setattr(
+        "mindroom.embeddings.signatures.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        embedders = list(
+            pool.map(
+                lambda _index: create_sentence_transformers_embedder(
+                    TEST_RUNTIME_PATHS,
+                    "sentence-transformers/cache-regression-test",
+                    dimensions=384 if _index % 2 == 0 else 768,
+                ),
+                range(8),
+            ),
+        )
+
+    assert model_constructions == 1
+    assert max_dependency_checks_active == 1
+    assert len({id(embedder) for embedder in embedders}) == 8
+    assert len({id(embedder.sentence_transformer_client) for embedder in embedders}) == 1
+    assert {embedder.dimensions for embedder in embedders} == {384, 768}
+
+
+def test_sentence_transformers_embedder_releases_retired_cached_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching the active model should not permanently retain the old client."""
+
+    class ModelClient:
+        pass
+
+    class DummyEmbedder:
+        def __init__(
+            self,
+            *,
+            sentence_transformer_client: object | None = None,
+            **_kwargs: object,
+        ) -> None:
+            self.sentence_transformer_client = sentence_transformer_client or ModelClient()
+
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.signatures.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+
+    old_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/old")
+    old_client = old_embedder.sentence_transformer_client
+    old_client_ref = weakref.ref(old_client)
+
+    new_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
+
+    assert new_embedder.sentence_transformer_client is not old_client
+    del old_embedder, old_client
+    gc.collect()
+    assert old_client_ref() is None
+
+
+def test_sentence_transformers_embedder_retries_failed_model_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed replacement should preserve the old client and allow retry."""
+    reject_new_model = True
+
+    class DummyEmbedder:
+        def __init__(
+            self,
+            *,
+            sentence_transformer_client: object | None = None,
+            **kwargs: object,
+        ) -> None:
+            if kwargs["id"] == "sentence-transformers/new" and reject_new_model:
+                error_message = "model load failed"
+                raise RuntimeError(error_message)
+            self.sentence_transformer_client = sentence_transformer_client or object()
+
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.signatures.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+
+    old_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/old")
+
+    with pytest.raises(RuntimeError, match="model load failed"):
+        create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
+
+    old_embedder_after_failure = create_sentence_transformers_embedder(
+        TEST_RUNTIME_PATHS,
+        "sentence-transformers/old",
+    )
+    assert old_embedder_after_failure.sentence_transformer_client is old_embedder.sentence_transformer_client
+
+    reject_new_model = False
+    new_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
+    assert new_embedder.sentence_transformer_client is not old_embedder.sentence_transformer_client
 
 
 class _ConcurrencyProbe:
@@ -177,6 +321,7 @@ def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyP
     class DummyEmbedder:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
+            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
 
         def get_embedding(self, text: str) -> list[float]:
             probe.observe()
@@ -186,9 +331,9 @@ def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyP
             probe.observe()
             return [float(len(text))], {"tokens": len(text)}
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
     )
     return create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
@@ -201,8 +346,8 @@ def test_sentence_transformers_usage_delegation_does_not_deadlock(
     """Agno's usage method may delegate back through the serialized embedding entry point."""
 
     class DelegatingEmbedder:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
+        def __init__(self, **kwargs: object) -> None:
+            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
 
         def get_embedding(self, text: str) -> list[float]:
             return [float(len(text))]
@@ -210,9 +355,9 @@ def test_sentence_transformers_usage_delegation_does_not_deadlock(
         def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
             return self.get_embedding(text), None
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DelegatingEmbedder),
     )
     embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
@@ -282,22 +427,22 @@ def test_mem0_custom_openai_compatible_signature_keeps_implicit_dimensions_unset
     """Custom OpenAI-compatible models should not be keyed as explicit 1536-d vectors."""
     assert effective_mem0_embedder_signature(
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         host="http://example.com/v1",
     ) == (
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         "http://example.com/v1",
         "",
     )
     assert effective_mem0_embedder_signature(
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         host="http://example.com/v1",
         dimensions=1536,
     ) == (
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         "http://example.com/v1",
         "1536",
     )

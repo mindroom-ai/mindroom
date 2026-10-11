@@ -9,9 +9,11 @@ from backend.openrouter import (
     CreatedOpenRouterKey,
     OpenRouterConfigurationError,
     OpenRouterError,
+    OpenRouterKeyNotFoundError,
     OpenRouterKeyPlan,
     create_openrouter_key,
     delete_openrouter_key,
+    set_openrouter_key_disabled,
 )
 
 
@@ -257,3 +259,33 @@ def test_delete_openrouter_key_rejects_malformed_success_response() -> None:
 
     with pytest.raises(OpenRouterError, match=r"invalid response.*\[\]"):
         delete_openrouter_key(management_api_key="sk-or-v1-management", key_hash="hash_123", http_delete=http_delete)
+
+
+@pytest.mark.parametrize("disabled", [True, False])
+def test_set_openrouter_key_disabled_patches_key(disabled: bool) -> None:
+    """Lifecycle holds disable a key without deleting it, and resubscribing re-enables it."""
+    captured: dict[str, Any] = {}
+
+    def http_patch(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
+        captured.update(url=url, headers=headers, body=json.loads(body))
+        return 200, b'{"data":{"hash":"hash_123"}}'
+
+    set_openrouter_key_disabled(
+        management_api_key="sk-or-v1-management", key_hash="hash_123", disabled=disabled, http_patch=http_patch
+    )
+
+    assert captured["url"] == "https://openrouter.ai/api/v1/keys/hash_123"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-v1-management"
+    assert captured["body"] == {"disabled": disabled}
+
+
+def test_missing_openrouter_key_raises_not_found() -> None:
+    """A 404 is distinguishable so teardown can treat an already-deleted key as done."""
+
+    def http_patch(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:  # noqa: ARG001
+        return 404, b'{"error":{"message":"Key not found"}}'
+
+    with pytest.raises(OpenRouterKeyNotFoundError, match="status 404"):
+        set_openrouter_key_disabled(
+            management_api_key="sk-or-v1-management", key_hash="hash_123", disabled=True, http_patch=http_patch
+        )

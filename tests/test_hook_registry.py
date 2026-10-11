@@ -5,6 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
+from mindroom.automations import automation
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import HookOverrideConfig, PluginEntryConfig
@@ -48,6 +51,7 @@ def _plugin(
     return SimpleNamespace(
         name=name,
         discovered_hooks=tuple(callbacks),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(
             path=f"./plugins/{name}",
             settings=settings or {},
@@ -82,6 +86,13 @@ def _message_received_context(
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         ),
     )
+
+
+@pytest.mark.parametrize("event_name", [EVENT_MESSAGE_RECEIVED, "agent:stopped", "custom:test"])
+def test_required_hooks_are_limited_to_startup(event_name: str) -> None:
+    """Required initialization must not change ordinary observer fault isolation."""
+    with pytest.raises(ValueError, match="required hooks are only supported for agent:started"):
+        hook(event_name, required=True)
 
 
 def test_hook_registry_orders_by_priority_plugin_order_and_lineno() -> None:
@@ -181,3 +192,22 @@ def test_hook_registry_scope_filtering_uses_decorator_agents_and_rooms(tmp_path:
     eligible = _eligible_hooks(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path))
 
     assert [hook.hook_name for hook in eligible] == ["matching"]
+
+
+def test_the_plugin_snapshot_carries_the_automations_plugins_register() -> None:
+    """A plugin's decorated check reaches the runner through the compiled snapshot, beside the built-ins."""
+
+    def check(ctx: object) -> None:  # noqa: ARG001
+        return None
+
+    digest = automation("weekly_digest")(check)
+    plugin = _plugin("digest", [])
+    plugin.discovered_automations = (digest,)
+
+    registry = HookRegistry.from_plugins([plugin])
+
+    definition = registry.automations.get("weekly_digest")
+    assert definition is not None
+    assert definition.check is digest
+    assert registry.automations.get("dreaming") is not None
+    assert HookRegistry.empty().automations.get("weekly_digest") is None

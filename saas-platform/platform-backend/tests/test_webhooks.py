@@ -1,11 +1,43 @@
 """Comprehensive HTTP API tests for webhook endpoints."""
 
-from unittest.mock import MagicMock, Mock, patch
+import hashlib
+import hmac
+import json
+import os
+import subprocess
+import sys
+import time
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import stripe
 from backend.pricing import get_stripe_price_id
 from fastapi.testclient import TestClient
+
+_WEBHOOK_SECRET = "whsec_test_secret"  # noqa: S105
+
+
+def _signed_headers(body: bytes, secret: str) -> dict[str, str]:
+    """Build a Stripe-Signature header the way Stripe signs webhook payloads."""
+    timestamp = int(time.time())
+    signature = hmac.new(secret.encode(), f"{timestamp}.{body.decode()}".encode(), hashlib.sha256).hexdigest()
+    return {"Stripe-Signature": f"t={timestamp},v1={signature}"}
+
+
+def test_whitespace_webhook_secret_is_unconfigured() -> None:
+    """A whitespace-only secret is as forgeable as an empty one, so startup must treat it as missing."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STRIPE_WEBHOOK_SECRET")}
+    env |= {"STRIPE_SECRET_KEY": "sk_test", "STRIPE_WEBHOOK_SECRET": " \n"}
+    completed = subprocess.run(
+        [sys.executable, "-c", "import backend.config as c; print(repr(c.STRIPE_WEBHOOK_SECRET))"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert completed.stdout.strip() == "''"
+    assert "STRIPE_WEBHOOK_SECRET is not configured" in completed.stderr
 
 
 class TestWebhookEndpoints:
@@ -18,10 +50,28 @@ class TestWebhookEndpoints:
 
         return TestClient(app)
 
+    @pytest.fixture(autouse=True)
+    def webhook_secret(self):
+        """Configure a webhook secret so requests reach signature verification."""
+        with patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", _WEBHOOK_SECRET):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def mock_reconcile(self):
+        """Keep instance lifecycle side effects out of webhook persistence tests."""
+        with patch("backend.routes.webhooks.reconcile_account_instances", new=AsyncMock()) as mock:
+            yield mock
+
     @pytest.fixture
     def mock_stripe_signature(self):
         """Mock Stripe signature verification."""
-        with patch("backend.routes.webhooks.stripe.Webhook.construct_event") as mock:
+        with (
+            patch("backend.routes.webhooks.stripe.Webhook.construct_event") as mock,
+            patch(
+                "backend.routes.webhooks.stripe.Subscription.retrieve",
+                side_effect=lambda _id: mock.return_value.data.object,
+            ),
+        ):
             yield mock
 
     @pytest.fixture
@@ -29,6 +79,8 @@ class TestWebhookEndpoints:
         """Mock Supabase client."""
         with patch("backend.routes.webhooks.ensure_supabase") as mock:
             sb = MagicMock()
+            # No stored Stripe subscription id, so update events are never treated as superseded.
+            sb.table.return_value.select.return_value.eq.return_value.execute.return_value = Mock(data=[])
             mock.return_value = sb
             yield sb
 
@@ -62,11 +114,11 @@ class TestWebhookEndpoints:
                             "metadata": {"tier": tier, "billing_cycle": billing_cycle},
                         },
                         "quantity": quantity,
+                        "current_period_start": 1700000000,
+                        "current_period_end": 1702678400,
                     }
                 ]
             },
-            "current_period_start": 1700000000,
-            "current_period_end": 1702678400,
             "trial_end": None,
         }
 
@@ -78,11 +130,11 @@ class TestWebhookEndpoints:
         amount_paid: int = 2900,  # in cents
         currency: str = "usd",
     ) -> dict:
-        """Create test invoice data."""
+        """Create test invoice data in the basil API shape, where the subscription sits under ``parent``."""
         return {
             "id": invoice_id,
             "customer": customer_id,
-            "subscription": subscription_id,
+            "parent": {"type": "subscription_details", "subscription_details": {"subscription": subscription_id}},
             "amount_paid": amount_paid,
             "currency": currency,
             "created": 1700000000,
@@ -107,6 +159,58 @@ class TestWebhookEndpoints:
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "invalid_sig"})
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid signature"
+
+    def _subscription_event_body(self) -> bytes:
+        """Serialize a subscription event granting a paid tier."""
+        event = {
+            "id": "evt_test_subscription",
+            "object": "event",
+            "type": "customer.subscription.created",
+            "data": {"object": self._create_subscription_data(tier="pro")},
+        }
+        return json.dumps(event).encode()
+
+    def test_webhook_rejects_events_without_configured_secret(self, client: TestClient, mock_supabase: MagicMock):
+        """An empty secret must not let anyone sign events with an empty HMAC key."""
+        body = self._subscription_event_body()
+
+        with patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", ""):
+            response = client.post("/webhooks/stripe", content=body, headers=_signed_headers(body, ""))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Webhook not configured"
+        mock_supabase.table.assert_not_called()
+
+    @pytest.mark.parametrize(("signing_secret", "status_code"), [(_WEBHOOK_SECRET, 200), ("", 400)])
+    def test_webhook_verifies_real_stripe_signature(
+        self, client: TestClient, mock_supabase: MagicMock, signing_secret: str, status_code: int
+    ):
+        """Only events signed with the configured secret reach the handlers."""
+        body = self._subscription_event_body()
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+        mock_supabase.table.reset_mock()
+
+        response = client.post("/webhooks/stripe", content=body, headers=_signed_headers(body, signing_secret))
+
+        assert response.status_code == status_code
+        if status_code == 200:
+            assert response.json() == {"received": True, "error": None}
+            mock_supabase.table.assert_any_call("subscriptions")
+        else:
+            mock_supabase.table.assert_not_called()
+
+    @pytest.mark.parametrize(("webhook_secret", "stripe_ok"), [("", False), (_WEBHOOK_SECRET, True)])
+    def test_health_reports_missing_webhook_secret(self, client: TestClient, webhook_secret: str, stripe_ok: bool):
+        """Stripe is unhealthy when webhooks cannot be verified."""
+        with (
+            patch("backend.routes.health.ensure_supabase"),
+            patch("backend.routes.health.stripe.api_key", "sk_test"),
+            patch("backend.routes.health.STRIPE_WEBHOOK_SECRET", webhook_secret),
+        ):
+            response = client.get("/health")
+
+        assert response.json() == {"status": "ok" if stripe_ok else "degraded", "supabase": True, "stripe": stripe_ok}
 
     def test_subscription_created_success(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -157,6 +261,33 @@ class TestWebhookEndpoints:
         assert result["error"] is None
         inserted_payloads = [call_.args[0] for call_ in mock_supabase.table().insert.call_args_list if call_.args]
         assert any(payload.get("tier") == "byok" for payload in inserted_payloads)
+
+    @pytest.mark.parametrize(
+        ("event_type", "reconciles"),
+        [("customer.subscription.updated", True), ("customer.subscription.trial_will_end", False)],
+    )
+    def test_lifecycle_events_reconcile_account_instances(
+        self,
+        client: TestClient,
+        mock_stripe_signature: Mock,
+        mock_supabase: MagicMock,
+        mock_reconcile: AsyncMock,
+        event_type: str,
+        reconciles: bool,
+    ):
+        """Subscription and invoice events reconcile the account's instances after responding."""
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = Mock(
+            data={"id": "acc_123"}
+        )
+        mock_stripe_signature.return_value = self._create_stripe_event(event_type, self._create_subscription_data())
+
+        response = client.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "test_sig"})
+
+        assert response.status_code == 200
+        if reconciles:
+            mock_reconcile.assert_awaited_once_with("acc_123")
+        else:
+            mock_reconcile.assert_not_awaited()
 
     def test_subscription_created_no_account(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -209,7 +340,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"account_id": "account_123"})
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[{"account_id": "account_123"}])
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
@@ -221,6 +352,76 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
+    @pytest.mark.parametrize("event_kind", ["created", "updated"])
+    @pytest.mark.parametrize("period_timestamp", [None, 0, 1700000000])
+    def test_subscription_projection_preserves_event_fields(
+        self,
+        client: TestClient,
+        mock_stripe_signature: Mock,
+        mock_supabase: MagicMock,
+        event_kind: str,
+        period_timestamp: int | None,
+    ):
+        """Common projection retains timestamp omission and event-specific fields."""
+        subscription = self._create_subscription_data(tier="pro")
+        subscription["items"]["data"][0]["current_period_start"] = period_timestamp
+        subscription["items"]["data"][0]["current_period_end"] = period_timestamp
+        subscription["trial_end"] = 0
+        subscription["canceled_at"] = 0
+        mock_stripe_signature.return_value = self._create_stripe_event(
+            f"customer.subscription.{event_kind}", subscription
+        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
+
+        assert response.status_code == 200
+        assert response.json() == {"received": True, "error": None}
+        writes = (
+            mock_supabase.table().insert.call_args_list
+            if event_kind == "created"
+            else mock_supabase.table().update.call_args_list
+        )
+        payload = next(
+            call_.args[0]
+            for call_ in writes
+            if call_.args and call_.args[0].get("stripe_subscription_id") == "sub_test_123"
+        )
+        expected = {
+            "stripe_subscription_id": "sub_test_123",
+            "stripe_price_id": "price_pro_monthly",
+            "tier": "pro",
+            "status": "active",
+            "trial_ends_at": "1970-01-01T00:00:00+00:00",
+        }
+        if event_kind == "created":
+            expected["account_id"] = "account_123"
+        else:
+            expected["cancelled_at"] = "1970-01-01T00:00:00+00:00"
+        if period_timestamp:
+            expected["current_period_start"] = "2023-11-14T22:13:20+00:00"
+            expected["current_period_end"] = "2023-11-14T22:13:20+00:00"
+        assert payload["updated_at"]
+        assert {key: value for key, value in payload.items() if key != "updated_at"} == expected
+
+    @pytest.mark.parametrize("event_kind", ["created", "updated"])
+    def test_subscription_requires_billing_cycle(
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock, event_kind: str
+    ):
+        """Both events reject a price that has a tier but no billing cycle."""
+        subscription = self._create_subscription_data()
+        subscription["items"]["data"][0]["price"]["metadata"] = {"tier": "byok"}
+        mock_stripe_signature.return_value = self._create_stripe_event(
+            f"customer.subscription.{event_kind}", subscription
+        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
+
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
+
+        assert response.status_code == 200
+        assert "Unable to determine billing cycle" in response.json()["error"]
+
     def test_subscription_deleted_not_found(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
@@ -231,14 +432,14 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock subscription not found
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
 
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
-        assert response.json() == {"received": True, "error": "Failed to process subscription deletion"}
+        assert response.json() == {"received": True, "error": None}
 
     def test_payment_succeeded(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test successful payment webhook."""
@@ -248,8 +449,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
-        mock_supabase.table().insert().execute.return_value = Mock()
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[{"id": "account_123"}])
 
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
@@ -260,17 +460,18 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-        # Verify both payments and usage tables were updated
-        insert_calls = mock_supabase.table().insert.call_count
-        assert insert_calls >= 2  # payments + usage
+        # Verify the payment was recorded
+        payment = mock_supabase.table().upsert.call_args.args[0]
+        assert payment["subscription_id"] == "sub_test_123"
+        assert payment["account_id"] == "account_123"
 
     def test_payment_succeeded_no_subscription(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test payment webhook for one-time payment (no subscription)."""
         # Setup
-        invoice_data = self._create_invoice_data(subscription_id=None)
-        del invoice_data["subscription"]
+        invoice_data = self._create_invoice_data()
+        invoice_data["parent"] = None
         event = self._create_stripe_event("invoice.payment_succeeded", invoice_data)
         mock_stripe_signature.return_value = event
 
@@ -289,7 +490,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"account_id": "account_123"})
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[{"account_id": "account_123"}])
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
@@ -311,14 +512,14 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock no subscription found
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
 
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
-        assert response.json() == {"received": True, "error": "Failed to process payment failure"}
+        assert response.json() == {"received": True, "error": None}
 
     def test_trial_will_end(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test trial ending webhook."""
@@ -380,9 +581,9 @@ class TestWebhookEndpoints:
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        # Verify
-        assert response.status_code == 200
-        assert response.json() == {"received": True, "error": "Database error"}
+        # A failed subscription event is not acknowledged, so Stripe redelivers it.
+        assert response.status_code == 500
+        mock_supabase.table.return_value.insert.assert_not_called()
 
     def test_webhook_event_recording_failure(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -447,43 +648,6 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-    def test_pro_plan_uses_configured_limits(
-        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
-    ):
-        """Test pro plan ignores Stripe quantity and uses configured limits."""
-        # Setup
-        subscription_data = self._create_subscription_data(tier="pro", quantity=10)
-        event = self._create_stripe_event("customer.subscription.created", subscription_data)
-        mock_stripe_signature.return_value = event
-
-        # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
-
-        # Capture the insert call to verify configured limits
-        inserted_payloads = []
-
-        def capture_insert(data):
-            inserted_payloads.append(data)
-            return Mock(execute=Mock(return_value=Mock()))
-
-        mock_supabase.table().insert = capture_insert
-
-        # Make request
-        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
-
-        # Verify
-        assert response.status_code == 200
-        data = response.json()
-        assert data["received"] is True
-        assert data["error"] is None
-
-        subscription_payload = next(
-            payload for payload in inserted_payloads if payload.get("stripe_subscription_id") == "sub_test_123"
-        )
-        assert subscription_payload["max_agents"] == 999999
-        assert subscription_payload["max_messages_per_day"] == 999999
-
     def test_subscription_update_with_cancellation(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
@@ -542,12 +706,9 @@ class TestWebhookEndpoints:
         # Make request
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
-        # Verify - should fail gracefully
+        # The tier can never be determined, so the event is recorded with an error instead of retried.
         assert response.status_code == 200
-        # Should have an error since tier couldn't be determined
-        result = response.json()
-        assert result["received"] is True
-        assert "error" in result or "Unable to determine tier" in str(result)
+        assert "Unable to determine tier" in response.json()["error"]
 
     def test_price_metadata_requires_tier(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -563,6 +724,4 @@ class TestWebhookEndpoints:
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         assert response.status_code == 200
-        result = response.json()
-        assert result["received"] is True
-        assert "Unable to determine tier" in result["error"]
+        assert "Unable to determine tier" in response.json()["error"]

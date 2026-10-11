@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from typing import Any
 
 _LONG_TEXT_METADATA_KEY = "io.mindroom.long_text"
+# What makes a sidecar preview an ``m.file`` event: the sidecar marker plus the file it points at.
+# A visible layer has no edit wrapper of its own, so a nested ``m.new_content`` is dropped too.
+_SETTLED_DROPPED_KEYS = frozenset({_LONG_TEXT_METADATA_KEY, "url", "file", "filename", "info", "m.new_content"})
 
 
 def _validated_mxc_url(value: object) -> str | None:
@@ -53,3 +56,14 @@ def holds_unresolved_sidecar(content: Mapping[str, Any]) -> bool:
     false. Nothing has to remember to clear a flag.
     """
     return sidecar_content_to_resolve(content) is not None
+
+
+def without_sidecar_reference(content: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one visible content layer as plain text with no sidecar or file reference.
+
+    Left as a file event, the preview would still look like shared media, and
+    collecting a thread's attachments would download the sidecar on every turn.
+    """
+    plain = {key: value for key, value in content.items() if key not in _SETTLED_DROPPED_KEYS}
+    plain["msgtype"] = "m.text"
+    return plain

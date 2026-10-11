@@ -13,15 +13,17 @@ from fastapi import HTTPException
 
 from mindroom.api import sandbox_exec
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     requires_explicit_private_agent_visibility,
-    visible_state_roots_for_worker_key,
+    visible_workspace_roots,
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import (
     LocalWorkerStatePaths,
+    ensure_local_script_worker_state_locked,
     ensure_local_worker_state_locked,
     get_local_worker_manager,
     local_worker_state_paths_for_root,
@@ -30,6 +32,9 @@ from mindroom.workers.backends.local import (
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -147,6 +152,7 @@ def _prepare_worker(
     runtime_paths: RuntimePaths,
     *,
     runner_token: str | None = None,
+    run_scoped_script: bool = False,
 ) -> WorkerHandle:
     """Ensure a worker is ready and return its handle."""
     dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
@@ -160,7 +166,10 @@ def _prepare_worker(
             raise WorkerBackendError(msg)
         paths = local_worker_state_paths_for_root(dedicated_root)
         try:
-            ensure_local_worker_state_locked(paths)
+            if run_scoped_script:
+                ensure_local_script_worker_state_locked(paths)
+            else:
+                ensure_local_worker_state_locked(paths)
         except Exception as exc:
             failure_reason = f"Failed to initialize dedicated worker '{worker_key}': {exc}"
             raise WorkerBackendError(failure_reason) from exc
@@ -184,6 +193,21 @@ def _prepare_worker(
     return get_local_worker_manager(runtime_paths).ensure_worker(WorkerSpec(worker_key))
 
 
+def prepare_script_worker(
+    worker_key: str,
+    runtime_paths: RuntimePaths,
+    *,
+    runner_token: str | None = None,
+) -> WorkerHandle:
+    """Prepare one run-scoped script worker with its lightweight runtime."""
+    return _prepare_worker(
+        worker_key,
+        runtime_paths,
+        runner_token=runner_token,
+        run_scoped_script=True,
+    )
+
+
 def normalize_request_worker_key(
     worker_key: str | None,
     runtime_paths: RuntimePaths,
@@ -199,36 +223,34 @@ def _resolve_worker_base_dir(
     storage_root: Path,
     worker_key: str,
     requested_base_dir: object | None,
-    private_agent_names: frozenset[str] = frozenset(),
+    workspace_roots: tuple[Path, ...],
 ) -> Path:
-    """Resolve the effective base_dir inside shared storage or the worker root."""
-    shared_root = storage_root.resolve()
+    """Resolve the effective base_dir inside one visible workspace or the worker root."""
     if requested_base_dir is None:
         return paths.workspace.resolve()
     if not isinstance(requested_base_dir, str):
         msg = "base_dir must be a string path."
         raise TypeError(msg)
 
-    visible_state_roots = visible_state_roots_for_worker_key(
-        storage_root,
-        worker_key,
-        private_agent_names=private_agent_names,
-    )
     raw_path = Path(requested_base_dir).expanduser()
     if raw_path.is_absolute():
         candidate = raw_path.resolve()
-    elif visible_state_roots:
-        candidate = (shared_root / raw_path).resolve()
+    elif workspace_roots:
+        candidate = (storage_root.resolve() / raw_path).resolve()
     else:
-        msg = f"base_dir requires a resolved worker key with visible state roots: {worker_key}"
+        msg = f"base_dir requires a resolved worker key with visible workspaces: {worker_key}"
         raise ValueError(msg)
 
-    allowed_roots = (paths.root.resolve(), *visible_state_roots)
-    if not any(candidate.is_relative_to(root) for root in allowed_roots):
-        msg = f"base_dir must stay inside the allowed state roots or worker root: {requested_base_dir}"
-        raise ValueError(msg)
-
-    return candidate
+    for root in (paths.root.resolve(), *workspace_roots):
+        # Workspaces authorize their configured location, not a linked replacement.
+        if root.resolve() != root:
+            continue
+        try:
+            return resolve_path_within_root(root, candidate, symlinks="internal")
+        except ValueError:
+            continue
+    msg = f"base_dir must stay inside a visible workspace or the worker root: {requested_base_dir}"
+    raise ValueError(msg)
 
 
 def ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dict[str, object] | None:
@@ -260,6 +282,7 @@ def prepare_worker_request(
     worker_key: str | None,
     tool_init_overrides: dict[str, object],
     runtime_paths: RuntimePaths,
+    agent_policies: Mapping[str, ResolvedAgentPolicy],
     private_agent_names: frozenset[str] | None = None,
     runner_token: str | None = None,
 ) -> PreparedWorkerRequest:
@@ -280,13 +303,19 @@ def prepare_worker_request(
 
     try:
         paths = local_worker_state_paths_from_handle(worker_handle)
+        storage_root = sandbox_exec.runner_storage_root(runtime_paths)
         runtime_overrides: dict[str, object] = {
             "base_dir": _resolve_worker_base_dir(
                 paths,
-                sandbox_exec.runner_storage_root(runtime_paths),
+                storage_root,
                 worker_key,
                 tool_init_overrides.get("base_dir"),
-                private_agent_names=_explicit_private_agent_names(worker_key, private_agent_names),
+                visible_workspace_roots(
+                    storage_root,
+                    worker_key,
+                    agent_policies,
+                    private_agent_names=_explicit_private_agent_names(worker_key, private_agent_names),
+                ),
             ),
         }
     except (FileNotFoundError, TypeError, ValueError) as exc:
@@ -304,6 +333,7 @@ def resolve_prepared_worker_request(
     worker_key: str | None,
     tool_init_overrides: dict[str, object],
     runtime_paths: RuntimePaths,
+    agent_policies: Mapping[str, ResolvedAgentPolicy],
     private_agent_names: frozenset[str] | None = None,
     prepared_worker: PreparedWorkerRequest | None,
     runner_token: str | None = None,
@@ -315,6 +345,7 @@ def resolve_prepared_worker_request(
         worker_key=worker_key,
         tool_init_overrides=tool_init_overrides,
         runtime_paths=runtime_paths,
+        agent_policies=agent_policies,
         private_agent_names=private_agent_names,
         runner_token=runner_token,
     )

@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+from mindroom.external_triggers.models import MAX_REPLAY_KEY_BYTES, replay_key_too_large
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -88,6 +90,9 @@ class TriggerSignatureHeaders:
         """Validate header values that are independent of configured key material."""
         if not self.nonce:
             msg = "trigger signature nonce must not be empty"
+            raise TriggerAuthError(msg)
+        if replay_key_too_large(self.nonce):
+            msg = f"trigger signature nonce must be at most {MAX_REPLAY_KEY_BYTES} bytes once JSON-escaped"
             raise TriggerAuthError(msg)
 
 

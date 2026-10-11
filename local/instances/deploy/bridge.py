@@ -13,18 +13,21 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
 import matty
 import typer
 import yaml
+from deploy import _write_private_file
 from dotenv import load_dotenv
 from jinja2 import Template
 from pydantic import BaseModel, Field
@@ -49,7 +52,7 @@ load_dotenv(SCRIPT_DIR / ".env.telegram")
 
 
 # Bridge types and their configurations
-class BridgeType(str, Enum):
+class BridgeType(StrEnum):
     """Supported bridge types."""
 
     TELEGRAM = "telegram"
@@ -80,9 +83,6 @@ class BridgeConfig(BaseModel):
     matrix_server: str | None = None
     matrix_domain: str | None = None
 
-    # Bridge-specific credentials (stored separately from config)
-    credentials: dict[str, Any] = Field(default_factory=dict)
-
 
 class BridgeDefaults(BaseModel):
     """Default configuration for bridge types."""
@@ -99,6 +99,10 @@ class BridgeRegistry(BaseModel):
     allocated_ports: dict[BridgeType, list[int]] = Field(default_factory=dict)
     defaults: BridgeDefaults = Field(default_factory=BridgeDefaults)
 
+
+MATRIX_USER_ID_PATTERN = re.compile(r"@[^:\s]+:\S+")
+# Lowest permission level of each bridge; mautrix-telegram (legacy) and mautrix-slack (bridgev2) name it differently.
+RELAY_PERMISSION_LEVELS = {BridgeType.TELEGRAM: "relaybot", BridgeType.SLACK: "relay"}
 
 # Bridge template configurations
 BRIDGE_TEMPLATES = {
@@ -138,10 +142,29 @@ def load_registry() -> BridgeRegistry:
 
 
 def save_registry(registry: BridgeRegistry) -> None:
-    """Save the bridge registry."""
-    with BRIDGE_REGISTRY_FILE.open("w") as f:
-        data = registry.model_dump(mode="json")
-        json.dump(data, f, indent=2)
+    """Save the bridge registry owner-only, replacing any platform tokens older versions stored in it."""
+    _write_private_file(BRIDGE_REGISTRY_FILE, json.dumps(registry.model_dump(mode="json"), indent=2))
+
+
+def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
+    """Make the bridge config and registration owner-only, including copies older versions wrote at the umask."""
+    for path in (Path(bridge.data_dir) / "data" / "config.yaml", Path(bridge.data_dir) / "data" / "registration.yaml"):
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                msg = f"Refusing non-regular file: {path}"
+                raise ValueError(msg)
+            if info.st_mode & 0o077 == 0:
+                continue
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as f:
+                os.fchmod(f.fileno(), 0o600)
+        except FileNotFoundError:
+            continue
+        except PermissionError as e:
+            # A non-root operator cannot chmod files the bridge container already owns.
+            console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only: {e}")
+            # A sudo chmod of this path would follow a link the container swaps in before it runs.
+            console.print("  Rerun this bridge.py command as root, which changes the file without following links.")
 
 
 def load_instances() -> dict[str, Any]:
@@ -222,7 +245,11 @@ def _get_matrix_info(instance_name: str) -> tuple[str, str, str]:
     return matrix_type, matrix_domain, matrix_url
 
 
-def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[str, Any]) -> Path:
+def _create_bridge_docker_compose(
+    bridge: BridgeConfig,
+    bridge_template: dict[str, Any],
+    credentials: dict[str, Any],
+) -> Path:
     """Create a docker-compose file for a bridge using Jinja2 template."""
     compose_file = Path(bridge.data_dir) / "docker-compose.yml"
 
@@ -251,8 +278,8 @@ def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[st
             {
                 "smtp_port": bridge.port,
                 "imap_port": bridge.port + 1,
-                "email_domain": bridge.credentials.get("domain", "example.com"),
-                "smtp_host": bridge.credentials.get("smtp_host", "smtp.example.com"),
+                "email_domain": credentials.get("domain", "example.com"),
+                "smtp_host": credentials.get("smtp_host", "smtp.example.com"),
             },
         )
 
@@ -266,8 +293,11 @@ def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[st
     return compose_file
 
 
-def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path:  # noqa: ARG001
-    """Generate bridge configuration from template."""
+def _generate_bridge_config(bridge: BridgeConfig, credentials: dict[str, Any], admin_user_id: str | None) -> Path:
+    """Generate bridge configuration from template.
+
+    Instances from older deploy templates allow open registration, so only the chosen admin gets more than relay access.
+    """
     config_file = Path(bridge.data_dir) / "data" / "config.yaml"
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -290,16 +320,9 @@ def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path: 
                     "address": "http://0.0.0.0:29317",
                 },
                 "telegram": {
-                    "api_id": bridge.credentials.get("api_id"),
-                    "api_hash": bridge.credentials.get("api_hash"),
-                    "bot_token": bridge.credentials.get("bot_token"),
-                },
-                "bridge": {
-                    "permissions": {
-                        "*": "relaybot",
-                        bridge.matrix_domain: "user",
-                        f"@admin:{bridge.matrix_domain}": "admin",
-                    },
+                    "api_id": credentials.get("api_id"),
+                    "api_hash": credentials.get("api_hash"),
+                    "bot_token": credentials.get("bot_token"),
                 },
             }
     elif bridge.bridge_type == BridgeType.SLACK:
@@ -314,16 +337,11 @@ def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path: 
                 "address": "http://0.0.0.0:29317",
             },
             "slack": {
-                "app_token": bridge.credentials.get("app_token"),
-                "bot_token": bridge.credentials.get("bot_token"),
-                "team_id": bridge.credentials.get("team_id"),
+                "app_token": credentials.get("app_token"),
+                "bot_token": credentials.get("bot_token"),
+                "team_id": credentials.get("team_id"),
             },
             "bridge": {
-                "permissions": {
-                    "*": "relaybot",
-                    bridge.matrix_domain: "user",
-                    f"@admin:{bridge.matrix_domain}": "admin",
-                },
                 "username_template": "slack_{{.}}",
                 "displayname_template": "{{.RealName}} (Slack)",
             },
@@ -341,30 +359,35 @@ def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path: 
     if "homeserver" in config_data:
         config_data["homeserver"]["address"] = bridge.matrix_server
         config_data["homeserver"]["domain"] = bridge.matrix_domain
+    if admin_user_id is not None:
+        relay_level = RELAY_PERMISSION_LEVELS[bridge.bridge_type]
+        config_data.setdefault("bridge", {})["permissions"] = {"*": relay_level, admin_user_id: "admin"}
 
     # Add credentials
     if bridge.bridge_type == BridgeType.TELEGRAM and "telegram" in config_data:
-        config_data["telegram"]["api_id"] = int(bridge.credentials.get("api_id", 0))
-        config_data["telegram"]["api_hash"] = bridge.credentials.get("api_hash", "")
-        config_data["telegram"]["bot_token"] = bridge.credentials.get("bot_token", "")
+        config_data["telegram"]["api_id"] = int(credentials.get("api_id", 0))
+        config_data["telegram"]["api_hash"] = credentials.get("api_hash", "")
+        config_data["telegram"]["bot_token"] = credentials.get("bot_token", "")
     elif bridge.bridge_type == BridgeType.SLACK and "slack" in config_data:
-        config_data["slack"]["app_token"] = bridge.credentials.get("app_token", "")
-        config_data["slack"]["bot_token"] = bridge.credentials.get("bot_token", "")
-        config_data["slack"]["team_id"] = bridge.credentials.get("team_id", "")
+        config_data["slack"]["app_token"] = credentials.get("app_token", "")
+        config_data["slack"]["bot_token"] = credentials.get("bot_token", "")
+        config_data["slack"]["team_id"] = credentials.get("team_id", "")
 
-    with config_file.open("w") as f:
-        yaml.dump(config_data, f, default_flow_style=False)
+    # The config holds the platform credentials.
+    _write_private_file(config_file, yaml.dump(config_data, default_flow_style=False))
 
     bridge.config_file = str(config_file)
     return config_file
 
 
-def _register_with_tuwunel(bridge: BridgeConfig, registration_yaml: str) -> bool:  # noqa: ARG001
+def _register_with_tuwunel(bridge: BridgeConfig, registration_yaml: str) -> bool:
     """Register bridge with Tuwunel/Conduit via admin room API."""
     console.print("[yellow]i[/yellow] Tuwunel registration requires manual steps:")
-    console.print(f"1. Join the admin room: #admins:{bridge.matrix_domain}")
-    console.print("2. Send: !admin appservices register")
-    console.print("3. Paste the registration.yaml content")
+    console.print(f"1. Join the admin room as an authorized admin: #admins:{bridge.matrix_domain}")
+    console.print("2. Send this command and fenced YAML together as one message:")
+    message = "!admin appservices register\n```\n" + registration_yaml.rstrip("\n") + "\n```"
+    console.print(message, markup=False, highlight=False, soft_wrap=True)
+    console.print("3. Check the response, then verify with: !admin appservices list")
     console.print("\n[dim]Registration content saved to:[/dim]")
     console.print(f"  {bridge.registration_file}")
 
@@ -373,7 +396,7 @@ def _register_with_tuwunel(bridge: BridgeConfig, registration_yaml: str) -> bool
     console.print("The bridge will attempt this automatically when started.")
 
     console.print("\n[yellow]After registration, run:[/yellow]")
-    console.print(f"  ./bridge.py start {bridge.bridge_type} --instance {bridge.instance_name}")
+    console.print(f"  ./bridge.py start {bridge.bridge_type.value} --instance {bridge.instance_name}")
     return True
 
 
@@ -390,7 +413,10 @@ def _register_with_synapse(bridge: BridgeConfig, registration_file: Path) -> boo
         return False
 
     # Add registration file to app_service_config_files
-    with synapse_config.open() as f:
+    with os.fdopen(os.open(synapse_config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)) as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            msg = f"Refusing non-regular file: {synapse_config}"
+            raise ValueError(msg)
         config = yaml.safe_load(f)
 
     if "app_service_config_files" not in config:
@@ -401,11 +427,12 @@ def _register_with_synapse(bridge: BridgeConfig, registration_file: Path) -> boo
     if reg_path not in config["app_service_config_files"]:
         config["app_service_config_files"].append(reg_path)
 
-    with synapse_config.open("w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+    _write_private_file(synapse_config, yaml.dump(config, default_flow_style=False))
 
     console.print("[green]✓[/green] Added to Synapse configuration")
-    console.print("[yellow]i[/yellow] Restart Synapse to apply: './deploy.py restart --only-matrix'")
+    console.print(
+        f"[yellow]i[/yellow] Restart Synapse to apply: './deploy.py restart {bridge.instance_name} --only-matrix'",
+    )
     return True
 
 
@@ -418,6 +445,11 @@ def add(  # noqa: PLR0915
     bot_token: str | None = typer.Option(None, "--bot-token", help="Telegram/Slack Bot Token"),
     app_token: str | None = typer.Option(None, "--app-token", help="Slack App Token"),
     team_id: str | None = typer.Option(None, "--team-id", help="Slack Team/Workspace ID"),
+    admin: str | None = typer.Option(
+        None,
+        "--admin",
+        help="Matrix user ID that administers the Telegram or Slack bridge, for example @alice:m-example.com",
+    ),
 ) -> None:
     """Add and configure a bridge for a Mindroom instance."""
     registry = load_registry()
@@ -438,6 +470,14 @@ def add(  # noqa: PLR0915
         raise typer.Exit(1)
 
     template = BRIDGE_TEMPLATES[bridge_type]
+
+    # Every other account gets the relay level only, because the instance homeserver may allow open registration.
+    admin_user_id = None
+    if bridge_type in {BridgeType.TELEGRAM, BridgeType.SLACK}:
+        admin_user_id = admin or typer.prompt("Bridge admin Matrix user ID (for example @alice:m-example.com)")
+        if MATRIX_USER_ID_PATTERN.fullmatch(admin_user_id) is None:
+            console.print(f"[red]✗[/red] Bridge admin must be a full Matrix user ID like @alice:{matrix_domain}")
+            raise typer.Exit(1)
 
     # Collect credentials
     credentials = {}
@@ -520,7 +560,6 @@ def add(  # noqa: PLR0915
         data_dir=str(bridge_data_dir),
         matrix_server=matrix_url,
         matrix_domain=matrix_domain,
-        credentials=credentials,
     )
 
     # Create directories
@@ -530,11 +569,11 @@ def add(  # noqa: PLR0915
 
     # Note: Permissions are handled by Docker container
 
-    # Generate configuration
-    _generate_bridge_config(bridge, Path())  # Template path not used yet
+    # The bridge config holds the platform credentials, so the registry never stores them.
+    _generate_bridge_config(bridge, credentials, admin_user_id)
 
     # Create docker-compose file
-    _create_bridge_docker_compose(bridge, template)
+    _create_bridge_docker_compose(bridge, template, credentials)
 
     # Update registry
     if instance not in registry.bridges:
@@ -553,6 +592,14 @@ def add(  # noqa: PLR0915
     console.print(f"  [dim]Matrix:[/dim] {matrix_domain} ({matrix_type})")
     console.print("\n[yellow]Next step:[/yellow] Register the bridge")
     console.print(f"  ./bridge.py register {bridge_type} --instance {instance}")
+
+
+def _point_registration_at_bridge_container(bridge: BridgeConfig, registration_file: Path) -> None:
+    """Address the bridge by container name on the Docker network, keeping the appservice tokens owner-only."""
+    reg_data = yaml.safe_load(registration_file.read_text())
+    bridge_container = f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge"
+    reg_data["url"] = f"http://{bridge_container}:29317"
+    _write_private_file(registration_file, yaml.dump(reg_data, default_flow_style=False))
 
 
 @app.command()
@@ -610,17 +657,7 @@ def register(
         process.terminate()
         subprocess.run(f"cd {bridge.data_dir} && docker compose down", shell=True, check=False)
 
-    # Update registration with correct URL (use container name for internal communication)
-    with registration_file.open() as f:
-        reg_data = yaml.safe_load(f)
-
-    # Use the bridge container name for internal Docker network communication
-    bridge_container = f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge"
-    reg_data["url"] = f"http://{bridge_container}:29317"
-
-    with registration_file.open("w") as f:
-        yaml.dump(reg_data, f, default_flow_style=False)
-
+    _point_registration_at_bridge_container(bridge, registration_file)
     bridge.registration_file = str(registration_file)
 
     # Register based on Matrix type
@@ -793,6 +830,7 @@ def start(
             raise typer.Exit(1)
 
     for bridge in bridges_to_start:
+        _protect_bridge_secret_files(bridge)
         with console.status(f"[yellow]Starting {bridge.bridge_type} bridge...[/yellow]"):
             cmd = f"cd {bridge.data_dir} && docker compose up -d"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)

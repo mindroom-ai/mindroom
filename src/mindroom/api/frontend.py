@@ -57,12 +57,21 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
             return login_redirect
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    frontend_dir = ensure_frontend_dist_dir(api_runtime_paths(request))
+    runtime_paths = api_runtime_paths(request)
+    if first_segment == "connections" and not (runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
+        raise HTTPException(status_code=404, detail="Connections are not enabled")
+    frontend_dir = ensure_frontend_dist_dir(runtime_paths)
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")
+
+    if first_segment == "connections":
+        frontend_dir = frontend_dir / "connections"
+        path = path.removeprefix("connections").lstrip("/")
 
     asset_path = _resolve_frontend_asset(frontend_dir, path)
     if asset_path is None:
         raise HTTPException(status_code=404, detail="Frontend asset not found")
 
+    if asset_path.suffix == ".svgz":
+        return FileResponse(asset_path, media_type="image/svg+xml", headers={"Content-Encoding": "gzip"})
     return FileResponse(asset_path)

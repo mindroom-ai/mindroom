@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -14,11 +15,10 @@ import yaml
 from agno.agent import Agent
 from agno.team.team import Team  # noqa: TC002 - Agno resolves tool annotations at runtime.
 from agno.tools import Toolkit
-from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
-from jinja2.sandbox import SandboxedEnvironment, SecurityError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mindroom import yaml_io
+from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.custom_tools.todo_state import (
     PRIORITY_ORDER,
     TERMINAL_STATUSES,
@@ -31,13 +31,25 @@ from mindroom.custom_tools.todo_state import (
     state_root,
     todos_path,
 )
+from mindroom.custom_tools.todo_template_render import render_trusted_template, render_workspace_template
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    read_regular_file_within_root,
+    resolve_path_within_root,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
+from mindroom.tool_system.skills import workspace_entry_names
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+
+logger = get_logger(__name__)
 
 _VALID_PRIORITIES = frozenset(PRIORITY_ORDER)
 _PRIORITY_EMOJI: dict[str, str] = {
@@ -47,8 +59,13 @@ _PRIORITY_EMOJI: dict[str, str] = {
     "low": "green",
 }
 _TEMPLATE_RECURSION_LIMIT = 3
+# Workspace templates are worker-written, so one apply_template call must stay small however they nest.
+_MAX_TEMPLATE_SIZE = 64 * 1024
+_MAX_TEMPLATE_TODOS = 100
+_MAX_TEMPLATE_RENDER_SECONDS = 5.0
+# One list_templates call stops reading workspace templates after this many bytes, however many worker code planted.
+_MAX_TEMPLATE_LISTING_BYTES = 1024 * 1024
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
-_JINJA_ENV = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
 
 
 class MindroomDevParams(BaseModel):
@@ -91,7 +108,8 @@ class TemplateTodo(BaseModel):
     sub_template: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     priority: Literal["low", "medium", "high", "critical"] = "medium"
-    depends_on: list[int] = Field(default_factory=list)
+    # A set, so a repeated index cannot multiply the edges a sub-template's terminals add.
+    depends_on: set[int] = Field(default_factory=set)
     assigned_agent: str | None = None
 
     @model_validator(mode="after")
@@ -138,10 +156,62 @@ _PARAMS_SCHEMAS: dict[str, type[BaseModel]] = {
 
 @dataclass(frozen=True, slots=True)
 class _TemplateRoot:
-    """One visible source of todo templates."""
+    """One visible source of todo templates; workspace templates are read by a capped no-follow walk."""
 
     path: Path
     source: str
+    workspace_root: Path | None = None
+
+    def template_paths(self, templates_dir: Path) -> list[Path]:
+        """Return this root's template files by name; a workspace scan examines only its first entries."""
+        if self.workspace_root is None:
+            return sorted(templates_dir.glob("*.yaml.j2"))
+        relative = templates_dir.relative_to(self.workspace_root.resolve())
+        with open_directory_within_root(self.workspace_root, relative) as directory_fd:
+            listing = workspace_entry_names(directory_fd, directories=False)
+        if not listing.complete:
+            logger.warning("Listing only the first workspace todo template entries", path=str(templates_dir))
+        return [templates_dir / name for name in listing.names if name.endswith(".yaml.j2")]
+
+    def read_bytes(self, path: Path) -> bytes:
+        """Return one template's bytes from this root."""
+        if self.workspace_root is None:
+            return path.read_bytes()
+        # Template paths are canonical; open them below the workspace as spelled so a replaced workspace is refused.
+        relative = path.relative_to(self.workspace_root.resolve())
+        return read_regular_file_within_root(self.workspace_root, relative, max_bytes=_MAX_TEMPLATE_SIZE)
+
+    def read_text(self, path: Path) -> str:
+        """Return one template's text from this root."""
+        return self.read_bytes(path).decode("utf-8")
+
+
+@dataclass(slots=True)
+class _TemplateBudget:
+    """Template text one `apply_template` call may still read and render, shared by every sub-template it expands."""
+
+    remaining_read_bytes: int = _MAX_TEMPLATE_SIZE
+    remaining_rendered_chars: int = _MAX_TEMPLATE_SIZE
+    render_deadline: float = field(default_factory=lambda: time.monotonic() + _MAX_TEMPLATE_RENDER_SECONDS)
+
+    def charge_read(self, path: Path, text: str) -> None:
+        self.remaining_read_bytes -= len(text.encode("utf-8"))
+        if self.remaining_read_bytes < 0:
+            raise _template_value_error(path, f"templates read by one call exceed {_MAX_TEMPLATE_SIZE} bytes")
+
+    def charge_rendered(self, path: Path, chunk: str) -> None:
+        self.remaining_rendered_chars -= len(chunk)
+        if self.remaining_rendered_chars < 0:
+            raise _template_value_error(path, f"templates rendered by one call exceed {_MAX_TEMPLATE_SIZE} characters")
+
+    def remaining_render_seconds(self, path: Path) -> float:
+        remaining = self.render_deadline - time.monotonic()
+        if remaining <= 0:
+            raise _template_value_error(
+                path,
+                f"templates rendered by one call exceed {_MAX_TEMPLATE_RENDER_SECONDS:g} seconds",
+            )
+        return remaining
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,12 +285,11 @@ def _validate_template_name(name: str) -> None:
 
 def _template_path(name: str, template_dir: Path | None = None) -> Path:
     _validate_template_name(name)
-    root = (template_dir or _templates_dir()).resolve()
-    path = (root / f"{name}.yaml.j2").resolve()
-    if not path.is_relative_to(root):
+    try:
+        return resolve_path_within_root(template_dir or _templates_dir(), f"{name}.yaml.j2", symlinks="internal")
+    except ValueError:
         msg = f"invalid template name: '{name}'"
-        raise ValueError(msg)
-    return path
+        raise ValueError(msg) from None
 
 
 def _agent_config_key(agent: Agent | Team | None, configured_agents: set[str]) -> str | None:
@@ -267,12 +336,18 @@ def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_Templat
     roots: list[_TemplateRoot] = []
     workspace_root = _current_agent_workspace_root(agent)
     if workspace_root is not None:
-        resolved_workspace_root = workspace_root.resolve()
-        workspace_template_root = (resolved_workspace_root / _WORKSPACE_TEMPLATE_RELATIVE_DIR).resolve()
-        if not workspace_template_root.is_relative_to(resolved_workspace_root):
+        try:
+            workspace_template_root = resolve_path_within_root(
+                workspace_root,
+                _WORKSPACE_TEMPLATE_RELATIVE_DIR,
+                symlinks="internal",
+            )
+        except ValueError:
             msg = "Workspace todo template directory escapes workspace"
-            raise ValueError(msg)
-        roots.append(_TemplateRoot(path=workspace_template_root, source="workspace"))
+            raise ValueError(msg) from None
+        roots.append(
+            _TemplateRoot(path=workspace_template_root, source="workspace", workspace_root=workspace_root),
+        )
     roots.append(_TemplateRoot(path=_templates_dir(), source="builtin"))
     return tuple(roots)
 
@@ -287,19 +362,43 @@ def _resolve_template_path(name: str, template_roots: Sequence[_TemplateRoot]) -
     raise ValueError(msg)
 
 
+def _builtin_applies(name: str, template_roots: Sequence[_TemplateRoot]) -> bool:
+    """Return whether apply_template would use the built-in template of this name."""
+    try:
+        return _resolve_template_path(name, template_roots)[1].source == "builtin"
+    except ValueError:
+        return False
+
+
 def _template_value_error(path: Path, message: str) -> ValueError:
     return ValueError(f"Invalid template '{path.name}': {message}")
 
 
-def _render_jinja_template(template_text: str, params: Mapping[str, Any], *, path: Path) -> str:
+def _render_jinja_template(
+    template_text: str,
+    params: Mapping[str, Any],
+    *,
+    path: Path,
+    template_root: _TemplateRoot,
+    budget: _TemplateBudget,
+) -> str:
+    workspace = template_root.source == "workspace"
+    timeout_seconds = budget.remaining_render_seconds(path) if workspace else 0.0
     try:
-        return _JINJA_ENV.from_string(template_text).render(**params)
-    except SecurityError as exc:
-        raise _template_value_error(path, f"unsafe template expression: {exc}") from exc
-    except UndefinedError as exc:
-        raise _template_value_error(path, f"undefined variable: {exc}") from exc
-    except TemplateSyntaxError as exc:
-        raise _template_value_error(path, f"syntax error: {exc}") from exc
+        if workspace:
+            rendered_text = render_workspace_template(
+                template_text,
+                params,
+                max_chars=budget.remaining_rendered_chars,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            # Built-in templates ship with MindRoom, so they render in this process.
+            rendered_text = render_trusted_template(template_text, params, max_chars=budget.remaining_rendered_chars)
+    except ValueError as exc:
+        raise _template_value_error(path, str(exc)) from exc
+    budget.charge_rendered(path, rendered_text)
+    return rendered_text
 
 
 def _format_validation_error(exc: ValidationError) -> str:
@@ -312,7 +411,7 @@ def _format_validation_error(exc: ValidationError) -> str:
 
 def _load_template_document(path: Path, text: str) -> dict[str, Any]:
     try:
-        document = yaml_io.safe_load(text)
+        document = yaml_io.safe_load_without_aliases(text)
     except yaml.YAMLError as exc:
         raise _template_value_error(path, str(exc)) from exc
     if not isinstance(document, dict):
@@ -356,8 +455,8 @@ def _validate_dependency_cycle(template_name: str, todos: list[dict[str, Any]]) 
         visit(node_id)
 
 
-def _load_template_metadata(path: Path) -> dict[str, str]:
-    template = _load_template_document(path, path.read_text(encoding="utf-8"))
+def _load_template_metadata(path: Path, text: str) -> dict[str, str]:
+    template = _load_template_document(path, text)
     expected_name = path.name.removesuffix(".yaml.j2")
     name = template.get("name")
     version = template.get("version")
@@ -402,16 +501,19 @@ def _render_template_definition(
     params: dict[str, Any],
     *,
     template_roots: Sequence[_TemplateRoot],
+    budget: _TemplateBudget,
     depth: int = 1,
+    max_todos: int = _MAX_TEMPLATE_TODOS,
 ) -> dict[str, Any]:
     if depth > _TEMPLATE_RECURSION_LIMIT:
         msg = f"Template recursion depth exceeded while expanding '{name}'"
         raise ValueError(msg)
 
     path, template_root = _resolve_template_path(name, template_roots)
-    raw_text = path.read_text(encoding="utf-8")
-    raw_template = _load_template_document(path, raw_text)
-    _validate_template_document(raw_template, path)
+    raw_text = template_root.read_text(path)
+    budget.charge_read(path, raw_text)
+    # The unrendered template must be YAML, so Jinja stays inside values; the rendered document is validated below.
+    _load_template_document(path, raw_text)
     schema = _PARAMS_SCHEMAS.get(name) if template_root.source == "builtin" else None
     if schema is None:
         resolved_params = dict(params)
@@ -421,12 +523,24 @@ def _render_template_definition(
         except ValidationError as exc:
             raise _template_value_error(path, f"params validation failed: {_format_validation_error(exc)}") from exc
 
-    rendered_text = _render_jinja_template(raw_text, resolved_params, path=path)
+    rendered_text = _render_jinja_template(
+        raw_text,
+        resolved_params,
+        path=path,
+        template_root=template_root,
+        budget=budget,
+    )
     rendered_template = _load_template_document(path, rendered_text)
     rendered_document = _validate_template_document(rendered_template, path)
     rendered_todos = rendered_document.model_dump(mode="python", exclude_none=True)["todos"]
     _validate_depends_on_indexes(rendered_todos, path=path)
-    expanded_todos = _expand_template_todos(rendered_todos, template_roots=template_roots, depth=depth)
+    expanded_todos = _expand_template_todos(
+        rendered_todos,
+        template_roots=template_roots,
+        budget=budget,
+        depth=depth,
+        max_todos=max_todos,
+    )
     _validate_dependency_cycle(rendered_document.name, expanded_todos)
 
     return {
@@ -442,12 +556,18 @@ def _expand_template_todos(
     todos: list[dict[str, Any]],
     *,
     template_roots: Sequence[_TemplateRoot],
+    budget: _TemplateBudget,
     depth: int,
+    max_todos: int,
 ) -> list[dict[str, Any]]:
     expanded: list[dict[str, Any]] = []
     index_map: dict[int, _ExpandedTemplateIndex] = {}
 
     for original_index, entry in enumerate(todos, start=1):
+        # Every entry adds at least one todo, so this budget also bounds sub-template renders.
+        if len(expanded) >= max_todos:
+            msg = f"Templates may expand to at most {_MAX_TEMPLATE_TODOS} todos"
+            raise ValueError(msg)
         if entry.get("title") is not None:
             expanded.append(
                 {
@@ -466,7 +586,9 @@ def _expand_template_todos(
             entry["sub_template"],
             entry.get("params", {}),
             template_roots=template_roots,
+            budget=budget,
             depth=depth + 1,
+            max_todos=max_todos - len(expanded),
         )
         offset = len(expanded)
         expanded.extend(
@@ -544,11 +666,16 @@ def _format_templates_table(templates: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _current_scope() -> tuple[Path, str, str, str]:
+def _runtime_context() -> ToolRuntimeContext:
     ctx = get_tool_runtime_context()
     if ctx is None:
         msg = "todo requires an active tool runtime context"
         raise RuntimeError(msg)
+    return ctx
+
+
+def _current_scope() -> tuple[Path, str, str, str]:
+    ctx = _runtime_context()
     thread_id = ctx.resolved_thread_id or ctx.thread_id or "main"
     return state_root(ctx.runtime_paths), ctx.room_id, thread_id, ctx.agent_name
 
@@ -557,7 +684,7 @@ def _configured_agent_names() -> set[str]:
     ctx = get_tool_runtime_context()
     if ctx is None:
         return set()
-    return set((ctx.config.agents or {}).keys())
+    return set((ctx.current_config.agents or {}).keys())
 
 
 def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> str | None:
@@ -565,6 +692,35 @@ def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> st
         available = ", ".join(sorted(configured)) or "none"
         return f"Unknown agent '{agent_name}'. Available: {available}"
     return None
+
+
+def _may_address(requester_id: str, agent_name: str) -> bool:
+    """Return whether a requester may direct todo work to one agent in the current room."""
+    ctx = _runtime_context()
+    config = ctx.current_config
+    # Unconfigured assignees have no reply policy and are never poked; new ones are rejected as unknown.
+    return agent_name not in config.agents or is_sender_allowed_for_responder(
+        requester_id,
+        agent_name,
+        ctx.room_id,
+        config,
+        ctx.runtime_paths,
+        ctx.require_agent_reply_memberships(),
+    )
+
+
+def _unauthorized_assignee_message(agent_name: str) -> str | None:
+    """Refuse todo work for a configured agent that the current requester may not address in this room."""
+    if _may_address(_runtime_context().requester_id, agent_name):
+        return None
+    return (
+        f"Cannot give or change todo work for '{agent_name}': that agent is not allowed to reply to you in this room."
+    )
+
+
+def _assignee_error(agent_name: str, configured: set[str]) -> str | None:
+    """Reject unknown assignees and agents the current requester may not address in this room."""
+    return _unknown_assigned_agent_message(agent_name, configured) or _unauthorized_assignee_message(agent_name)
 
 
 def _default_assignee(agent: Agent | Team, context_agent_name: str) -> str:
@@ -597,7 +753,7 @@ class TodoTools(Toolkit):
             ],
         )
 
-    def plan(self, agent: Agent | Team, tasks: str) -> str:
+    def plan(self, agent: Agent | Team, tasks: str) -> str:  # noqa: C901
         """Create a multi-step work plan for the current thread."""
         state_root, room_id, thread_id, agent_name = _current_scope()
         assigned_agent = _default_assignee(agent, agent_name)
@@ -622,6 +778,10 @@ class TodoTools(Toolkit):
 
         if not parsed:
             return "No valid tasks found after parsing."
+        assignee_error = _assignee_error(assigned_agent, _configured_agent_names())
+        if assignee_error is not None:
+            return assignee_error
+        requester_id = _runtime_context().requester_id
 
         def create_plan(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
@@ -638,6 +798,7 @@ class TodoTools(Toolkit):
                     "priority": priority,
                     "depends_on": [],
                     "assigned_agent": assigned_agent,
+                    "requester_id": requester_id,
                     "created_at": now,
                     "updated_at": now,
                     "completed_at": None,
@@ -675,9 +836,10 @@ class TodoTools(Toolkit):
 
         dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()] if depends_on else []
         resolved_agent = assigned_agent.strip() or _default_assignee(agent, agent_name)
-        unknown_agent = _unknown_assigned_agent_message(resolved_agent, _configured_agent_names())
-        if unknown_agent is not None:
-            return unknown_agent
+        assignee_error = _assignee_error(resolved_agent, _configured_agent_names())
+        if assignee_error is not None:
+            return assignee_error
+        requester_id = _runtime_context().requester_id
 
         def create_item(data: dict[str, Any]) -> dict[str, Any] | str | NoWriteResult:
             _ensure_thread_state(data, room_id, thread_id)
@@ -696,6 +858,7 @@ class TodoTools(Toolkit):
                 "priority": priority,
                 "depends_on": dep_ids,
                 "assigned_agent": resolved_agent,
+                "requester_id": requester_id,
                 "created_at": now,
                 "updated_at": now,
                 "completed_at": None,
@@ -763,7 +926,7 @@ class TodoTools(Toolkit):
                 result_lines.append(f"- {mark} `{item['id']}` {item['title']}")
         return "\n".join(result_lines)
 
-    def update_todo(  # noqa: C901
+    def update_todo(  # noqa: C901, PLR0915
         self,
         agent: Agent | Team,
         todo_id: str,
@@ -791,14 +954,29 @@ class TodoTools(Toolkit):
             return "Title cannot be empty."
         if not path.exists():
             return f"Todo `{todo_id}` not found."
+        requester_id = _runtime_context().requester_id
 
-        def do_update(data: dict[str, Any]) -> str | NoWriteResult:  # noqa: C901, PLR0912
+        def do_update(data: dict[str, Any]) -> str | NoWriteResult:  # noqa: C901, PLR0911, PLR0912
             _ensure_thread_state(data, room_id, thread_id)
             items_by_id = {item["id"]: item for item in data["items"]}
             if todo_id not in items_by_id:
                 return no_write(f"Todo `{todo_id}` not found.")
 
             item = items_by_id[todo_id]
+            new_agent = assigned_agent.strip() if assigned_agent else ""
+            # Changing an agent's work, or handing work to an agent, needs the requester's access to that agent.
+            for target_agent in (item.get("assigned_agent", ""), new_agent):
+                unauthorized_agent = _unauthorized_assignee_message(target_agent)
+                if unauthorized_agent is not None:
+                    return no_write(unauthorized_agent)
+            # A kept title stays attributed to its author, who must also be allowed to address a new assignee.
+            # A legacy item has no author yet; the write below records the current requester, whose access is checked above.
+            title_author = item.get("requester_id")
+            if not clean_title and title_author is not None and not _may_address(title_author, new_agent):
+                return no_write(
+                    f"Cannot give todo `{todo_id}` to '{new_agent}': "
+                    "the person who wrote it is not allowed to address that agent in this room.",
+                )
             dep_ids: list[str] | None = None
             now = _now_iso()
             if depends_on is not None:
@@ -831,6 +1009,14 @@ class TodoTools(Toolkit):
             if not changes:
                 return no_write("No fields to update.")
 
+            # Writing a title makes the current requester its author.
+            # LEGACY_COMPAT: Todo items without a recorded requester_id, adopted on their next write.
+            # Legacy format: A native `todos.json` item with no `requester_id` key.
+            # Last legacy release: v2026.9.292; replacement: the next release records the title author's `requester_id` on every item it writes.
+            # Handling: Any successful update records the current requester, after the access checks above, so unattributed text cannot reach a newly assigned agent as that agent's internal turn; the None guard above skips the title-author check that the adoption replaces.
+            # Coverage: tests/test_todo_builtin.py::test_todo_write_records_requester_on_legacy_item.
+            if clean_title or title_author is None:
+                item["requester_id"] = requester_id
             item["updated_at"] = now
             data["updated_at"] = now
             unblocked_message = ""
@@ -854,7 +1040,12 @@ class TodoTools(Toolkit):
     ) -> str:
         """Apply a named todo template to the current thread's work plan."""
         template_roots = _visible_template_roots(agent)
-        rendered_template = _render_template_definition(name, params, template_roots=template_roots)
+        rendered_template = _render_template_definition(
+            name,
+            params,
+            template_roots=template_roots,
+            budget=_TemplateBudget(),
+        )
         if dry_run:
             return _format_template_preview(
                 rendered_template["name"],
@@ -869,9 +1060,10 @@ class TodoTools(Toolkit):
         configured_agents = _configured_agent_names()
         for template_todo in rendered_template["todos"]:
             resolved_agent = template_todo.get("assigned_agent") or default_assignee
-            unknown_agent = _unknown_assigned_agent_message(resolved_agent, configured_agents)
-            if unknown_agent is not None:
-                return unknown_agent
+            assignee_error = _assignee_error(resolved_agent, configured_agents)
+            if assignee_error is not None:
+                return assignee_error
+        requester_id = _runtime_context().requester_id
 
         def apply_template(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
@@ -888,6 +1080,7 @@ class TodoTools(Toolkit):
                     "priority": template_todo.get("priority", "medium"),
                     "depends_on": [],
                     "assigned_agent": template_todo.get("assigned_agent") or default_assignee,
+                    "requester_id": requester_id,
                     "created_at": now,
                     "updated_at": now,
                     "completed_at": None,
@@ -912,25 +1105,33 @@ class TodoTools(Toolkit):
     def list_templates(self, agent: Agent | Team) -> str:
         """List available todo templates."""
         templates: list[dict[str, Any]] = []
-        seen_names: set[str] = set()
-        for template_root in _visible_template_roots(agent):
+        remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES
+        template_roots = _visible_template_roots(agent)
+        for template_root in template_roots:
             templates_root = template_root.path.resolve()
             if not templates_root.is_dir():
                 continue
-            for path in sorted(templates_root.glob("*.yaml.j2")):
-                resolved_path = path.resolve()
-                if not resolved_path.is_relative_to(templates_root):
-                    msg = f"Template '{path.name}' escapes templates dir via symlink"
-                    raise ValueError(msg)
+            for path in template_root.template_paths(templates_root):
                 try:
-                    metadata = _load_template_metadata(path)
+                    resolve_path_within_root(templates_root, path, symlinks="internal")
+                except ValueError:
+                    msg = f"Template '{path.name}' escapes templates dir via symlink"
+                    raise ValueError(msg) from None
+                try:
+                    payload = template_root.read_bytes(path)
+                    if template_root.source == "workspace":
+                        remaining_workspace_bytes -= len(payload)
+                        if remaining_workspace_bytes < 0:
+                            logger.warning("Listing only the first workspace todo templates", template=path.name)
+                            break
+                    metadata = _load_template_metadata(path, payload.decode("utf-8"))
                 except (OSError, ValueError):
                     if template_root.source == "workspace":
                         continue
                     raise
-                if metadata["name"] in seen_names:
+                # A workspace file of the same name, listed or not, is what apply_template uses instead.
+                if template_root.source == "builtin" and not _builtin_applies(metadata["name"], template_roots):
                     continue
-                seen_names.add(metadata["name"])
                 schema = _PARAMS_SCHEMAS.get(metadata["name"]) if template_root.source == "builtin" else None
                 templates.append(
                     {

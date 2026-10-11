@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -12,8 +14,6 @@ from mindroom.oauth.providers import OAuthProvider
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -36,7 +36,7 @@ def _provider(provider_id: str) -> OAuthProvider:
         authorization_url="https://auth.example.test/authorize",
         token_url="https://auth.example.test/token",  # noqa: S106
         scopes=("read",),
-        credential_service=provider_id,
+        credential_service=f"{provider_id}_oauth",
         client_config_services=(f"{provider_id}_oauth_client",),
     )
 
@@ -50,12 +50,36 @@ def test_builtin_oauth_registry_includes_google_docs() -> None:
     assert providers["google_drive"].scopes[-1] == "https://www.googleapis.com/auth/drive"
 
 
+def test_builtin_oauth_registry_includes_google_cloud() -> None:
+    """Google Cloud is a built-in provider whose tools keep settings under their own tool names."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["google_cloud"].credential_service == "google_cloud_oauth"
+    assert providers["google_cloud"].tool_config_service is None
+    assert providers["google_cloud"].scopes[-1] == "https://www.googleapis.com/auth/cloud-platform.read-only"
+
+
 def test_builtin_oauth_registry_includes_github() -> None:
     """GitHub should participate in built-in discovery and service-collision checks."""
     providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
 
     assert providers["github"].credential_service == "github_oauth"
     assert providers["github"].tool_config_service == "github"
+
+
+def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:
+    """Dashboard-editable provider settings cannot use the reserved OAuth token suffix."""
+    with pytest.raises(ValueError, match=r"tool_config_service.*must not end with '_oauth'"):
+        OAuthProvider(
+            id="demo",
+            display_name="Demo",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",  # noqa: S106
+            scopes=("read",),
+            credential_service="demo_oauth",
+            tool_config_service="demo_settings_oauth",
+            client_config_services=("demo_oauth_client",),
+        )
 
 
 def test_load_oauth_provider_registry_caches_loaded_registry(

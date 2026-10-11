@@ -61,7 +61,7 @@ def managed_space_alias_localpart(runtime_paths: RuntimePaths) -> str:
     return managed_room_alias_localpart("_mindroom_root_space", runtime_paths)
 
 
-def managed_room_key_from_alias_localpart(
+def _managed_room_key_from_alias_localpart(
     alias_localpart: str,
     runtime_paths: RuntimePaths,
 ) -> str | None:
@@ -77,7 +77,7 @@ def managed_room_key_from_alias_localpart(
     return room_key or None
 
 
-def room_alias_localpart(room_alias: str) -> str | None:
+def _room_alias_localpart(room_alias: str) -> str | None:
     """Extract the localpart from a room alias like '#lobby:example.com'."""
     if not room_alias.startswith("#") or ":" not in room_alias:
         return None
@@ -87,11 +87,11 @@ def room_alias_localpart(room_alias: str) -> str | None:
 def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
     """Return alias, localpart, and managed-room key identifiers for one Matrix alias."""
     identifiers = [room_alias]
-    localpart = room_alias_localpart(room_alias)
+    localpart = _room_alias_localpart(room_alias)
     if not localpart:
         return identifiers
     identifiers.append(localpart)
-    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
+    managed_room_key = _managed_room_key_from_alias_localpart(localpart, runtime_paths)
     if managed_room_key:
         identifiers.append(managed_room_key)
     return identifiers

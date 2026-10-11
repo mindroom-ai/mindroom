@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.tool_system.catalog import TOOL_METADATA, ToolStatus, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dependencies import _pip_name_to_import, check_deps_installed
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
@@ -160,7 +161,7 @@ def _select_tools(
     return selected, unknown
 
 
-def _runtime_check_tool(tool_name: str) -> RuntimeToolCheckResult:
+def _runtime_check_tool(tool_name: str, runtime_paths: RuntimePaths) -> RuntimeToolCheckResult:
     metadata = TOOL_METADATA[tool_name]
     dependencies = list(metadata.dependencies or [])
     before = _dependencies_installed(dependencies)
@@ -168,7 +169,7 @@ def _runtime_check_tool(tool_name: str) -> RuntimeToolCheckResult:
     status = "ok"
     error: str | None = None
     try:
-        toolkit = get_tool_by_name(tool_name, disable_sandbox_proxy=True)
+        toolkit = get_tool_by_name(tool_name, runtime_paths, disable_sandbox_proxy=True, worker_target=None)
         _ = getattr(toolkit, "name", tool_name)
     except Exception as exc:
         status = "failed"
@@ -334,19 +335,25 @@ def _emit_extra_results(results: list[ExtraToolCheckResult], *, json_output: boo
     return 1 if failed else 0
 
 
+def _worker_runtime_paths() -> RuntimePaths:
+    """Keep the worker's runtime storage inside the disposable environment the host removes."""
+    return resolve_primary_runtime_paths(storage_path=Path(sys.prefix).parent / "mindroom_data")
+
+
 def _run_runtime_worker(*, tools: set[str] | None, json_output: bool) -> int:
     isolation_error = _worker_isolation_error()
     if isolation_error is not None:
         print(isolation_error, file=sys.stderr)
         return 2
 
-    ensure_tool_registry_loaded()
+    runtime_paths = _worker_runtime_paths()
+    ensure_tool_registry_loaded(runtime_paths)
     selected_tools, unknown = _select_tools(requested_tools=tools, available_tools=sorted(TOOL_REGISTRY))
     if unknown:
         print(f"Unknown tools requested: {', '.join(unknown)}", file=sys.stderr)
         return 2
 
-    results = [_runtime_check_tool(tool_name) for tool_name in selected_tools]
+    results = [_runtime_check_tool(tool_name, runtime_paths) for tool_name in selected_tools]
     return _emit_runtime_results(results, json_output=json_output)
 
 
@@ -356,7 +363,7 @@ def _run_extra_worker(*, tools: set[str] | None, json_output: bool) -> int:
         print(isolation_error, file=sys.stderr)
         return 2
 
-    ensure_tool_registry_loaded()
+    ensure_tool_registry_loaded(_worker_runtime_paths())
     selected_tools, unknown = _select_tools(requested_tools=tools, available_tools=sorted(_available_tool_extras()))
     if unknown:
         print(f"Unknown tools requested: {', '.join(unknown)}", file=sys.stderr)

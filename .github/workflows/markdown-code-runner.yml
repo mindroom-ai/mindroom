@@ -6,23 +6,31 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   markdown-code-runner:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Run markdown-code-runner
         env:
@@ -32,23 +40,13 @@ jobs:
           uv sync
           uv run python docs/run_markdown_code_runner.py
 
-      - name: Commit updated docs
-        id: commit
+      # This job runs dependency code, so it never holds a write token; regenerate stale docs locally instead.
+      - name: Check that generated docs are up to date
         run: |
-          git add -A
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          if git diff --quiet && git diff --staged --quiet; then
-            echo "No changes in docs, skipping commit."
-            echo "commit_status=skipped" >> $GITHUB_ENV
-          else
-            git commit -m "Update auto-generated docs"
-            echo "commit_status=committed" >> $GITHUB_ENV
+          git add -A -- '*.md'
+          if ! git diff --cached --quiet; then
+            echo "::error::Generated docs are stale. Run 'uv run python docs/run_markdown_code_runner.py' locally and commit the result."
+            git diff --cached --stat
+            git diff --cached
+            exit 1
           fi
-
-      - name: Push changes
-        if: env.commit_status == 'committed'
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.head_ref }}

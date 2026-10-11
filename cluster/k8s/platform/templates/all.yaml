@@ -33,6 +33,9 @@ metadata:
 {{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) }}
 {{ fail "provisioner.trustedUpstreamAuth.emailHeader is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
 {{ end }}
+{{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailDomain | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.emailDomain is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
+{{ end }}
 {{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) }}
 {{ fail "provisioner.trustedUpstreamAuth.userIdHeader is required when provisioner.trustedUpstreamAuth.enabled=true" }}
 {{ end }}
@@ -56,12 +59,18 @@ metadata:
 {{ if and $platformSecretsCreate $matrixOidcEnabled (not ($matrixOidc.privateKey | default "")) }}
 {{ fail "matrixOidc.privateKey is required when matrixOidc.enabled=true" }}
 {{ end }}
+{{ if and $platformSecretsCreate (.Values.stripe.secretKey | default "") (not (.Values.stripe.webhookSecret | default "" | trim)) }}
+{{ fail "stripe.webhookSecret is required when stripe.secretKey is set" }}
+{{ end }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
   ENVIRONMENT: {{ .Values.environment }}
   ENABLE_CLEANUP_SCHEDULER: {{ .Values.cleanupScheduler.enabled | default "false" | quote }}
+  INSTANCE_TEARDOWN_GRACE_DAYS: {{ .Values.cleanupScheduler.teardownGraceDays | default 30 | quote }}
+  TRUSTED_PROXY_CIDRS: {{ (.Values.trustedProxyCidrs | default (list) | join ",") | quote }}
   INSTANCE_BASE_DOMAIN: {{ .Values.provisioner.instanceBaseDomain | default .Values.domain | quote }}
   INSTANCE_STORAGE_CLASS_NAME: {{ .Values.provisioner.instanceStorageClassName | default "" | quote }}
+  INSTANCE_INGRESS_CONTROLLER_NAMESPACE: {{ .Values.provisioner.instanceIngressControllerNamespace | default "" | quote }}
   INSTANCE_MINDROOM_IMAGE: {{ .Values.provisioner.instanceMindroomImage | default "" | quote }}
   INSTANCE_MINDROOM_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceMindroomImagePullPolicy | default "" | quote }}
   INSTANCE_IMAGE_PULL_SECRET_NAMES: {{ (.Values.provisioner.instanceImagePullSecretNames | default (list) | join ",") | quote }}
@@ -71,6 +80,7 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER: {{ $trustedUpstreamAuth.userIdHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER: {{ $trustedUpstreamAuth.emailHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER: {{ $trustedUpstreamAuth.matrixUserIdHeader | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN: {{ $trustedUpstreamAuth.emailDomain | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT: {{ $trustedUpstreamAuth.requireJwt | default "false" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER: {{ $trustedUpstreamAuth.jwtHeader | default "" | quote }}

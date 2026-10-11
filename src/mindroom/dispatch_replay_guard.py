@@ -39,27 +39,19 @@ def has_newer_unresponded_in_thread(
     if event_ts is None or not thread_history:
         return False
     for message in thread_history:
-        if is_visible_router_voice_echo(message.sender, message.content):
-            continue
-        if (
-            requester_user_id_for_event(
-                message.sender,
-                {"content": message.content},
-            )
-            != requester_user_id
-        ):
-            continue
         if message.timestamp is None or message.timestamp <= event_ts:
             continue
         if message.event_id == event.event_id:
             continue
-        if is_handled(message.event_id):
-            continue
-        if (
-            message.body
-            and isinstance(message.body, str)
-            and not is_voice_event(message, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
-            and command_parser.parse(message.body.strip()) is not None
+        if not _is_unresponded_requester_event(
+            message,
+            source={"content": message.content},
+            body=message.body,
+            requester_user_id=requester_user_id,
+            requester_user_id_for_event=requester_user_id_for_event,
+            is_visible_router_voice_echo=is_visible_router_voice_echo,
+            sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
+            is_handled=is_handled,
         ):
             continue
         logger.info(
@@ -71,16 +63,18 @@ def has_newer_unresponded_in_thread(
     return False
 
 
-def _unresponded_requester_event_id(
-    journal_event: JournalEvent,
+def _is_unresponded_requester_event(
+    event: JournalEvent | ResolvedVisibleMessage,
     *,
+    source: Mapping[str, object],
+    body: object,
     requester_user_id: str,
     requester_user_id_for_event: _RequesterResolver,
     is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
-) -> str | None:
-    """Return an unanswered requester event id from one pending journal event, when eligible.
+) -> bool:
+    """Return whether a normalized candidate is an unanswered requester turn.
 
     The filters SQL cannot express. Whose turn an event really is depends on
     trusted relay metadata inside its content, a router transcript echo is a
@@ -95,23 +89,20 @@ def _unresponded_requester_event_id(
     before a crash replays as a pending row afterwards. Trusting pending alone
     would let an already-answered message suppress an older one forever.
     """
-    sender = journal_event.sender
-    content = journal_event.source.get("content")
+    sender = event.sender
+    content = source.get("content")
     if (
         is_visible_router_voice_echo(sender, content)
-        or requester_user_id_for_event(sender, journal_event.source) != requester_user_id
+        or requester_user_id_for_event(sender, source) != requester_user_id
     ):
-        return None
-    if is_handled(journal_event.event_id):
-        return None
-    body = cast("Mapping[str, object]", content).get("body") if isinstance(content, Mapping) else None
-    if (
+        return False
+    if is_handled(event.event_id):
+        return False
+    return not (
         isinstance(body, str)
-        and not is_voice_event(journal_event, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
+        and not is_voice_event(event, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
         and command_parser.parse(body.strip()) is not None
-    ):
-        return None
-    return journal_event.event_id
+    )
 
 
 async def has_newer_unresponded_journal_thread_event(
@@ -155,19 +146,22 @@ async def has_newer_unresponded_journal_thread_event(
         return False
 
     for candidate in candidates:
-        newer_event_id = _unresponded_requester_event_id(
+        content = candidate.source.get("content")
+        body = cast("Mapping[str, object]", content).get("body") if isinstance(content, Mapping) else None
+        if _is_unresponded_requester_event(
             candidate,
+            source=candidate.source,
+            body=body,
             requester_user_id=requester_user_id,
             requester_user_id_for_event=requester_user_id_for_event,
             is_visible_router_voice_echo=is_visible_router_voice_echo,
             sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
             is_handled=is_handled,
-        )
-        if newer_event_id is not None:
+        ):
             logger.info(
                 "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
                 skipped_event_id=event.event_id,
-                newer_event_id=newer_event_id,
+                newer_event_id=candidate.event_id,
                 thread_id=thread_id,
             )
             return True

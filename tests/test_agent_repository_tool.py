@@ -18,6 +18,7 @@ import pytest
 
 import mindroom.agent_repositories as agent_repositories_module
 import mindroom.custom_tools.agent_repository as agent_repository_tool_module
+import mindroom.tools  # noqa: F401
 from mindroom.agent_repositories import (
     RepositoryBindingError,
     RepositoryBindingStore,
@@ -29,12 +30,9 @@ from mindroom.agent_repositories import (
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.agent_repository import AgentRepositoryTools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.sandbox_proxy import ensure_worker_target_ready
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    resolve_worker_target,
-    tool_stays_local,
-)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -134,7 +132,7 @@ def test_tool_exposes_only_argument_free_ensure() -> None:
     signature = inspect.signature(AgentRepositoryTools.ensure_my_repository)
 
     assert list(signature.parameters) == ["self"]
-    assert tool_stays_local("agent_repository")
+    assert TOOL_METADATA["agent_repository"].requires_primary_runtime is True
 
 
 @pytest.mark.asyncio

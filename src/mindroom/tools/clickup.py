@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="clickup",
+    file_access=ToolFileAccess.NONE,
     display_name="ClickUp",
     description="Manage tasks, spaces, and lists in ClickUp project management",
     category=ToolCategory.PRODUCTIVITY,
@@ -36,6 +37,14 @@ if TYPE_CHECKING:
             required=True,
             placeholder="ClickUp space ID",
             description="ID of the master space to work with",
+        ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+            description="Per-request HTTP timeout in seconds",
         ),
     ],
     dependencies=["requests"],

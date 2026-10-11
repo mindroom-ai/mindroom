@@ -9,6 +9,10 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom.authorization import (
+    ensure_room_membership_synced,
+    responder_candidate_entities_from_cached_room,
+)
 from mindroom.commands.handler import generate_welcome_message_for_room, handle_command
 from mindroom.commands.parsing import (
     _COMMAND_DOCS,
@@ -22,6 +26,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from tests.authorization_helpers import (
     isolated_membership_index,
@@ -281,6 +286,11 @@ def test_get_command_help() -> None:
     assert "in 5 minutes" in schedule_help
     assert "Requires an explicit recurring polling cadence" in schedule_help
     assert "Automatically converts to smart polling" not in schedule_help
+    assert "silently" in schedule_help
+    assert "quietly" in schedule_help
+    assert "hide their trigger" in schedule_help
+    assert "NO_REPLY" in schedule_help
+    assert "visible by default" in schedule_help
 
     list_schedules_help = get_command_help("list_schedules")
     assert "List Schedules Command" in list_schedules_help
@@ -292,6 +302,9 @@ def test_get_command_help() -> None:
     edit_help = get_command_help("edit_schedule")
     assert "Edit Schedule Command" in edit_help
     assert "edit_schedule" in edit_help
+    assert "make this schedule silent" in edit_help
+    assert "make this schedule visible" in edit_help
+    assert "silent-delivery mode" in edit_help
 
     reload_help = get_command_help("reload-plugins")
     assert "Reload Plugins Command" in reload_help
@@ -317,6 +330,13 @@ def test_compact_command_entries_characterize_welcome_subset() -> None:
     )
 
 
+def _synced_client() -> AsyncMock:
+    """A Matrix client whose member lookup reports an empty, already-synced room."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members = AsyncMock(return_value=nio.JoinedMembersResponse(members=[], room_id="!room:localhost"))
+    return client
+
+
 @pytest.mark.asyncio
 async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None:
     """The welcome quick commands should match the parser-owned compact docs."""
@@ -325,7 +345,7 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
     config = Config()
     persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router_oldns"})
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         "@alice:localhost",
         config,
@@ -365,7 +385,7 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
         },
     )
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         "@alice:localhost",
         config,
@@ -374,7 +394,8 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
-    assert "\u2022 **@ops**: Operations escalation team (Team of 1 agent)" in welcome_message
+    assert "\u2022 **Ops Team** (alias `ops`): Operations escalation team (Team of 1 agent)" in welcome_message
+    assert format_message_with_mentions(config, runtime_paths, welcome_message)["body"] == welcome_message
 
 
 @pytest.mark.asyncio
@@ -417,7 +438,7 @@ async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Pat
     )
 
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         None,
         config,
@@ -426,9 +447,9 @@ async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Pat
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
-    assert "\u2022 **@code**: Writes code" in welcome_message
-    assert "\u2022 **@ops**: Operations escalation team (Team of 1 agent)" in welcome_message
-    assert "@research" not in welcome_message
+    assert "\u2022 **Code** (alias `code`): Writes code" in welcome_message
+    assert "\u2022 **Ops Team** (alias `ops`): Operations escalation team (Team of 1 agent)" in welcome_message
+    assert "\u2022 **Research**" not in welcome_message
 
 
 @pytest.mark.asyncio
@@ -481,7 +502,7 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
 
     response_text = send_response.await_args.args[0]
     assert "\U0001f9e0 **Available agents and teams in this room:**" in response_text
-    assert "\u2022 **@code**: Writes code" in response_text
+    assert "\u2022 **Code** (alias `code`): Writes code" in response_text
     context.client.joined_members.assert_not_awaited()
 
 
@@ -541,21 +562,97 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
 
     candidate_resolver.assert_awaited_once_with(room, "@alice:localhost")
     response_text = send_response.await_args.args[0]
-    assert "\u2022 **@code**: Writes code" in response_text
-    assert "@research" not in response_text
+    assert "\u2022 **Code** (alias `code`): Writes code" in response_text
+    assert "\u2022 **Research**" not in response_text
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_member", [None, "@bob:localhost"])
+async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_path: Path) -> None:
+    """Live scheduling must not retry a failed membership refresh from the same turn."""
+    config = Config()
+    runtime_paths = _test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router"})
+    membership_index = isolated_membership_index()
+    room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
+    room.add_member("@mindroom_router:localhost", "Router", None)
+    room.add_member("@alice:localhost", "Alice", None)
+    client = AsyncMock()
+    client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    send_response = AsyncMock(return_value="$schedule-response")
+    command = Command(
+        type=CommandType.SCHEDULE,
+        args={"full_text": "in 5 minutes check logs"},
+        raw_text="!schedule in 5 minutes check logs",
+    )
+    event = SimpleNamespace(
+        sender="@alice:localhost",
+        event_id="$schedule",
+        body=command.raw_text,
+        source={"content": {"body": command.raw_text}},
+    )
+
+    async def cached_responder_candidates(candidate_room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
+        return responder_candidate_entities_from_cached_room(
+            candidate_room,
+            sender_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(room.room_id, None, event.event_id),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=send_response,
+        responder_candidates_for_room=cached_responder_candidates,
+        agent_reply_memberships=membership_index,
+    )
+
+    assert not await ensure_room_membership_synced(client, room, sender_id=event.sender)
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id=event.sender,
+    )
+
+    assert client.joined_members.await_count == 1
+    assert "No agents or teams" in send_response.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("room_shape", "sync_mode", "expected_reply"),
+    [
+        ("private", "classic", None),
+        ("extra_member", "classic", "private room"),
+        ("failed_refresh", "classic", "try again"),
+        ("unseen_invite", "classic", "private room"),
+        # Sliding sync loads members lazily, so a refresh without the server's counts proves nothing about invites.
+        ("private", "sliding", "private room"),
+        ("counted", "sliding", None),
+    ],
+)
 async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    extra_member: str | None,
+    room_shape: str,
+    sync_mode: str,
+    expected_reply: str | None,
 ) -> None:
-    """Router-owned commands require the sole eligible agent and no unrelated room member."""
+    """Router-owned commands require the sole eligible agent and a complete membership with no other party."""
     runtime_paths = _test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "matrix_sync": {"mode": sync_mode},
             "defaults": {"tools": []},
             "agents": {
                 "code": {
@@ -573,16 +670,34 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         usernames={"router": "mindroom_router", "code": "mindroom_code"},
     )
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
-    for user_id in ("@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"):
+    joined_user_ids = ["@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"]
+    if room_shape == "extra_member":
+        joined_user_ids.append("@bob:localhost")
+    for user_id in joined_user_ids:
         room.add_member(user_id, None, None)
-    if extra_member is not None:
-        room.add_member(extra_member, None, None)
+    if room_shape == "unseen_invite":
+        # The server still counts an invite the projection never saw.
+        room.update_summary(nio.RoomSummary(invited_member_count=1, joined_member_count=3))
+    if room_shape == "counted":
+        room.update_summary(nio.RoomSummary(invited_member_count=0, joined_member_count=3))
+    client = AsyncMock()
+    if room_shape == "failed_refresh":
+        client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    else:
+        client.joined_members.return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id, None, None) for user_id in joined_user_ids],
+            room_id=room.room_id,
+        )
+    assert await ensure_room_membership_synced(client, room, sender_id="@alice:localhost") is (
+        room_shape != "failed_refresh"
+    )
     send_response = AsyncMock(return_value="$desktop")
     candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
+    controller_identity = MagicMock()
     desktop_handler = MagicMock(return_value="desktop status")
     monkeypatch.setattr("mindroom.commands.handler.handle_desktop_command", desktop_handler)
     context = make_test_command_handler_context(
-        client=AsyncMock(),
+        client=client,
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
@@ -592,6 +707,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         record_command_result=AsyncMock(),
         send_response=send_response,
         responder_candidates_for_room=candidate_resolver,
+        controller_identity=controller_identity,
     )
 
     await handle_command(
@@ -611,22 +727,20 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         requester_user_id="@alice:localhost",
     )
 
-    if extra_member is None:
+    if expected_reply is None:
         assert desktop_handler.call_args.kwargs["scope"].agent_name == "code"
         assert desktop_handler.call_args.kwargs["scope"].requester_id == "@alice:localhost"
+        assert desktop_handler.call_args.kwargs["scope"].controller_identity is controller_identity
     else:
         desktop_handler.assert_not_called()
-        assert "private room" in send_response.await_args.args[0]
+        assert expected_reply in send_response.await_args.args[0]
 
 
-def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:
-    """The docs index summary should stay in sync with the supported command set."""
-    docs_index = Path(__file__).resolve().parents[1] / "docs" / "index.md"
-    contents = docs_index.read_text(encoding="utf-8")
-    table_row = next(line for line in contents.splitlines() if line.startswith("| **Chat Commands** |"))
-    doc_link = next(line for line in contents.splitlines() if line.startswith("- [Chat Commands]("))
+def test_chat_commands_page_lists_all_supported_commands() -> None:
+    """The chat commands docs page should document every supported command syntax."""
+    chat_commands = Path(__file__).resolve().parents[1] / "docs" / "chat-commands.md"
+    # Table cells escape literal pipes in command syntax as "\|".
+    contents = chat_commands.read_text(encoding="utf-8").replace("\\|", "|")
 
     for syntax, _description in _COMMAND_DOCS.values():
-        # Table cells escape literal pipes in command syntax as "\|".
-        assert syntax in table_row.replace("\\|", "|")
-        assert syntax in doc_link
+        assert syntax in contents

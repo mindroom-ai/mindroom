@@ -5,17 +5,14 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mindroom.config.validation import duplicate_items
-from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-_RoomAccessMode = Literal["single_user_private", "multi_user"]
-_MultiUserJoinRule = Literal["public", "knock"]
 _MatrixSyncMode = Literal["sliding", "classic"]
 RoomJoinRule = Literal["invite", "public", "knock"]
 RoomDirectoryVisibility = Literal["public", "private"]
@@ -41,6 +38,16 @@ class MatrixSyncConfig(BaseModel):
             "Timeline event limit for each room requested through Simplified Sliding Sync. Sliding positions are"
             " connection-scoped, so this also bounds how many per-room events a restarted connection can replay."
         ),
+    )
+    max_response_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1,
+        description="Maximum HTTP response size in bytes for each durable Matrix sync session.",
+    )
+    max_pending_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+        description="Maximum encoded pending output size in bytes for each durable Matrix sync session.",
     )
 
 
@@ -107,116 +114,6 @@ class MatrixSpaceConfig(BaseModel):
         return normalized
 
 
-class MatrixRoomAccessConfig(BaseModel):
-    """Configuration for managed Matrix room access and discoverability."""
-
-    mode: _RoomAccessMode = Field(
-        default="single_user_private",
-        description=(
-            "Room access mode. 'single_user_private' preserves invite-only/private behavior. "
-            "'multi_user' applies configured join rules and directory visibility."
-        ),
-    )
-    multi_user_join_rule: _MultiUserJoinRule = Field(
-        default="public",
-        description="Default join rule for managed rooms in multi_user mode",
-    )
-    publish_to_room_directory: bool = Field(
-        default=False,
-        description="Whether managed rooms should be published to the room directory in multi_user mode",
-    )
-    invite_only_rooms: list[str] = Field(
-        default_factory=list,
-        description=("Managed room keys/aliases/IDs that must remain invite-only and private, even in multi_user mode"),
-    )
-    reconcile_existing_rooms: bool = Field(
-        default=False,
-        description=(
-            "Whether to reconcile existing managed rooms to match current mode/join rule/directory settings "
-            "on startup and config reload"
-        ),
-    )
-    encrypt_managed_rooms: bool = Field(
-        default=False,
-        description=(
-            "Whether managed rooms should have Matrix end-to-end encryption enabled by default. "
-            "Per-room rooms.<key>.encrypted overrides this. "
-            "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
-        ),
-    )
-    room_admins: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Matrix user IDs granted room admin power (100) in every managed room. "
-            "Applied at room creation and reconciled on startup and config reload; "
-            "membership is unchanged, so listed users become admins once they are in the room."
-        ),
-    )
-
-    @field_validator("invite_only_rooms", "room_admins")
-    @classmethod
-    def validate_unique_entries(cls, values: list[str], info: ValidationInfo) -> list[str]:
-        """Ensure each configured entry appears at most once."""
-        duplicates = duplicate_items(values)
-        if duplicates:
-            msg = f"Duplicate {info.field_name} are not allowed: {', '.join(duplicates)}"
-            raise ValueError(msg)
-        return values
-
-    def is_multi_user_mode(self) -> bool:
-        """Return whether multi-user room access mode is enabled."""
-        return self.mode == "multi_user"
-
-    def is_invite_only_room(
-        self,
-        room_key: str,
-        runtime_paths: RuntimePaths,
-        room_id: str | None = None,
-        room_alias: str | None = None,
-    ) -> bool:
-        """Check whether a managed room should remain invite-only."""
-        identifiers = {room_key}
-        if room_id:
-            identifiers.add(room_id)
-        if room_alias:
-            identifiers.add(room_alias)
-            localpart = room_alias_localpart(room_alias)
-            if localpart:
-                identifiers.add(localpart)
-                managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
-                if managed_room_key:
-                    identifiers.add(managed_room_key)
-        return any(identifier in self.invite_only_rooms for identifier in identifiers)
-
-    def get_target_join_rule(
-        self,
-        room_key: str,
-        runtime_paths: RuntimePaths,
-        room_id: str | None = None,
-        room_alias: str | None = None,
-    ) -> RoomJoinRule | None:
-        """Get the configured target join rule for a managed room."""
-        if not self.is_multi_user_mode():
-            return None
-        if self.is_invite_only_room(room_key, runtime_paths, room_id=room_id, room_alias=room_alias):
-            return "invite"
-        return self.multi_user_join_rule
-
-    def get_target_directory_visibility(
-        self,
-        room_key: str,
-        runtime_paths: RuntimePaths,
-        room_id: str | None = None,
-        room_alias: str | None = None,
-    ) -> RoomDirectoryVisibility | None:
-        """Get the configured target room directory visibility for a managed room."""
-        if not self.is_multi_user_mode():
-            return None
-        if self.is_invite_only_room(room_key, runtime_paths, room_id=room_id, room_alias=room_alias):
-            return "private"
-        return "public" if self.publish_to_room_directory else "private"
-
-
 class EventJournalConfig(BaseModel):
     """Where this runtime's durable event journal lives."""
 
@@ -231,6 +128,7 @@ class EventJournalConfig(BaseModel):
         description=(
             "PostgreSQL connection URL for the durable Matrix event journal. Prefer database_url_env for secrets."
         ),
+        json_schema_extra=dashboard_hint(secret=True),
     )
     database_url_env: str = Field(
         default="MINDROOM_EVENT_CACHE_DATABASE_URL",

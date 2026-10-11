@@ -24,6 +24,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _make_client_mock,
@@ -112,6 +113,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     @pytest.mark.asyncio
     async def test_agent_responds_in_existing_thread(self, bot: AgentBot) -> None:
         """Test that agents respond correctly in existing threads."""
+        install_direct_response_admission(bot)
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
 

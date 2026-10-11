@@ -9,12 +9,12 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -27,6 +27,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -76,6 +77,7 @@ def setup_test_bot(
         rooms=[room_id],
         enable_streaming=enable_streaming,
     )
+    install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
     bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
@@ -109,16 +111,17 @@ class TestStreamingEdits:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization=AuthorizationConfig(default_room_access=True),
+        self.config = with_current_room_member_access(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
 
     @pytest.mark.asyncio
@@ -177,6 +180,7 @@ class TestStreamingEdits:
         edit_event1.sender = "@user:localhost"
         edit_event1.body = "* @mindroom_calculator:localhost: What's 2+2? Can you show the work?"
         edit_event1.event_id = "$edit1"
+        edit_event1.server_timestamp = 1000
         edit_event1.source = {
             "content": {
                 "body": "* @mindroom_calculator:localhost: What's 2+2? Can you show the work?",
@@ -204,6 +208,7 @@ class TestStreamingEdits:
         edit_event2.sender = "@user:localhost"
         edit_event2.body = "* @mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?"
         edit_event2.event_id = "$edit2"
+        edit_event2.server_timestamp = 2000
         edit_event2.source = {
             "content": {
                 "body": "* @mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?",

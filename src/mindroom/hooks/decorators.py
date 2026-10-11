@@ -6,7 +6,7 @@ import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from .types import HookCallback, validate_event_name
+from .types import EVENT_AGENT_STARTED, HookCallback, validate_event_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -26,6 +26,7 @@ class _HookMetadata:
     timeout_ms: int | None
     agents: tuple[str, ...] | None
     rooms: tuple[str, ...] | None
+    required: bool
 
 
 def hook(
@@ -36,9 +37,13 @@ def hook(
     timeout_ms: int | None = None,
     agents: Iterable[str] | None = None,
     rooms: Iterable[str] | None = None,
+    required: bool = False,
 ) -> Callable[[HookCallback], HookCallback]:
     """Annotate an async function as a MindRoom hook."""
     event_name = validate_event_name(event)
+    if required and event_name != EVENT_AGENT_STARTED:
+        msg = "required hooks are only supported for agent:started"
+        raise ValueError(msg)
     normalized_agents = tuple(agent.strip() for agent in agents or () if agent.strip()) or None
     normalized_rooms = tuple(room.strip() for room in rooms or () if room.strip()) or None
 
@@ -54,6 +59,7 @@ def hook(
             timeout_ms=timeout_ms,
             agents=normalized_agents,
             rooms=normalized_rooms,
+            required=required,
         )
         setattr(callback, _HOOK_METADATA_ATTR, metadata)
         return callback

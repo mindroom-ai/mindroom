@@ -1,181 +1,109 @@
 # Router Configuration
 
-The router is a built-in system component that handles intelligent message routing and room management.
-It decides which agent or team should respond when no specific agent or team is mentioned, sends welcome messages to new rooms, and manages various system-level tasks.
+The router is a built-in MindRoom account that is always present, cannot be disabled, and joins every room with configured agents or teams.
+It picks which agent or team answers a message that mentions no one, accepts room invitations, and sends welcome messages.
+Configure it under `router:` to choose its routing model, who may invite it into rooms, who may interact with it, and optional System One or OpenAI Decisions responder selection.
+
+See also [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/), [Access Control](https://docs.mindroom.chat/authorization/), and [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/).
 
 ## Configuration
 
 ```yaml
 router:
-  # Model for routing decisions (defaults to "default")
-  model: haiku
-
-  # Accept authorized room invites and preserve them across restarts (default: true)
+  model: haiku          # Must exist under models
   accept_invites: true
-
 ```
-
-The router has two configuration options:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
+| `model` | string | `"default"` | Model alias used for routing decisions |
+| `judgment` | object or null | `null` | Optional System One or OpenAI Decisions responder selection before LLM routing; see [Responder Selection Judgments](#responder-selection-judgments) |
+| `access` | object or null | `null` | Who may interact with the router; see [Access Control](https://docs.mindroom.chat/authorization/) |
+| `accept_invites` | bool or list[string] | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID |
+
+Point `model` at a cheap, fast alias to keep routing inexpensive.
+Room and thread model overrides also apply to routing.
+
+### Invitations and access
+
+Inviter patterns are matched after [identity alias](https://docs.mindroom.chat/authorization/#requester-identity-and-private-state) resolution and use the same case-sensitive wildcard rules as `access.users`.
+Rooms joined through an invitation are kept across restarts and survive room cleanup.
+Accepting an invitation only joins the room; every interaction afterwards still requires the router's `access` policy.
+Router `access` defaults to `current_room_members: true`, which still applies when you set only `access.users`; set `current_room_members: false` to remove it.
 
 ## How Routing Works
 
-When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
+When a message mentions no agent or team, MindRoom first finds the responders the sender may address in that room.
 
-1. If the thread already requires explicit targeting, MindRoom stays silent until someone mentions an agent or team
-2. If exactly one eligible responder remains, that agent or team handles the message directly
-3. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
-4. Based on the candidate entities' roles, tools, and instructions, it selects the best match
-5. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
-6. The mentioned agent or team sees the mention and responds in the thread
+- In configured rooms, candidates are the agents and teams that list the room in `rooms`.
+- In ad-hoc rooms the router joined by invitation, candidates are the MindRoom agents and teams currently joined to the room.
+- Either way, candidates the sender is not allowed to address are removed.
 
-For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`, then are filtered by the sender's per-entity reply permissions.
-For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room, then are filtered by the same sender permissions.
+Then:
 
-When multiple responders are eligible, the router uses a structured output schema to ensure consistent routing decisions, including the selected agent or team name and reasoning for the selection.
+1. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
+2. If exactly one eligible responder remains, it answers directly without an AI routing call.
+3. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
+4. The router posts a message mentioning the chosen agent or team (for example "@code could you help with this?"), and that entity answers in the thread.
 
-## Router Responsibilities
+If routing fails, for example because of a model error or an invalid choice, the router replies "Please try mentioning an agent or team directly with @ or rephrase your request."
+Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.
+An entity invited into a configured room that does not list it posts a note when it joins, and repeats that note instead of answering when it alone is mentioned there: the room's agents are managed in the MindRoom configuration, so talk to the entity in a new room it is invited to.
+A request that mentions several entities gets the same explanation when every entity it cannot use is such an invited, unlisted entity.
+The note speaks only to people the entity's `access` admits and names the room's agents they can ask instead.
+See [Multi-Human Thread Protection](https://docs.mindroom.chat/configuration/threads/#multi-human-thread-protection) for when threads require explicit tags.
 
-The router is a special system agent that handles several important tasks beyond message routing:
+### Mentioning the router
 
-### Command Handling
+The router is not a conversational agent.
+A message that mentions only the router gets a short rules-of-engagement reply instead of an answer.
+Mention a specific agent or team to get an answer, or several agents for an ad-hoc collaboration.
 
-The router owns commands by default.
-A requester-scoped `!desktop` command may instead be owned by an eligible private agent when the room contains exactly that requester and agent.
+## Responder Selection Judgments
 
-- `!help [topic]` - Get help on commands or specific topics
-- `!hi` - Show the welcome message again
-- `!schedule <task>` - Schedule tasks and reminders
-- `!list_schedules` - List scheduled tasks
-- `!cancel_schedule <id>` - Cancel a scheduled task
-- `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!reload-plugins` - Reload configured plugins (admin only)
-- `!config <operation>` - Manage configuration when explicitly enabled for global admins
-- `!desktop [setup|status|confirm|rotate|disconnect]` - Manage the requester's Desktop target
-- `!model [name|list|reset]` - Show or switch the current thread model
-- `!room_model [name|list|reset]` - Show the current room model default or switch it (set/reset require a room admin)
-- `!thread_mode [room|thread|reset|show]` - Manage room thread mode (room admin only)
-- `!encrypt [confirm]` - Enable room encryption (irreversible, room admin only)
-- `!e2ee` - Show room encryption diagnostics
+Set `router.judgment` to let System One (TypeSafe) or the OpenAI Decisions API choose among the eligible agents and teams before ordinary LLM routing.
+It is off by default, even when the backend's API key is set.
+Explicit mentions, thread participation rules, access control, and the single-candidate shortcut work the same way with or without it.
 
-Except for the requester-scoped `!desktop` case above, commands are processed by the router even in single-responder rooms.
-
-### Welcome Messages
-
-After accepting an invite, the router sends a requester-scoped welcome message only when the room has no existing message history.
-
-That welcome message lists:
-
-- Available agents and teams visible to the inviter with their descriptions
-- How to interact with agents and teams (mentions, commands)
-- Quick command reference
-
-Startup welcomes with no requester list configured room responders when the room is statically configured.
-Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely after restart.
-The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
-
-Use `!hi` in any room to see the welcome message again.
-
-The `!hi` welcome lists responders visible to the requester.
-
-### Room Management
-
-The router creates and manages rooms:
-
-- Creates configured rooms that don't exist yet
-- Invites configured agents, teams, and users to their rooms
-- Applies `matrix_room_access` policy for managed rooms (when enabled)
-- Reconciles managed room power levels so the custom thread-tags state event can be written at PL0
-- Generates AI-powered room topics based on configured agents and teams
-- Has admin privileges to manage room membership
-- Cleans up orphaned bots on startup
-
-Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
-The tool can invite only the persisted router identity and only into the agent's current room.
-The router treats the configured agent identity as an authorized internal sender, auto-accepts the invite, and persists the room when `router.accept_invites` is enabled.
-The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
-This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
-
-By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
-In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
-That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
-
-### Voice Message Processing
-
-Audio events are handled through the shared media pipeline on all bots.
-The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a room.
-When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
-By default, `voice.visible_router_echo: true` also lets the router post an immediate display-only transcription placeholder and replace it with the normalized transcript or fallback text when voice STT is enabled and it is allowed to reply.
-With STT disabled, the router posts the display-only fallback directly.
-Set `voice.visible_router_echo: false` to suppress that display-only echo.
-
-See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
-
-### Configuration Confirmations
-
-The router handles interactive configuration changes.
-When a config change is requested, the router posts a confirmation message with reactions, and only the router processes the confirmation reactions.
-
-### Scheduled Task Restoration
-
-When the router joins a room, it restores any previously scheduled tasks and pending configuration changes to ensure they persist across restarts.
-
-## Routing Behavior Details
-
-### Single Responder Optimization
-
-When there is only one eligible responder for a room, the router skips AI routing entirely.
-The single responder handles messages directly, which is faster and more efficient.
-
-### Multi-Human Thread Protection
-
-When multiple human users have posted in a thread, the router, agents, and teams require an explicit `@mention` before responding.
-This prevents MindRoom entities from injecting themselves into human-to-human conversations.
-
-The rules are:
-
-1. **Mentioned eligible agents or teams respond** — an explicit `@agent` or `@team` bypasses AI routing, but room configuration and reply permissions still apply.
-2. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
-3. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
-4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
-5. **Mentioning a non-MindRoom user** — if a message tags only humans or unmanaged users, agents and teams stay silent.
-
-#### Bot accounts
-
-By default, any Matrix user that is not a MindRoom agent or team counts as a "human" for the rules above.
-This includes bridge bots (Telegram, Slack, etc.) and other non-MindRoom bots.
-If a bridge bot relays a message into a thread, it looks like a second human to MindRoom and triggers the mention requirement.
-
-To prevent this, list those accounts in `bot_accounts`:
+Set `TYPESAFE_API_KEY` in the process environment or the `.env` next to `config.yaml`, then enable it:
 
 ```yaml
-bot_accounts:
-  - "@telegram:example.com"
-  - "@slackbot:example.com"
+router:
+  model: default
+  judgment:
+    provider: typesafe
+    threshold: 0.8
+    timeout_seconds: 1.5
 ```
 
-Accounts in this list are treated like MindRoom entities for response logic — their messages and mentions don't count toward the multi-human detection.
+For the OpenAI Decisions API, set `provider: openai_decisions`; it uses the OpenAI API key described in [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends).
 
-### Routing Fallback
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | Required | `typesafe` or `openai_decisions` |
+| `threshold` | float | `0.8` | From `0` to `1`; both the chosen option's probability and the backend's confidence must reach it |
+| `timeout_seconds` | float | `1.5` | Positive deadline of at most `30` seconds |
 
-If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message that asks the user to mention an agent or team directly or rephrase the request.
+Unknown fields are rejected.
 
-Users can mention eligible agents or teams directly with `@entity_name` to bypass routing, while configured-room allowlists and reply permissions still decide whether that entity may answer.
+The backend receives each candidate's role, tools, delegation targets, and brief instructions, the current message, and the last three visible messages with senders replaced by aliases.
+It does not receive system prompts, tool results, attachment contents, or the rest of the conversation.
+It runs only with 2 to 253 candidates and a request of at most 16,000 bytes; messages are never shortened, so long input or input that looks like a secret uses ordinary routing instead.
 
-## Note on the Router Agent
+| Outcome | Result |
+|---------|--------|
+| A candidate is chosen | The router mentions that agent or team as usual |
+| `no_fit` | The router asks the user to mention a responder or rephrase; OpenAI-compatible [`auto`](https://docs.mindroom.chat/openai-api/#auto-routing) requests get HTTP 400 with code `no_suitable_responder` |
+| `multiple` | Ordinary LLM routing picks one responder; several agents are never launched |
+| Tie, low confidence, abstention, missing key, full judgment limit, timeout, or error | Ordinary LLM routing with `router.model` |
 
-The router is always present and cannot be disabled.
-It automatically joins any room with configured agents or teams.
-If no `router` section is configured, it uses the default model.
+The router's prompt overrides apply only to LLM routing, not to the judgment backend.
+Router judgments share the process-wide limit and logging described in [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends), with at most one router judgment at a time.
 
-The router account is not a conversational AI agent to tag directly.
-If a message mentions only the router and no other users, agents, or teams, the router replies with the rules of engagement instead of answering the prompt.
-Mention a specific agent or team when you want that entity to answer.
-Mention multiple agents when you want an ad-hoc collaboration, or mention a configured team directly for its team workflow.
-When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
-Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next.
-In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.
+## Welcome Messages
+
+After accepting an invitation into a room with no message history, the router posts a welcome if the inviter has router access, listing the agents and teams the inviter may address, how to mention them, and a quick command reference.
+At startup, empty configured rooms get a welcome listing their configured responders.
+Send [`!hi`](https://docs.mindroom.chat/chat-commands/#hi) to see the welcome again, limited to responders visible to you.
+
+The router's other duties are documented on their own pages: [command handling](https://docs.mindroom.chat/chat-commands/#command-handling), [room management](https://docs.mindroom.chat/rooms/#room-management), [voice message processing](https://docs.mindroom.chat/voice/#voice-message-processing), [configuration confirmations](https://docs.mindroom.chat/chat-commands/#configuration-confirmations), and [scheduled task restoration](https://docs.mindroom.chat/scheduling/#scheduled-task-restoration).

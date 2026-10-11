@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 import mindroom.routing
@@ -64,9 +65,20 @@ def check_agent_mentioned(
     event_source: dict,
     agent_id: MatrixID | None,
     config: Config,
+    *,
+    joined_user_ids: tuple[str, ...] = (),
 ) -> tuple[list[MatrixID], bool, bool]:
     """Check mentions with the test config's bound runtime context."""
-    return mindroom.thread_utils.check_agent_mentioned(event_source, agent_id, config, runtime_paths_for(config))
+    room = nio.MatrixRoom("!test:localhost", "@mindroom_router:localhost")
+    for user_id in joined_user_ids:
+        room.add_member(user_id, None, None)
+    return mindroom.thread_utils.check_agent_mentioned(
+        event_source,
+        agent_id,
+        config,
+        runtime_paths_for(config),
+        room=room,
+    )
 
 
 def _message(
@@ -159,7 +171,6 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
             "attach_media_to_run_input",
             "copy_run_input",
             "cached_agent_run",
-            "append_inline_media_fallback_to_run_input",
             "get_model_instance",
             "install_queued_message_notice_hook",
             "queued_message_signal_context",
@@ -174,7 +185,7 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
                 getattr(module, attr)
             assert attr not in getattr(module, "__all__", ())
 
-    model_loading_module = importlib.import_module("mindroom.model_loading")
+    model_loading_module = importlib.import_module("mindroom.providers.model_loading")
     assert callable(model_loading_module.get_model_instance)
 
 
@@ -216,7 +227,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             # Mock the Agent and response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -256,7 +267,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = {"entity_name": "general", "reasoning": "Custom route"}
@@ -292,7 +303,7 @@ class TestAIRouting:
             _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = {
@@ -335,7 +346,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             # AI suggests an agent not in available list
@@ -372,7 +383,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance") as mock_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_model:
             mock_model.side_effect = Exception("Model error")
 
             agents = [MatrixID(username="mindroom_general", domain="localhost")]
@@ -514,14 +525,19 @@ class TestThreadUtils:
         assert has_multiple_non_agent_users_in_thread(history, self.config) is False
 
     def test_check_agent_mentioned_detects_non_agent_mentions(self) -> None:
-        """Tagging a non-agent user sets has_non_agent_mentions."""
+        """Tagging a joined non-agent user sets has_non_agent_mentions."""
         event_source = {
             "content": {
                 "m.mentions": {"user_ids": ["@bob:localhost"]},
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            self.config,
+            joined_user_ids=("@bob:localhost",),
+        )
         assert am_i_mentioned is False
         assert has_non_agent is True
 
@@ -580,7 +596,12 @@ class TestThreadUtils:
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, _, has_non_agent = check_agent_mentioned(event_source, agent_id, config)
+        _, _, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            config,
+            joined_user_ids=("@telegram:localhost",),
+        )
         assert has_non_agent is False
 
     def test_check_agent_mentioned_mixed_bot_and_human_mentions(self) -> None:
@@ -600,7 +621,12 @@ class TestThreadUtils:
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, _, has_non_agent = check_agent_mentioned(event_source, agent_id, config)
+        _, _, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            config,
+            joined_user_ids=("@bob:localhost",),
+        )
         assert has_non_agent is True
 
 
@@ -676,7 +702,12 @@ class TestBridgeMentionFallback:
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            self.config,
+            joined_user_ids=("@alice:localhost",),
+        )
         assert am_i_mentioned is False
         assert has_non_agent is True
 

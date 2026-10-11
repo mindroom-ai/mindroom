@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.approval_inbound import handle_tool_approval_action
+from mindroom.approval.inbound import handle_tool_approval_action
 from mindroom.commands import config_confirmation
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -20,15 +20,14 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.coalescing.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
-    from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
-    from mindroom.stop import StopManager
     from mindroom.turn_policy import TurnPolicy
-    from mindroom.turn_store import TurnStore
     from mindroom.user_stop_reconciliation import UserStopReconciler
 
 
@@ -41,9 +40,8 @@ class ReactionDispatcherDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     journal_dispatcher: JournalDispatcher
+    agent_reply_memberships: AgentReplyMembershipIndex
     turn_policy: TurnPolicy
-    turn_store: TurnStore
-    stop_manager: StopManager
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
@@ -95,12 +93,13 @@ class ReactionDispatcher:
             status="approved",
             reason=None,
             before_consume=None if approval_claimed else claim_approval_reaction,
-            authorization_prevalidated=approval_claimed,
+            membership_index=self.deps.agent_reply_memberships,
         )
         return approval_claimed or approval_handled
 
     async def _maybe_handle_stop_reaction(
         self,
+        room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
     ) -> bool:
@@ -113,26 +112,19 @@ class ReactionDispatcher:
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
             ).current_entity_name_for_user_id(event.sender)
-            turn_record = self.deps.turn_store.turn_record_for_response_event_id(event.reacts_to)
-            has_incomplete_turn = turn_record is not None and not turn_record.completed
             if sender_agent_name or not (
-                self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to) or has_incomplete_turn
+                # A running reply in the reaction's room, including one whose create is still unacknowledged.
+                await self.deps.user_stop_reconciler.accepts_reply_stop(event.reacts_to, room.room_id)
             ):
                 return False
             await self.deps.journal_dispatcher.claim_semantic_consumer(
                 SemanticConsumer.STOP_REACTION,
             )
 
-        async def remove_current_stop_button() -> None:
-            await self.deps.stop_manager.remove_stop_button(
-                self._client(),
-                event.reacts_to,
-            )
-
         stopped = await self.deps.user_stop_reconciler.finalize(
             event.reacts_to,
             await self.deps.journal_dispatcher.receipt_order(),
-            remove_current_stop_button,
+            room_id=room.room_id,
         )
         if stopped:
             self.deps.logger.info(
@@ -196,7 +188,7 @@ class ReactionDispatcher:
                     self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
                     await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-                if await self._maybe_handle_stop_reaction(event, consumer):
+                if await self._maybe_handle_stop_reaction(room, event, consumer):
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 outcome = await self._maybe_handle_interactive_reaction(
                     room,
@@ -216,7 +208,7 @@ class ReactionDispatcher:
                     correlation_id=event.event_id,
                 )
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        if await self._maybe_handle_stop_reaction(event, consumer):
+        if await self._maybe_handle_stop_reaction(room, event, consumer):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._maybe_handle_interactive_reaction(
             room,

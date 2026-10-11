@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, type Mock } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { UnconfiguredRooms } from "./UnconfiguredRooms";
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -10,6 +11,52 @@ function jsonResponse(payload: unknown, status = 200): Response {
 }
 
 describe("UnconfiguredRooms", () => {
+  it("distinguishes and selects rooms with identical display names", async () => {
+    const rooms = ["!first:example.com", "!second:example.com"];
+    (global.fetch as Mock).mockResolvedValueOnce(
+      jsonResponse({
+        agents: [
+          {
+            agent_id: "team",
+            display_name: "Team",
+            configured_rooms: [],
+            joined_rooms: rooms,
+            unconfigured_rooms: rooms,
+            unconfigured_room_details: rooms.map((room_id) => ({
+              room_id,
+              name: "Lobby",
+            })),
+          },
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    render(<UnconfiguredRooms />);
+
+    const first = await screen.findByRole("checkbox", {
+      name: "Select Lobby (!first:example.com) for Team",
+    });
+    const second = screen.getByRole("checkbox", {
+      name: "Select Lobby (!second:example.com) for Team",
+    });
+    await user.click(second);
+    expect(first).not.toBeChecked();
+    expect(second).toBeChecked();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Open Lobby (!second:example.com) in Matrix client",
+      }),
+    );
+    expect(open).toHaveBeenCalledWith(
+      "https://matrix.to/#/!second:example.com",
+      "_blank",
+    );
+    expect(second).toBeChecked();
+    open.mockRestore();
+  });
+
   it("renders teams in the external room list", async () => {
     (global.fetch as Mock).mockResolvedValueOnce(
       jsonResponse({

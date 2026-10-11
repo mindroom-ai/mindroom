@@ -15,6 +15,11 @@ resource "time_sleep" "wait_for_cert_manager" {
 resource "kubernetes_namespace" "mindroom_instances" {
   metadata {
     name = "mindroom-instances"
+    # Tenant pods run tenant code on the node that hosts the control plane, so admission rejects
+    # privileged containers, host namespaces, hostPath volumes, and capabilities beyond the default set.
+    labels = {
+      "pod-security.kubernetes.io/enforce" = "baseline"
+    }
   }
 
   depends_on = [module.kube-hetzner]

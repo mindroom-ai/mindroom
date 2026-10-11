@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 import shlex
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -25,15 +26,14 @@ from mindroom.external_triggers.store import (
     ExternalTriggerTarget,
 )
 from mindroom.runtime_state import get_api_server_address
-from mindroom.tool_system.worker_routing import resolve_agent_owned_path
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _CALLBACK_KIND = "mindroom.callback.completed"
 _MAX_LABEL_LENGTH = 200
+_CALLBACKS_DIR = Path(".mindroom/callbacks")
 
 
 def _callback_base_url(context: ToolRuntimeContext) -> str:
@@ -97,7 +97,8 @@ class CallbackManagerTools(Toolkit):
             )
             callback_url = f"{_callback_base_url(context)}/api/triggers/{record.trigger_id}"
             script_path = write_callback_script(
-                _workspace_callbacks_dir(context),
+                agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name),
+                _CALLBACKS_DIR,
                 callback_id=record.trigger_id,
                 script_text=build_callback_script(
                     callback_url=callback_url,
@@ -121,14 +122,6 @@ class CallbackManagerTools(Toolkit):
                         config=context.config,
                     )
             return custom_tool_payload("callback_manager", "error", message=str(exc))
-
-
-def _workspace_callbacks_dir(context: ToolRuntimeContext) -> Path:
-    return resolve_agent_owned_path(
-        ".mindroom/callbacks",
-        agent_name=context.agent_name,
-        base_storage_path=context.runtime_paths.storage_root,
-    )
 
 
 def _callback_label(label: str) -> str:

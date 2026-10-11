@@ -6,13 +6,16 @@ export type RawAgentConfig = Omit<Agent, "id" | "tools"> & {
   tools: ToolEntry[];
 };
 
-export type RawDefaultsConfig = Omit<Config["defaults"], "tools"> & {
+export type RawDefaultsConfig = Omit<
+  NonNullable<Config["defaults"]>,
+  "tools"
+> & {
   tools?: ToolEntry[];
 };
 
 export type RawConfig = Omit<Config, "agents" | "defaults"> & {
   agents: Record<string, RawAgentConfig>;
-  defaults: RawDefaultsConfig;
+  defaults?: RawDefaultsConfig;
 };
 
 export type ConfigSavePayload = RawConfig;

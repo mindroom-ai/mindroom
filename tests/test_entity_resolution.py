@@ -16,6 +16,7 @@ from mindroom.entity_resolution import (
     configured_bot_user_ids_for_room,
     configured_call_agent_name_for_room,
     entity_identity_registry,
+    persisted_bot_user_ids,
 )
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -162,6 +163,25 @@ def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) ->
         )
 
 
+def test_explicit_call_room_owner_overrides_ambiguous_invited_membership(tmp_path: Path) -> None:
+    """Explicit room configuration wins over stale overlapping invite state."""
+    config = _call_config(tmp_path, general=True, other=True)
+    config.agents["general"].rooms = ["!agent-call:server"]
+
+    assert (
+        configured_call_agent_name_for_room(
+            config,
+            "!agent-call:server",
+            runtime_paths_for(config),
+            invited_rooms_by_agent={
+                "general": {"!agent-call:server"},
+                "other": {"!agent-call:server"},
+            },
+        )
+        == "general"
+    )
+
+
 def test_configured_call_agent_ignores_stale_invites_when_acceptance_is_disabled(tmp_path: Path) -> None:
     """Disabling invite acceptance revokes persisted ad-hoc call-room ownership."""
     config = _call_config(tmp_path, general=False)
@@ -248,6 +268,25 @@ def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Pa
 
     with pytest.raises(MissingManagedEntityAccountError, match="router"):
         entity_identity_registry(config, runtime_paths)
+
+
+def test_persisted_bot_user_ids_keep_removed_entities_and_skip_internal_user(tmp_path: Path) -> None:
+    """Every persisted bot account counts, whether or not it is configured, but the internal user never does."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    state = MatrixState()
+    state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router", "pw", domain="server")
+    state.add_account("agent_retired", "mindroom_retired", "pw", domain="server")
+    state.add_account("agent_legacy", "mindroom_legacy", "pw")
+    state.add_account("agent_user", "mindroom_user", "pw", domain="server")
+    state.save(runtime_paths=runtime_paths)
+
+    assert persisted_bot_user_ids(runtime_paths) == frozenset(
+        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:localhost"},
+    )
 
 
 def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_path: Path) -> None:

@@ -7,8 +7,8 @@ This directory contains Matrix bridge configurations and the bridge management t
 The bridge manager generates local bridge files and controls bridge containers:
 
 ```bash
-# Add a Telegram bridge to an instance
-./bridge.py add telegram --instance default
+# Add a Telegram bridge to an instance; only --admin gets more than relay access
+./bridge.py add telegram --instance default --admin @you:m-default.example.com
 
 # Generate registration file
 ./bridge.py register telegram --instance default
@@ -73,6 +73,7 @@ First, get your credentials:
 Then add the bridge:
 ```bash
 ./bridge.py add telegram --instance yourinstance \
+  --admin @you:m-yourinstance.mindroom.chat \
   --api-id YOUR_API_ID \
   --api-hash YOUR_API_HASH \
   --bot-token YOUR_BOT_TOKEN
@@ -86,14 +87,23 @@ Generate the registration file:
 ```
 
 #### For Tuwunel/Conduit:
-1. Join the admin room: `#admins:m-yourinstance.mindroom.chat`
-2. Send: `!admin appservices register`
-3. Paste the registration.yaml content (shown in the output)
-4. Verify with: `!admin appservices list`
+1. Join the admin room `#admins:m-yourinstance.mindroom.chat` using an authorized admin account.
+2. Send the command and the complete generated YAML together as **one message**, with the YAML inside triple backticks:
+
+   ````text
+   !admin appservices register
+   ```
+   <paste the complete registration.yaml contents here>
+   ```
+   ````
+
+3. Check the response, then verify registration with `!admin appservices list`.
+
+See the [Tuwunel appservice registration guide](https://github.com/matrix-construct/tuwunel/blob/main/docs/appservices.md#admin-room).
 
 #### For Synapse:
 The manager updates `homeserver.yaml`, but the local Compose layout does not mount the generated registration file into the Synapse container.
-Manually expose the generated file at the configured `app_service_config_files` path, then restart Synapse.
+Manually expose the generated file at the configured `app_service_config_files` path, then restart Synapse with `./deploy.py restart yourinstance --only-matrix`.
 
 ### Step 4: Start the Bridge
 
@@ -120,10 +130,10 @@ You can run bridges on multiple instances with different bots:
 
 ```bash
 # Add bridge to 'default' instance
-./bridge.py add telegram --instance default --bot-token TOKEN1
+./bridge.py add telegram --instance default --admin @you:m-default.example.com --bot-token TOKEN1
 
 # Add bridge to 'alt' instance with a different bot
-./bridge.py add telegram --instance alt --bot-token TOKEN2
+./bridge.py add telegram --instance alt --admin @you:m-alt.example.com --bot-token TOKEN2
 
 # Start all bridges for an instance
 ./bridge.py start --all --instance default
@@ -156,7 +166,7 @@ You can run bridges on multiple instances with different bots:
 ### How bridge.py Works
 
 1. **Automatic Network Configuration**: Bridges are automatically placed on the same Docker network as their Matrix server
-2. **Port Management**: Automatically allocates non-conflicting ports
+2. **Port Management**: Scans from a type-specific starting port, checking host availability and reservations for the same bridge type
 3. **URL Resolution**: Uses Docker container names for internal communication
 4. **Permission Handling**: Sets correct file permissions for databases
 5. **Bot User Creation**: Attempts to auto-create bot users when needed
@@ -246,7 +256,7 @@ docker logs default-telegram-bridge
 - `data/registration.yaml` - Contains authentication tokens
 - `*.db` - Database files
 
-The `bridge_instances.json` file is automatically added to `.gitignore`.
+The generated `local/instances/deploy/bridge_instances.json` registry is covered by the `.gitignore` beside `bridge.py`.
 
 ## Support
 

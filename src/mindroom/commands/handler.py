@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.authorization import (
+    is_platform_administrator,
+    responder_candidate_entities_with_membership_refresh,
+)
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.desktop_commands import (
@@ -14,15 +17,25 @@ from mindroom.commands.desktop_commands import (
     handle_desktop_command,
 )
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
-from mindroom.commands.model_commands import handle_model_command
+from mindroom.commands.mode_commands import handle_mode_command
+from mindroom.commands.model_commands import handle_model_command, handle_structured_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.commands.room_model_commands import handle_room_model_command
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
+from mindroom.entity_resolution import (
+    configured_routable_entity_ids_for_room,
+    entity_identity_registry,
+    persisted_bot_user_ids,
+)
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
-from mindroom.scheduling import (
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
+from mindroom.message_target import MessageTarget
+from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
+from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.scheduling.tasks import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,
@@ -41,10 +54,11 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
-    from mindroom.message_target import MessageTarget
+    from mindroom.model_selection import CommandResultContent
     from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
@@ -57,9 +71,23 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.EDIT_SCHEDULE,
         CommandType.DESKTOP,
         CommandType.MODEL,
+        CommandType.MODE,
         CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
         CommandType.ENCRYPT,
+    },
+)
+# Commands an agent may post for a human; Desktop pairing, confirmations, and admin changes need the human in person.
+_COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN = frozenset(
+    {
+        CommandType.HELP,
+        CommandType.MODE,
+        CommandType.MODEL,
+        CommandType.SCHEDULE,
+        CommandType.LIST_SCHEDULES,
+        CommandType.CANCEL_SCHEDULE,
+        CommandType.EDIT_SCHEDULE,
+        CommandType.UNKNOWN,
     },
 )
 
@@ -74,6 +102,8 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
+        responder_candidates_for_room=context.responder_candidates_for_room,
+        config_provider=context.config_provider,
     )
 
 
@@ -98,6 +128,13 @@ class _CommandResponseSender(Protocol):
         """Send a command response."""
 
 
+class _CommandResultRecorder(Protocol):
+    """Checkpoint readable text and optional structured metadata together."""
+
+    def __call__(self, response_text: str, *, extra_content: CommandResultContent | None = None) -> Awaitable[None]:
+        """Save one authoritative command result."""
+
+
 @dataclass(frozen=True)
 class CommandHandlerContext:
     """Dependencies required by command handling."""
@@ -109,12 +146,14 @@ class CommandHandlerContext:
     conversation_reader: ConversationReader
     stable_target: MessageTarget
     record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
-    record_command_result: Callable[[str], Awaitable[None]]
+    record_command_result: _CommandResultRecorder
     send_response: _CommandResponseSender
     agent_reply_memberships: AgentReplyMembershipIndex
+    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
-    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
+    controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
+    config_provider: Callable[[], Config | None] | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -166,7 +205,7 @@ def _format_welcome_message(
         if entity_name is None:
             continue
         description = _format_agent_description(entity_name, config)
-        entity_entry = f"• **@{entity_name}**"
+        entity_entry = f"• **{config.entity_display_name(entity_name)}** (alias `{entity_name}`)"
         if description:
             entity_entry += f": {description}"
         entity_list.append(entity_entry)
@@ -198,7 +237,7 @@ def _format_welcome_message(
 
 
 async def generate_welcome_message_for_room(
-    client: nio.AsyncClient | None,
+    client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str | None,
     config: Config,
@@ -209,7 +248,7 @@ async def generate_welcome_message_for_room(
     if sender_id is None:
         candidate_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
     else:
-        candidate_entities = await responder_candidate_entities_for_room(
+        candidate_entities = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             sender_id,
@@ -237,6 +276,32 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
 
 
+def _room_admin_sender(context: CommandHandlerContext, event: _CommandEvent, requester_user_id: str) -> str:
+    """Return the sender whose room power may authorize a room-admin command besides the requester."""
+    # A managed entity's own room power never authorizes a command it posted for a human.
+    if event.sender in persisted_bot_user_ids(context.runtime_paths):
+        return requester_user_id
+    return event.sender
+
+
+def _room_has_only(config: Config, room: nio.MatrixRoom, member_ids: set[str]) -> bool:
+    """Return whether complete membership, including every invite, is exactly ``member_ids``."""
+    # The joined-member refresh never lists invites, so invites come from the synced projection.
+    # MindRoom's classic sync filter never loads members lazily, so that projection holds every invite.
+    # Sliding sync loads members lazily, so only the server's joined and invited counts can reveal an unseen invite.
+    # Without both counts, nio's member_count falls back to the projection size.
+    summary = room.summary
+    has_server_counts = (
+        summary is not None and summary.joined_member_count is not None and summary.invited_member_count is not None
+    )
+    return (
+        room_membership_is_complete(room)
+        and (has_server_counts or config.matrix_sync.mode == "classic")
+        and room.member_count == len(member_ids)
+        and cached_member_ids(room) == member_ids
+    )
+
+
 def agent_owns_command(
     command: Command,
     *,
@@ -250,10 +315,11 @@ def agent_owns_command(
         return True
     if command.type is not CommandType.DESKTOP:
         return False
-    return chat_pairing_desktop_error(config, agent_name) is None and set(room.users) == {
-        requester_user_id,
-        room.own_user_id,
-    }
+    return chat_pairing_desktop_error(config, agent_name) is None and _room_has_only(
+        config,
+        room,
+        {requester_user_id, room.own_user_id},
+    )
 
 
 async def _desktop_agent_for_room(
@@ -262,17 +328,7 @@ async def _desktop_agent_for_room(
     requester_user_id: str,
 ) -> str | None:
     """Resolve one eligible agent from a room containing only the requester and serving bots."""
-    if context.responder_candidates_for_room is None:
-        candidates = await responder_candidate_entities_for_room(
-            context.client,
-            room,
-            requester_user_id,
-            context.config,
-            context.runtime_paths,
-            context.agent_reply_memberships,
-        )
-    else:
-        candidates = await context.responder_candidates_for_room(room, requester_user_id)
+    candidates = await context.responder_candidates_for_room(room, requester_user_id)
     registry = entity_identity_registry(context.config, context.runtime_paths)
     eligible: list[tuple[str, str]] = []
     for candidate in candidates:
@@ -284,8 +340,7 @@ async def _desktop_agent_for_room(
     if len(eligible) != 1:
         return None
     agent_name, agent_user_id = eligible[0]
-    expected_members = {requester_user_id, room.own_user_id, agent_user_id}
-    if set(room.users) != expected_members:
+    if not _room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id}):
         return None
     return agent_name
 
@@ -297,6 +352,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     event: _CommandEvent,
     command: Command,
     requester_user_id: str,
+    acts_for_requester: bool = False,
 ) -> None:
     """Dispatch chat commands using injected bot context."""
     context.logger.info("Handling command", command_type=command.type.value)
@@ -304,14 +360,17 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     effective_thread_id = context.stable_target.resolved_thread_id
 
     response_text = ""
+    result_extra_content = None
 
-    if command.type == CommandType.HELP:
+    if acts_for_requester and command.type not in _COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN:
+        response_text = "❌ Agents cannot run this command for you. Send it yourself."
+
+    elif command.type == CommandType.HELP:
         topic = command.args.get("topic")
         response_text = get_command_help(topic)
 
     elif command.type == CommandType.RELOAD_PLUGINS:
-        resolved_requester_user_id = context.config.authorization.resolve_alias(requester_user_id)
-        if resolved_requester_user_id not in context.config.authorization.global_users:
+        if not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
         elif context.reload_plugins is None:
             response_text = "❌ Plugin reload unavailable."
@@ -322,27 +381,34 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 context.logger.exception("Plugin reload command failed", error=str(exc))
                 response_text = f"❌ Plugin reload failed: {exc}"
 
+    elif command.type == CommandType.MODE:
+        response_text = handle_mode_command(
+            command.args.get("args_text", ""),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            target=MessageTarget.resolve(
+                room.room_id,
+                context.stable_target.source_thread_id or EventInfo.from_event(event.source).thread_id,
+                event.event_id,
+            ),
+            requester_id=requester_user_id,
+            membership_index=context.agent_reply_memberships,
+        )
+
     elif command.type == CommandType.HI:
-        if context.responder_candidates_for_room is None:
-            response_text = await generate_welcome_message_for_room(
-                context.client,
-                room,
-                requester_user_id,
-                context.config,
-                context.runtime_paths,
-                context.agent_reply_memberships,
-            )
-        else:
-            candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
-            response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
+        candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
+        response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
 
     elif command.type == CommandType.DESKTOP:
-        desktop_agent_name = await _desktop_agent_for_room(context, room, requester_user_id)
-        if desktop_agent_name is None:
+        if not room_membership_is_complete(room):
+            response_text = "❌ Couldn't confirm this room's membership; try again in a moment."
+        elif (desktop_agent_name := await _desktop_agent_for_room(context, room, requester_user_id)) is None:
             response_text = (
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
+        elif context.controller_identity is None:
+            response_text = "❌ Desktop setup is unavailable until the target agent is running."
         else:
             response_text = handle_desktop_command(
                 command.args.get("args_text", ""),
@@ -351,13 +417,20 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     runtime_paths=context.runtime_paths,
                     agent_name=desktop_agent_name,
                     requester_id=requester_user_id,
+                    controller_identity=context.controller_identity,
                 ),
             )
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
-        mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
+        mentioned_agents, _, _ = check_agent_mentioned(
+            event.source,
+            None,
+            context.config,
+            context.runtime_paths,
+            room=room,
+        )
 
         _, response_text = await schedule_task(
             runtime=_scheduling_runtime(context, room),
@@ -372,6 +445,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = await list_scheduled_tasks(
             client=context.client,
             room_id=room.room_id,
+            runtime_paths=context.runtime_paths,
             thread_id=effective_thread_id,
             config=context.config,
         )
@@ -384,6 +458,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text = await cancel_all_scheduled_tasks(
                 client=context.client,
                 room_id=room.room_id,
+                runtime_paths=context.runtime_paths,
                 matrix_admin=context.matrix_admin,
             )
         else:
@@ -393,6 +468,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 client=context.client,
                 room_id=room.room_id,
                 task_id=task_id,
+                runtime_paths=context.runtime_paths,
                 matrix_admin=context.matrix_admin,
             )
 
@@ -410,12 +486,16 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.CONFIG:
         authorization = context.config.authorization
-        resolved_requester_user_id = authorization.resolve_alias(requester_user_id)
         if not authorization.config_command_enabled:
             response_text = "❌ Config command disabled."
-        elif resolved_requester_user_id not in authorization.global_users:
+        elif not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
         else:
+            resolved_requester_user_id = resolve_human_requester_alias(
+                requester_user_id,
+                context.config,
+                context.runtime_paths,
+            )
             # Handle config command
             args_text = command.args.get("args_text", "")
             response_text, change_info = await handle_config_command(
@@ -442,8 +522,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     room_id=room.room_id,
                     thread_id=effective_thread_id,
                     config_path=change_info["config_path"],
-                    old_value=change_info["old_value"],
                     new_value=change_info["new_value"],
+                    new_value_withheld=change_info["new_value_withheld"],
                     requester=resolved_requester_user_id,
                 )
 
@@ -451,14 +531,29 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 return  # Exit early since we've handled the response
 
     elif command.type == CommandType.MODEL:
-        response_text = handle_model_command(
-            command.args.get("args_text", ""),
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-            requester_user_id=requester_user_id,
-        )
+        content = event.source.get("content", {})
+        if MODEL_SELECTION_CONTENT_KEY in content:
+            response_text, result_extra_content = await handle_structured_model_command(
+                content,
+                client=context.client,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                membership_index=context.agent_reply_memberships,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                requester_user_id=event.sender,
+                command_event_id=event.event_id,
+            )
+        else:
+            response_text = handle_model_command(
+                command.args.get("args_text", ""),
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                membership_index=context.agent_reply_memberships,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                requester_user_id=requester_user_id,
+            )
 
     elif command.type == CommandType.ROOM_MODEL:
         response_text = await handle_room_model_command(
@@ -468,7 +563,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.THREAD_MODE:
@@ -478,7 +573,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.ENCRYPT:
@@ -487,7 +582,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             client=context.client,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.E2EE:
@@ -502,7 +597,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     if response_text:
         if command.type in COMMAND_TYPES_WITH_SIDE_EFFECTS:
-            await context.record_command_result(response_text)
+            if result_extra_content is None:
+                await context.record_command_result(response_text)
+            else:
+                await context.record_command_result(response_text, extra_content=result_extra_content)
         raw_response_event_id = await context.send_response(
             response_text,
             skip_mentions=True,

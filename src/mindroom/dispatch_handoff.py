@@ -27,7 +27,7 @@ from mindroom.matrix.media import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.coalescing_batch import CoalescingKey
+    from mindroom.coalescing.batch import CoalescingKey
     from mindroom.message_target import ResponseLifecycleKey
 
 
@@ -60,6 +60,8 @@ class PreparedIngress:
     server_timestamp: int | float | None = None
     source_kind_override: str | None = None
     requester_user_id: str | None = None
+    # The sender wrote this reply for ``requester_user_id``, so it stays the message's speaker.
+    acts_for_requester: bool = False
     source_kind: str | None = None
     dispatch_policy_source_kind: str | None = None
     hook_source: str | None = None
@@ -68,6 +70,9 @@ class PreparedIngress:
     discovery_event_id: str | None = None
     turn_dispatch_recovery: bool = False
     raw_event: MediaDispatchEvent | None = None
+    # Whom it mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people.
+    # A message for another participant never shares a turn with messages for this agent.
+    for_another_participant: bool | None = None
 
 
 @dataclass

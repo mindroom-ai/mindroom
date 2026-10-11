@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from mindroom import constants
+from mindroom.matrix import appservice
 from mindroom.matrix.appservice import (
     login_appservice_user,
     register_appservice_user,
@@ -245,6 +246,46 @@ async def test_login_appservice_user_returns_per_user_device_client(tmp_path: Pa
         runtime_paths=runtime_paths,
         sync_storage=DEFAULT_MATRIX_SYNC_STORAGE,
     )
+
+
+@pytest.mark.asyncio
+async def test_appservice_credentials_create_no_temporary_matrix_client(
+    tmp_path: Path,
+) -> None:
+    """Direct appservice credentials cross no MatrixStore/client boundary."""
+    captured: list[tuple[str, dict[str, str], dict[str, object]]] = []
+    response = httpx.Response(
+        200,
+        json={
+            "user_id": "@mindroom_agent:example.com",
+            "access_token": "device-token",
+            "device_id": "DEVICE",
+        },
+    )
+
+    with (
+        patch(
+            "mindroom.matrix.appservice.httpx.AsyncClient",
+            _recording_client(captured, response),
+        ),
+        patch(
+            "mindroom.matrix.appservice.create_authenticated_client",
+            side_effect=AssertionError("credential request created a Matrix client"),
+        ),
+    ):
+        credentials = await appservice.login_appservice_credentials(
+            "https://matrix.example.com",
+            user_id="@mindroom_agent:example.com",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+    assert credentials == (
+        "@mindroom_agent:example.com",
+        "DEVICE",
+        "device-token",
+    )
+    assert captured[0][2]["type"] == "m.login.application_service"
 
 
 @pytest.mark.asyncio

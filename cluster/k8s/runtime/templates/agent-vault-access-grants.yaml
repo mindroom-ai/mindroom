@@ -2,50 +2,63 @@
 {{- $accessGrants := $av.accessGrants -}}
 {{- if and $accessGrants.enabled (gt (len $accessGrants.grants) 0) }}
 {{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $name }}
-  labels:
-    {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
-data:
-  access-grants.yaml: |
-    apiUrl: {{ $av.apiUrl | quote }}
-    vaultNamePrefix: {{ $av.vaultNamePrefix | quote }}
-    {{- if $accessGrants.tenantId }}
-    tenantId: {{ $accessGrants.tenantId | quote }}
-    {{- end }}
-    {{- if $accessGrants.accountId }}
-    accountId: {{ $accessGrants.accountId | quote }}
-    {{- end }}
-    grants:
-      {{- range $grant := $accessGrants.grants }}
-      - email: {{ $grant.email | quote }}
-        workerScope: {{ $grant.workerScope | quote }}
-        {{- if $grant.requester }}
-        requester: {{ $grant.requester | quote }}
-        {{- end }}
-        {{- if $grant.agent }}
-        agent: {{ $grant.agent | quote }}
-        {{- end }}
-        role: {{ default "admin" $grant.role | quote }}
-      {{- end }}
----
+{{- $jobSpec := include "mindroom-runtime.agentVaultAccessGrantsJobSpec" . -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ $name }}
+  name: {{ include "mindroom-runtime.agentVaultJobName" (list . $name $jobSpec) }}
   labels:
     {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
+  {{- if eq $av.jobNaming "fixed" }}
   annotations:
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  {{- end }}
+{{ $jobSpec }}
+{{- end }}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsConfig" -}}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $accessGrants := $av.accessGrants -}}
+apiUrl: {{ $av.apiUrl | quote }}
+vaultNamePrefix: {{ $av.vaultNamePrefix | quote }}
+{{- if $accessGrants.tenantId }}
+tenantId: {{ $accessGrants.tenantId | quote }}
+{{- end }}
+{{- if $accessGrants.accountId }}
+accountId: {{ $accessGrants.accountId | quote }}
+{{- end }}
+grants:
+  {{- range $grant := $accessGrants.grants }}
+  - email: {{ $grant.email | quote }}
+    workerScope: {{ $grant.workerScope | quote }}
+    {{- if $grant.requester }}
+    requester: {{ $grant.requester | quote }}
+    {{- end }}
+    {{- if $grant.agent }}
+    agent: {{ $grant.agent | quote }}
+    {{- end }}
+    role: {{ default "admin" $grant.role | quote }}
+  {{- end }}
+{{- end }}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsJobSpec" -}}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $accessGrants := $av.accessGrants -}}
+{{- $configAnnotation := "mindroom.ai/access-grants-config" -}}
 spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
+      {{- /* Pod templates are immutable, so version labels stay on the Job and a version-only upgrade keeps the template. */}}
       labels:
-        {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 8 }}
+        {{- omit (include "mindroom-runtime.agentVaultAccessGrantsLabels" . | fromYaml) "helm.sh/chart" "app.kubernetes.io/version" | toYaml | nindent 8 }}
+      {{- /* The grants config lives in the pod template and reaches the container through a downward API volume,
+           so the Job name hash covers it, each Job applies the grants it was created for,
+           and no separate ConfigMap needs cleanup. */}}
+      annotations:
+        {{ $configAnnotation }}: |
+          {{- include "mindroom-runtime.agentVaultAccessGrantsConfig" . | nindent 10 }}
     spec:
       restartPolicy: OnFailure
       automountServiceAccountToken: false
@@ -81,8 +94,11 @@ spec:
               readOnly: true
       volumes:
         - name: access-grants-config
-          configMap:
-            name: {{ $name }}
+          downwardAPI:
+            items:
+              - path: access-grants.yaml
+                fieldRef:
+                  fieldPath: {{ printf "metadata.annotations['%s']" $configAnnotation | quote }}
         - name: access-grants-admin-token
           secret:
             secretName: {{ $accessGrants.adminTokenSecret.name }}

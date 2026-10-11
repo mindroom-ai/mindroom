@@ -19,11 +19,16 @@ A reusable list sidebar component that provides consistent header, search, item 
 
 #### Usage
 
+`selectedId` supplies the selection state to `renderItem`; the rendered item owns pointer and keyboard interaction.
+Use `ItemCard.onClick` to update controlled selection.
+
 ```tsx
-import { ListPanel } from "@/components/shared";
+import { useState } from "react";
+import { ItemCard, ListPanel } from "@/components/shared";
 import { Bot } from "lucide-react";
 
 const AgentListExample = () => {
+  const [selectedId, setSelectedId] = useState("1");
   const agents = [
     { id: "1", display_name: "Agent 1", description: "First agent" },
     { id: "2", display_name: "Agent 2", description: "Second agent" },
@@ -34,14 +39,16 @@ const AgentListExample = () => {
       title="Agents"
       icon={Bot}
       items={agents}
-      selectedId="1"
-      onItemSelect={(id) => console.log("Selected:", id)}
+      selectedId={selectedId}
       onCreateItem={() => console.log("Create agent")}
       renderItem={(agent, isSelected) => (
-        <div className={isSelected ? "bg-blue-100" : ""}>
-          <h3>{agent.display_name}</h3>
-          <p>{agent.description}</p>
-        </div>
+        <ItemCard
+          id={agent.id}
+          title={agent.display_name}
+          description={agent.description}
+          isSelected={isSelected}
+          onClick={setSelectedId}
+        />
       )}
       showSearch={true}
       creationMode="inline-form"

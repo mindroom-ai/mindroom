@@ -38,197 +38,112 @@ class TestAdminAccountDeletion:
             yield sb
 
     @pytest.fixture
-    def mock_uninstall_instance(self):
-        """Mock the provisioner service uninstall function."""
-        with patch("backend.services.provisioner_service.uninstall_instance") as mock:
-            mock.return_value = {"success": True}
-            yield mock
+    def mock_tear_down(self):
+        """Mock the lifecycle teardown and the final auth user deletion of an account."""
+        lifecycle = "backend.routes.admin.instance_lifecycle"
+        with (
+            patch(f"{lifecycle}.tear_down_account", new=AsyncMock()) as tear_down,
+            patch(f"{lifecycle}.delete_auth_user", new=AsyncMock()) as delete_auth_user,
+        ):
+            yield Mock(tear_down_account=tear_down, delete_auth_user=delete_auth_user)
 
-    def test_delete_account_complete_success(
-        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_uninstall_instance: AsyncMock
-    ):
-        """Test successful complete account deletion (without Stripe)."""
-        # Setup account data without Stripe customer ID
-        account_data = {
-            "id": "account_123",
-            "email": "user@example.com",
-            "stripe_customer_id": None,  # No Stripe customer
-        }
-
-        # Setup instances data
-        instances_data = [{"instance_id": 1, "status": "running"}, {"instance_id": 2, "status": "stopped"}]
-
-        # Mock Supabase queries
-        # Account lookup
+    @staticmethod
+    def _account_tables(mock_supabase: MagicMock, instances: list[dict]) -> None:
+        """Wire the account and instance lookups."""
         account_mock = MagicMock()
         account_mock.select.return_value = account_mock
         account_mock.eq.return_value = account_mock
-        account_mock.execute.return_value = Mock(data=[account_data])
-
-        # Instances lookup
+        account_mock.execute.return_value = Mock(
+            data=[{"id": "account_123", "email": "user@example.com", "stripe_customer_id": "cus_123"}]
+        )
         instances_mock = MagicMock()
         instances_mock.select.return_value = instances_mock
         instances_mock.eq.return_value = instances_mock
-        instances_mock.execute.return_value = Mock(data=instances_data)
+        instances_mock.execute.return_value = Mock(data=instances)
 
-        # Account deletion
-        delete_mock = MagicMock()
-        delete_mock.delete.return_value = delete_mock
-        delete_mock.eq.return_value = delete_mock
-        delete_mock.execute.return_value = Mock(data=[])
+        tables = {"accounts": account_mock, "instances": instances_mock}
+        mock_supabase.table.side_effect = lambda name: tables.get(name, MagicMock())
 
-        # Audit log insertion
-        audit_mock = MagicMock()
-        audit_mock.insert.return_value = audit_mock
-        audit_mock.execute.return_value = Mock(data=[])
+    def test_delete_account_complete_success(
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
+    ):
+        """The account is marked pending deletion and claimed, torn down, and only then loses its rows and login."""
+        self._account_tables(
+            mock_supabase, [{"instance_id": 1, "status": "running"}, {"instance_id": 2, "status": "deprovisioned"}]
+        )
+        steps: list[str] = []
+        mock_supabase.rpc.side_effect = lambda name, _params: steps.append(name) or MagicMock()
+        mock_tear_down.tear_down_account.side_effect = lambda _account_id: steps.append("tear down")
+        mock_tear_down.delete_auth_user.side_effect = lambda _account_id: steps.append("delete auth user")
 
-        def table_side_effect(table_name):
-            if table_name == "accounts":
-                return account_mock if not hasattr(account_mock, "_delete_called") else delete_mock
-            elif table_name == "instances":
-                return instances_mock
-            elif table_name == "audit_logs":
-                return audit_mock
-            return MagicMock()
-
-        mock_supabase.table.side_effect = table_side_effect
-
-        # Make delete return the right mock
-        account_mock.delete = lambda: delete_mock
-        delete_mock._delete_called = True
-
-        # Make the request
         response = client.delete("/admin/accounts/account_123/complete")
 
-        # Assertions
         assert response.status_code == 200
         assert response.json() == {"data": {"id": "account_123"}}
+        assert steps == ["soft_delete_account", "tear down", "hard_delete_account", "delete auth user"]
+        assert mock_supabase.rpc.call_args_list[0].args == (
+            "soft_delete_account",
+            {"target_account_id": "account_123", "reason": "admin_complete_deletion", "requested_by": "admin_123"},
+        )
+        # The claim ends the customer's restore window and lets hard_delete_account act on the account.
+        claim = mock_supabase.table("accounts").update.call_args.args[0]
+        assert set(claim) == {"hard_delete_started_at"}
+        mock_tear_down.delete_auth_user.assert_awaited_once_with("account_123")
 
-        # Verify uninstall was called for both instances with their instance ids
-        assert mock_uninstall_instance.call_count == 2
-        mock_uninstall_instance.assert_any_call(1)
-        mock_uninstall_instance.assert_any_call(2)
-
-    def test_delete_account_not_found(self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock):
+    def test_delete_account_not_found(
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
+    ):
         """Test deleting non-existent account."""
-        # Mock empty account result
         account_mock = MagicMock()
         account_mock.select.return_value = account_mock
         account_mock.eq.return_value = account_mock
         account_mock.execute.return_value = Mock(data=[])
-
         mock_supabase.table.return_value = account_mock
 
-        # Make the request
         response = client.delete("/admin/accounts/nonexistent_123/complete")
 
-        # Assertions
         assert response.status_code == 404
         assert response.json()["detail"] == "Account not found"
+        mock_tear_down.tear_down_account.assert_not_awaited()
 
-    def test_delete_account_no_instances(
-        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_uninstall_instance: AsyncMock
+    def test_an_account_that_is_not_marked_pending_deletion_is_not_torn_down(
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
     ):
-        """Test deleting account with no instances."""
-        # Setup account data without Stripe customer
-        account_data = {"id": "account_123", "email": "user@example.com", "stripe_customer_id": None}
+        """The claim only takes when the soft delete did, so a customer can never restore mid-teardown."""
+        self._account_tables(mock_supabase, [])
+        claim = mock_supabase.table("accounts").update.return_value.eq.return_value.not_.is_.return_value
+        claim.execute.return_value = Mock(data=[])
 
-        # Mock Supabase queries
-        account_mock = MagicMock()
-        account_mock.select.return_value = account_mock
-        account_mock.eq.return_value = account_mock
-        account_mock.execute.return_value = Mock(data=[account_data])
-
-        instances_mock = MagicMock()
-        instances_mock.select.return_value = instances_mock
-        instances_mock.eq.return_value = instances_mock
-        instances_mock.execute.return_value = Mock(data=[])  # No instances
-
-        delete_mock = MagicMock()
-        delete_mock.delete.return_value = delete_mock
-        delete_mock.eq.return_value = delete_mock
-        delete_mock.execute.return_value = Mock(data=[])
-
-        audit_mock = MagicMock()
-        audit_mock.insert.return_value = audit_mock
-        audit_mock.execute.return_value = Mock(data=[])
-
-        def table_side_effect(table_name):
-            if table_name == "accounts":
-                return account_mock if not hasattr(account_mock, "_delete_called") else delete_mock
-            elif table_name == "instances":
-                return instances_mock
-            elif table_name == "audit_logs":
-                return audit_mock
-            return MagicMock()
-
-        mock_supabase.table.side_effect = table_side_effect
-        account_mock.delete = lambda: delete_mock
-        delete_mock._delete_called = True
-
-        # Make the request
         response = client.delete("/admin/accounts/account_123/complete")
 
-        # Assertions
-        assert response.status_code == 200
-        assert response.json() == {"data": {"id": "account_123"}}
+        assert response.status_code == 500
+        assert "nothing was deleted" in response.json()["detail"]
+        mock_tear_down.tear_down_account.assert_not_awaited()
 
-        # Verify uninstall was not called
-        mock_uninstall_instance.assert_not_called()
-
-    def test_delete_account_continues_on_instance_failure(
-        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock
+    def test_failed_teardown_keeps_the_account(
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
     ):
-        """Test that account deletion continues even if instance deprovisioning fails."""
-        with patch("backend.services.provisioner_service.uninstall_instance") as mock_uninstall:
-            # Make uninstall fail
-            mock_uninstall.side_effect = Exception("Kubernetes API error")
+        """If billing or an uninstall fails, the rows that map releases and keys to the owner stay."""
+        self._account_tables(mock_supabase, [{"instance_id": 1, "status": "running"}])
+        mock_tear_down.tear_down_account.side_effect = RuntimeError("Failed to uninstall instance: Kubernetes error")
 
-            # Setup account data
-            account_data = {"id": "account_123", "email": "user@example.com", "stripe_customer_id": None}
+        response = client.delete("/admin/accounts/account_123/complete")
 
-            # Setup instances data
-            instances_data = [{"instance_id": 1, "status": "running"}]
+        assert response.status_code == 500
+        assert "account rows were kept, but Stripe billing may already be cancelled" in response.json()["detail"]
+        mock_tear_down.delete_auth_user.assert_not_awaited()
 
-            # Mock Supabase queries
-            account_mock = MagicMock()
-            account_mock.select.return_value = account_mock
-            account_mock.eq.return_value = account_mock
-            account_mock.execute.return_value = Mock(data=[account_data])
+    def test_failed_auth_user_deletion_keeps_the_account_row(
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_tear_down: Mock
+    ):
+        """The login and account row stay after a failed auth deletion, so retrying the deletion finishes it."""
+        self._account_tables(mock_supabase, [])
+        mock_tear_down.delete_auth_user.side_effect = RuntimeError("auth unavailable")
 
-            instances_mock = MagicMock()
-            instances_mock.select.return_value = instances_mock
-            instances_mock.eq.return_value = instances_mock
-            instances_mock.execute.return_value = Mock(data=instances_data)
+        response = client.delete("/admin/accounts/account_123/complete")
 
-            delete_mock = MagicMock()
-            delete_mock.delete.return_value = delete_mock
-            delete_mock.eq.return_value = delete_mock
-            delete_mock.execute.return_value = Mock(data=[])
-
-            audit_mock = MagicMock()
-            audit_mock.insert.return_value = audit_mock
-            audit_mock.execute.return_value = Mock(data=[])
-
-            def table_side_effect(table_name):
-                if table_name == "accounts":
-                    return account_mock if not hasattr(account_mock, "_delete_called") else delete_mock
-                elif table_name == "instances":
-                    return instances_mock
-                elif table_name == "audit_logs":
-                    return audit_mock
-                return MagicMock()
-
-            mock_supabase.table.side_effect = table_side_effect
-            account_mock.delete = lambda: delete_mock
-            delete_mock._delete_called = True
-
-            # Make the request
-            response = client.delete("/admin/accounts/account_123/complete")
-
-            # Should still succeed despite instance failure
-            assert response.status_code == 200
-            assert response.json() == {"data": {"id": "account_123"}}
+        assert response.status_code == 500
+        assert "deleting the account's rows or login failed, so the account row was kept" in response.json()["detail"]
 
     def test_generic_delete_blocks_account_deletion(
         self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock

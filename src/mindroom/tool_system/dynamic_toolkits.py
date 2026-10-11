@@ -35,7 +35,7 @@ class VisibleToolSurface:
 
 @dataclass(frozen=True)
 class LoadToolResult:
-    """Result of one locked dynamic-tool load attempt."""
+    """Result of one dynamic-tool load attempt."""
 
     status: str
     loaded_tools: tuple[str, ...]
@@ -177,7 +177,7 @@ def _special_tool_names(
     tool_names: list[str] = []
 
     if agent_config.delegate_to:
-        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH  # noqa: PLC0415
+        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
         if delegation_depth < MAX_DELEGATION_DEPTH:
             tool_names.append("delegate")
@@ -189,6 +189,11 @@ def _special_tool_names(
     )
     if allow_self_config:
         tool_names.append("self_config")
+
+    if agent_config.skill_learning.enabled:
+        # Like Hermes, an agent that learns skills can also save them in chat, and its skill review can only call
+        # tools the agent's own request offered.
+        tool_names.append("skill_manage")
 
     if enable_dynamic_tools_manager and has_deferred_tools(config, agent_name):
         tool_names.append("dynamic_tools")
@@ -395,6 +400,27 @@ def get_loaded_tools_for_session(
         return list(loaded_tools)
 
 
+def _load_validation_result(
+    validation_failure: LoadToolValidationFailure | None,
+    loaded_tools: list[str],
+) -> LoadToolResult | None:
+    if validation_failure is None:
+        return None
+    if validation_failure.status == "function_name_collision":
+        return LoadToolResult(
+            status="function_name_collision",
+            loaded_tools=tuple(loaded_tools),
+            collision_messages=tuple(sorted(validation_failure.messages)),
+        )
+    if validation_failure.status == "tool_unavailable":
+        return LoadToolResult(
+            status="tool_unavailable",
+            loaded_tools=tuple(loaded_tools),
+            unavailable_messages=tuple(sorted(validation_failure.messages)),
+        )
+    return None
+
+
 def load_tool_for_session(
     *,
     agent_name: str,
@@ -410,69 +436,74 @@ def load_tool_for_session(
         return LoadToolResult(status="error", loaded_tools=tuple(loaded_tools))
 
     key = _state_key(agent_name, session_id)
-    with _loaded_tools_lock:
-        raw_loaded_tools = _loaded_tools.get(key)
-        if raw_loaded_tools is None:
-            raw_loaded_tools = _initial_loaded_tools(config, agent_name)
-        else:
-            raw_loaded_tools = _coerce_loaded_tools(raw_loaded_tools)
-
-        loaded_tools, invalid_tools = _sanitize_loaded_tools_with_current_initials(config, agent_name, raw_loaded_tools)
-        if invalid_tools:
-            logger.warning(
-                "Dropping invalid dynamic tools from in-memory session state",
-                agent=agent_name,
-                session_id=session_id,
-                scope_key=key[1],
-                invalid_tools=invalid_tools,
-            )
-            save_loaded_tools_for_session(
-                agent_name=agent_name,
-                session_id=session_id,
-                loaded_tools=loaded_tools,
-                config=config,
-            )
-
-        if tool_name not in deferred_tool_names:
-            result = LoadToolResult(
-                status="unknown",
-                loaded_tools=tuple(loaded_tools),
-                available_tools=tuple(deferred_tool_names),
-            )
-        elif incompatible_tools := config.resolve_entity(agent_name).deferred_tool_scope_incompatible_tools(tool_name):
-            result = LoadToolResult(
-                status="scope_incompatible",
-                loaded_tools=tuple(loaded_tools),
-                unsupported_tools=tuple(incompatible_tools),
-            )
-        elif tool_name in loaded_tools:
-            result = LoadToolResult(status="already_loaded", loaded_tools=tuple(loaded_tools))
-        else:
-            candidate_loaded_tools = _ordered_deferred_tools(deferred_tool_names, [*loaded_tools, tool_name])
-            validation_failure = (
-                validate_loaded_tools(candidate_loaded_tools) if validate_loaded_tools is not None else None
-            )
-            if validation_failure is not None and validation_failure.status == "function_name_collision":
-                result = LoadToolResult(
-                    status="function_name_collision",
-                    loaded_tools=tuple(loaded_tools),
-                    collision_messages=tuple(sorted(validation_failure.messages)),
-                )
-            elif validation_failure is not None and validation_failure.status == "tool_unavailable":
-                result = LoadToolResult(
-                    status="tool_unavailable",
-                    loaded_tools=tuple(loaded_tools),
-                    unavailable_messages=tuple(sorted(validation_failure.messages)),
-                )
+    while True:
+        with _loaded_tools_lock:
+            raw_loaded_tools = _loaded_tools.get(key)
+            if raw_loaded_tools is None:
+                raw_loaded_tools = _initial_loaded_tools(config, agent_name)
             else:
+                raw_loaded_tools = _coerce_loaded_tools(raw_loaded_tools)
+
+            loaded_tools, invalid_tools = _sanitize_loaded_tools_with_current_initials(
+                config,
+                agent_name,
+                raw_loaded_tools,
+            )
+            if invalid_tools:
+                logger.warning(
+                    "Dropping invalid dynamic tools from in-memory session state",
+                    agent=agent_name,
+                    session_id=session_id,
+                    scope_key=key[1],
+                    invalid_tools=invalid_tools,
+                )
                 save_loaded_tools_for_session(
                     agent_name=agent_name,
                     session_id=session_id,
-                    loaded_tools=candidate_loaded_tools,
+                    loaded_tools=loaded_tools,
                     config=config,
                 )
-                result = LoadToolResult(status="loaded", loaded_tools=tuple(candidate_loaded_tools))
-        return result
+
+            if tool_name not in deferred_tool_names:
+                return LoadToolResult(
+                    status="unknown",
+                    loaded_tools=tuple(loaded_tools),
+                    available_tools=tuple(deferred_tool_names),
+                )
+            if incompatible_tools := config.resolve_entity(agent_name).deferred_tool_scope_incompatible_tools(
+                tool_name,
+            ):
+                return LoadToolResult(
+                    status="scope_incompatible",
+                    loaded_tools=tuple(loaded_tools),
+                    unsupported_tools=tuple(incompatible_tools),
+                )
+            if tool_name in loaded_tools:
+                return LoadToolResult(status="already_loaded", loaded_tools=tuple(loaded_tools))
+
+            candidate_loaded_tools = _ordered_deferred_tools(deferred_tool_names, [*loaded_tools, tool_name])
+            state_snapshot = tuple(_loaded_tools[key]) if key in _loaded_tools else None
+
+        # Validation may be slow, so run it unlocked; retry if same-session state changes.
+        validation_failure = (
+            validate_loaded_tools(candidate_loaded_tools) if validate_loaded_tools is not None else None
+        )
+
+        with _loaded_tools_lock:
+            current_state = tuple(_loaded_tools[key]) if key in _loaded_tools else None
+            if current_state != state_snapshot:
+                continue
+
+            if validation_result := _load_validation_result(validation_failure, loaded_tools):
+                return validation_result
+
+            save_loaded_tools_for_session(
+                agent_name=agent_name,
+                session_id=session_id,
+                loaded_tools=candidate_loaded_tools,
+                config=config,
+            )
+            return LoadToolResult(status="loaded", loaded_tools=tuple(candidate_loaded_tools))
 
 
 def unload_tool_for_session(
@@ -557,21 +588,3 @@ def deferred_tool_catalog_entries(
             ),
         )
     return entries
-
-
-def resolve_dynamic_tool_selection(
-    *,
-    agent_name: str,
-    config: Config,
-    session_id: str | None,
-    delegation_depth: int = 0,
-    include_matrix_room_runtime_tools: bool = False,
-) -> VisibleToolSurface:
-    """Return the current loaded tools and final runtime tool selection for one session."""
-    return visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        session_id=session_id,
-        delegation_depth=delegation_depth,
-        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
-    )

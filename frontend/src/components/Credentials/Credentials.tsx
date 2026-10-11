@@ -32,6 +32,10 @@ interface CredentialStatusResponse {
   key_names?: string[] | null;
 }
 
+interface CredentialSaveResponse {
+  service?: string;
+}
+
 interface CredentialGetResponse {
   service: string;
   credentials: Record<string, unknown>;
@@ -301,18 +305,38 @@ export function Credentials() {
     setIsSaving(true);
     setError(null);
     try {
-      await fetchJSON(API_ENDPOINTS.credentials.set(selectedService), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credentials: parsed }),
-      });
+      const response = await fetchJSON<CredentialSaveResponse>(
+        API_ENDPOINTS.credentials.set(selectedService),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ credentials: parsed }),
+        },
+      );
+      // The backend stores provider keys typed under their env var name
+      // (e.g. ANTHROPIC_API_KEY) under the canonical provider service.
+      const storedService = response.service ?? selectedService;
       const formatted = formatServiceJson(parsed as Record<string, unknown>);
       setJsonDraft(formatted);
       setLoadedDraft(formatted);
-      await refreshSelectedStatus(selectedService);
+      if (storedService !== selectedService) {
+        setServices((previous) => [
+          ...previous.filter(
+            (item) =>
+              item.service !== storedService &&
+              (item.service !== selectedService || item.hasCredentials),
+          ),
+          { service: storedService, hasCredentials: true, keyNames: [] },
+        ]);
+        setSelectedService(storedService);
+      }
+      await refreshSelectedStatus(storedService);
       toast({
         title: "Credentials saved",
-        description: `Updated credentials for '${selectedService}'.`,
+        description:
+          storedService === selectedService
+            ? `Updated credentials for '${selectedService}'.`
+            : `Saved as '${storedService}', the service MindRoom reads for '${selectedService}'.`,
       });
     } catch (err) {
       const message =

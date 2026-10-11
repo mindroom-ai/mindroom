@@ -13,6 +13,8 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
+    SILENT_SCHEDULE_EVENT_TYPE,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -23,29 +25,36 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
-    DeliveryProjectionPendingError,
-    DepartureSource,
+    ApprovalDecisionMetadata,
     EventClass,
     EventKind,
     PendingPage,
     SemanticConsumer,
     VisibleMessage,
 )
-from mindroom.journal_dispatch import _BINDINGS, _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
+from mindroom.journal_dispatch import _BINDINGS, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import is_visible_room_message
 from mindroom.matrix.conversation_hydration import _projected_from_event
+from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
-    JournalIngress,
     _event_class_for,
     _event_kind,
-    inbound_event,
+    _inbound_event,
+    _projected_event,
+    ingestion_timeline_views,
     parse_journal_event,
-    projected_event,
 )
-from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS, PendingEventWorker
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
+from tests.approval_continuation_helpers import claim_continuation
+from tests.conftest import request_envelope
+from tests.journal_helpers import admit_dispatch_event
+from tests.reply_span_helpers import paused_for_approval
+from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import corrupt
 
 if TYPE_CHECKING:
@@ -87,6 +96,34 @@ def text_event(
         },
     )
     assert isinstance(event, nio.Event)
+    return event
+
+
+def schedule_trigger_event(
+    event_id: str,
+    body: object = "Run the scheduled task",
+    *,
+    event_type: str = SILENT_SCHEDULE_EVENT_TYPE,
+    sender: str = BOT,
+    extra_content: dict[str, Any] | None = None,
+    ts: int = 1_000,
+) -> nio.UnknownEvent:
+    """Return a parsed silent scheduled trigger."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": ts,
+            "type": event_type,
+            "content": {
+                "msgtype": "m.text",
+                "body": body,
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                **(extra_content or {}),
+            },
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
     return event
 
 
@@ -354,9 +391,93 @@ class TestEventKinds:
 class TestAdmissionAdapter:
     """The translation from a nio event to a durable row."""
 
+    @pytest.mark.parametrize("kind", [EventKind.REACTION, EventKind.REDACTION])
+    @pytest.mark.parametrize(
+        "provenance",
+        [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.RECOVERED],
+    )
+    async def test_media_extensions_do_not_change_a_non_message_event_kind(
+        self,
+        kind: EventKind,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Extension fields cannot turn a reaction or redaction into an image."""
+        event = (
+            reaction_event("$extended", target="$target")
+            if kind is EventKind.REACTION
+            else redaction_event("$extended", "$target")
+        )
+        event.source["content"].update(
+            {"msgtype": "m.image", "body": "extension.png", "url": "mxc://example.org/extension"},
+        )
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=provenance,
+        )
+
+        assert views is not None
+        inbound, projection = views
+        assert inbound.kind is kind
+        assert inbound.event_class is EventClass.ACTIONABLE
+        if kind is EventKind.REACTION:
+            assert projection is None
+        else:
+            assert projection is not None
+            assert projection.redacts_event_id == "$target"
+
+    @pytest.mark.parametrize("kind", [EventKind.REACTION, EventKind.REDACTION])
+    async def test_valid_non_message_ingress_has_no_message_validation_warning(
+        self,
+        kind: EventKind,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Valid event content is validated against its own Matrix event type."""
+        event = (
+            reaction_event("$valid", target="$target")
+            if kind is EventKind.REACTION
+            else redaction_event("$valid", "$target")
+        )
+        with caplog.at_level("WARNING", logger="nio.events.misc"):
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=event.source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.RECOVERED,
+            )
+
+        assert views is not None
+        assert views[0].kind is kind
+        assert not any("Error validating event" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.parametrize("encrypted", [False, True])
+    async def test_malformed_media_ingress_has_no_semantic_disposition(
+        self,
+        encrypted: bool,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The media parser choice cannot admit a missing attachment URL."""
+        source = image_event("$invalid", encrypted=encrypted).source
+        if encrypted:
+            source["content"]["file"] = {}
+        else:
+            del source["content"]["url"]
+        with caplog.at_level("WARNING", logger="nio.events.misc"):
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.RECOVERED,
+            )
+
+        assert views is None
+        assert any("ValidationError" in record.getMessage() for record in caplog.records)
+
     async def test_a_threaded_message_lands_in_its_thread(self) -> None:
         """A threaded message lands in its thread."""
-        inbound = inbound_event(
+        inbound = _inbound_event(
             ROOM,
             text_event("$m", thread_id="$root"),
             EventKind.MESSAGE,
@@ -366,7 +487,7 @@ class TestAdmissionAdapter:
 
     async def test_an_unthreaded_message_has_no_thread(self) -> None:
         """An unthreaded message has no thread."""
-        inbound = inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
+        inbound = _inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
         assert inbound.thread_id is None
 
     async def test_a_delivery_echo_keeps_its_matrix_transaction_id(self) -> None:
@@ -383,7 +504,7 @@ class TestAdmissionAdapter:
         )
         assert isinstance(event, nio.Event)
 
-        projected = projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
+        projected = _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
 
         assert projected is not None
         assert projected.transaction_id == "tx-final"
@@ -400,11 +521,11 @@ class TestAdmissionAdapter:
             },
         )
         assert isinstance(event, nio.Event)
-        assert projected_event(ROOM, event, EventKind.REACTION, self_sender=BOT) is None
+        assert _projected_event(ROOM, event, EventKind.REACTION, self_sender=BOT) is None
 
     async def test_a_redaction_projects_onto_its_target(self) -> None:
         """A redaction projects onto its target."""
-        projected = projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION, self_sender=BOT)
+        projected = _projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION, self_sender=BOT)
         assert projected is not None
         assert projected.redacts_event_id == "$m"
 
@@ -470,8 +591,8 @@ class TestSidecarContent:
         preview = "The answer beg [Message continues in attached file]"
         event = sidecar_event("$long", preview, "mxc://server/long-answer")
         await alice.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -493,8 +614,8 @@ class TestSidecarContent:
         sidecar = sidecar_event("$long", "truncated [Message continues in attached file]", "mxc://server/long")
         for event in (plain, sidecar):
             await alice.admit(
-                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
             )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -515,8 +636,8 @@ class TestSidecarContent:
         whole = "The answer begins here and runs on for many thousands of characters."
         event = text_event("$long", whole, ts=5_000)
         await alice.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -541,8 +662,8 @@ class TestEchoOrdering:
         """A self-authored echo is projected like any other timeline event."""
         echo = bot_event("$answer", "the answer")
         await alice.admit(
-            inbound_event(ROOM, echo, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, echo, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, echo, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, echo, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -561,8 +682,8 @@ class TestEchoOrdering:
             text_event("$follow_up", "and then?", ts=1_200),
         ):
             await alice.admit(
-                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
             )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -589,8 +710,8 @@ class TestEchoOrdering:
         await asyncio.gather(
             *(
                 alice.admit(
-                    inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                    projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                    _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                    _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
                 )
                 for event in batch
             ),
@@ -616,9 +737,14 @@ class TestEchoOrdering:
         one goes through `_admit` so that a sender filter added there fails
         here, because the echo route depends on there not being one.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), bot_event("$answer", "the answer"), provenance)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=bot_event("$answer", "the answer").source,
+            self_sender=BOT,
+            provenance=provenance,
+        )
+        assert views is not None
+        await alice.admit(*views)
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$answer"]
@@ -634,13 +760,13 @@ class TestEchoOrdering:
         """A gap-recovered echo still lands before the live message that follows."""
         recovered = bot_event("$answer", "the answer", ts=3_100)
         await alice.admit(
-            inbound_event(ROOM, recovered, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, recovered, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, recovered, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, recovered, EventKind.MESSAGE, self_sender=BOT),
         )
         live = text_event("$follow_up", "and then?", ts=3_200)
         await alice.admit(
-            inbound_event(ROOM, live, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, live, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, live, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, live, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -666,9 +792,16 @@ class TestStreamingProgressIsTransport:
     """
 
     @staticmethod
-    async def _admit_live(ingress: JournalIngress, *events: nio.Event) -> None:
+    async def _admit_live(store: PrincipalStore, *events: nio.Event) -> None:
         for event in events:
-            await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=event.source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.LIVE,
+            )
+            assert views is not None
+            await store.admit(*views)
 
     @staticmethod
     async def _one_visible(store: PrincipalStore) -> VisibleMessage:
@@ -683,10 +816,8 @@ class TestStreamingProgressIsTransport:
         status: str,
     ) -> None:
         """A self-authored in-flight revision must not move the visible row."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event("$progress", "half an ans", status, replaces=PLACEHOLDER_ID, ts=1_100),
         )
@@ -708,7 +839,6 @@ class TestStreamingProgressIsTransport:
         one. The prompt then differed by nothing but whether the bot had
         restarted, which is the divergence the projection exists to remove.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
         summary = nio.Event.parse_event(
             {
                 "event_id": "$summary",
@@ -724,7 +854,7 @@ class TestStreamingProgressIsTransport:
         )
         assert isinstance(summary, nio.Event)
 
-        await self._admit_live(ingress, summary)
+        await self._admit_live(alice, summary)
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$summary"]
@@ -743,7 +873,6 @@ class TestStreamingProgressIsTransport:
         any member can set, so if it could promote a notice to work, decorating
         one would be a way to make the bot answer something it should not.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
         foreign = nio.Event.parse_event(
             {
                 "event_id": "$theirs",
@@ -759,9 +888,9 @@ class TestStreamingProgressIsTransport:
         )
         assert isinstance(foreign, nio.Event)
 
-        await self._admit_live(ingress, foreign)
+        await self._admit_live(alice, foreign)
 
-        assert ingress._admission_kind(foreign) is EventKind.MESSAGE
+        assert _event_kind(foreign) is EventKind.MESSAGE
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$theirs"]
         # Admitted, projected, and never work.
@@ -779,10 +908,8 @@ class TestStreamingProgressIsTransport:
         terminal edit had no original, parked in `unresolved_edits`, and the
         conversation this projection exists to serve never saw the answer.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$progress",
@@ -820,10 +947,8 @@ class TestStreamingProgressIsTransport:
         replays from. Dropping the event instead of only its projection would
         make nio's redelivery of it look like something new.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$progress",
@@ -852,9 +977,7 @@ class TestStreamingProgressIsTransport:
         terminal edit with no logical message to revise, and the answer would
         never become visible at all.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await self._admit_live(ingress, placeholder_event())
+        await self._admit_live(alice, placeholder_event())
 
         visible = await self._one_visible(alice)
         assert visible.logical_event_id == PLACEHOLDER_ID
@@ -882,10 +1005,8 @@ class TestStreamingProgressIsTransport:
         to resume a partial reply, so a rule that kept only ``completed`` would
         strand an interrupted answer on its placeholder.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event("$progress", "half an ans", STREAM_STATUS_STREAMING, replaces=PLACEHOLDER_ID, ts=1_100),
             stream_event("$terminal", "the whole answer", status, replaces=PLACEHOLDER_ID, ts=1_200),
@@ -908,10 +1029,8 @@ class TestStreamingProgressIsTransport:
         revisions are transport, so a user's edit reduces whatever it says —
         otherwise a correction could be suppressed by spelling it right.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             text_event("$ask", "frist question", ts=1_000),
             stream_event("$fix", "first question", status, sender=ALICE, replaces="$ask", ts=1_100),
         )
@@ -920,18 +1039,18 @@ class TestStreamingProgressIsTransport:
         assert visible.content["body"] == "first question"
         assert visible.revision_event_id == "$fix"
 
-    async def test_a_crash_mid_stream_leaves_the_placeholder_until_cleanup_speaks(
+    async def test_a_crash_mid_stream_leaves_the_placeholder_until_a_terminal_edit_lands(
         self,
         alice: PrincipalStore,
     ) -> None:
         """The row a crash leaves behind is the placeholder, and that is correct.
 
         No intermediate body was durable, so there is nothing to half-restore.
-        Startup stale-stream cleanup rewrites the visible message with a
-        terminal status, and that echo reduces like any other terminal edit —
-        which is what makes skipping progress safe rather than lossy.
+        The replay that continues the reply, or the restart note that ends it,
+        rewrites the visible message with a terminal status, and that echo
+        reduces like any other terminal edit — which is what makes skipping
+        progress safe rather than lossy.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
         progress = [
             stream_event(
                 f"$progress{index}",
@@ -943,14 +1062,14 @@ class TestStreamingProgressIsTransport:
             for index in range(1, 6)
         ]
 
-        await self._admit_live(ingress, placeholder_event(), *progress)
+        await self._admit_live(alice, placeholder_event(), *progress)
 
         crashed = await self._one_visible(alice)
         assert crashed.content["body"] == PLACEHOLDER_BODY
         assert crashed.revision_event_id == PLACEHOLDER_ID
 
         await self._admit_live(
-            ingress,
+            alice,
             stream_event(
                 "$cleanup",
                 "partial 5 [interrupted]",
@@ -985,10 +1104,8 @@ class TestStreamingProgressIsTransport:
         decision belonged all along, rather than resting on a
         notification-semantics choice made on the delivery side.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$notice",
@@ -1011,8 +1128,8 @@ class TestReplayFidelity:
         """A message replays as itself."""
         original = text_event("$m", "hello")
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
         )
 
         stored = (await alice.pending())[0]
@@ -1035,8 +1152,8 @@ class TestReplayFidelity:
         original.session_id = "session"
 
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
         )
         replayed = parse_journal_event((await alice.pending())[0])
 
@@ -1058,8 +1175,8 @@ class TestReplayFidelity:
         """
         original = image_event("$img", "diagram.png")
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
+            _inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
         )
 
         replayed = parse_journal_event((await alice.pending())[0])
@@ -1074,10 +1191,15 @@ class TestReplayFidelity:
     ) -> None:
         """Without the key material the reference is a file nobody can open."""
         original = image_event("$sealed", "sealed.png", encrypted=True)
-        await alice.admit(
-            inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=original.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.RECOVERED,
         )
+        assert views is not None
+        assert views[0].kind is EventKind.MEDIA
+        await alice.admit(*views)
 
         replayed = parse_journal_event((await alice.pending())[0])
 
@@ -1106,8 +1228,8 @@ class TestReplayFidelity:
         for source in sources:
             kind = EventKind.MESSAGE if isinstance(source, nio.RoomMessageText) else EventKind.MEDIA
             await alice.admit(
-                inbound_event(ROOM, source, kind, EventClass.ACTIONABLE),
-                projected_event(ROOM, source, kind, self_sender=BOT),
+                _inbound_event(ROOM, source, kind, EventClass.ACTIONABLE),
+                _projected_event(ROOM, source, kind, self_sender=BOT),
             )
 
         replayed = [parse_journal_event(stored) for stored in await alice.pending()]
@@ -1127,7 +1249,7 @@ class TestReplayFidelity:
         """A corrupt payload is refused not guessed."""
         original = text_event("$m")
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
             None,
         )
         stored = (await alice.pending())[0]
@@ -1137,179 +1259,99 @@ class TestReplayFidelity:
             parse_journal_event(corrupted)
 
 
-class TestDurableAdmission:
-    """nio hears "accepted" only after the transaction commits."""
-
-    async def test_an_admitted_event_becomes_pending_work(self, alice: PrincipalStore) -> None:
-        """An admitted event becomes pending work."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-        assert [event.event_id for event in await alice.pending()] == ["$m"]
-
-    async def test_cold_history_populates_context_without_work(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Cold history populates context without work."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m", "old"), nio.TimelineEventProvenance.HISTORY)
-
-        assert await alice.pending() == ()
-        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
-        assert [m.content["body"] for m in page.messages] == ["old"]
-
-    async def test_a_failed_admission_refuses_the_callback(self) -> None:
-        """Refusing is what keeps the event for redelivery instead of losing it."""
-
-        class Failing:
-            principal_id = "agent@alice"
-
-            async def admit(self, *_args: object, **_kwargs: object) -> None:
-                msg = "disk is full"
-                raise RuntimeError(msg)
-
-        ingress = JournalIngress(store=Failing(), self_sender=BOT)  # type: ignore[arg-type]
-
-        with pytest.raises(nio.CallbackNotAcceptedError):
-            await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-    async def test_a_pending_delivery_projection_schedules_recovery_before_refusing(self) -> None:
-        """The outbox must be woken before nio retries the blocked source."""
-
-        class ProjectionPending:
-            principal_id = "agent@alice"
-
-            async def admit(self, *_args: object, **_kwargs: object) -> None:
-                msg = "projection pending"
-                raise DeliveryProjectionPendingError(msg)
-
-        recovery_requests = 0
-
-        def schedule_recovery() -> None:
-            nonlocal recovery_requests
-            recovery_requests += 1
-
-        ingress = JournalIngress(
-            store=ProjectionPending(),  # type: ignore[arg-type]
-            self_sender=BOT,
-            on_delivery_recovery_needed=schedule_recovery,
-        )
-
-        with pytest.raises(nio.CallbackNotAcceptedError):
-            await ingress._admit(room(), text_event("$m", "1"), nio.TimelineEventProvenance.LIVE)
-
-        assert recovery_requests == 1
-
-    async def test_redelivery_after_a_crash_creates_one_turn(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Nio redelivers what it was never told was accepted."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        event = text_event("$m")
-
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        assert [journal.event_id for journal in await alice.pending()] == ["$m"]
-
-    async def test_a_settled_event_redelivered_is_not_kept_for_a_run_that_cannot_come(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Held parsed events are released by the run that uses them, and nothing else.
-
-        An event whose work is already settled is never handed to the worker
-        again, so nothing releases a parsed object kept for it. A checkpoint
-        replayed from further back redelivers a whole window of them, and every
-        distinct one stays held for the life of the process.
-        """
-        event = text_event("$m")
-        await alice.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
-        )
-        await alice.settle(event.event_id)
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        assert dispatcher._live_events == {}
-
-    async def test_a_live_event_is_kept_for_the_run_it_still_owes(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Replaying from the payload instead would discard nio's decryption state."""
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-        event = text_event("$m")
-
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        assert set(dispatcher._live_events) == {"$m"}
-
-    async def test_an_event_the_fence_settled_before_its_run_is_not_kept_forever(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A row can stop being pending with no run, and the run is the only release.
-
-        A message and the departure that fences its room arrive in one sync
-        response. The fence settles the turn-backed work it has just made
-        unanswerable, so the worker is never handed that event -- and the
-        parsed object kept for the run it was going to get stays held for the
-        life of the process, message text and all.
-        """
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-        event = text_event("$m")
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
-        assert await alice.pending() == (), "the fence settled the work it made unanswerable"
-
-        await dispatcher.drain_once()
-
-        assert dispatcher._live_events == {}
-
-    async def test_an_unowned_event_is_neither_admitted_nor_rejected(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """An unowned event is neither admitted nor rejected."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        topic = nio.Event.parse_event(
-            {
-                "event_id": "$topic",
-                "sender": ALICE,
-                "origin_server_ts": 1,
-                "type": "m.room.topic",
-                "state_key": "",
-                "content": {"topic": "hi"},
-            },
-        )
-        assert isinstance(topic, nio.Event)
-
-        await ingress._admit(room(), topic, nio.TimelineEventProvenance.LIVE)
-
-        assert await alice.pending() == ()
-
-
 class TestPendingEventWorker:
     """Execution order, failure isolation, and crash behavior."""
 
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, room_id: str = ROOM) -> None:
         await store.admit(
-            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     @staticmethod
     async def _admit_reaction(store: PrincipalStore, event: nio.Event) -> None:
-        await store.admit(inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
+        await store.admit(_inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
+
+    @pytest.mark.parametrize("error_type", [None, asyncio.CancelledError, RuntimeError])
+    async def test_reserved_response_wakes_idle_lane_with_fresh_lifecycle(
+        self,
+        alice: PrincipalStore,
+        error_type: type[BaseException] | None,
+    ) -> None:
+        """A resumed response queues behind its waking turn without reusing its reservation."""
+        coordinator = ResponseLifecycleCoordinator()
+        envelope = request_envelope(
+            room_id=ROOM,
+            thread_id="$thread",
+            reply_to_event_id="$selection",
+            agent_name="general",
+        )
+        attempted = asyncio.Event()
+        resumed: list[asyncio.Task[str]] = []
+        order: list[str] = []
+
+        async def deliver(_target: object) -> str:
+            order.append("resume")
+            return "approved response"
+
+        async def resume() -> str:
+            attempted.set()
+            return await coordinator.run_locked_response(
+                target=envelope.target,
+                response_envelope=replace(envelope, source_event_id="$approval"),
+                pipeline_timing=None,
+                locked_operation=deliver,
+            )
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$seed":
+                return True
+            assert event.event_id == "$source"
+            response = asyncio.create_task(resume())
+            resumed.append(response)
+            await response
+            return True
+
+        await self._admit(alice, text_event("$seed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        reservation = await coordinator.reserve_response_lifecycle(envelope)
+
+        async def publish(_target: object) -> None:
+            order.append("selection")
+            await self._admit(alice, text_event("$source"))
+            assert not worker._lanes
+            worker.wake(room_id=ROOM)
+            await asyncio.wait_for(attempted.wait(), timeout=1.0)
+            assert not resumed[0].done(), resumed[0].exception()
+            assert order == ["selection"]
+            order.append("selection finished")
+            if error_type is not None:
+                msg = "selection failed"
+                raise error_type(msg)
+
+        try:
+            await _eventually_async(alice.pending)
+            await _eventually(lambda: not worker._lanes)
+            with (
+                response_lifecycle_reservation_context(reservation),
+                contextlib.nullcontext() if error_type is None else pytest.raises(error_type, match="selection failed"),
+            ):
+                await coordinator.run_locked_response(
+                    target=envelope.target,
+                    response_envelope=envelope,
+                    pipeline_timing=None,
+                    locked_operation=publish,
+                )
+            assert await asyncio.wait_for(resumed[0], timeout=1.0) == "approved response"
+            await _eventually_async(alice.pending)
+            assert len(resumed) == 1
+            assert order == ["selection", "selection finished", "resume"]
+            assert not coordinator.has_active_response_for_target(envelope.target)
+        finally:
+            await worker.stop()
+            await reservation.release()
 
     async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:
         """A rooms events run in receipt order."""
@@ -1380,6 +1422,93 @@ class TestPendingEventWorker:
         assert handled == ["$first"]
         assert {event.event_id for event in await alice.pending()} == {"$first", "$second"}
 
+    async def test_owner_completion_within_one_page_rewinds_before_later_callback(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """An earlier owner returns its source while the page checks its next source."""
+        owner_live = True
+        handled: list[str] = []
+
+        class OwnerLostDuringRead(_FlakyReplayView):
+            async def is_pending(self, event_id: str) -> bool:
+                nonlocal owner_live
+                if event_id == "$later" and owner_live:
+                    owner_live = False
+                    worker.release(("$earlier",))
+                    worker.wake(room_id=ROOM)
+                return await super().is_pending(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id != "$earlier" or not owner_live
+
+        for event_id in ("$earlier", "$later"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=OwnerLostDuringRead(alice),
+            handle=handle,
+            deferral_is_live=lambda _event: owner_live,
+        )
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=5)
+            assert handled == ["$earlier"]
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            worker.start()
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
+            assert handled == ["$earlier", "$earlier", "$later"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("boundary", ["handler", "pending_check"])
+    async def test_shutdown_stops_admission_after_cancellation_is_absorbed(
+        self,
+        alice: PrincipalStore,
+        boundary: str,
+    ) -> None:
+        """Cleanup may finish, but no later callback may enter a stopped worker."""
+        entered = asyncio.Event()
+        handled: list[str] = []
+        stopping = True
+
+        async def finish_on_cancel() -> None:
+            entered.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+
+        class FinishingRead(_FlakyReplayView):
+            async def is_pending(self, event_id: str) -> bool:
+                if stopping and boundary == "pending_check" and event_id == "$head":
+                    await finish_on_cancel()
+                return await super().is_pending(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            if stopping and boundary == "handler" and event.event_id == "$head":
+                await finish_on_cancel()
+            return True
+
+        for event_id in ("$head", "$tail"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=FinishingRead(alice), handle=handle)
+        worker.start()
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await asyncio.wait_for(worker.stop(), timeout=5)
+            assert handled == (["$head"] if boundary == "handler" else [])
+            assert await alice.unsettled_event_ids() == (
+                frozenset({"$tail"}) if boundary == "handler" else frozenset({"$head", "$tail"})
+            )
+            stopping = False
+            worker.start()
+            await _eventually_async(alice.pending)
+            assert handled == ["$head", "$tail"]
+        finally:
+            await worker.stop()
+
     async def test_a_recovery_drain_runs_a_room_through_its_lane_not_beside_it(
         self,
         alice: PrincipalStore,
@@ -1395,7 +1524,7 @@ class TestPendingEventWorker:
 
         The handler claims a semantic consumer the way a reaction's does, so
         the second handler is not merely wasteful: its claim raises against
-        the row the first one already settled, and `_run_lane` logs that and
+        the row the first one already settled, and the room owner logs that and
         stops the room mid-pass. The claim is right to raise. Nothing settles
         an event while its own handler is running, so a settled row there
         means the event was already being run somewhere else.
@@ -1529,8 +1658,8 @@ class TestPendingEventWorker:
             async def is_pending(self, event_id: str) -> bool:
                 return await self.inner.is_pending(event_id)
 
-            async def settle(self, event_id: str) -> None:
-                await self.inner.settle(event_id)
+            async def settle(self, event_id: str) -> tuple[str, ...]:
+                return await self.inner.settle(event_id)
 
         async def handle(event: JournalEvent) -> bool:
             del event
@@ -1697,7 +1826,7 @@ class TestPendingEventWorker:
         # because that note is the only thing that arranges the second look. A
         # bare yield cannot fail -- a second lane over one room is impossible
         # either way -- so it proved the wakeup without exercising it.
-        await _eventually(lambda: worker._rooms_with_more == {ROOM})
+        await _eventually(lambda: worker._ready_rooms == {ROOM})
         released.set()
 
         await _eventually(lambda: handled == ["$slow", "$late"])
@@ -1810,6 +1939,7 @@ class TestPendingEventWorker:
     async def test_a_deferral_whose_owner_died_is_dispatched_again(
         self,
         alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
     ) -> None:
         """The hole this closes: durable work owed to an owner that is gone.
 
@@ -1836,27 +1966,24 @@ class TestPendingEventWorker:
 
         owner_alive = False
         await worker.drain_once()
-
-        assert attempts == ["$m", "$m"]
+        worker.start()
+        try:
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: attempts == ["$m", "$m"])
+        finally:
+            await worker.stop()
 
     async def test_a_reclaimed_deferral_does_not_jump_ahead_of_an_earlier_event(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A lane runs its list verbatim, so the list has to be in receipt order.
-
-        Reclaimed deferrals seed the grouping before any page is read, and the
-        reclaim knows nothing about where they sit in the backlog. So a later
-        message taken back from a dead owner was handed to the room's lane
-        ahead of an earlier one that had simply never run -- the room answered
-        out of order, which is the one thing a lane exists to prevent.
-        """
+        """Reclaiming a later deferral still starts with the room's earliest work."""
         handled: list[str] = []
         owner_alive = True
 
         async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return False
+            return True
 
         await self._admit(alice, text_event("$early", ts=1_000))
         await self._admit(alice, text_event("$late", ts=2_000))
@@ -1866,46 +1993,40 @@ class TestPendingEventWorker:
             deferral_is_live=lambda _event: owner_alive,
         )
 
-        # `$early` is claimed by a caller running it itself, so only `$late`
-        # reaches a lane and defers to an owner that then dies.
-        with worker.sole_handler("$early"):
-            await worker.drain_once()
-        assert handled == ["$late"]
-        handled.clear()
+        # A lost owner requests replay; the room query determines its order.
+        late = await alice.load_event("$late")
+        assert late is not None
+        worker._defer(late)
 
         owner_alive = False
         await worker.drain_once()
 
         assert handled == ["$early", "$late"]
 
-    async def test_a_wrapped_pass_does_not_run_its_tail_before_its_head(
+    async def test_a_wrapped_discovery_keeps_room_callbacks_in_receipt_order(
         self,
         alice: PrincipalStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The other way one room's list comes out inverted.
-
-        A pass that ran out of page budget resumes at its cursor, reads to the
-        end of the backlog, and only then wraps to the front. Those two blocks
-        arrive in the opposite order to the one they were received in, and the
-        room's lane is handed the concatenation.
-        """
+        """Discovery can start at the tail without handing that tail to the lane."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 3)
         for index in range(8):
             await self._admit(alice, text_event(f"$m{index}", ts=1_000 + index))
+        handled: list[str] = []
 
         async def handle(event: JournalEvent) -> bool:
-            del event
+            handled.append(event.event_id)
             return True
 
         worker = PendingEventWorker(store=alice, handle=handle)
-        # One budget-limited pass parks the cursor part way through the
-        # backlog; the next reads the tail, hits the end, and wraps.
-        await worker._collect_dispatchable()
-        by_room, _more = await worker._collect_dispatchable()
-
-        assert [event.event_id for event in by_room[ROOM]] == ["$m0", "$m1", "$m6", "$m7"]
+        worker._scan_cursor = (await alice.pending(limit=6))[-1].receipt_order
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+            assert handled == ["$m0", "$m1", "$m2", "$m3", "$m4", "$m5", "$m6", "$m7"]
+        finally:
+            await worker.stop()
 
     async def test_a_lost_owner_is_noticed_without_any_further_admission(
         self,
@@ -1943,6 +2064,1084 @@ class TestPendingEventWorker:
         await worker.stop()
 
 
+@pytest.fixture
+def retry_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, asyncio.Event]]:
+    """Hold only worker retry timers, leaving real journal I/O and loop scheduling intact."""
+    sleeping: list[tuple[float, asyncio.Event]] = []
+    original_sleep = asyncio.sleep
+
+    async def sleep(delay: float) -> None:
+        task = asyncio.current_task()
+        if task is not None and "retry" in task.get_name():
+            release = asyncio.Event()
+            sleeping.append((delay, release))
+            await release.wait()
+        else:
+            await original_sleep(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    return sleeping
+
+
+async def _dispatch_worker_pass(worker: PendingEventWorker) -> None:
+    """Finish one real scan and its room lanes without running the background pump."""
+    await worker._dispatch_ready_rooms()
+    await asyncio.gather(*worker._lanes.values())
+    await asyncio.sleep(0)
+
+
+class TestRoomRetryBackoff:
+    """Only a room's own successful work resets its bounded retry delay."""
+
+    async def test_worker_restart_retains_a_live_downstream_handoff(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Restarting discovery does not duplicate a response or lose its release bookkeeping."""
+        owner_live = True
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return not owner_live
+
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        worker.start()
+        try:
+            await _eventually(lambda: "$source" in worker._deferred and not worker._lanes)
+            await worker.stop()
+            worker.start()
+            await worker.drain_once()
+            assert attempts == ["$source"]
+            owner_live = False
+            worker.release(("$source",))
+            worker.wake(room_id=ROOM)
+            await _eventually_async(alice.pending)
+            assert attempts == ["$source", "$source"]
+        finally:
+            await worker.stop()
+
+    async def test_terminal_release_cleans_up_an_idle_rooms_ownership(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A terminal-only release needs no later admission to discard room history."""
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+
+        async def handle(_event: JournalEvent) -> bool:
+            return False
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            await _eventually(lambda: "$source" in worker._deferred and not worker._lanes)
+            await alice.settle("$source")
+            worker.release(("$source",))
+            await _eventually(lambda: ROOM not in worker._rooms)
+            assert not worker._deferred
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("lose_after_first_sweep", [False, True])
+    async def test_fallback_sweep_reaches_owners_beyond_one_probe_batch(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        lose_after_first_sweep: bool,
+    ) -> None:
+        """A quiet backlog is swept in yielding batches without waiting extra periods."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        attempts: list[str] = []
+        lost: set[str] = set()
+        sources = [f"$source-{index}" for index in range(5)]
+        block_discovery = False
+        discovery_blocked = asyncio.Event()
+        release_discovery = asyncio.Event()
+        last_owner_probed = asyncio.Event()
+
+        class SlowDiscovery(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                if room_id is None and block_discovery:
+                    discovery_blocked.set()
+                    await release_discovery.wait()
+                return await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return event.event_id in lost
+
+        def owner_is_live(event: JournalEvent) -> bool:
+            if discovery_blocked.is_set() and event.event_id == sources[-1]:
+                last_owner_probed.set()
+            return event.event_id not in lost
+
+        for event_id in sources:
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=SlowDiscovery(alice),
+            handle=handle,
+            deferral_is_live=owner_is_live,
+            deferral_scan_seconds=0.01,
+        )
+        worker.start()
+        try:
+            await _eventually(lambda: len(worker._deferred) == len(sources))
+            block_discovery = True
+            worker.wake()
+            await asyncio.wait_for(discovery_blocked.wait(), timeout=5)
+            if lose_after_first_sweep:
+                await asyncio.wait_for(last_owner_probed.wait(), timeout=5)
+            lost.add(sources[-1])
+            await _eventually(lambda: attempts.count(sources[-1]) == 2, seconds=5)
+            assert attempts == [*sources, sources[-1]]
+        finally:
+            release_discovery.set()
+            await worker.stop()
+
+    async def test_owner_failure_after_lane_completion_keeps_exponential_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A detached response owns retry history after its admission lane exits."""
+        attempts: list[str] = []
+        owner_live = False
+
+        async def handle(event: JournalEvent) -> bool:
+            nonlocal owner_live
+            attempts.append(event.event_id)
+            owner_live = True
+            return False
+
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        worker.start()
+        try:
+            for index, delay in enumerate((1, 2, 4)):
+                await _eventually(lambda index=index: len(attempts) == index + 1 and not worker._lanes)
+                owner_live = False
+                worker.release(("$source",))
+                worker.wake(room_id=ROOM)
+                await _eventually(lambda index=index: len(retry_sleeps) > index or len(attempts) > index + 1)
+                assert len(attempts) == index + 1
+                assert retry_sleeps[index][0] == delay
+                retry_sleeps[index][1].set()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("count", [128, 256])
+    async def test_bulk_handoffs_require_only_linear_owner_probes(
+        self,
+        alice: PrincipalStore,
+        count: int,
+    ) -> None:
+        """Each admission must not rescan all previously handed-off sources."""
+        probes = 0
+        handled: list[str] = []
+
+        def owner_is_live(_event: JournalEvent) -> bool:
+            nonlocal probes
+            probes += 1
+            return True
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return False
+
+        sources = [f"$source-{index}" for index in range(count)]
+        for event_id in sources:
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=owner_is_live)
+        try:
+            await worker.drain_once()
+            assert handled == sources
+            assert probes <= count * 2
+        finally:
+            await worker.stop()
+
+    async def test_alternating_failed_owners_cannot_keep_a_drain_running(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A lifecycle lock handoff may lose the previous source's owner each time."""
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+        live: set[str] = set()
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if live:
+                worker.release(tuple(live))
+                worker.wake(room_id=event.room_id)
+            live.clear()
+            live.add(event.event_id)
+            return False
+
+        for event_id in ("$first", "$second"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda event: event.event_id in live)
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=1)
+            assert attempts == ["$first", "$second"]
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert retry_sleeps[0][0] == 1
+            assert await alice.unsettled_event_ids() == frozenset({"$first", "$second"})
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("max_pages", [1, 16])
+    @pytest.mark.parametrize("wake_on_return", [False, True])
+    async def test_ownerless_handoffs_pause_the_room_without_trapping_a_drain(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        max_pages: int,
+        *,
+        wake_on_return: bool,
+    ) -> None:
+        """A promptly failed downstream owner cannot spin or let later work pass."""
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", max_pages)
+        attempts: list[str] = []
+        failing = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id != "$earlier" or not failing:
+                return True
+            if wake_on_return:
+                worker.release((event.event_id,))
+                worker.wake(room_id=event.room_id)
+            return False
+
+        for event_id in ("$earlier", "$later"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: False)
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=1)
+            assert sorted(attempts) == ["$earlier", "$healthy"]
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert retry_sleeps[0][0] == 1
+            worker.start()
+            worker.wake(room_id=ROOM)
+            await worker.drain_once()
+            assert attempts.count("$earlier") == 1
+
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: len(retry_sleeps) == 2)
+            assert attempts.count("$earlier") == 2
+            assert "$later" not in attempts
+            assert retry_sleeps[1][0] == 2
+
+            failing = False
+            retry_sleeps[1][1].set()
+            await _eventually_async(alice.pending)
+            assert attempts.count("$earlier") == 3
+            assert attempts[-1] == "$later"
+        finally:
+            await worker.stop()
+
+    async def test_busy_room_keeps_work_skipped_by_discovery_in_order(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A busy lane cannot lose its earlier messages as discovery moves on."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$first":
+                entered.set()
+                await release.wait()
+            return True
+
+        for event_id in ("$first", "$second", "$third", "$fourth"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await worker._dispatch_ready_rooms()
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await worker._dispatch_ready_rooms()
+            await worker._dispatch_ready_rooms()
+            release.set()
+            await asyncio.gather(*worker._lanes.values())
+            await asyncio.sleep(0)
+            await _dispatch_worker_pass(worker)
+            assert attempts[:2] == ["$first", "$second"]
+            for _ in range(4):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$first", "$second", "$third", "$fourth"]
+        finally:
+            release.set()
+            await worker.stop()
+
+    async def test_ready_retry_runs_while_new_admissions_keep_discovery_advancing(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovery must not depend on reaching the end of a growing global scan."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts == ["$head"]:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$head"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await worker._room_retries[ROOM].task
+            for index in range(8):
+                await TestPendingEventWorker._admit(alice, text_event(f"$later-{index}"))
+                await _dispatch_worker_pass(worker)
+            assert attempts[:2] == ["$head", "$head"]
+            assert not await alice.is_pending("$head")
+        finally:
+            await worker.stop()
+
+    async def test_wrapped_retry_wakes_the_skipped_tail(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovering the head must wake work skipped before the scan wrapped."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 4)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$head" and attempts.count("$head") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id, room_id in (
+            ("$head", ROOM),
+            ("$filler1", "!healthy1:example.org"),
+            ("$filler2", "!healthy2:example.org"),
+            ("$filler3", "!healthy3:example.org"),
+            ("$tail", ROOM),
+        ):
+            await TestPendingEventWorker._admit(alice, text_event(event_id), room_id)
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await worker._room_retries[ROOM].task
+            worker.start()
+            await _eventually_async(alice.pending)
+            assert [event_id for event_id in attempts if event_id in {"$head", "$tail"}] == ["$head", "$head", "$tail"]
+        finally:
+            await worker.stop()
+
+    async def test_room_read_respects_approval_handoff_after_discovery(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A source transferred to an approval must not fence later room work."""
+        for event_id in ("$source-1", "$source-2", "$later"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        approval_created = False
+
+        class ApprovalDuringScan(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                nonlocal approval_created
+                page = await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+                if not approval_created:
+                    approval_created = True
+                    await paused_for_approval(alice, _ApprovalContinuations.continuation(state="waiting"))
+                return page
+
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        worker = PendingEventWorker(
+            store=ApprovalDuringScan(alice),
+            handle=handle,
+        )
+        try:
+            worker.start()
+            await _eventually_async(alice.pending)
+            assert handled == ["$later"]
+            assert await alice.is_pending("$source-1")
+            assert await alice.is_pending("$source-2")
+        finally:
+            await worker.stop()
+
+    async def test_room_approval_wake_invalidates_a_pending_tail_read(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A retry handoff invalidates room admission before any further awaited lookup."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        generation = "runtime-a"
+        store = _ApprovalWakeReplayView(alice)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id != "$source-1":
+                return True
+            if attempts.count("$source-1") == 1:
+                created = await paused_for_approval(
+                    alice,
+                    replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation=generation),
+                )
+                assert created is not None
+                await _ApprovalContinuations.remember_card(alice)
+            else:
+                claimed = await claim_continuation(alice, "approval-1", runtime_generation=generation)
+                assert claimed is not None
+                assert claimed.state == "claimed"
+            return False
+
+        for event_id in ("$source-1", "$source-2", "$middle", "$tail"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        middle = (await alice.pending())[2]
+        worker = PendingEventWorker(store=store, handle=handle, runtime_generation=generation)
+        try:
+            worker.start()
+            await asyncio.wait_for(store.tail_read_entered.wait(), timeout=5)
+            assert attempts == ["$source-1", "$middle"]
+            assert store.tail_read_after == middle.receipt_order
+            worker.release(("$source-1",))
+            recorded = await alice.resolve_continuation_approval_card(
+                card_event_id="$approval",
+                requested_status="approved",
+                reason=None,
+                metadata=ApprovalDecisionMetadata(),
+            )
+            assert recorded.continuation_ready
+            assert recorded.continuation_room_id == ROOM
+            worker.wake(room_id=ROOM)
+            # Release the stale tail immediately; retry admission must already
+            # be invalidated when the synchronous handoff returns.
+            store.release_tail_read.set()
+            await _eventually_async(lambda: alice.pending(runtime_generation=generation))
+            assert attempts == ["$source-1", "$middle", "$source-1", "$tail"]
+            assert await alice.is_pending("$source-1")
+            assert await alice.is_pending("$source-2")
+            assert not await alice.is_pending("$tail")
+        finally:
+            store.release_tail_read.set()
+            await worker.stop()
+
+    @pytest.mark.parametrize("drain", [False, True])
+    async def test_admissions_do_not_bypass_a_failed_rooms_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        *,
+        drain: bool,
+    ) -> None:
+        """An unrelated wake runs healthy rooms without retrying a failed head early."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$failed":
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            assert len(retry_sleeps) == 1
+            await TestPendingEventWorker._admit(alice, text_event("$later"))
+            await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+            if drain:
+                await asyncio.wait_for(worker.drain_once(), timeout=1)
+            else:
+                await _dispatch_worker_pass(worker)
+
+            assert attempts == ["$failed", "$healthy"]
+            assert await alice.unsettled_event_ids() == frozenset({"$failed", "$later"})
+        finally:
+            await worker.stop()
+
+    async def test_consecutive_room_failures_back_off_to_cap_and_success_resets(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Lane starts and successful work in another room cannot reset failure history."""
+        attempts: list[str] = []
+        failing = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.room_id == ROOM and failing:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            for index, expected_delay in enumerate((1, 2, 4, 8, 16, 30, 30)):
+                await _dispatch_worker_pass(worker)
+                assert retry_sleeps[-1][0] == expected_delay
+                assert attempts.count("$failed") == index + 1
+                await TestPendingEventWorker._admit(alice, text_event(f"$healthy{index}"), "!healthy:example.org")
+                await _dispatch_worker_pass(worker)
+                assert attempts[-1] == f"$healthy{index}"
+                retry_sleeps[-1][1].set()
+                await asyncio.sleep(0)
+
+            failing = False
+            await _dispatch_worker_pass(worker)
+            assert not await alice.is_pending("$failed")
+            failing = True
+            await TestPendingEventWorker._admit(alice, text_event("$new-failure"))
+            await _dispatch_worker_pass(worker)
+            assert retry_sleeps[-1][0] == 1
+        finally:
+            await worker.stop()
+
+    async def test_a_long_outage_retries_the_event_until_it_succeeds(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A callback failure never settles its event, however long the outage lasts.
+
+        An exception says nothing about whether the event itself is at fault, so
+        an unreachable homeserver or model provider must hold the room's lane
+        rather than drop the user's message. Deterministic refusals settle
+        inside the callback instead.
+        """
+        outage_failures = 25
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$message" and attempts.count("$message") <= outage_failures:
+                msg = "homeserver unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$message", ts=1_000))
+        await TestPendingEventWorker._admit(alice, text_event("$later", ts=2_000))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            for index in range(outage_failures):
+                await _eventually(lambda index=index: len(retry_sleeps) > index)
+                assert await alice.is_pending("$message")
+                retry_sleeps[index][1].set()
+            await _eventually_async(lambda: alice.pending(room_id=ROOM))
+        finally:
+            await worker.stop()
+
+        assert attempts == ["$message"] * (outage_failures + 1) + ["$later"]
+        assert retry_sleeps[-1][0] == _MAX_RETRY_DELAY_SECONDS
+
+    @pytest.mark.parametrize("failing_sources", [1, 2, 3])
+    async def test_sources_handed_back_by_their_turn_back_off_together(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        failing_sources: int,
+    ) -> None:
+        """Handed-off sources that keep coming back failed still back off.
+
+        Each source is deferred to a turn that fails and returns it. Reaching
+        the second one used to count as progress past the first, so a room with
+        two such sources retried every second forever.
+        """
+        worker: PendingEventWorker
+
+        async def hand_back(event_id: str) -> None:
+            await asyncio.sleep(0)
+            worker.release((event_id,))
+            worker.wake(room_id=ROOM)
+
+        async def handle(event: JournalEvent) -> bool:
+            asyncio.get_running_loop().create_task(hand_back(event.event_id), name="failed_turn")
+            return False
+
+        for index in range(failing_sources):
+            await TestPendingEventWorker._admit(alice, text_event(f"$m{index}", ts=1_000 + index))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            for index in range(7):
+                await _eventually(lambda index=index: len(retry_sleeps) > index)
+                retry_sleeps[index][1].set()
+        finally:
+            await worker.stop()
+
+        assert [delay for delay, _release in retry_sleeps[:7]] == [1, 2, 4, 8, 16, 30, 30]
+
+    async def test_each_room_wakes_at_its_own_retry_without_new_admission(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """One timer cannot release another failing room or strand its pending event."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts.count(event.event_id) == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await TestPendingEventWorker._admit(alice, text_event("$first"))
+        worker.start()
+        try:
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            await TestPendingEventWorker._admit(alice, text_event("$second"), "!second:example.org")
+            worker.wake()
+            await _eventually(lambda: len(retry_sleeps) == 2)
+            retry_sleeps[1][1].set()
+            await _eventually(lambda: attempts.count("$second") == 2)
+            assert attempts.count("$first") == 1
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
+            assert attempts == ["$first", "$second", "$second", "$first"]
+        finally:
+            await worker.stop()
+        assert worker.pending_task_count == 0
+
+    async def test_retry_waits_for_failed_head_when_scan_resumes_in_later_page(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A rotating scan must not dispatch later room events ahead of the failed head."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts == ["$first"]:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$first", "$second", "$third"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            for _ in range(6):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$first", "$first", "$second", "$third"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    async def test_settled_failed_head_releases_later_events_after_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """External settlement cannot leave an absent failed head blocking later work."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$failed":
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        await TestPendingEventWorker._admit(alice, text_event("$later"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            await alice.settle("$failed")
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            await _dispatch_worker_pass(worker)
+            assert attempts == ["$failed", "$later"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("cooldown_passes", [0, 4])
+    @pytest.mark.parametrize("earlier_fails", [False, True])
+    async def test_reclaimed_earlier_event_does_not_release_later_slice_before_failed_head(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        cooldown_passes: int,
+        *,
+        earlier_fails: bool,
+    ) -> None:
+        """Reclaimed work before the failure cannot make a later scan slice safe."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+        owner_live = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$earlier":
+                if earlier_fails and not owner_live and attempts.count("$earlier") == 2:
+                    msg = "earlier callback unavailable"
+                    raise RuntimeError(msg)
+                return not owner_live
+            if event.event_id == "$failed" and attempts.count("$failed") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$earlier", "$failed", "$later", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        try:
+            await _dispatch_worker_pass(worker)
+            await _dispatch_worker_pass(worker)
+            owner_live = False
+            worker.release(("$earlier",))
+            worker.wake(room_id=ROOM)
+            for _ in range(cooldown_passes):
+                await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            if earlier_fails:
+                await _dispatch_worker_pass(worker)
+                assert attempts == ["$earlier", "$failed", "$earlier"]
+                retry_sleeps[-1][1].set()
+                await asyncio.sleep(0)
+            for _ in range(8):
+                await _dispatch_worker_pass(worker)
+            if earlier_fails:
+                assert attempts == ["$earlier", "$failed", "$earlier", "$earlier", "$failed", "$later", "$last"]
+            else:
+                assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
+        finally:
+            await worker.stop()
+
+    async def test_failed_head_read_does_not_block_other_rooms(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Checking a failed head must keep store failures scoped to that room."""
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        store = _FlakyReplayView(alice, fail_is_pending={"$failed"})
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            failed = (await alice.pending())[0]
+            store.fail_pending_after.add(failed.receipt_order - 1)
+            await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$healthy"]
+            assert retry_sleeps[-1][0] == 2
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("owner_dies_during_scan", [False, True])
+    async def test_retry_admission_reclaims_earlier_deferral_after_awaited_page(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        owner_dies_during_scan: bool,
+    ) -> None:
+        """Owner loss before or during a room read preserves earlier work."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        owner_live = True
+        block_next_room_page = False
+        page_entered = asyncio.Event()
+        release_page = asyncio.Event()
+        blocked_event_ids: list[str] = []
+        attempts: list[str] = []
+
+        class BlockingRoomRead(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                nonlocal block_next_room_page
+                page = await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+                if room_id == ROOM and block_next_room_page:
+                    block_next_room_page = False
+                    blocked_event_ids.extend(event.event_id for event in page)
+                    page_entered.set()
+                    await release_page.wait()
+                return page
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$earlier":
+                return not owner_live
+            if event.event_id == "$failed" and attempts.count("$failed") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$earlier", "$failed", "$later", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=BlockingRoomRead(alice),
+            handle=handle,
+            deferral_is_live=lambda _event: owner_live,
+        )
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=5)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert attempts == ["$earlier", "$failed"]
+            owner_live = owner_dies_during_scan
+            if not owner_live:
+                worker.release(("$earlier",))
+                worker.wake(room_id=ROOM)
+            block_next_room_page = True
+            worker.start()
+            retry_sleeps[0][1].set()
+            await asyncio.wait_for(page_entered.wait(), timeout=5)
+            assert blocked_event_ids == ["$failed" if owner_dies_during_scan else "$earlier"]
+            assert attempts == ["$earlier", "$failed"]
+            owner_live = False
+            if owner_dies_during_scan:
+                worker.release(("$earlier",))
+                worker.wake(room_id=ROOM)
+            release_page.set()
+            await _eventually_async(alice.pending)
+            assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            release_page.set()
+            await worker.stop()
+
+    @pytest.mark.parametrize("drain", [False, True])
+    async def test_concurrent_drain_respects_room_read_ownership_and_failure(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        drain: bool,
+    ) -> None:
+        """A reserved room read excludes another drain through head failure."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        store = _ReservedRoomReplayView(alice)
+        attempts: list[str] = []
+        first_drain: asyncio.Task[int] | None = None
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$head" and attempts.count("$head") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$head", "$tail", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            if drain:
+                first_drain = asyncio.create_task(worker.drain_once())
+            else:
+                worker.start()
+            await asyncio.wait_for(store.page_entered.wait(), timeout=5)
+            store.competing_drain = asyncio.create_task(worker.drain_once())
+            await asyncio.wait_for(store.competing_discovered.wait(), timeout=5)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(store.overlapping_reads.wait(), timeout=0.1)
+            assert not store.overlapping_reads.is_set()
+            assert store.room_reads == 1
+            assert attempts == []
+            store.release_page.set()
+            await asyncio.wait_for(store.competing_drain, timeout=5)
+            if first_drain is not None:
+                await asyncio.wait_for(first_drain, timeout=5)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert attempts == ["$head"]
+            assert store.room_reads == 1
+            assert await alice.unsettled_event_ids() == frozenset({"$head", "$tail", "$last"})
+            worker.start()
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
+            assert attempts == ["$head", "$head", "$tail", "$last"]
+        finally:
+            store.release_page.set()
+            drains = [task for task in (first_drain, store.competing_drain) if task is not None]
+            for task in drains:
+                task.cancel()
+            await asyncio.gather(*drains, return_exceptions=True)
+            await worker.stop()
+
+    @pytest.mark.parametrize("fails_first", [False, True])
+    async def test_room_progress_does_not_wait_for_stalled_discovery(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        fails_first: bool,
+    ) -> None:
+        """A discovered room owns page continuation and retry despite slow discovery."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        discovery_started = asyncio.Event()
+        release_discovery = asyncio.Event()
+        release_head = asyncio.Event()
+        attempts: list[str] = []
+        global_reads = 0
+
+        class SlowDiscovery(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                nonlocal global_reads
+                if room_id is None:
+                    global_reads += 1
+                    if global_reads > 1:
+                        discovery_started.set()
+                        await release_discovery.wait()
+                return await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                if fails_first:
+                    msg = "callback unavailable"
+                    raise RuntimeError(msg)
+                await release_head.wait()
+            return True
+
+        for event_id in ("$head", "$tail", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=SlowDiscovery(alice), handle=handle)
+        worker.start()
+        try:
+            await asyncio.wait_for(discovery_started.wait(), timeout=5)
+            if fails_first:
+                await _eventually(lambda: len(retry_sleeps) == 1)
+                retry_sleeps[0][1].set()
+            else:
+                release_head.set()
+            await _eventually_async(alice.pending)
+            assert attempts == (["$head", "$head"] if fails_first else ["$head"]) + ["$tail", "$last"]
+        finally:
+            release_head.set()
+            release_discovery.set()
+            await worker.stop()
+
+    async def test_shutdown_cancels_room_cooldown_and_restart_replays_pending_work(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A cooling room owns a cancellable timer and leaves its journal work durable."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await _dispatch_worker_pass(worker)
+        assert len(retry_sleeps) == 1
+        worker.begin_shutdown()
+        assert await worker.wait_stopped(timeout_seconds=0.1)
+        assert worker.pending_task_count == 0
+        assert await alice.is_pending("$failed")
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+        finally:
+            await worker.stop()
+        assert attempts == ["$failed", "$failed"]
+
+
 class TestOutOfBandDispatch:
     """An event its caller runs itself is still an event with one handler."""
 
@@ -1958,7 +3157,6 @@ class TestOutOfBandDispatch:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", noop),
                 on_media=cast("Any", noop),
@@ -1966,28 +3164,16 @@ class TestOutOfBandDispatch:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=on_room_lifecycle,
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
 
-    async def test_admit_and_run_is_the_events_only_handler(self, alice: PrincipalStore) -> None:
-        """Running an event inline does not exempt it from having one handler.
-
-        ``admit_and_run`` wakes the pump and then awaits twice -- a load and a
-        pending check -- before it reaches the callback. The pump has no
-        in-flight filter, because an event stays pending for the whole time its
-        handler runs, so a scan inside that window collects the very event the
-        caller is already running and dispatches it into the room's lane.
-
-        The count matters as much as the concurrency. Asserting only that
-        nothing raised would pass with the bug present: a room-lifecycle
-        callback claims no semantic consumer, so the second handler runs to
-        completion and settles a row the first one is about to settle again.
-        """
+    async def test_concurrent_drains_keep_one_handler(self, alice: PrincipalStore) -> None:
+        """Concurrent pump and explicit drains must share one room lane."""
         handled: list[str] = []
         concurrent = 0
         peak_concurrent = 0
@@ -2011,10 +3197,15 @@ class TestOutOfBandDispatch:
                 concurrent -= 1
 
         dispatcher = self._dispatcher(alice, on_room_lifecycle)
-        dispatcher.start()
-        running = asyncio.create_task(
-            dispatcher.admit_and_run(room(), member_event("$join"), EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE),
+        await admit_dispatch_event(
+            dispatcher,
+            room(),
+            member_event("$join"),
+            EventKind.ROOM_LIFECYCLE,
+            EventClass.ACTIONABLE,
         )
+        running = asyncio.create_task(dispatcher.drain_once())
+        dispatcher.start()
         await asyncio.wait_for(inside_handler.wait(), timeout=5)
         with contextlib.suppress(TimeoutError):
             # A second handler has to wake the pump, read a page of pending
@@ -2048,7 +3239,6 @@ class TestDeferralOwnership:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", noop),
                 on_media=cast("Any", noop),
@@ -2056,10 +3246,10 @@ class TestDeferralOwnership:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda _event_id: turn_claimed,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -2068,8 +3258,8 @@ class TestDeferralOwnership:
     async def _admitted(store: PrincipalStore, event: nio.Event, kind: EventKind) -> JournalEvent:
         """Admit one event and return the journal row the worker would see."""
         await store.admit(
-            inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, kind, self_sender=BOT),
+            _inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
         )
         return next(item for item in await store.pending() if item.event_id == event.event_id)
 
@@ -2163,71 +3353,6 @@ class TestDeferralOwnership:
         assert dispatcher._deferral_is_live(message) is False
 
 
-class TestUnsettledLifecycleIdentities:
-    """The set a join-hook suppressor trusts has to be all of them."""
-
-    @staticmethod
-    def _dispatcher(store: PrincipalStore) -> JournalDispatcher:
-        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-            return None
-
-        return JournalDispatcher(
-            store=store,
-            self_sender=BOT,
-            callbacks=JournalCallbacks(
-                on_message=cast("Any", noop),
-                on_media=cast("Any", noop),
-                on_reaction=cast("Any", noop),
-                on_approval=cast("Any", noop),
-                on_room_lifecycle=cast("Any", noop),
-                on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
-                on_approval_continuation=AsyncMock(return_value=None),
-                source_has_live_owner=lambda _event_id: False,
-                turn_has_live_claim=lambda _event_id: False,
-            ),
-            room_for_id=lambda _room_id: room(),
-        )
-
-    async def test_every_unsettled_identity_is_returned_past_one_page(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """One page short is one join hook that never runs.
-
-        The caller records every join this set does not cover as already seen,
-        so an identity missing because the read filled up is not merely late:
-        nothing asks about it again.
-        """
-        count = _LIFECYCLE_PAGE_SIZE + 1
-        for index in range(count):
-            member = member_event(f"$join{index:04d}", user_id=f"@user{index:04d}:example.org")
-            await alice.admit(inbound_event(ROOM, member, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE))
-
-        members = await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
-
-        assert len(members) == count
-        assert (ROOM, f"@user{count - 1:04d}:example.org") in members
-
-    async def test_an_identity_it_could_not_read_is_not_reported_as_absent(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A walk that steps over a row it cannot read finishes looking complete.
-
-        Which is worse than stopping short, because the caller writes off every
-        identity the set does not name. The hook owed to the member behind that
-        row then never runs, and nothing asks about it again.
-        """
-        for index in range(3):
-            member = member_event(f"$join{index}", user_id=f"@user{index}:example.org")
-            await alice.admit(inbound_event(ROOM, member, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE))
-        await corrupt(alice, "$join1")
-
-        with pytest.raises(JournalCorruptionError, match="could not be read"):
-            await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
-
-
 async def _never_called(event: JournalEvent) -> bool:
     """Fail loudly, for a worker whose scan is under test rather than its lanes."""
     msg = f"no handler should have run for {event.event_id}"
@@ -2240,8 +3365,8 @@ class TestABoundedScanIsFair:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
         await store.admit(
-            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     @classmethod
@@ -2256,7 +3381,7 @@ class TestABoundedScanIsFair:
             # Unprojected: nothing will ever read these rows as conversation,
             # and a page of this size is expensive enough to build already.
             await store.admit(
-                inbound_event(
+                _inbound_event(
                     ROOM,
                     text_event(f"$corrupt{index:04d}", ts=1_000 + index),
                     EventKind.MESSAGE,
@@ -2450,95 +3575,32 @@ class TestABoundedScanIsFair:
         finally:
             await worker.stop()
 
-    async def test_a_wrapped_pass_stops_at_the_position_it_set_out_from(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """One revolution, not an unbounded lap of a circle.
-
-        A pass resumed part way through the backlog runs to the end and then
-        starts again at the front, and nothing stopped it running past its own
-        origin and collecting what it had already collected pages earlier. The
-        room's lane is handed that list as it stands, and a handler that defers
-        rather than settling is not saved by the pending recheck in front of
-        it: it runs a second time on one source.
-
-        Asked of the scan rather than of a lane, because the duplicate is in
-        the list the scan produces and reading it there is exact -- through a
-        lane it is a race between two dispatches of one event.
-
-        Five events, each once, is what the stop proves: a pass that ran past
-        its origin collects ``$e3`` and ``$e4`` twice, which no ordering of the
-        result can hide.
-        """
-        for index in range(5):
-            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
-        admitted = await alice.pending(limit=5)
-        worker = PendingEventWorker(store=alice, handle=_never_called)
-        worker._scan_cursor = admitted[2].receipt_order
-
-        by_room, more_remains = await worker._collect_dispatchable()
-
-        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1", "$e2", "$e3", "$e4"]
-        assert not more_remains
-        assert worker._scan_cursor is None
-
-    async def test_a_lost_owner_behind_the_window_is_still_taken_back(
+    async def test_a_lost_owner_behind_discovery_still_runs_first(
         self,
         alice: PrincipalStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The reclaim's question is about the deferrals, not about the window.
-
-        A backlog too large for one pass keeps the scan's window ahead of a
-        deferral sitting behind it -- the pages stay full, so the pass never
-        reaches the end and never wraps to the front. Reclaiming only what the
-        window happens to cover then leaves that deferral's dead owner
-        unnoticed for as long as the overload lasts, which is the unbounded
-        outage the reclaim exists to replace.
-        """
+        """An abandoned source is reclaimed through its room, before later work."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
         for index in range(3):
             await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
         admitted = await alice.pending(limit=3)
-        worker = PendingEventWorker(store=alice, handle=_never_called, deferral_is_live=lambda _event: False)
-        worker._deferred[admitted[0].event_id] = admitted[0]
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: False)
+        worker._defer(admitted[0])
         worker._scan_cursor = admitted[0].receipt_order
-
-        by_room, _ = await worker._collect_dispatchable()
-
-        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1"]
-
-    async def test_an_object_handed_over_mid_pass_is_not_read_as_unreachable(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Absent from a scan already past its row is not the same as not pending.
-
-        Releasing on that reading would take back the parsed object for an
-        event admitted moments ago, and the run it then gets replays from the
-        stored payload -- as a recovery would, with nio's decryption state
-        thrown away and a live turn treated as a replayed one.
-        """
-        retained = {"$before"}
-
-        def snapshot() -> frozenset[str]:
-            taken = frozenset(retained)
-            # Admitted while the pass was already underway.
-            retained.add("$during")
-            return taken
-
-        worker = PendingEventWorker(
-            store=alice,
-            handle=_never_called,
-            retained_event_ids=snapshot,
-            release_retained=retained.difference_update,
-        )
-
-        await worker._collect_dispatchable()
-
-        assert retained == {"$during"}
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+            assert handled == ["$e0", "$e1", "$e2"]
+        finally:
+            await worker.stop()
 
 
 class TestADrainSeesTheWholeBacklog:
@@ -2547,8 +3609,8 @@ class TestADrainSeesTheWholeBacklog:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
         await store.admit(
-            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     async def test_a_backlog_of_failures_larger_than_one_pass_still_returns(
@@ -2614,16 +3676,23 @@ class _FlakyReplayView:
     inner: PrincipalStore
     fail_is_pending: set[str] = field(default_factory=set)
     fail_settle: set[str] = field(default_factory=set)
+    fail_pending_after: set[int] = field(default_factory=set)
 
     async def pending(
         self,
         *,
         limit: int = 256,
+        room_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:
+        if after_receipt_order is not None and after_receipt_order in self.fail_pending_after:
+            self.fail_pending_after.remove(after_receipt_order)
+            msg = "the journal is unreadable"
+            raise RuntimeError(msg)
         return await self.inner.pending(
             limit=limit,
+            room_id=room_id,
             after_receipt_order=after_receipt_order,
             runtime_generation=runtime_generation,
         )
@@ -2635,12 +3704,80 @@ class _FlakyReplayView:
             raise RuntimeError(msg)
         return await self.inner.is_pending(event_id)
 
-    async def settle(self, event_id: str) -> None:
+    async def settle(self, event_id: str) -> tuple[str, ...]:
         if event_id in self.fail_settle:
             self.fail_settle.discard(event_id)
             msg = "the journal is unwritable"
             raise RuntimeError(msg)
-        await self.inner.settle(event_id)
+        return await self.inner.settle(event_id)
+
+
+@dataclass
+class _ReservedRoomReplayView(_FlakyReplayView):
+    """Hold the first room read while another drain finishes discovering it."""
+
+    page_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_page: asyncio.Event = field(default_factory=asyncio.Event)
+    competing_discovered: asyncio.Event = field(default_factory=asyncio.Event)
+    overlapping_reads: asyncio.Event = field(default_factory=asyncio.Event)
+    room_reads: int = 0
+    competing_drain: asyncio.Task[int] | None = None
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        reading_room = room_id == ROOM
+        if reading_room:
+            self.room_reads += 1
+            if self.room_reads == 2:
+                self.overlapping_reads.set()
+        hold_this_read = reading_room and self.room_reads == 1
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        if room_id is None and asyncio.current_task() is self.competing_drain and page.reached_end:
+            self.competing_discovered.set()
+        if hold_this_read:
+            self.page_entered.set()
+            await self.release_page.wait()
+        return page
+
+
+@dataclass
+class _ApprovalWakeReplayView(_FlakyReplayView):
+    """Hold a room snapshot across an approval eligibility change."""
+
+    tail_read_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_tail_read: asyncio.Event = field(default_factory=asyncio.Event)
+    tail_read_after: int | None = None
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        if room_id == ROOM and not self.tail_read_entered.is_set() and any(event.event_id == "$tail" for event in page):
+            self.tail_read_after = after_receipt_order
+            self.tail_read_entered.set()
+            await self.release_tail_read.wait()
+        return page
 
 
 class TestStoreFailuresBelongToTheLane:
@@ -2649,8 +3786,8 @@ class TestStoreFailuresBelongToTheLane:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event) -> None:
         await store.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     async def test_a_read_that_fails_before_the_handler_is_retried(
@@ -2731,7 +3868,6 @@ class TestRecoveryDoesNotReenterALiveTurn:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", on_turn),
                 on_media=cast("Any", on_turn),
@@ -2739,10 +3875,10 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -2750,8 +3886,8 @@ class TestRecoveryDoesNotReenterALiveTurn:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, kind: EventKind = EventKind.MESSAGE) -> None:
         await store.admit(
-            inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, kind, self_sender=BOT),
+            _inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
         )
 
     @pytest.mark.parametrize(
@@ -2828,6 +3964,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
     async def test_a_deferred_source_is_still_taken_back_when_its_owner_dies(
         self,
         alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
     ) -> None:
         """Skipping an owned source may not become losing an abandoned one.
 
@@ -2851,8 +3988,12 @@ class TestRecoveryDoesNotReenterALiveTurn:
 
         live_claims.clear()
         await dispatcher.drain_once()
-
-        assert entered == ["$m", "$m"]
+        dispatcher.start()
+        try:
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: entered == ["$m", "$m"])
+        finally:
+            await dispatcher.stop()
 
 
 async def _eventually_async(query: Callable[[], Awaitable[Sized]], *, seconds: float = 10.0) -> None:
@@ -2894,80 +4035,6 @@ def member_event(event_id: str, *, user_id: str = ALICE) -> nio.RoomMemberEvent:
     return event
 
 
-class TestTimelineMemberProvenance:
-    """A consumer that runs after the timeline still gets nio's verdict."""
-
-    @pytest.mark.parametrize(
-        ("provenance", "expected"),
-        [
-            (nio.TimelineEventProvenance.LIVE, EventClass.ACTIONABLE),
-            (nio.TimelineEventProvenance.RECOVERED, EventClass.ACTIONABLE),
-            (nio.TimelineEventProvenance.HISTORY, EventClass.CONTEXT_ONLY),
-        ],
-    )
-    async def test_a_declined_member_event_still_states_its_class(
-        self,
-        alice: PrincipalStore,
-        provenance: nio.TimelineEventProvenance,
-        expected: EventClass,
-    ) -> None:
-        """Declining to admit is exactly when a later consumer needs the verdict."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        event = member_event("$join")
-
-        await ingress._admit(room(), event, provenance)
-
-        assert ingress._admission_kind(event) is None
-        assert ingress.timeline_member_event_class(event) is expected
-
-    async def test_an_event_nio_never_offered_has_no_class(self, alice: PrincipalStore) -> None:
-        """Nio skips admission for an event it accepted earlier, and silence is the answer."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        assert ingress.timeline_member_event_class(member_event("$join")) is None
-
-    async def test_only_member_events_are_recorded(self, alice: PrincipalStore) -> None:
-        """Nothing else has a consumer that runs later, so nothing else is kept."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-        assert ingress.timeline_member_provenance.get("$m") is None
-
-    async def test_clearing_forgets_the_response_that_produced_it(self, alice: PrincipalStore) -> None:
-        """The verdict is about one delivery, so it cannot answer for the next."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        event = member_event("$join")
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        ingress.timeline_member_provenance.clear()
-
-        assert ingress.timeline_member_event_class(event) is None
-
-
-class TestLiveRoomMembershipTransitions:
-    """Only durably admitted live membership deltas may update authorization state."""
-
-    async def test_live_transition_runs_but_recovered_and_history_do_not(self, alice: PrincipalStore) -> None:
-        """Replayed lifecycle rows must not regress a newer authoritative snapshot."""
-        on_live_transition = AsyncMock()
-        ingress = JournalIngress(
-            store=alice,
-            self_sender=BOT,
-            room_lifecycle_enabled=lambda: True,
-            on_live_room_membership_transition=on_live_transition,
-        )
-        live = member_event("$live")
-        recovered = member_event("$recovered")
-        history = member_event("$history")
-
-        await ingress._admit(room(), live, nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), recovered, nio.TimelineEventProvenance.RECOVERED)
-        await ingress._admit(room(), history, nio.TimelineEventProvenance.HISTORY)
-
-        on_live_transition.assert_awaited_once_with(ROOM, live)
-
-
 def message_event(
     event_id: str,
     msgtype: str,
@@ -3006,25 +4073,6 @@ _ROOM_MESSAGE_MSGTYPES = [
 ]
 
 
-class _AdmissionClient:
-    """The one nio surface ``JournalDispatcher.register`` uses.
-
-    Registering rather than reaching for the dispatcher's private ingress is
-    what makes these tests exercise the real admission callback: the same
-    function nio calls, with the provenance nio supplies.
-    """
-
-    def __init__(self) -> None:
-        self.admit: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]] | None = None
-
-    def add_event_admission_callback(
-        self,
-        callback: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]],
-    ) -> None:
-        """Capture the callback the dispatcher installs."""
-        self.admit = callback
-
-
 @dataclass(frozen=True)
 class _Delivery:
     """What one admitted event owed, and what actually ran for it."""
@@ -3056,7 +4104,6 @@ class TestAdmittedWorkReachesItsCallback:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", on_message),
                 on_media=cast("Any", noop),
@@ -3064,12 +4111,13 @@ class TestAdmittedWorkReachesItsCallback:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
+                replies_ended=lambda _reply_ids: None,
             ),
             room_for_id=lambda _room_id: room(),
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
         )
 
     async def _deliver(
@@ -3086,10 +4134,15 @@ class TestAdmittedWorkReachesItsCallback:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         dispatcher = self._dispatcher(store, on_message)
-        client = _AdmissionClient()
-        dispatcher.register(cast("nio.AsyncClient", client))
-        assert client.admit is not None
-        await client.admit(room(), event, provenance)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=provenance,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        if views is not None:
+            await store.admit(*views)
         # Read before draining: "was this committed as work?" and "did anything
         # run for it?" are different questions, and a context-only event has to
         # answer no to both. Work that is committed and then refused by the
@@ -3242,12 +4295,12 @@ class TestAdmittedWorkReachesItsCallback:
         with no line anywhere saying a message had been discarded.
         """
         dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
-        await dispatcher.admit_out_of_band(
+        await admit_dispatch_event(
+            dispatcher,
             room(),
             reaction_event("$mislabelled"),
             EventKind.MESSAGE,
             EventClass.ACTIONABLE,
-            live=False,
         )
 
         with capture_logs() as logs:
@@ -3258,3 +4311,311 @@ class TestAdmittedWorkReachesItsCallback:
         assert mismatches[0]["kind"] == EventKind.MESSAGE.value
         assert mismatches[0]["payload_type"] == "ReactionEvent"
         assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_live_call_event_reaches_its_durable_callback(self, alice: PrincipalStore) -> None:
+        """A supported call event stays pending until its callback completes."""
+        handled: list[nio.UnknownEvent] = []
+
+        async def on_call_event(_room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+            handled.append(event)
+
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_rtc=on_call_event,
+        )
+        source = {
+            "event_id": "$call",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+
+        assert [event.event_id for event in handled] == ["$call"]
+        assert not await alice.is_pending("$call")
+
+    async def test_failed_call_callback_replays_from_durable_work(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A callback failure keeps the RTC event pending for a later pass."""
+        failure = RuntimeError("call reconciliation failed")
+        on_rtc = AsyncMock(side_effect=[failure, None])
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_rtc=on_rtc)
+        source = {
+            "event_id": "$call-retry",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+        assert await alice.is_pending("$call-retry")
+
+        await dispatcher.drain_once()
+        assert on_rtc.await_count == 1
+        retry_sleeps[0][1].set()
+        await asyncio.sleep(0)
+        await dispatcher.drain_once()
+        assert on_rtc.await_count == 2
+        assert not await alice.is_pending("$call-retry")
+        await dispatcher.stop()
+
+
+class TestScheduleTriggerDispatch:
+    """Silent schedule work uses the ordinary formatted-message turn path."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+    ) -> JournalDispatcher:
+        return TestAdmittedWorkReachesItsCallback._dispatcher(store, on_message)
+
+    @staticmethod
+    async def _admit(
+        store: PrincipalStore,
+        event: nio.Event,
+        *,
+        event_class: EventClass = EventClass.ACTIONABLE,
+        kind: EventKind = EventKind.SCHEDULE_TRIGGER,
+    ) -> None:
+        """Store one already-classified event for dispatcher-focused tests."""
+        await store.admit(
+            _inbound_event(ROOM, event, kind, event_class),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
+        )
+
+    async def test_schedule_trigger_dispatch_preserves_the_admitted_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Dropping metadata or crypto state would make live and replayed turns differ."""
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            handled.append(event)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        event = schedule_trigger_event(
+            "$schedule-live",
+            "Inspect the durable queue",
+            extra_content={
+                "msgtype": "m.notice",
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                "com.example.request": {"history_limit": 4, "requester": ALICE},
+            },
+            ts=7_654,
+        )
+        event.decrypted = True
+        event.verified = False
+        event.sender_key = "sender-key"
+        event.session_id = "session-id"
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        assert len(handled) == 1
+        delivered = handled[0]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert delivered.event_id == event.event_id
+        assert delivered.sender == event.sender
+        assert delivered.server_timestamp == event.server_timestamp
+        assert delivered.body == "Inspect the durable queue"
+        assert delivered.source["type"] == "m.room.message"
+        assert delivered.source["content"] == {
+            "msgtype": "m.text",
+            "body": "Inspect the durable queue",
+            SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+            "com.example.request": {"history_limit": 4, "requester": ALICE},
+        }
+        assert delivered.decrypted is True
+        assert delivered.verified is False
+        assert delivered.sender_key == "sender-key"
+        assert delivered.session_id == "session-id"
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_replay_uses_the_same_message_callback(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A process restart must not strand a valid trigger as an unknown event."""
+        event = schedule_trigger_event(
+            "$schedule-replay",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await self._admit(alice, event)
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
+            assert turn_dispatch_recovery_active()
+            handled.append(message)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await dispatcher.drain_once()
+
+        assert [message.event_id for message in handled] == [event.event_id]
+        assert isinstance(handled[0], nio.RoomMessageFormatted)
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_whitespace_schedule_trigger_replay_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Recovered whitespace-only trigger bodies are malformed, not actionable prompts."""
+        event = schedule_trigger_event(
+            "$schedule-whitespace-replay",
+            " \n\t",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await self._admit(alice, event)
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_ordinary_user_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An otherwise authorized human cannot manufacture automation work."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-human", sender=ALICE)
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        assert views is None
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_with_mismatched_marker_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The custom event type alone cannot promote a differently marked payload."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-marker",
+            extra_content={SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND},
+        )
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_deferred_callback_keeps_the_source_pending(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Settling on callback return would lose the turn before its response is durable."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-deferred")
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        on_message.assert_awaited_once()
+        delivered = on_message.await_args.args[1]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_cold_history_never_reaches_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Cold history must remain inert even though the custom payload is convertible."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-cold")
+
+        await self._admit(alice, event, event_class=EventClass.CONTEXT_ONLY)
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    @pytest.mark.parametrize("body", ["", None, 7])
+    async def test_malformed_schedule_trigger_settles_without_body_logging(
+        self,
+        alice: PrincipalStore,
+        body: object,
+    ) -> None:
+        """A bad durable row must not poison later recovery or leak its body."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-malformed", body)
+
+        with capture_logs() as logs:
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "body" not in invalid[0]
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_binding_rejects_the_wrong_custom_type(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A corrupt kind label must not promote an unrelated custom event to a message."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-type",
+            "private-body-marker",
+            event_type="com.example.unrelated",
+        )
+
+        with capture_logs() as logs:
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "private-body-marker" not in str(logs)
+        assert not await alice.is_pending(event.event_id)

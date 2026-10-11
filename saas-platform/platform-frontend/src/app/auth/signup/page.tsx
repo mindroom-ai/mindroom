@@ -1,10 +1,14 @@
-'use client'
-
 import { AuthShell } from '@/components/auth/auth-shell'
 import { AuthWrapper } from '@/components/auth/auth-wrapper'
 import Link from 'next/link'
 
-export default function SignupPage() {
+export default async function SignupPage({ searchParams }: { searchParams: Promise<{ plan?: string }> }) {
+  // A plan picked on the landing page opens preselected on the upgrade page once the account exists
+  const { plan } = await searchParams
+  const redirectTo = plan
+    ? `/auth/callback?next=${encodeURIComponent(`/dashboard/billing/upgrade?plan=${encodeURIComponent(plan)}`)}`
+    : undefined
+
   return (
     <AuthShell
       title="Create your MindRoom"
@@ -26,7 +30,7 @@ export default function SignupPage() {
         </>
       )}
     >
-      <AuthWrapper view="sign_up" />
+      <AuthWrapper view="sign_up" redirectTo={redirectTo} />
     </AuthShell>
   )
 }

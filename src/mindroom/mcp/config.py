@@ -7,6 +7,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.schema_hints import dashboard_hint
+
 MCPTransport = Literal["stdio", "sse", "streamable-http"]
 _MCPOAuthDiscoveryMode = Literal["auto", "manual"]
 _MCPOAuthTokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
@@ -58,7 +60,7 @@ class MCPOAuthConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    type: Literal["oauth"]
+    type: Literal["oauth"] = Field(description="Authentication scheme; OAuth is the only supported type")
     provider_id: str | None = Field(default=None, description="OAuth provider id; defaults to mcp_<server_id>")
     display_name: str | None = Field(default=None, description="Human-readable OAuth provider name")
     resource: str | None = Field(default=None, description="OAuth protected resource identifier")
@@ -75,9 +77,19 @@ class MCPOAuthConfig(BaseModel):
     pkce_code_challenge_method: Literal["S256"] | None = Field(default="S256", description="PKCE challenge method")
     scopes: list[str] = Field(default_factory=list, description="OAuth scopes")
     extra_auth_params: dict[str, str] = Field(default_factory=dict, description="Extra authorization request params")
-    extra_token_params: dict[str, str] = Field(default_factory=dict, description="Extra token request params")
+    extra_token_params: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra token request params; may include credentials",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
     client_config_services: list[str] = Field(default_factory=list, description="Provider-specific client config")
     shared_client_config_services: list[str] = Field(default_factory=list, description="Shared client config services")
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        """Trim OAuth labels so blank names use the provider and catalog fallbacks."""
+        return (value.strip() or None) if value is not None else None
 
     @field_validator("provider_id")
     @classmethod
@@ -110,6 +122,9 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = Field(default=True, description="Whether the server is active")
+    display_name: str | None = Field(default=None, description="Human-readable tool name for the dashboard and catalog")
+    summary: str | None = Field(default=None, description="Short capability summary for the dashboard and tool catalog")
+    icon: str | None = Field(default=None, description="Optional dashboard icon name, such as SiConfluence or Calendar")
     description: str | None = Field(
         default=None,
         description="What the server provides; appended to the OAuth bridge tool descriptions shown to the model. Requires auth.",
@@ -122,9 +137,17 @@ class MCPServerConfig(BaseModel):
     command: str | None = Field(default=None, description="Executable name for stdio transport")
     args: list[str] = Field(default_factory=list, description="Arguments for stdio transport")
     cwd: str | None = Field(default=None, description="Working directory for stdio transport")
-    env: dict[str, str] = Field(default_factory=dict, description="Environment variables for stdio transport")
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables for stdio transport",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
     url: str | None = Field(default=None, description="Remote URL for SSE or streamable HTTP")
-    headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers for remote transports")
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="HTTP headers for remote transports",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
     tool_prefix: str | None = Field(default=None, description="Prefix for model-visible function names")
     auth: MCPOAuthConfig | None = Field(default=None, description="Optional worker-scoped MCP auth")
     include_tools: list[str] = Field(default_factory=list, description="Optional remote tool allowlist")
@@ -134,10 +157,10 @@ class MCPServerConfig(BaseModel):
     max_concurrent_calls: int = Field(default=1, ge=1, description="Maximum concurrent calls")
     auto_reconnect: bool = Field(default=True, description="Whether to reconnect automatically")
 
-    @field_validator("description")
+    @field_validator("display_name", "summary", "description", "icon")
     @classmethod
-    def normalize_description(cls, value: str | None) -> str | None:
-        """Collapse blank descriptions to None so callers can test truthiness."""
+    def normalize_display_metadata(cls, value: str | None) -> str | None:
+        """Trim optional display metadata and collapse blank values to None."""
         if value is None:
             return None
         return value.strip() or None

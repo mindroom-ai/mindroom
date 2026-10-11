@@ -1,75 +1,54 @@
 # Attachments
 
-MindRoom can process files, images, audio, and videos sent to Matrix rooms, passing them to agents and teams for analysis or action.
-Supported attachment kinds: `audio`, `file`, `image`, `video`.
+This page covers how agents and teams receive files, images, and videos sent in Matrix rooms, how attachment IDs work, how long attachments are kept, and how to use the `attachments` tool to view, save, and register files.
+Attachment handling works automatically for agents and teams in direct messages and threads; no configuration is needed.
+Image-specific behavior is on [Image Messages](https://docs.mindroom.chat/images/), and audio messages are transcribed as described on [Voice Messages](https://docs.mindroom.chat/voice/).
 
-## Overview
+## Sending Files to an Agent
 
-When a user sends a file, image, audio message, or video in a Matrix room:
+Send a file, image, or video in a Matrix room and mention the agent or team in the caption:
 
-1. The responder determines whether it should answer (via mention, thread participation, or DM)
-2. The media is downloaded and decrypted (if E2E encrypted)
-3. The file is saved locally and registered as a context-scoped attachment
-4. The responder receives the media as an Agno `File`, `Video`, `Audio`, or `Image` object plus an attachment ID it can reference in tool calls
-5. The responder replies with its analysis or takes action on the file
+- **With caption**: `@assistant Summarize this document` uses the caption as the prompt.
+- **Without caption**: the responder receives `[Attached file]`, `[Attached image]`, or `[Attached video]` as the prompt.
 
-Attachment support works automatically for agents and teams -- no configuration is needed.
+A media event's `body` counts as a caption only when the event also has a `filename` field with a different value, following [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/2530), so a body that only repeats the filename is not a caption.
 
-## How It Works
+The responder answers only when it would answer a text message there (mention, thread participation, or DM).
+Without an `@mention`, the router uses the caption to choose among several eligible agents or teams.
+Both unencrypted and end-to-end encrypted media are supported.
 
-```
-┌──────────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ File/Image/Audio │────>│ Download &  │────>│ Register    │────>│ Pass to AI  │
-│ /Video (Matrix)  │     │ Decrypt     │     │ Attachment  │     │ Model       │
-└──────────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-                                                                  │
-                                                                  v
-                                                            ┌─────────────┐
-                                                            │ Responder   │
-                                                            │ Replies     │
-                                                            └─────────────┘
-```
-
-## Usage
-
-Send a file, image, audio message, or video in a Matrix room and mention the agent or team in the caption:
-
-- **With caption**: `@assistant Summarize this document` -- the caption is used as the prompt
-- **Without caption**: The agent receives `[Attached file]`, `[Attached image]`, `[Attached audio]`, or `[Attached video]` as the prompt
-- **Bare filename**: If the body is just the filename (e.g., `report.pdf`), it is treated the same as no caption
-
-Attachments work in both direct messages and threads, and with both individual agents and teams.
+The responder's model receives the media directly, so it must support that input type (vision for images, file or video input for documents and videos).
+Models without that support can still work with the file through the [`attachments` tool](#the-attachments-tool).
+When a provider rejects inline media, MindRoom retries without it and tells the agent the content was not inspected; see [Media Fallback](https://docs.mindroom.chat/images/#media-fallback).
+Some provider integrations never send certain media kinds, so MindRoom leaves those out from the start with the same note.
+Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
 
 ## Attachment IDs
 
-Each registered file, image, audio clip, or video is assigned a stable attachment ID (e.g., `att_abc123`).
-Attachments sent with the current message are listed in the prompt with full provenance (kind, filename, sender, send time, and originating event ID):
+Each received or registered file gets an attachment ID such as `att_abc123`.
+Attachments sent with the current message are listed in the prompt with their kind, filename, sender, send time, and event ID:
 
 ```
 Attachments sent with the current message (use tool calls to inspect or process them by ID):
 - att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
 ```
 
-Earlier attachments stay attached to the conversation messages that carried them: when thread history is rendered for the model, each message gets an inline annotation and (for user messages) the media itself, so attachments appear in chronological position:
+Only current-message attachments are sent to the model as media.
+Earlier attachments appear in the conversation history as annotations, and the agent can open them again by ID with the `attachments` tool:
 
-```
+```text
 @user:example.org: check this out
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Keeping media bytes pinned to their original messages also keeps the request prefix stable across turns, so provider prompt caching covers previously sent media instead of re-processing it every turn.
-
-Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
-This prevents cross-room data leakage for ID-based access.
-When voice media download and registration succeed, raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another.
+Within a conversation, an authorized response can open files uploaded by any participant.
+When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 
 ## The `attachments` Tool
 
-Agents can use the optional `attachments` tool to interact with context-scoped attachments programmatically.
-
-### Enabling
-
-Add `attachments` to the agent's tool list:
+The optional `attachments` tool lets an agent list, view, save, and register files in the current conversation, including with models that cannot take file input directly.
+Add it to the agent's tools; it has no configuration fields, and enabling [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/) also enables it:
 
 ```yaml
 agents:
@@ -78,43 +57,73 @@ agents:
       - attachments
 ```
 
-### Operations
+| Function | What it does |
+|----------|--------------|
+| `list_attachments(target=None)` | List the attachment IDs available in the current context with their metadata, plus any `missing_attachment_ids`; `target` returns one attachment |
+| `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
+| `view_file(path=None, attachment_id=None)` | Show an image from the workspace or an attachment to the model |
+| `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
 
-| Operation | Description |
-|-----------|-------------|
-| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, event_timestamp, created_at) |
-| `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt |
-| `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
+```python
+list_attachments()
+get_attachment("att_abc123")
+get_attachment("att_abc123", view=True)
+get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
+view_file(path="plots/result.png")
+register_attachment("exports/report.csv")
+matrix_message(message="Here is the report.", attachments=["att_abc123", "exports/report.csv"])
+```
 
-When `mindroom_output_path` is omitted, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
-For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path="incoming/file.ext")` before processing an attachment with `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
-`mindroom_output_path` must be a file path relative to the agent workspace.
-It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
-When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.
-In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so `incoming/file.ext` and `~/incoming/file.ext` refer to the same saved file.
+Attachment arguments must be `att_*` IDs available in the current conversation or registered earlier in the same tool run.
+Metadata includes the kind, filename, MIME type, size, room ID, thread ID, sender, timestamps, and an `available` flag that reports whether the file still exists.
+It also includes the runtime-local path, except for agents whose workspace tools run on a worker, where that path does not exist; their metadata has a `usage` note saying to save the file with `mindroom_output_path` instead.
+To post files into Matrix, pass attachment IDs or file paths to `matrix_message`; see [`matrix_message` attachments](https://docs.mindroom.chat/tools/matrix-message/#attachments).
 
-`attachment_ids` accepts only context attachment IDs (`att_*`).
-`attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
-Relative paths resolve from the agent workspace when one is available.
-Relative paths must stay inside the workspace.
-Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
+### Viewing Content
 
-### Why use this tool?
+`get_attachment(attachment_id, view=True)` sends an image, audio, video, or document (including PDF and plain text) to the model, up to 20 MiB.
+The model and its provider must support that media type and may have stricter limits.
+`view=True` cannot be combined with `mindroom_output_path`.
+If the model cannot take the media, the agent is told so and can save the file and use other extraction or transcription tools instead.
 
-Not all AI models support direct file inputs.
-The `attachments` tool lets any model work with files by calling tools that operate on attachment IDs, even if the model itself cannot ingest the raw bytes.
+`view_file` shows one image to the calling model in one call; supply exactly one of `path` or `attachment_id`, and use `read_file` for ordinary text and code.
+Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace.
+It accepts PNG, JPEG, GIF, and WebP images up to 20 MiB and 40 million pixels.
+Images larger than 2048 pixels on the longest edge or 5 MiB are scaled down, animated images show only the first frame, and the result metadata reports these changes.
+Image viewing through `get_attachment(view=True)` follows the same limits.
+Viewing does not post anything to Matrix; to share the image, pass the returned attachment ID to `matrix_message`.
+That ID works within the same tool run; in later turns, view the original path again.
+Conversation history keeps up to four recently viewed images within 10 MiB in total, and older ones are replaced by a notice.
 
-## Encryption
+### Saving Files to the Workspace
 
-Both unencrypted and E2E encrypted files, images, audio clips, and videos are supported.
-Encrypted media is decrypted transparently using the key material from the Matrix event.
+`get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
+Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
+The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
+Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
+See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
+
+### Registering Local Files
+
+`register_attachment(file_path)` copies a local file into attachment storage and returns a new attachment ID for the current room and thread, usable by later calls in the same run.
+Later changes to the source file do not change the attachment.
+Registered files are limited to 64 MiB.
+Paths, including the targets of symbolic links, follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting:
+
+- With the default `workspace`, paths resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
+  `~` expands to the MindRoom process home, not the worker workspace, so `~/incoming/file.txt` is rejected.
+  Without a configured workspace, path registration is refused.
+- With `unrestricted`, any file the MindRoom process can read is accepted, including absolute paths.
 
 ## Retention
 
-MindRoom automatically prunes attachment metadata and managed `incoming_media/` files older than 30 days.
-Pruning runs opportunistically during new attachment registration.
+Attachment bytes are stored under `incoming_media/` and metadata under `attachments/` in the storage directory (`mindroom_data/` by default).
+MindRoom prunes attachments older than 30 days; deletion is not immediate at the 30-day mark.
+Pruning never deletes workspace files, the source files of registered attachments, or copies on the Matrix homeserver.
 
-## Limitations
+## Limits
 
-- **Routing with multiple eligible responders** -- without an `@mention`, the router uses the file caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
-- **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.
+- **Incoming media size**: received files must be at most 64 MiB (67,108,864 bytes), including after decryption; send a smaller file if one is rejected.
+  Homeservers and model providers may set lower limits.
+- **Earlier media per turn**: a turn fetches at most 10 earlier files, images, or videos that are not stored yet, newest first, and leaves the rest for later turns.
+  An earlier file that fails to download is not tried again for an hour.

@@ -114,7 +114,7 @@ variable "stripe_secret_key" {
 }
 
 variable "stripe_webhook_secret" {
-  description = "Stripe webhook secret"
+  description = "Stripe webhook secret (required when stripe_secret_key is set)"
   type        = string
   sensitive   = true
   default     = ""

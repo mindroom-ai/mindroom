@@ -359,7 +359,6 @@ async def execute_router_relay(
     ) = await deps.visible_responses.prepare_visible_delivery_turn(
         source_turn,
         requester_id=requester_user_id,
-        correlation_id=event.event_id,
         target=resolved_target,
         excluded_event_ids=(visible_echo_event_id,) if visible_echo_event_id is not None else (),
     )

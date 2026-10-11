@@ -57,39 +57,51 @@ async function takeScreenshot() {
     });
     console.log(`Full page screenshot saved to: ${fullPagePath}`);
 
-    // Click on first agent to show details
-    const agentButtons = await page.$$('[role="button"]');
-    if (agentButtons.length > 0) {
-      await agentButtons[0].click();
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // Take screenshot with agent selected
-      const selectedPath = path.join(screenshotsDir, `mindroom-dashboard-agents-${timestamp}.png`);
-      await page.screenshot({
-        path: selectedPath,
-        fullPage: true,
-      });
-      console.log(`Selected agent screenshot saved to: ${selectedPath}`);
+    // Open the Agents route before looking for its selectable cards.
+    await page.click('nav[aria-label="Primary navigation"] a[href="/agents"]');
+    await page.waitForSelector('section[aria-label="Agents workspace"]', {
+      visible: true,
+      timeout: 10000,
+    });
+    const agentButtons = await page.$$(
+      'section[aria-label="Agents workspace"] [role="button"][aria-pressed]',
+    );
+    if (agentButtons.length === 0) {
+      throw new Error("Cannot capture Agents: no configured agents are available to select.");
     }
+    await agentButtons[0].click();
+    await page.waitForSelector(
+      'section[aria-label="Agents workspace"] [role="button"][aria-pressed="true"]',
+      { visible: true, timeout: 10000 },
+    );
+    await page.waitForSelector(
+      'section[aria-label="Agents workspace"] [aria-busy="false"] #display_name',
+      { visible: true, timeout: 10000 },
+    );
 
-    // Switch to Models tab
-    const tabButtons = await page.$$('button[role="tab"]');
-    for (const button of tabButtons) {
-      const text = await page.evaluate(el => el.textContent, button);
-      if (text.includes("Models")) {
-        await button.click();
-        await new Promise(resolve => setTimeout(resolve, 1000));
+    const selectedPath = path.join(screenshotsDir, `mindroom-dashboard-agents-${timestamp}.png`);
+    await page.screenshot({
+      path: selectedPath,
+      fullPage: true,
+    });
+    console.log(`Selected agent screenshot saved to: ${selectedPath}`);
 
-        // Take screenshot of models tab
-        const modelsPath = path.join(screenshotsDir, `mindroom-dashboard-models-${timestamp}.png`);
-        await page.screenshot({
-          path: modelsPath,
-          fullPage: true,
-        });
-        console.log(`Models tab screenshot saved to: ${modelsPath}`);
-        break;
-      }
-    }
+    // Models is a route link, not a tab button.
+    await page.click('nav[aria-label="Primary navigation"] a[href="/models"]');
+    await page.waitForSelector('section[aria-label="Models workspace"]', {
+      visible: true,
+      timeout: 10000,
+    });
+    await page.waitForSelector(
+      'section[aria-label="Models workspace"] [aria-busy="false"] [data-testid="models-table-scroll-container"]',
+      { visible: true, timeout: 10000 },
+    );
+    const modelsPath = path.join(screenshotsDir, `mindroom-dashboard-models-${timestamp}.png`);
+    await page.screenshot({
+      path: modelsPath,
+      fullPage: true,
+    });
+    console.log(`Models screenshot saved to: ${modelsPath}`);
 
     return {
       fullPage: fullPagePath,

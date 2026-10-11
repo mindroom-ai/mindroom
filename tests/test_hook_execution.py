@@ -20,15 +20,19 @@ from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     EVENT_MESSAGE_RECEIVED,
+    EVENT_SYSTEM_ENRICH,
     BeforeResponseContext,
     CustomEventContext,
+    EnrichmentItem,
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookRegistry,
+    HookRegistryState,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
     ResponseDraft,
+    SystemEnrichContext,
     build_hook_matrix_admin,
     hook,
 )
@@ -72,6 +76,7 @@ def _plugin(name: str, callbacks: list[object]) -> object:
         {
             "name": name,
             "discovered_hooks": tuple(callbacks),
+            "discovered_automations": (),
             "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
             "plugin_order": 0,
         },
@@ -195,6 +200,11 @@ def _final_response_transform_context(
     )
 
 
+def test_unbound_hook_context_is_inactive(tmp_path: Path) -> None:
+    """A context without lifecycle bindings must fail closed."""
+    assert _message_received_context(tmp_path).is_active() is False
+
+
 def test_final_response_transform_builtin_event_can_register() -> None:
     """The final-response transform event should be accepted as a built-in hook."""
 
@@ -237,6 +247,32 @@ async def test_emit_observer_continues_after_failure_and_propagates_suppression(
 
     assert seen == ["failing", "suppressing"]
     assert context.suppress is True
+
+
+@pytest.mark.asyncio
+async def test_bound_hook_context_tracks_whether_its_registry_is_still_active(
+    tmp_path: Path,
+) -> None:
+    """Long-running hooks can stop work after their registry is replaced."""
+    observed: list[bool] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def observer(ctx: MessageReceivedContext) -> None:
+        observed.append(ctx.is_active())
+        registry_state.registry = replacement_registry
+        observed.append(ctx.is_active())
+
+    active_registry = HookRegistry.from_plugins([_plugin("observer-plugin", [observer])])
+    replacement_registry = HookRegistry.empty()
+    registry_state = HookRegistryState(active_registry)
+    context = replace(
+        _message_received_context(tmp_path),
+        _hook_registry_state=registry_state,
+    )
+
+    await emit(active_registry, EVENT_MESSAGE_RECEIVED, context)
+
+    assert observed == [True, False]
 
 
 @pytest.mark.asyncio
@@ -301,6 +337,58 @@ async def test_emit_collect_merges_in_hook_order_and_isolates_per_hook_state(tmp
     items = await emit_collect(registry, EVENT_MESSAGE_ENRICH, context)
 
     assert [item.key for item in items] == ["first", "second"]
+    assert context._items == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_name", [EVENT_MESSAGE_ENRICH, EVENT_SYSTEM_ENRICH])
+@pytest.mark.parametrize("failure", ["exception", "timeout"])
+async def test_emit_collect_discards_failed_hook_items(
+    tmp_path: Path,
+    event_name: str,
+    failure: str,
+) -> None:
+    """A failed collector contributes nothing while successful collectors survive."""
+
+    @hook(event_name, priority=10, timeout_ms=10)
+    async def failing(ctx: MessageEnrichContext | SystemEnrichContext) -> None:
+        if isinstance(ctx, MessageEnrichContext):
+            ctx.add_metadata("partial", "must be discarded")
+            ctx.add_metadata("transient", "must also be discarded", persist=False)
+        else:
+            ctx.add_instruction("partial", "must be discarded")
+        if failure == "timeout":
+            await asyncio.Event().wait()
+        message = "collector failed after appending items"
+        raise RuntimeError(message)
+
+    @hook(event_name, priority=20)
+    async def healthy(ctx: MessageEnrichContext | SystemEnrichContext) -> EnrichmentItem:
+        if isinstance(ctx, MessageEnrichContext):
+            ctx.add_metadata("healthy", "keep appended item")
+        else:
+            ctx.add_instruction("healthy", "keep appended item")
+        return EnrichmentItem(key="returned", text="keep returned item")
+
+    registry = HookRegistry.from_plugins([_plugin("collectors", [failing, healthy])])
+    config = _config(tmp_path)
+    context_type = MessageEnrichContext if event_name == EVENT_MESSAGE_ENRICH else SystemEnrichContext
+    context = context_type(
+        event_name=event_name,
+        plugin_name="",
+        settings={},
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        logger=get_logger("tests.hooks").bind(event_name=event_name),
+        correlation_id="corr-failed-collector",
+        envelope=_envelope(),
+        target_entity_name="code",
+        target_member_names=None,
+    )
+
+    items = await emit_collect(registry, event_name, context)
+
+    assert [item.key for item in items] == ["healthy", "returned"]
     assert context._items == []
 
 

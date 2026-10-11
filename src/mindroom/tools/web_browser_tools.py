@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.webbrowser import WebBrowserTools
+    from mindroom.tools.agno_compat_webbrowser import MindRoomWebBrowserTools
 
 
 @register_tool_with_metadata(
     name="web_browser_tools",
+    file_access=ToolFileAccess.NONE,
     display_name="Web Browser Tools",
     description="Open URLs in web browser tabs or windows",
     category=ToolCategory.DEVELOPMENT,  # From docs URL: /tools/toolkits/others/
@@ -40,8 +41,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/others/web-browser",
     function_names=("open_page",),
 )
-def web_browser_tools() -> type[WebBrowserTools]:
-    """Return Web Browser Tools for opening URLs."""
-    from agno.tools.webbrowser import WebBrowserTools
+def web_browser_tools() -> type[MindRoomWebBrowserTools]:
+    """Return Web Browser Tools that open only http(s) URLs."""
+    from mindroom.tools.agno_compat_webbrowser import MindRoomWebBrowserTools
 
-    return WebBrowserTools
+    return MindRoomWebBrowserTools

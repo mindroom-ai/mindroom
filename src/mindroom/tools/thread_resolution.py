@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,8 +13,9 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="thread_resolution",
+    file_access=ToolFileAccess.NONE,
     display_name="Thread Resolution",
-    description="Explicitly resolve or reopen the active Matrix thread",
+    description="Mark conversation threads as resolved or reopen them",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

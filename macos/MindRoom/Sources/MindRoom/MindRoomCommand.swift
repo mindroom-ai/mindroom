@@ -8,14 +8,23 @@ enum MindRoomCommand: Equatable {
     case stopService
     case restartService
     case serviceStatus
+    case checkSetup
     case initializeHostedConfig
     case initializeSelfHostedConfig
-    case localStackSetup
-    case pairHosted(pairCode: String)
+    case pairHosted
+    case reconnectHosted
     case openDashboard
     case openHostedChat
     case openConfigFolder
     case openLogsFolder
+
+    /// Exit code of `mindroom connect` when this Mac is already connected and pairing was not forced.
+    /// Matches `_CONNECT_ALREADY_CONNECTED_EXIT_CODE` in src/mindroom/cli/main.py.
+    static let alreadyConnectedExitCode: Int32 = 3
+
+    /// Pairing was cancelled before credentials were received.
+    /// Matches `_CONNECT_CANCELLED_EXIT_CODE` in src/mindroom/cli/main.py.
+    static let pairingCancelledExitCode: Int32 = 130
 
     var title: String {
         switch self {
@@ -24,7 +33,7 @@ enum MindRoomCommand: Equatable {
         case .updateRuntime:
             return "Update MindRoom Runtime"
         case .installService:
-            return "Install/Ensure Service"
+            return "Install and Start Agents"
         case .startService:
             return "Start Service"
         case .stopService:
@@ -33,18 +42,20 @@ enum MindRoomCommand: Equatable {
             return "Restart Service"
         case .serviceStatus:
             return "Refresh Status"
+        case .checkSetup:
+            return "Check Setup"
         case .initializeHostedConfig:
-            return "Initialize Hosted Config"
+            return "Prepare Configuration"
         case .initializeSelfHostedConfig:
-            return "Initialize Self-Hosted Config"
-        case .localStackSetup:
-            return "Run Local Stack Setup"
+            return "Prepare Self-Hosted Configuration"
         case .pairHosted:
-            return "Pair Hosted MindRoom..."
+            return "Pair Chat Account"
+        case .reconnectHosted:
+            return "Reconnect Chat Account"
         case .openDashboard:
             return "Open Dashboard"
         case .openHostedChat:
-            return "Open chat.mindroom.chat"
+            return "Open Chat"
         case .openConfigFolder:
             return "Open Config Folder"
         case .openLogsFolder:
@@ -55,27 +66,42 @@ enum MindRoomCommand: Equatable {
     var successMessage: String? {
         switch self {
         case .installRuntime:
-            return "The MindRoom runtime is installed.\n\nNext: Initialize Hosted Config."
+            return "The command-line runtime is installed. The background service is a separate step. Continue to Configure, or use your existing configuration."
         case .updateRuntime:
-            return "The MindRoom runtime is up to date."
+            return "The runtime update finished. If the background service is installed, use Apply Runtime to Service in Settings to run local agents on this version."
         case .installService:
-            return "The MindRoom background service is installed and running.\n\nNext: Open Dashboard."
+            return "The background service was installed and started. Open Chat or Open Dashboard to check that your agents are ready."
         case .startService:
-            return "The MindRoom service was started.\n\nNext: Open Dashboard."
+            return "The service start command finished. Open Chat or Open Dashboard to check that your agents are ready."
         case .stopService:
             return "The MindRoom service was stopped."
         case .restartService:
             return "The MindRoom service was restarted."
         case .initializeHostedConfig:
-            return "Config files are ready in ~/.mindroom.\n\nNext: use Open chat.mindroom.chat, sign in to create your hosted account, click the Local MindRoom icon in the sidebar to generate a pair code, then use Pair Hosted MindRoom..."
+            return "Configuration is ready. Existing files were kept. Click Connect Account to approve this Mac in MindRoom Chat."
         case .initializeSelfHostedConfig:
-            return "Config files are ready in ~/.mindroom.\n\nEdit config.yaml and .env to point at your Matrix homeserver and model provider, then use Install/Ensure Service."
-        case .localStackSetup:
-            return "Local stack setup finished."
+            return "Configuration is ready. Edit your configuration and .env for your Matrix server and model provider, then install and start agents."
         case .pairHosted:
-            return "Paired with hosted MindRoom.\n\nNext: Install/Ensure Service, then Open Dashboard."
+            return "The chat account was paired. Configure an AI provider, then install and start agents."
+        case .reconnectHosted:
+            return "The chat account was paired again. Existing agents keep working; new agents get the new namespace."
+        case .checkSetup:
+            return "The setup check finished. Review the Check summary before continuing to Start."
         case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
+        }
+    }
+
+    /// Setup commands use the installed runtime's CLI options, and service install pins the service to
+    /// that runtime, so they wait for the runtime matching this app. Start, stop, and restart only
+    /// control the launchd service, which keeps the version pinned when it was installed.
+    var requiresMatchingRuntime: Bool {
+        switch self {
+        case .installService, .checkSetup, .initializeHostedConfig, .initializeSelfHostedConfig, .pairHosted, .reconnectHosted:
+            return true
+        case .installRuntime, .updateRuntime, .startService, .stopService, .restartService, .serviceStatus,
+             .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
+            return false
         }
     }
 
@@ -95,14 +121,16 @@ enum MindRoomCommand: Equatable {
             return .restartService
         case .serviceStatus:
             return .serviceStatus
+        case .checkSetup:
+            return .checkSetup
         case .initializeHostedConfig:
             return .initializeHostedConfig
         case .initializeSelfHostedConfig:
             return .initializeSelfHostedConfig
-        case .localStackSetup:
-            return .localStackSetup
-        case let .pairHosted(pairCode):
-            return .pairHosted(pairCode: pairCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())
+        case .pairHosted:
+            return .pairHosted
+        case .reconnectHosted:
+            return .reconnectHosted
         case .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
         }

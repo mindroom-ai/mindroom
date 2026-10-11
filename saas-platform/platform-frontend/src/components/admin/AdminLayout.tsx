@@ -7,8 +7,8 @@ import {
   CreditCard,
   Server,
   FileText,
-  BarChart3,
   Home,
+  Hourglass,
   LogOut
 } from 'lucide-react'
 
@@ -17,8 +17,8 @@ const navItems = [
   { name: 'Accounts', href: '/admin/accounts', icon: Users },
   { name: 'Subscriptions', href: '/admin/subscriptions', icon: CreditCard },
   { name: 'Instances', href: '/admin/instances', icon: Server },
+  { name: 'Lifecycle', href: '/admin/lifecycle', icon: Hourglass },
   { name: 'Audit Logs', href: '/admin/audit-logs', icon: FileText },
-  { name: 'Usage Metrics', href: '/admin/usage', icon: BarChart3 },
 ]
 
 export function AdminLayout({ children }: { children: React.ReactNode }) {

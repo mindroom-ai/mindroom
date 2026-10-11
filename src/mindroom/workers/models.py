@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
+ScriptResourceProfileName = Literal["small", "standard", "large"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +20,9 @@ class WorkerSpec:
 
     worker_key: str
     private_agent_names: frozenset[str] | None = None
+    mirrored_credential_services: frozenset[str] | None = None
+    state_scope_worker_key: str | None = None
+    resource_profile: ScriptResourceProfileName | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,10 +66,29 @@ class WorkerReadyProgress:
 
 ProgressSink = Callable[[WorkerReadyProgress], None]
 
+_API_ROUTES = {
+    "cleanup": "workers/cleanup",
+    "script-run": "scripts/run",
+    "script-status": "scripts",
+    "script-cancel": "scripts",
+    "execute-cancel": "execute/cancel",
+}
+
 
 def worker_api_endpoint(
     handle: WorkerHandle,
-    operation: Literal["execute", "leases", "workers", "cleanup", "save-attachment"],
+    operation: Literal[
+        "execute",
+        "leases",
+        "workers",
+        "cleanup",
+        "save-attachment",
+        "view-file",
+        "script-run",
+        "script-status",
+        "script-cancel",
+        "execute-cancel",
+    ],
 ) -> str:
     """Return the API endpoint for one worker operation."""
     api_root = handle.debug_metadata.get("api_root")
@@ -71,6 +97,13 @@ def worker_api_endpoint(
 
     if operation == "execute":
         return handle.endpoint
-    if operation == "cleanup":
-        return f"{api_root}/workers/cleanup"
-    return f"{api_root}/{operation}"
+    return f"{api_root}/{_API_ROUTES.get(operation, operation)}"
+
+
+def process_worker_key(base_worker_key: str, *, process_id: UUID) -> str:
+    """Pin a background script process to a user-agent key without changing its final agent."""
+    parts = base_worker_key.split(":")
+    if len(parts) < 5 or parts[0] != "v1" or parts[2] != "user_agent" or not parts[-1]:
+        msg = "Isolated processes require a resolved user-agent worker key."
+        raise ValueError(msg)
+    return ":".join((*parts[:-1], f"script-{process_id.hex}", parts[-1]))

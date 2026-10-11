@@ -36,6 +36,8 @@ Invariants enforced here (every resolver in the repo must go through this module
    callers can fail closed (mutation callers invalidate room-wide; dispatch callers coalesce on the
    candidate root and retry).
    Lookup failures and missing related events during the walk are likewise INDETERMINATE, never ROOM_LEVEL.
+   A related event the homeserver will not serve, or one that is not a message, carries
+   ``RelatedEventUnavailableError``, which no retry changes.
 
 5. Child proof and relation ancestry accept only ``m.room.message`` and ``m.room.encrypted`` events.
    Child proof also excludes the candidate root itself and edits of the root: an ``m.replace`` of a
@@ -64,6 +66,7 @@ type _ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type _EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
 type _ThreadRootProofLookup = Callable[[str, str], Awaitable["_ThreadRootProof"]]
 type _ThreadEventSourcesLookup = Callable[[str, str], Awaitable[tuple[Sequence[Mapping[str, object]], bool]]]
+type MapBackedRelationWalks = dict[str, tuple["ThreadResolution | RelatedEventUnavailableError", int]]
 _MAX_THREAD_MEMBERSHIP_HOPS = 512
 
 
@@ -169,6 +172,17 @@ class ThreadMembershipLookupError(RuntimeError):
     """Raised when related-event lookup cannot determine thread membership from available data."""
 
 
+class RelatedEventUnavailableError(ThreadMembershipLookupError):
+    """Raised when a related event can never place an event in a conversation.
+
+    The homeserver will not serve it -- it does not exist, is not in this
+    room, or is hidden from this account, for example history from before it
+    joined -- or it is not a message and so belongs to no conversation. Asking
+    again gets the same answer, so a caller that cannot proceed without the
+    event has to end its work rather than retry it.
+    """
+
+
 class ThreadRoomScanRootNotFoundError(RuntimeError):
     """Raised when a room scan finishes without ever seeing the requested root event."""
 
@@ -200,7 +214,7 @@ def _conversation_relation_thread_membership_access(
         event_info = await access.fetch_event_info(room_id, event_id)
         if event_info is not None and not event_type_supports_thread_relations(event_info.event_type):
             msg = f"Related event {event_id} cannot carry conversation thread membership"
-            raise ThreadMembershipLookupError(msg)
+            raise RelatedEventUnavailableError(msg)
         return event_info
 
     async def lookup_thread_id(room_id: str, event_id: str) -> str | None:
@@ -210,7 +224,7 @@ def _conversation_relation_thread_membership_access(
         event_info = await fetch_event_info(room_id, event_id)
         if event_info is None:
             msg = f"Indexed event {event_id} is unavailable for conversation thread validation"
-            raise ThreadMembershipLookupError(msg)
+            raise RelatedEventUnavailableError(msg)
         return thread_id
 
     return ThreadMembershipAccess(
@@ -293,7 +307,7 @@ async def resolve_related_event_thread_membership(
         if related_event_info is None:
             # Missing related events are still possible thread roots; demote later without losing the candidate.
             resolution = ThreadResolution._indeterminate(
-                ThreadMembershipLookupError(f"Related event {current_event_id} is unavailable"),
+                RelatedEventUnavailableError(f"Related event {current_event_id} is unavailable"),
                 candidate_thread_root_id=current_event_id,
             )
             break
@@ -341,6 +355,17 @@ def map_backed_thread_membership_access(
     resolved_thread_ids: dict[str, str],
 ) -> ThreadMembershipAccess:
     """Return one thread-membership access adapter backed by in-memory event maps."""
+    # Index proven roots once, so each proof is a lookup rather than a sweep over every event.
+    proven_root_ids = {
+        event_info.thread_id
+        for event_id, event_info in event_infos.items()
+        if event_info.thread_id is not None
+        and _page_event_info_counts_as_thread_child_proof(
+            event_info.thread_id,
+            event_id=event_id,
+            event_info=event_info,
+        )
+    }
 
     async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
         return resolved_thread_ids.get(event_id)
@@ -349,15 +374,9 @@ def map_backed_thread_membership_access(
         return event_infos.get(event_id)
 
     async def prove_thread_root(_room_id: str, thread_root_id: str) -> _ThreadRootProof:
-        has_children = any(
-            _page_event_info_counts_as_thread_child_proof(
-                thread_root_id,
-                event_id=event_id,
-                event_info=event_info,
-            )
-            for event_id, event_info in event_infos.items()
-        )
-        return _ThreadRootProof.proven() if has_children else _ThreadRootProof.not_a_thread_root()
+        if thread_root_id in proven_root_ids:
+            return _ThreadRootProof.proven()
+        return _ThreadRootProof.not_a_thread_root()
 
     return _conversation_relation_thread_membership_access(
         ThreadMembershipAccess(
@@ -366,6 +385,61 @@ def map_backed_thread_membership_access(
             prove_thread_root=prove_thread_root,
         ),
     )
+
+
+async def resolve_map_backed_related_event_thread_membership(
+    room_id: str,
+    related_event_id: str,
+    *,
+    event_infos: Mapping[str, EventInfo],
+    resolved_thread_ids: Mapping[str, str],
+    access: ThreadMembershipAccess,
+    walks: MapBackedRelationWalks,
+) -> ThreadResolution:
+    """Return ``resolve_related_event_thread_membership`` over in-memory maps, walking each event at most once.
+
+    ``access`` must be ``map_backed_thread_membership_access`` over the same maps.
+    A walk that passes through an event continues exactly as the walk starting there would, one hop later.
+    So the chain is followed to the first event where a walk stops, one canonical hop settles that event,
+    and each earlier walk takes the next one's result, turning room level past the hop cap.
+    ``walks`` records each settled start with the hop that decided it and stays exact while
+    ``resolved_thread_ids`` is unchanged.
+    """
+    chain: list[str] = []
+    chained_event_ids: set[str] = set()
+    event_id = related_event_id
+    while event_id not in walks:
+        if event_id in chained_event_ids:
+            # Every walk along this chain comes back to an event it already visited, so it stays room level.
+            walks[event_id] = (ThreadResolution.room_level(), 0)
+            break
+        event_info = event_infos.get(event_id)
+        if (
+            event_id in resolved_thread_ids
+            or event_info is None
+            or event_info.thread_id is not None
+            or not event_type_supports_thread_relations(event_info.event_type)
+            or (next_event_id := event_info.next_related_event_id(event_id)) is None
+        ):
+            try:
+                walks[event_id] = (await resolve_related_event_thread_membership(room_id, event_id, access=access), 1)
+            except RelatedEventUnavailableError as error:
+                # An unreadable indexed event fails only the walks that reach it within the hop cap.
+                walks[event_id] = (error, 1)
+            break
+        chain.append(event_id)
+        chained_event_ids.add(event_id)
+        event_id = next_event_id
+    resolution, hops = walks[event_id]
+    for chained_event_id in reversed(chain):
+        hops += 1
+        if hops > _MAX_THREAD_MEMBERSHIP_HOPS:
+            resolution = ThreadResolution.room_level()
+        walks[chained_event_id] = (resolution, hops)
+    resolution = walks[related_event_id][0]
+    if isinstance(resolution, RelatedEventUnavailableError):
+        raise resolution
+    return resolution
 
 
 def _page_event_info_counts_as_thread_child_proof(

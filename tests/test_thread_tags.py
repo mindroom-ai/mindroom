@@ -82,10 +82,6 @@ def _tag_record_content(
     return content
 
 
-def _thread_tags_content(**tags: dict[str, object]) -> dict[str, object]:
-    return {"tags": tags}
-
-
 def _thread_tag_state_key(thread_root_id: str, tag: str) -> str:
     return json.dumps([thread_root_id, tag], separators=(",", ":"))
 
@@ -103,7 +99,7 @@ def _thread_tag_state_event(
     }
 
 
-def _legacy_thread_tags_event(
+def _old_thread_tags_event(
     thread_root_id: str,
     *,
     content: dict[str, object] | None = None,
@@ -111,7 +107,7 @@ def _legacy_thread_tags_event(
     return {
         "type": THREAD_TAGS_EVENT_TYPE,
         "state_key": thread_root_id,
-        "content": content if content is not None else _thread_tags_content(resolved=_tag_record_content()),
+        "content": content if content is not None else {"tags": {"resolved": _tag_record_content()}},
     }
 
 
@@ -156,19 +152,6 @@ def _power_levels_response(
         content=content,
         event_type="m.room.power_levels",
         state_key="",
-        room_id="!room:localhost",
-    )
-
-
-def _thread_tags_state_response(
-    thread_root_id: str,
-    *,
-    content: dict[str, object] | None = None,
-) -> nio.RoomGetStateEventResponse:
-    return nio.RoomGetStateEventResponse(
-        content=content if content is not None else _thread_tags_content(resolved=_tag_record_content()),
-        event_type=THREAD_TAGS_EVENT_TYPE,
-        state_key=thread_root_id,
         room_id="!room:localhost",
     )
 
@@ -774,24 +757,6 @@ async def test_set_thread_tag_merges_existing_valid_tags_and_drops_malformed_sib
             "set_at": "2026-03-21T19:02:03+00:00",
             "data": [],
         },
-        "$thread-root:localhost": _thread_tags_content(
-            blocked=_tag_record_content(data={"blocked_by": ["  $other:localhost  "]}),
-            **{
-                "bad tag!": _tag_record_content(),
-                "waiting": _tag_record_content(data={"waiting_on": 42}),
-                "review": {
-                    "set_by": "@user:localhost",
-                    "set_at": "2026-03-21T19:02:03+00:00",
-                    "note": 42,
-                    "data": {},
-                },
-                "custom": {
-                    "set_by": "@user:localhost",
-                    "set_at": "2026-03-21T19:02:03+00:00",
-                    "data": [],
-                },
-            },
-        ),
     }
 
     async def room_get_state_event(**kwargs: object) -> object:
@@ -994,58 +959,6 @@ async def test_set_thread_tag_retries_when_verification_detects_same_tag_payload
     assert final_kwargs["content"]["set_by"] == "@alice:localhost"
     assert final_kwargs["content"]["note"] == "from alice"
     assert final_kwargs["content"]["data"] == {"source": "alice"}
-
-
-@pytest.mark.asyncio
-async def test_set_thread_tag_retries_when_verification_detects_lost_sibling_tag() -> None:
-    """A new-format write should keep a legacy sibling tag without a merge retry."""
-    client = AsyncMock()
-    client.user_id = "@mindroom_general:localhost"
-    client.joined_members.return_value = _joined_members_response(
-        "@mindroom_general:localhost",
-        "@alice:localhost",
-    )
-
-    current_events: dict[str, dict[str, object]] = {
-        "$thread-root:localhost": _thread_tags_content(
-            blocked=_tag_record_content(note="original sibling"),
-        ),
-    }
-
-    async def room_get_state_event(**kwargs: object) -> object:
-        assert kwargs["event_type"] == "m.room.power_levels"
-        return _power_levels_response(
-            users={
-                "@mindroom_general:localhost": 50,
-                "@alice:localhost": 50,
-            },
-        )
-
-    async def room_get_state(room_id: str) -> object:
-        assert room_id == "!room:localhost"
-        return _thread_tags_room_state_from_current(current_events)
-
-    async def room_put_state(**kwargs: object) -> object:
-        current_events[kwargs["state_key"]] = kwargs["content"]
-        return nio.RoomPutStateResponse.from_dict(
-            {"event_id": "$state"},
-            room_id="!room:localhost",
-        )
-
-    client.room_get_state_event.side_effect = room_get_state_event
-    client.room_get_state.side_effect = room_get_state
-    client.room_put_state.side_effect = room_put_state
-
-    state = await set_thread_tag(
-        client,
-        "!room:localhost",
-        "$thread-root:localhost",
-        "resolved",
-        set_by="@alice:localhost",
-    )
-
-    assert set(state.tags) == {"blocked", "resolved"}
-    assert state.tags["blocked"].note == "original sibling"
 
 
 @pytest.mark.asyncio
@@ -1408,15 +1321,6 @@ async def test_get_thread_tags_parses_valid_state() -> None:
             },
         ),
         _thread_tags_room_state_response(
-            _legacy_thread_tags_event("$thread-root:localhost", content={}),
-        ),
-        _thread_tags_room_state_response(
-            _legacy_thread_tags_event("$thread-root:localhost", content={"tags": {}}),
-        ),
-        _thread_tags_room_state_response(
-            _legacy_thread_tags_event("$thread-root:localhost", content={"tags": "invalid"}),
-        ),
-        _thread_tags_room_state_response(
             _thread_tag_state_event(
                 "$thread-root:localhost",
                 "resolved",
@@ -1487,20 +1391,13 @@ async def test_get_thread_tags_drops_malformed_tags_and_preserves_valid_siblings
 
 
 @pytest.mark.asyncio
-async def test_get_thread_tags_ignores_malformed_per_tag_overlay_and_keeps_legacy_tag() -> None:
-    """A malformed per-tag overlay must not hide a valid legacy tag during migration."""
+async def test_get_thread_tags_ignores_old_thread_wide_state() -> None:
+    """Old thread-wide state must not create tags after the storage cutoff."""
     client = AsyncMock()
     client.room_get_state.return_value = _thread_tags_room_state_response(
-        _legacy_thread_tags_event(
+        _old_thread_tags_event(
             "$thread-root:localhost",
-            content=_thread_tags_content(
-                resolved=_tag_record_content(note="legacy tag"),
-            ),
-        ),
-        _thread_tag_state_event(
-            "$thread-root:localhost",
-            "resolved",
-            content={"set_by": "@user:localhost", "set_at": "bad", "data": {}},
+            content={"tags": {"resolved": _tag_record_content(note="old tag")}},
         ),
     )
 
@@ -1510,9 +1407,7 @@ async def test_get_thread_tags_ignores_malformed_per_tag_overlay_and_keeps_legac
         "$thread-root:localhost",
     )
 
-    assert state is not None
-    assert list(state.tags) == ["resolved"]
-    assert state.tags["resolved"].note == "legacy tag"
+    assert state is None
 
 
 @pytest.mark.asyncio
@@ -1536,35 +1431,10 @@ async def test_list_tagged_threads_filters_non_matching_events_and_supports_tag_
             "state_key": _thread_tag_state_key("$thread-four:localhost", "resolved"),
             "content": {},
         },
-        _legacy_thread_tags_event(
-            "$thread-six:localhost",
-            content={
-                "tags": {
-                    "custom": {
-                        "set_by": "@user:localhost",
-                        "set_at": "2026-03-21T19:02:03+00:00",
-                        "data": [],
-                    },
-                },
-            },
-        ),
-        _legacy_thread_tags_event(
-            "$thread-seven:localhost",
-            content={
-                "tags": {
-                    "review": {
-                        "set_by": "@user:localhost",
-                        "set_at": "2026-03-21T19:02:03+00:00",
-                        "note": 42,
-                        "data": {},
-                    },
-                },
-            },
-        ),
         {
             "type": "com.mindroom.other",
             "state_key": "$thread-five:localhost",
-            "content": _thread_tags_content(resolved=_tag_record_content()),
+            "content": {"tags": {"resolved": _tag_record_content()}},
         },
     )
 

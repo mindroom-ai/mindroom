@@ -6,7 +6,29 @@ from dataclasses import dataclass
 
 import pytest
 
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (None, None),
+        ([], None),
+        ({}, None),
+        ({"run_id": 12}, None),
+        ({"run_id": ""}, None),
+        ({"run_id": "run-final"}, "run-final"),
+    ],
+)
+def test_final_delivery_normalizes_response_run_id(metadata: object, expected: str | None) -> None:
+    """Malformed wire identities must never become response linkage."""
+    outcome = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$response",
+        extra_content={AI_RUN_METADATA_KEY: metadata},
+    )
+    assert outcome.response_run_id == expected
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConfigStore } from "@/store/configStore";
+import { SchemaSection } from "@/components/SchemaForm";
 
 const EMBEDDER_PROVIDERS = [
   { value: "openai", label: "OpenAI" },
@@ -46,6 +47,22 @@ const MODEL_PLACEHOLDERS: Record<string, string> = {
 
 type MemorySettings = MindRoomConfig["memory"];
 
+/** MemoryConfig keys this page renders by hand; More settings shows the rest. */
+const MEMORY_EDITOR_FIELDS = [
+  "backend",
+  "team_reads_member_memory",
+  "embedder",
+  "file",
+  "search",
+  "auto_flush",
+] as const;
+
+const EMBEDDER_EDITOR_FIELDS = [
+  "model",
+  "credentials_service",
+  "host",
+] as const;
+
 const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   backend: "mem0",
   team_reads_member_memory: false,
@@ -59,6 +76,7 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   file: {
     path: "",
     max_entrypoint_lines: 200,
+    max_entrypoint_tokens: 50000,
   },
   search: {
     mode: "keyword",
@@ -181,8 +199,14 @@ function defaultEmbedderConfig(
 }
 
 export function MemoryConfig() {
-  const { config, updateMemoryConfig, saveConfig, isDirty, isLoading } =
-    useConfigStore();
+  const {
+    config,
+    updateMemoryConfig,
+    updateConfigValue,
+    saveConfig,
+    isDirty,
+    isLoading,
+  } = useConfigStore();
   const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
     normalizeMemorySettings(config?.memory),
   );
@@ -531,6 +555,18 @@ export function MemoryConfig() {
             </FieldGroup>
           )}
 
+          <SchemaSection
+            title="More embedder settings"
+            definition="EmbedderConfig"
+            value={config?.memory?.embedder?.config}
+            path={["memory", "embedder", "config"]}
+            exclude={EMBEDDER_EDITOR_FIELDS}
+            // Edit the authored config directly so untouched defaults stay unwritten.
+            onFieldChange={(key, next) =>
+              updateConfigValue(["memory", "embedder", "config", key], next)
+            }
+          />
+
           {localConfig.backend === "file" && (
             <>
               <FieldGroup
@@ -564,6 +600,32 @@ export function MemoryConfig() {
                       file: {
                         ...localConfig.file,
                         max_entrypoint_lines: parseInteger(e.target.value, 200),
+                      },
+                    })
+                  }
+                  className="transition-colors hover:border-ring focus:border-ring"
+                />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Entrypoint Max Tokens"
+                helperText="Maximum estimated tokens (characters / 4) of whole lines preloaded from the entrypoint file."
+                htmlFor="entrypoint-max-tokens"
+              >
+                <Input
+                  id="entrypoint-max-tokens"
+                  type="number"
+                  min={1}
+                  value={localConfig.file?.max_entrypoint_tokens ?? 50000}
+                  onChange={(e) =>
+                    applyMemoryConfig({
+                      ...localConfig,
+                      file: {
+                        ...localConfig.file,
+                        max_entrypoint_tokens: parseInteger(
+                          e.target.value,
+                          50000,
+                        ),
                       },
                     })
                   }
@@ -984,6 +1046,17 @@ export function MemoryConfig() {
               </FieldGroup>
             </>
           )}
+
+          <SchemaSection
+            title="More settings"
+            definition="MemoryConfig"
+            value={config?.memory}
+            path={["memory"]}
+            exclude={MEMORY_EDITOR_FIELDS}
+            onFieldChange={(key, next) =>
+              updateConfigValue(["memory", key], next)
+            }
+          />
         </div>
 
         <div className="p-4 bg-muted/50 rounded-lg shadow-sm border border-border">

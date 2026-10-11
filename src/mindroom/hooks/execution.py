@@ -159,11 +159,16 @@ def _snapshot_compaction_messages(messages: list[Message]) -> list[Message] | No
             return None
 
 
-def _bind_hook_context(hook: RegisteredHook, context: _HookExecutionContext) -> _HookExecutionContext | None:
+def _bind_hook_context(
+    registry: HookRegistry,
+    hook: RegisteredHook,
+    context: _HookExecutionContext,
+) -> _HookExecutionContext | None:
     replacement_kwargs: dict[str, object] = {
         "plugin_name": hook.plugin_name,
         "settings": dict(hook.settings),
         "logger": _context_logger(hook),
+        "_hook_registry_snapshot": registry,
     }
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
@@ -207,7 +212,7 @@ async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> 
             result = await hook.callback(context)
     except asyncio.CancelledError:
         raise
-    except (Exception, SystemExit):
+    except (Exception, SystemExit) as error:
         duration_ms = elapsed_ms_since(started_at, ndigits=2)
         context.logger.exception(
             "Hook execution failed",
@@ -215,6 +220,9 @@ async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> 
             duration_ms=duration_ms,
             timeout_ms=_effective_timeout_ms(hook),
         )
+        if hook.required:
+            msg = f"Required startup hook {hook.plugin_name}:{hook.hook_name} failed"
+            raise RuntimeError(msg) from error
         return _HookInvocationResult(succeeded=False)
 
     duration_ms = elapsed_ms_since(started_at, ndigits=2)
@@ -270,7 +278,7 @@ async def emit(
     token = _EMIT_DEPTH.set(depth + 1)
     try:
         for hook in _eligible_hooks(registry, event_name, context):
-            hook_context = _bind_hook_context(hook, context)
+            hook_context = _bind_hook_context(registry, hook, context)
             if hook_context is None:
                 return
             try:
@@ -307,7 +315,10 @@ async def emit_gate(
     token = _EMIT_DEPTH.set(depth + 1)
     try:
         for hook in _eligible_hooks(registry, event_name, context):
-            hook_context = cast("ToolBeforeCallContext", _bind_hook_context(hook, context))
+            hook_context = cast(
+                "ToolBeforeCallContext",
+                _bind_hook_context(registry, hook, context),
+            )
             if hook_context is None:
                 return
             invocation = await _invoke_hook(hook, hook_context)
@@ -348,8 +359,13 @@ async def emit_collect(
 
     async def run_hook(hook: RegisteredHook) -> list[EnrichmentItem]:
         async with semaphore:
-            hook_context = cast("MessageEnrichContext | SystemEnrichContext", _bind_hook_context(hook, context))
+            hook_context = cast(
+                "MessageEnrichContext | SystemEnrichContext",
+                _bind_hook_context(registry, hook, context),
+            )
             invocation = await _invoke_hook(hook, hook_context)
+            if not invocation.succeeded:
+                return []
             return _normalize_collector_result(invocation.value, hook_context)
 
     results = await asyncio.gather(*(run_hook(hook) for hook in hooks))
@@ -431,7 +447,11 @@ async def _emit_serial_transform(
     current_draft = context.draft
     for hook in _eligible_hooks(registry, event_name, context):
         hook_draft = _copy_transform_draft(current_draft) if copy_on_write else current_draft
-        bound_context = _bind_hook_context(hook, _transform_context_with_draft(context, hook_draft))
+        bound_context = _bind_hook_context(
+            registry,
+            hook,
+            _transform_context_with_draft(context, hook_draft),
+        )
         if bound_context is None:
             return current_draft
         hook_context = cast("_TransformContext", bound_context)

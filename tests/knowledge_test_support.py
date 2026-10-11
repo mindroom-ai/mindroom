@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
-from agno.vectordb import chroma as agno_chroma
 
+import mindroom.knowledge.read_proxy as knowledge_read_proxy
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
     from mindroom.config.knowledge import KnowledgeGitConfig
+    from mindroom.knowledge.indexing_config import IndexingSettings
 
 
 def validate_where_operands(where: dict[str, Any] | None) -> None:
@@ -182,6 +183,9 @@ class _VectorDb:
         self.collection_name = collection
         self.client = _Client()
 
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
+
     def delete(self) -> bool:
         with self.lock:
             self.collections.pop(self.collection_name, None)
@@ -215,6 +219,19 @@ class _VectorDb:
         filters: dict[str, object] | list[object] | None = None,
     ) -> list[Document]:
         return self.search(query=query, limit=limit, filters=filters)
+
+
+class _ReadProxy(_VectorDb):
+    def __init__(
+        self,
+        *,
+        collection_name: str,
+        path: str,
+        embedder: Embedder,
+        published_settings: IndexingSettings,
+    ) -> None:
+        self.published_settings = published_settings
+        super().__init__(collection=collection_name, path=path, embedder=embedder)
 
 
 class _Knowledge:
@@ -290,9 +307,17 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
     )
-    monkeypatch.setattr(agno_chroma, "ChromaDb", _VectorDb)
+    monkeypatch.setattr(knowledge_read_proxy, "ChromaReadProxy", _ReadProxy)
+    monkeypatch.setattr(
+        knowledge_read_proxy,
+        "collection_exists",
+        lambda _path, collection: _VectorDb(collection=collection).exists(),
+    )
     monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
-    monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "mindroom.knowledge.registry.create_configured_embedder",
+        lambda *_args, **_kwargs: _FakeEmbedder(),
+    )
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_locks._refresh_locks.clear()

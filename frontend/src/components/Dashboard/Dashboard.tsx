@@ -1,924 +1,438 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
-import { useConfigStore } from "@/store/configStore";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { ArrowLeft, ArrowRight, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { NetworkGraph } from "./NetworkGraph";
-import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
-import { sharedStyles } from "@/components/shared/styles";
-import { pluralize } from "@/lib/utils";
-import { FilterSelector } from "@/components/shared/FilterSelector";
+import { EntityAvatar } from "@/components/shared/EntityAvatar";
+import { useConfigStore } from "@/store/configStore";
+import type { Room } from "@/types/config";
+import type { ScheduleTask } from "@/types/schedule";
+import { WorkspaceDirectory } from "./WorkspaceDirectory";
 import {
-  Bot,
-  Home,
-  Users,
-  Settings,
-  RefreshCw,
-  FileText,
-  BarChart3,
-  User,
-  Mic,
-  MicOff,
-} from "lucide-react";
+  buildRunWeek,
+  scheduleTime,
+  upcomingSchedules,
+  useHomeData,
+} from "./homeData";
+import "./home.css";
 
-function DashboardSkeleton() {
+function SectionLink({
+  to,
+  children,
+}: {
+  to: string;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
-        <div>
-          <Skeleton className="h-7 w-48 mb-2" />
-          <Skeleton className="h-4 w-72" />
-        </div>
+    <Link className="home-link" to={to}>
+      {children}
+      <ArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
+    </Link>
+  );
+}
+
+function Today({
+  usage,
+  activity,
+}: Pick<ReturnType<typeof useHomeData>, "usage" | "activity">) {
+  const report =
+    !usage.isError && usage.data?.status === "ready"
+      ? usage.data.report
+      : undefined;
+  const partial = Boolean(
+    report &&
+    (report.daily_coverage.unavailable_sources > 0 ||
+      report.coverage.unavailable_sources > 0),
+  );
+  const week = report
+    ? buildRunWeek(report.generated_at, report.daily_breakdown, partial)
+    : [];
+  const today = week[week.length - 1]?.runs;
+  const max = Math.max(1, ...week.map((day) => day.runs ?? 0));
+  const runtime = activity.isError ? "Unavailable" : activity.data;
+  return (
+    <section className="home-today" aria-labelledby="today-heading">
+      <div className="home-section-heading">
+        <h3 id="today-heading">Today</h3>
+        <span
+          className="home-runtime"
+          aria-label={`Runtime: ${runtime ?? "Checking"}`}
+        >
+          <span
+            aria-hidden="true"
+            className={`home-runtime-mark ${runtime === "Working" ? "is-working" : ""}`}
+          />
+          {runtime ?? "Checking runtime…"}
+        </span>
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <Card key={i}>
-            <CardHeader className="pb-2">
-              <div className="flex items-center gap-3">
-                <Skeleton className="h-9 w-9 rounded-lg" />
-                <div>
-                  <Skeleton className="h-7 w-10 mb-1" />
-                  <Skeleton className="h-3 w-16" />
+      {report ? (
+        <>
+          <div className="home-run-count">
+            <strong>
+              {today == null ? "—" : today.toLocaleString()}
+              {partial && today != null ? "+" : ""}
+            </strong>
+            <span>runs today · UTC</span>
+          </div>
+          <div className="home-bars" aria-label="Daily recorded runs">
+            {week.map((day, index) => {
+              const label = `${day.date}: ${day.runs == null ? "unavailable" : `${day.runs} runs${partial ? " (partial)" : ""}`}`;
+              return (
+                <div key={day.date} className="home-bar-column">
+                  <div
+                    role="img"
+                    aria-label={label}
+                    title={label}
+                    className="home-bar-track"
+                  >
+                    <span
+                      className={`home-bar ${index === 6 ? "is-current" : ""} ${day.runs == null ? "is-unknown" : ""}`}
+                      style={{
+                        height:
+                          day.runs == null
+                            ? "2px"
+                            : `${Math.max(2, (day.runs / max) * 66)}px`,
+                      }}
+                    />
+                  </div>
+                  <span className={index === 6 ? "text-foreground" : ""}>
+                    {new Date(`${day.date}T00:00:00Z`).toLocaleDateString(
+                      "en-US",
+                      {
+                        weekday: "short",
+                        timeZone: "UTC",
+                      },
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <div className="home-chart-caption">
+            <span>Last 7 days · UTC</span>
+            {partial && <span className="home-partial">Partial data</span>}
+          </div>
+          <p className="home-report-date">
+            Report date:{" "}
+            {new Date(report.generated_at).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              timeZone: "UTC",
+            })}{" "}
+            · UTC
+          </p>
+        </>
+      ) : (
+        <div className="home-usage-state" role="status">
+          {usage.isError ? (
+            <>
+              <p>Usage unavailable</p>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void usage.refetch()}
+              >
+                Retry usage
+              </Button>
+            </>
+          ) : (
+            <>
+              <span className="home-count-placeholder">—</span>
+              <p>Preparing usage report…</p>
+            </>
+          )}
+        </div>
+      )}
+      <SectionLink to="/usage">View usage</SectionLink>
+    </section>
+  );
+}
+
+function scheduleRoom(
+  task: Pick<ScheduleTask, "room_id" | "room_alias">,
+  rooms: Room[],
+) {
+  return rooms.find(
+    (room) =>
+      room.id === task.room_id ||
+      room.id === task.room_alias ||
+      (task.room_alias?.startsWith(`#${room.id}:`) ?? false),
+  );
+}
+
+function ComingUp({
+  schedules,
+  rooms,
+}: {
+  schedules: ReturnType<typeof useHomeData>["schedules"];
+  rooms: Room[];
+}) {
+  const data = !schedules.isError ? schedules.data : undefined;
+  const tasks = data ? upcomingSchedules(data.tasks) : [];
+  return (
+    <section className="home-upcoming" aria-labelledby="upcoming-heading">
+      <div>
+        <h3 id="upcoming-heading">Coming up</h3>
+        <p className="home-timezone">{data?.timezone ?? "Scheduled tasks"}</p>
+      </div>
+      <div className="home-schedule-list">
+        {schedules.isError ? (
+          <p className="home-section-empty" role="status">
+            Schedules unavailable
+          </p>
+        ) : schedules.isPending ? (
+          <p className="home-section-empty" role="status">
+            Loading schedules…
+          </p>
+        ) : tasks.length === 0 ? (
+          <p className="home-section-empty">Nothing scheduled</p>
+        ) : (
+          tasks.map(({ task, at }) => {
+            const when = scheduleTime(at, data!.timezone);
+            const room = scheduleRoom(task, rooms);
+            const roomName =
+              room?.display_name ?? task.room_alias ?? task.room_id;
+            const title = task.description || task.message;
+            return (
+              <div
+                className="home-schedule"
+                key={`${task.room_id}:${task.task_id}`}
+              >
+                <time dateTime={at} className="home-schedule-time">
+                  <span>{when.date}</span>
+                  <strong>{when.time}</strong>
+                </time>
+                <div className="home-schedule-body">
+                  <p className="home-schedule-title" title={title}>
+                    {title}
+                  </p>
+                  <div className="home-schedule-room">
+                    <EntityAvatar
+                      kind="room"
+                      id={room?.id ?? task.room_id}
+                      name={roomName}
+                      className="h-6 w-6 rounded-lg"
+                    />
+                    <span title={roomName}>{roomName}</span>
+                  </div>
                 </div>
               </div>
-            </CardHeader>
-            <CardContent>
-              <Skeleton className="h-3 w-24" />
-            </CardContent>
-          </Card>
-        ))}
+            );
+          })
+        )}
       </div>
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        <div className="col-span-1 lg:col-span-4">
-          <Card>
-            <CardHeader>
-              <Skeleton className="h-6 w-24" />
-              <Skeleton className="h-4 w-40 mt-1" />
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className="h-20 w-full rounded-lg" />
-              ))}
-            </CardContent>
-          </Card>
+      <SectionLink to="/schedules">All schedules</SectionLink>
+    </section>
+  );
+}
+
+function Home({
+  onBrowse,
+  headingRef,
+}: {
+  onBrowse: () => void;
+  headingRef: React.RefObject<HTMLHeadingElement | null>;
+}) {
+  const { config, agents, rooms, teams, selectAgent, selectRoom, selectTeam } =
+    useConfigStore();
+  const data = useHomeData();
+  const navigate = useNavigate();
+  const openEditor = (kind: "agent" | "room", id: string) => {
+    selectAgent(kind === "agent" ? id : null);
+    selectRoom(kind === "room" ? id : null);
+    selectTeam(null);
+    navigate(kind === "agent" ? "/agents" : "/rooms");
+  };
+  const sortedRooms = [...rooms].sort((a, b) =>
+    a.display_name.localeCompare(b.display_name, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    }),
+  );
+  const sortedAgents = [...agents].sort((a, b) =>
+    a.display_name.localeCompare(b.display_name, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    }),
+  );
+  return (
+    <div className="home-page">
+      <header className="home-heading">
+        <div>
+          <h2 ref={headingRef} tabIndex={-1}>
+            Home
+          </h2>
+          <p>
+            {new Date().toLocaleDateString("en-US", {
+              weekday: "long",
+              month: "long",
+              day: "numeric",
+            })}
+          </p>
         </div>
-        <div className="col-span-1 lg:col-span-5">
-          <Card>
-            <CardHeader>
-              <Skeleton className="h-6 w-32" />
-              <Skeleton className="h-4 w-44 mt-1" />
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className="h-20 w-full rounded-lg" />
-              ))}
-            </CardContent>
-          </Card>
-        </div>
-        <div className="col-span-1 lg:col-span-3">
-          <Card>
-            <CardHeader>
-              <Skeleton className="h-6 w-20" />
-            </CardHeader>
-            <CardContent>
-              <Skeleton className="h-4 w-full mt-8" />
-            </CardContent>
-          </Card>
-        </div>
+        <Button
+          className="home-browse"
+          variant="outline"
+          size="sm"
+          onClick={onBrowse}
+        >
+          <Search aria-hidden="true" className="h-4 w-4" />
+          Browse workspace
+        </Button>
+      </header>
+      <div className="home-day-surface">
+        <Today usage={data.usage} activity={data.activity} />
+        <ComingUp schedules={data.schedules} rooms={rooms} />
       </div>
+      <section aria-labelledby="rooms-heading" className="home-rooms">
+        <div className="home-section-heading">
+          <h3 id="rooms-heading">
+            Your rooms <span className="home-count">{rooms.length}</span>
+          </h3>
+          <SectionLink to="/rooms">All rooms</SectionLink>
+        </div>
+        <div className="home-room-grid">
+          {sortedRooms.slice(0, 4).map((room) => {
+            const members = [
+              ...room.agents.map((id) => ({
+                id,
+                kind: "agent" as const,
+                name:
+                  agents.find((agent) => agent.id === id)?.display_name ?? id,
+              })),
+              ...teams
+                .filter((team) => team.rooms.includes(room.id))
+                .map((team) => ({
+                  id: team.id,
+                  kind: "team" as const,
+                  name: team.display_name,
+                })),
+            ];
+            return (
+              <button
+                type="button"
+                key={room.id}
+                className="home-room"
+                aria-label={`Configure ${room.display_name}`}
+                onClick={() => openEditor("room", room.id)}
+              >
+                <EntityAvatar
+                  kind="room"
+                  id={room.id}
+                  name={room.display_name}
+                  className="h-[52px] w-[52px] rounded-lg text-lg"
+                />
+                <span className="home-room-body">
+                  <span className="home-room-name" title={room.display_name}>
+                    {room.display_name}
+                  </span>
+                  {room.description && (
+                    <span
+                      className="home-room-description"
+                      title={room.description}
+                    >
+                      {room.description}
+                    </span>
+                  )}
+                  {members.length > 0 && (
+                    <span
+                      className="home-room-members"
+                      aria-label={`Members: ${members.map((member) => member.name).join(", ")}`}
+                    >
+                      {members.slice(0, 4).map((member) => (
+                        <EntityAvatar
+                          key={`${member.kind}:${member.id}`}
+                          kind={member.kind}
+                          id={member.id}
+                          name={member.name}
+                          className="h-[22px] w-[22px] rounded-full text-[8px] ring-2 ring-background"
+                        />
+                      ))}
+                      {members.length > 4 && (
+                        <span className="home-member-overflow">
+                          +{members.length - 4}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </span>
+                <ArrowRight
+                  aria-hidden="true"
+                  className="home-room-arrow h-4 w-4"
+                />
+              </button>
+            );
+          })}
+        </div>
+        {rooms.length === 0 && (
+          <p className="home-section-empty">
+            {config
+              ? "No rooms yet. Add a room to give your agents a place to work."
+              : "Rooms will appear when configuration is available."}
+          </p>
+        )}
+      </section>
+      <section className="home-agents" aria-labelledby="agents-heading">
+        <div className="home-section-heading">
+          <h3 id="agents-heading">Agents</h3>
+          <SectionLink to="/agents">All agents</SectionLink>
+        </div>
+        <div className="home-agent-strip">
+          {sortedAgents.slice(0, 6).map((agent) => (
+            <button
+              key={agent.id}
+              type="button"
+              className="home-agent"
+              aria-label={`Configure ${agent.display_name}`}
+              onClick={() => openEditor("agent", agent.id)}
+            >
+              <EntityAvatar
+                kind="agent"
+                id={agent.id}
+                name={agent.display_name}
+                className="h-9 w-9 rounded-full"
+              />
+              <span title={agent.display_name}>{agent.display_name}</span>
+            </button>
+          ))}
+        </div>
+        {agents.length === 0 && (
+          <p className="home-section-empty">
+            {config
+              ? "No agents configured yet."
+              : "Agents will appear when configuration is available."}
+          </p>
+        )}
+      </section>
     </div>
   );
 }
 
 export function Dashboard() {
-  const {
-    agents,
-    rooms,
-    teams,
-    config,
-    selectedRoomId,
-    selectedAgentId,
-    selectRoom,
-    selectAgent,
-  } = useConfigStore();
-
-  // Search and filter state
-  const [searchTerm, setSearchTerm] = useState("");
-  const [showTypes, setShowTypes] = useState<string[]>([
-    "agents",
-    "rooms",
-    "teams",
-  ]);
-
-  // Real-time status simulation (replace with actual WebSocket connection)
-  const [lastUpdated, setLastUpdated] = useState(new Date());
-
-  // Memoized status functions for performance
-  const getAgentStatus = useCallback((agentId: string) => {
-    const hash = agentId.split("").reduce((a, b) => a + b.charCodeAt(0), 0);
-    const statusOptions = ["online", "busy", "idle", "offline"] as const;
-    return statusOptions[hash % statusOptions.length];
-  }, []);
-
-  const getStatusColor = useCallback((status: string) => {
-    switch (status) {
-      case "online":
-        return "bg-green-500";
-      case "busy":
-        return "bg-orange-500";
-      case "idle":
-        return "bg-yellow-500";
-      case "offline":
-        return "bg-gray-400";
-      default:
-        return "bg-gray-400";
-    }
-  }, []);
-
-  const getStatusLabel = useCallback((status: string) => {
-    switch (status) {
-      case "online":
-        return "Online";
-      case "busy":
-        return "Busy";
-      case "idle":
-        return "Idle";
-      case "offline":
-        return "Offline";
-      default:
-        return "Unknown";
-    }
-  }, []);
-
-  // Simulate periodic updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setLastUpdated(new Date());
-    }, 30000); // Update every 30 seconds
-
-    return () => clearInterval(interval);
-  }, []);
-
-  // Calculate system stats with real-time status
-  const stats = useMemo(() => {
-    const agentStatuses = agents.map((agent) => getAgentStatus(agent.id));
-    return {
-      totalAgents: agents.length,
-      totalRooms: rooms.length,
-      totalTeams: teams.length,
-      modelsInUse: config ? Object.keys(config.models).length : 0,
-      agentsOnline: agentStatuses.filter((status) => status === "online")
-        .length,
-      agentsBusy: agentStatuses.filter((status) => status === "busy").length,
-      agentsIdle: agentStatuses.filter((status) => status === "idle").length,
-      agentsOffline: agentStatuses.filter((status) => status === "offline")
-        .length,
-      activeConnections: rooms.length,
-      voiceEnabled: config?.voice?.enabled || false,
-    };
-  }, [agents, rooms, teams, config, lastUpdated]);
-
-  // Filter data based on search and type filters
-  const filteredData = useMemo(() => {
-    const searchLower = searchTerm.toLowerCase();
-
-    return {
-      agents: showTypes.includes("agents")
-        ? agents.filter(
-            (agent) =>
-              agent.display_name.toLowerCase().includes(searchLower) ||
-              agent.role.toLowerCase().includes(searchLower) ||
-              agent.tools.some((tool) =>
-                tool.toLowerCase().includes(searchLower),
-              ) ||
-              agent.rooms.some((room) =>
-                room.toLowerCase().includes(searchLower),
-              ),
-          )
-        : [],
-      rooms: showTypes.includes("rooms")
-        ? rooms.filter(
-            (room) =>
-              room.display_name.toLowerCase().includes(searchLower) ||
-              room.id.toLowerCase().includes(searchLower),
-          )
-        : [],
-      teams: showTypes.includes("teams")
-        ? teams.filter(
-            (team) =>
-              team.display_name.toLowerCase().includes(searchLower) ||
-              team.role.toLowerCase().includes(searchLower) ||
-              team.mode.toLowerCase().includes(searchLower),
-          )
-        : [],
-    };
-  }, [agents, rooms, teams, searchTerm, showTypes]);
-
-  // Memoized export configuration function
-  const exportConfiguration = useCallback(() => {
-    const exportData = {
-      timestamp: new Date().toISOString(),
-      stats,
-      agents: agents.map((agent) => ({
-        ...agent,
-        teamMemberships: teams
-          .filter((team) => team.agents.includes(agent.id))
-          .map((team) => team.display_name),
-      })),
-      rooms: rooms.map((room) => ({
-        ...room,
-        teamsInRoom: teams
-          .filter((team) => team.rooms.includes(room.id))
-          .map((team) => team.display_name),
-      })),
-      teams,
-      modelConfigurations: config?.models || {},
-    };
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `mindroom-config-${new Date().toISOString().split("T")[0]}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, [agents, rooms, teams, config, stats]);
-
-  // Show skeleton while initial config is loading
-  if (!config) {
-    return <DashboardSkeleton />;
-  }
-
-  // Get selected room details
-  const selectedRoom = selectedRoomId
-    ? rooms.find((r) => r.id === selectedRoomId)
-    : null;
-  const selectedAgent = selectedAgentId
-    ? agents.find((a) => a.id === selectedAgentId)
-    : null;
-
-  return (
-    <div className="flex flex-col gap-4">
-      {/* Header with Quick Actions */}
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
-        <div>
-          <h2 className="text-xl sm:text-2xl font-bold">System Overview</h2>
-          <p className="text-sm sm:text-base text-amber-700 dark:text-amber-300">
-            Monitor your MindRoom configuration and status
-          </p>
-          <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
-            <RefreshCw className="w-3 h-3" /> Last updated:{" "}
-            {lastUpdated.toLocaleTimeString()}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2 items-center">
-          <Input
-            placeholder="Search..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-32 sm:w-48 md:w-64"
-          />
-          <FilterSelector
-            options={[
-              {
-                value: "agents",
-                label: (
-                  <>
-                    <Bot className="w-4 h-4" />
-                    <span className="hidden lg:inline">Agents</span>
-                  </>
-                ),
-              },
-              {
-                value: "rooms",
-                label: (
-                  <>
-                    <Home className="w-4 h-4" />
-                    <span className="hidden lg:inline">Rooms</span>
-                  </>
-                ),
-              },
-              {
-                value: "teams",
-                label: (
-                  <>
-                    <Users className="w-4 h-4" />
-                    <span className="hidden lg:inline">Teams</span>
-                  </>
-                ),
-              },
-            ]}
-            value={showTypes}
-            onChange={(value) => setShowTypes(value as string[])}
-            multiple
-            className="hidden md:inline-flex"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              selectAgent(null);
-              selectRoom(null);
-            }}
-            className="hidden sm:flex"
-          >
-            Clear Selection
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={exportConfiguration}
-            className="flex items-center gap-1"
-          >
-            <FileText className="w-4 h-4" />{" "}
-            <span className="hidden sm:inline">Export Config</span>
-          </Button>
-        </div>
-      </div>
-
-      {/* System Stats Cards - Top Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-amber-100 dark:bg-yellow-900/30">
-                <Bot className="w-5 h-5 text-amber-700 dark:text-amber-300" />
-              </div>
-              <div>
-                <CardTitle className="text-2xl font-bold text-amber-900 dark:text-amber-100">
-                  {stats.totalAgents}
-                </CardTitle>
-                <CardDescription className="text-amber-700 dark:text-amber-300">
-                  Agents
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-3 text-xs text-amber-700 dark:text-amber-300">
-              <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-green-500"></div>{" "}
-                {stats.agentsOnline}
-              </span>
-              <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-orange-500"></div>{" "}
-                {stats.agentsBusy}
-              </span>
-              <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-yellow-500"></div>{" "}
-                {stats.agentsIdle}
-              </span>
-              <span className="flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-gray-400"></div>{" "}
-                {stats.agentsOffline}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-orange-100 dark:bg-orange-900/30">
-                <Home className="w-5 h-5 text-orange-700 dark:text-orange-300" />
-              </div>
-              <div>
-                <CardTitle className="text-2xl font-bold text-orange-900 dark:text-orange-100">
-                  {stats.totalRooms}
-                </CardTitle>
-                <CardDescription className="text-orange-700 dark:text-orange-300">
-                  Rooms
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-orange-700 dark:text-orange-300">
-              {stats.activeConnections} configured
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-yellow-100 dark:bg-yellow-900/30">
-                <Users className="w-5 h-5 text-yellow-700 dark:text-yellow-300" />
-              </div>
-              <div>
-                <CardTitle className="text-2xl font-bold text-yellow-900 dark:text-yellow-100">
-                  {stats.totalTeams}
-                </CardTitle>
-                <CardDescription className="text-yellow-700 dark:text-yellow-300">
-                  Teams
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-yellow-700 dark:text-yellow-300">
-              {teams.reduce((acc, team) => acc + team.agents.length, 0)} members
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-stone-100 dark:bg-stone-900/30">
-                <Settings className="w-5 h-5 text-stone-700 dark:text-stone-300" />
-              </div>
-              <div>
-                <CardTitle className="text-2xl font-bold text-stone-900 dark:text-stone-100">
-                  {stats.modelsInUse}
-                </CardTitle>
-                <CardDescription className="text-stone-700 dark:text-stone-300">
-                  Models
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-stone-700 dark:text-stone-300">
-              in configuration
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <div
-                className={`p-2 rounded-lg ${
-                  stats.voiceEnabled
-                    ? "bg-purple-100 dark:bg-purple-900/30"
-                    : "bg-gray-100 dark:bg-gray-900/30"
-                }`}
-              >
-                {stats.voiceEnabled ? (
-                  <Mic className="w-5 h-5 text-purple-700 dark:text-purple-300" />
-                ) : (
-                  <MicOff className="w-5 h-5 text-gray-500 dark:text-gray-400" />
-                )}
-              </div>
-              <div>
-                <CardTitle className="text-2xl font-bold text-purple-900 dark:text-purple-100">
-                  Voice
-                </CardTitle>
-                <CardDescription
-                  className={
-                    stats.voiceEnabled
-                      ? "text-purple-700 dark:text-purple-300"
-                      : "text-gray-500 dark:text-gray-400"
-                  }
-                >
-                  {stats.voiceEnabled ? "Enabled" : "Disabled"}
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p
-              className={`text-xs ${
-                stats.voiceEnabled
-                  ? "text-purple-700 dark:text-purple-300"
-                  : "text-gray-500 dark:text-gray-400"
-              }`}
-            >
-              {stats.voiceEnabled
-                ? "Transcription active"
-                : "Configure in Voice tab"}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Network Graph Section */}
-      <div className="mb-4 hidden lg:block">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
-              <BarChart3 className="w-6 h-6 text-amber-700 dark:text-amber-300" />
-              System Insights
-            </CardTitle>
-            <CardDescription className="text-amber-700 dark:text-amber-300">
-              Key metrics and actionable insights about your MindRoom
-              configuration
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="p-2">
-            <div className="w-full h-96">
-              <NetworkGraph
-                agents={filteredData.agents}
-                rooms={filteredData.rooms}
-                teams={filteredData.teams}
-                selectedAgentId={selectedAgentId}
-                selectedRoomId={selectedRoomId}
-                onSelectAgent={(agentId: string | null) => {
-                  selectAgent(agentId);
-                  selectRoom(null);
-                }}
-                onSelectRoom={(roomId: string | null) => {
-                  selectRoom(roomId);
-                  selectAgent(null);
-                }}
-                width={1000}
-                height={350}
-              />
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Main Content Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Agent Cards - Left Sidebar */}
-        <div className="col-span-1 lg:col-span-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
-                <Bot className="w-6 h-6 text-amber-700 dark:text-amber-300" />
-                Agents
-              </CardTitle>
-              <CardDescription className="text-amber-700 dark:text-amber-300">
-                Click an agent to see details
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
-              <ScrollArea className="h-96">
-                <div
-                  className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}
-                >
-                  {filteredData.agents.map((agent) => {
-                    const badges: ItemCardBadge[] = [];
-                    const agentTeams = teams.filter((team) =>
-                      team.agents.includes(agent.id),
-                    );
-
-                    if (agentTeams.length > 0) {
-                      badges.push({
-                        content: pluralize(agentTeams.length, "team"),
-                        variant: "secondary" as const,
-                        icon: Users,
-                      });
-                    }
-
-                    return (
-                      <ItemCard
-                        key={agent.id}
-                        id={agent.id}
-                        title={agent.display_name}
-                        description={`Model: ${agent.model || "Default"} • ${pluralize(
-                          agent.rooms.length,
-                          "room",
-                        )} • ${pluralize(agent.tools.length, "tool")}`}
-                        isSelected={selectedAgentId === agent.id}
-                        onClick={(id) => {
-                          selectAgent(id);
-                          selectRoom(null);
-                        }}
-                        badges={badges}
-                      >
-                        <div className="flex items-center justify-between mt-2">
-                          <div className="flex flex-wrap gap-1">
-                            {agent.rooms.slice(0, 2).map((room) => (
-                              <Badge
-                                key={room}
-                                variant="secondary"
-                                className={sharedStyles.badge.secondary}
-                              >
-                                {room}
-                              </Badge>
-                            ))}
-                            {agent.rooms.length > 2 && (
-                              <Badge
-                                variant="outline"
-                                className={sharedStyles.badge.outline}
-                              >
-                                +{agent.rooms.length - 2}
-                              </Badge>
-                            )}
-                          </div>
-                          <div
-                            className={`w-2 h-2 rounded-full ${getStatusColor(
-                              getAgentStatus(agent.id),
-                            )}`}
-                            title={getStatusLabel(getAgentStatus(agent.id))}
-                          />
-                        </div>
-                      </ItemCard>
-                    );
-                  })}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Center - Rooms Overview */}
-        <div className="col-span-1 lg:col-span-5">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
-                <Home className="w-6 h-6 text-amber-700 dark:text-amber-300" />
-                Rooms Overview
-              </CardTitle>
-              <CardDescription className="text-amber-700 dark:text-amber-300">
-                Click a room to see details
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
-              <ScrollArea className="h-96">
-                <div
-                  className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}
-                >
-                  {filteredData.rooms.map((room) => {
-                    const badges: ItemCardBadge[] = [
-                      {
-                        content: pluralize(room.agents.length, "agent"),
-                        variant: "outline" as const,
-                        icon: Bot,
-                      },
-                    ];
-
-                    if (room.model) {
-                      badges.push({
-                        content: `Model: ${room.model}`,
-                        variant: "secondary" as const,
-                      });
-                    }
-
-                    const roomTeams = teams.filter((team) =>
-                      team.rooms.includes(room.id),
-                    );
-                    if (roomTeams.length > 0) {
-                      badges.push({
-                        content: pluralize(roomTeams.length, "team"),
-                        variant: "outline" as const,
-                        icon: Users,
-                      });
-                    }
-
-                    return (
-                      <ItemCard
-                        key={room.id}
-                        id={room.id}
-                        title={room.display_name}
-                        description={
-                          room.model
-                            ? `Model: ${room.model} • ${pluralize(room.agents.length, "agent")}`
-                            : pluralize(room.agents.length, "agent")
-                        }
-                        isSelected={selectedRoomId === room.id}
-                        onClick={(id) => {
-                          selectRoom(id);
-                          selectAgent(null);
-                        }}
-                        badges={badges}
-                      >
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          {room.agents.slice(0, 3).map((agentId) => {
-                            const agent = agents.find((a) => a.id === agentId);
-                            return (
-                              <Badge
-                                key={agentId}
-                                variant="secondary"
-                                className={sharedStyles.badge.secondary}
-                              >
-                                {agent?.display_name || agentId}
-                              </Badge>
-                            );
-                          })}
-                          {room.agents.length > 3 && (
-                            <Badge
-                              variant="outline"
-                              className={sharedStyles.badge.outline}
-                            >
-                              +{room.agents.length - 3}
-                            </Badge>
-                          )}
-                        </div>
-
-                        {roomTeams.length > 0 && (
-                          <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                            <div className="text-xs text-amber-600 dark:text-amber-400 mb-1">
-                              Teams:
-                            </div>
-                            <div className="flex flex-wrap gap-1">
-                              {roomTeams.map((team) => (
-                                <Badge
-                                  key={team.id}
-                                  variant="outline"
-                                  className="text-xs px-1 py-0 bg-purple-50 dark:bg-purple-950 flex items-center gap-1"
-                                >
-                                  <Users className="w-3 h-3" />{" "}
-                                  {team.display_name}
-                                </Badge>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </ItemCard>
-                    );
-                  })}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Right Panel - Selected Details */}
-        <div className="col-span-1 lg:col-span-3">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
-                <User className="w-6 h-6 text-amber-700 dark:text-amber-300" />
-                Details
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {selectedRoom ? (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="font-semibold text-lg mb-2">
-                      {selectedRoom.display_name}
-                    </h3>
-                    {selectedRoom.description && (
-                      <p className="text-sm text-amber-700 dark:text-amber-300 mb-3">
-                        {selectedRoom.description}
-                      </p>
-                    )}
-                  </div>
-
-                  {selectedRoom.model && (
-                    <div>
-                      <h4 className="font-medium mb-1">Model Override:</h4>
-                      <Badge variant="secondary">{selectedRoom.model}</Badge>
-                    </div>
-                  )}
-
-                  <div>
-                    <h4 className="font-medium mb-2">
-                      Agents ({selectedRoom.agents.length}):
-                    </h4>
-                    <div className="space-y-2">
-                      {selectedRoom.agents.map((agentId) => {
-                        const agent = agents.find((a) => a.id === agentId);
-                        if (!agent) return null;
-                        return (
-                          <div
-                            key={agentId}
-                            className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded text-sm"
-                          >
-                            <span>{agent.display_name}</span>
-                            <div className="flex items-center gap-2">
-                              <Badge variant="outline" className="text-xs">
-                                {pluralize(agent.tools.length, "tool")}
-                              </Badge>
-                              <div
-                                className={`w-2 h-2 rounded-full ${getStatusColor(
-                                  getAgentStatus(agent.id),
-                                )}`}
-                                title={getStatusLabel(getAgentStatus(agent.id))}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {(() => {
-                    const roomTeams = teams.filter((team) =>
-                      team.rooms.includes(selectedRoom.id),
-                    );
-                    return roomTeams.length > 0 ? (
-                      <div>
-                        <h4 className="font-medium mb-2">
-                          Teams ({roomTeams.length}):
-                        </h4>
-                        <div className="space-y-2">
-                          {roomTeams.map((team) => (
-                            <div
-                              key={team.id}
-                              className="p-2 bg-purple-50 dark:bg-purple-950 rounded text-sm"
-                            >
-                              <div className="font-medium flex items-center gap-1">
-                                <Users className="w-4 h-4" />{" "}
-                                {team.display_name}
-                              </div>
-                              <div className="text-xs text-amber-700 dark:text-amber-300">
-                                {team.mode} mode •{" "}
-                                {pluralize(team.agents.length, "member")}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null;
-                  })()}
-                </div>
-              ) : selectedAgent ? (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="font-semibold text-lg mb-2">
-                      {selectedAgent.display_name}
-                    </h3>
-                    <p className="text-sm text-amber-700 dark:text-amber-300 mb-3">
-                      {selectedAgent.role}
-                    </p>
-                  </div>
-
-                  <div>
-                    <h4 className="font-medium mb-1">Model:</h4>
-                    <Badge variant="secondary">
-                      {selectedAgent.model || "Default"}
-                    </Badge>
-                  </div>
-
-                  <div>
-                    <h4 className="font-medium mb-2">
-                      Rooms ({selectedAgent.rooms.length}):
-                    </h4>
-                    <div className="flex flex-wrap gap-1">
-                      {selectedAgent.rooms.map((roomId) => (
-                        <Badge
-                          key={roomId}
-                          variant="outline"
-                          className="text-xs"
-                        >
-                          {roomId}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <h4 className="font-medium mb-2">
-                      Tools ({selectedAgent.tools.length}):
-                    </h4>
-                    <div className="flex flex-wrap gap-1">
-                      {selectedAgent.tools.slice(0, 8).map((tool) => (
-                        <Badge
-                          key={tool}
-                          variant="secondary"
-                          className="text-xs"
-                        >
-                          {tool}
-                        </Badge>
-                      ))}
-                      {selectedAgent.tools.length > 8 && (
-                        <Badge variant="outline" className="text-xs">
-                          +{selectedAgent.tools.length - 8}
-                        </Badge>
-                      )}
-                    </div>
-                  </div>
-
-                  {(() => {
-                    const agentTeams = teams.filter((team) =>
-                      team.agents.includes(selectedAgent.id),
-                    );
-                    return agentTeams.length > 0 ? (
-                      <div>
-                        <h4 className="font-medium mb-2">Team Memberships:</h4>
-                        <div className="space-y-1">
-                          {agentTeams.map((team) => (
-                            <Badge
-                              key={team.id}
-                              variant="outline"
-                              className="text-xs block w-fit flex items-center gap-1"
-                            >
-                              <Users className="w-3 h-3" /> {team.display_name}
-                            </Badge>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null;
-                  })()}
-                </div>
-              ) : (
-                <div className="text-center text-amber-600 dark:text-amber-400 dark:text-gray-400 mt-8">
-                  <p>Select a room or agent to see details</p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+  const [browse, setBrowse] = useState(false);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
+  const switchView = (next: boolean) => {
+    setBrowse(next);
+    requestAnimationFrame(() =>
+      (next ? backRef.current : headingRef.current)?.focus(),
+    );
+  };
+  return browse ? (
+    <div className="home-directory">
+      <Button
+        ref={backRef}
+        variant="ghost"
+        size="sm"
+        className="mb-4"
+        onClick={() => switchView(false)}
+      >
+        <ArrowLeft aria-hidden="true" className="mr-2 h-4 w-4" />
+        Back to home
+      </Button>
+      <WorkspaceDirectory />
     </div>
+  ) : (
+    <Home onBrowse={() => switchView(true)} headingRef={headingRef} />
   );
 }

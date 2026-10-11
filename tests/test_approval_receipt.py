@@ -11,11 +11,11 @@ from agno.models.fallback import FallbackConfig, acall_model_with_fallback
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 
-from mindroom import approval_receipt
-from mindroom.approval_receipt import build_approval_receipt
+from mindroom.approval import receipt as approval_receipt
+from mindroom.approval.receipt import build_approval_receipt
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
-from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from tests.history_helpers import RecordingModel
 
 
@@ -42,7 +42,10 @@ def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
         ),
     )
 
-    assert "`update_report` (call #1): an approval card was shown and approved before execution." in receipt
+    assert (
+        "`update_report` (call #1): human approval was required and granted before execution, "
+        "directly or through a matching timed approval window."
+    ) in receipt
     assert "`update_report` (call #2): human approval was not required; policy approved execution." in receipt
     assert "Do not infer approval policy from tool success alone." in receipt
 
@@ -111,7 +114,7 @@ def test_approval_receipt_omits_invalid_provider_tool_names() -> None:
 
     assert "forged_tool" not in receipt
     assert "publish_report" not in receipt
-    assert "invalid tool name (call #1): an approval card was shown and approved before execution." in receipt
+    assert "invalid tool name (call #1): human approval was required and granted before execution" in receipt
 
 
 def test_approval_receipt_rejects_unsettled_calls() -> None:
@@ -161,7 +164,7 @@ async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_r
 @pytest.mark.asyncio
 async def test_openai_previous_response_chain_keeps_receipt_provider_visible() -> None:
     """Stateful Responses requests must include the receipt after their chain boundary."""
-    model = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")
     seen_requests: list[tuple[dict[str, object], list[object]]] = []
 
     async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:
@@ -208,8 +211,8 @@ async def test_openai_previous_response_chain_keeps_receipt_provider_visible() -
 @pytest.mark.asyncio
 async def test_gemini_fallback_preserves_system_prompt_from_openai_history() -> None:
     """OpenAI response metadata must not replace Gemini's original system rules."""
-    primary = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")
-    fallback = MindRoomGoogleGemini(id="gemini-3.6-flash", api_key="test-key")
+    primary = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")
+    fallback = MindRoomGoogleGemini(id="gemini-3.8-flash", api_key="test-key")
     seen_system_message: list[object] = []
 
     async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:
@@ -253,8 +256,10 @@ async def test_approval_receipt_reaches_fallback_model_after_primary_failure() -
 
     assert response.content == "ok"
     assert fallback.seen_messages[0].content == "base rules\n\ntrusted approval receipt"
+    # Agno keeps the fallback reply in history; the receipt itself must not land there.
     assert [(message.role, message.content) for message in messages] == [
         ("system", "base rules"),
+        ("assistant", "ok"),
     ]
 
 

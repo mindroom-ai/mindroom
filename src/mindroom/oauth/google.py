@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Mapping
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
-from google.auth import exceptions as google_auth_exceptions
-from google.auth.transport.requests import Request as GoogleRequest
-from google.oauth2 import id_token as google_id_token
-from requests import exceptions as requests_exceptions
 
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.matrix.provisioning_env import local_client_headers
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClaimValidationError,
@@ -37,6 +37,7 @@ _GOOGLE_CLIENT_CONFIG_SERVICE = "google_oauth_client"
 _GOOGLE_PROVISIONING_PATH = "/v1/local-mindroom/oauth/google-client"
 _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY = "_oauth_client_runtime_bootstrap_fetched_at"
 _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS = 60 * 60
+_GOOGLE_IDENTITY_VERIFICATION_TIMEOUT_SECONDS = 20.0
 GOOGLE_IDENTITY_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -62,7 +63,7 @@ def _provisioning_client_credentials(runtime_paths: RuntimePaths) -> tuple[str, 
     if not provisioning_url or not client_id or not client_secret:
         msg = (
             "Google OAuth bootstrap requires MINDROOM_PROVISIONING_URL, MINDROOM_LOCAL_CLIENT_ID, "
-            "and MINDROOM_LOCAL_CLIENT_SECRET. Run `mindroom connect --pair-code ...` to restore pairing."
+            "and MINDROOM_LOCAL_CLIENT_SECRET. Run `mindroom connect` to restore pairing."
         )
         raise OAuthProviderError(msg)
     parsed_url = httpx.URL(provisioning_url)
@@ -106,12 +107,12 @@ async def _google_runtime_bootstrapper(
     runtime_paths: RuntimePaths,
 ) -> OAuthRuntimeEndpoints:
     """Fetch the installed-app client config through an authenticated local pairing."""
-    resolution = provider.client_config_resolution(runtime_paths)
+    resolution = await asyncio.to_thread(provider.client_config_resolution, runtime_paths)
     if resolution is not None and resolution.custom:
         return _google_runtime_endpoints()
 
-    manager = get_runtime_credentials_manager(runtime_paths)
-    existing = manager.load_credentials(_GOOGLE_CLIENT_CONFIG_SERVICE)
+    manager = await asyncio.to_thread(get_runtime_credentials_manager, runtime_paths)
+    existing = await asyncio.to_thread(manager.load_credentials, _GOOGLE_CLIENT_CONFIG_SERVICE)
     if existing and existing.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True:
         return _google_runtime_endpoints()
     if _provisioned_google_client_is_fresh(existing):
@@ -122,16 +123,13 @@ async def _google_runtime_bootstrapper(
         if existing:
             return _google_runtime_endpoints()
         msg = (
-            "Google OAuth is not configured. Pair this local install with `mindroom connect --pair-code ...`, "
+            "Google OAuth is not configured. Pair this local install with `mindroom connect`, "
             "or save a custom Google OAuth client in the dashboard."
         )
         raise OAuthProviderError(msg)
 
     provisioning_url, local_client_id, local_client_secret = provisioning_credentials
-    headers = {
-        "X-Local-MindRoom-Client-Id": local_client_id,
-        "X-Local-MindRoom-Client-Secret": local_client_secret,
-    }
+    headers = local_client_headers(local_client_id, local_client_secret)
     try:
         client_id, client_secret = await _fetch_provisioned_google_client(provisioning_url, headers)
     except OAuthProviderError as exc:
@@ -147,7 +145,7 @@ async def _google_runtime_bootstrapper(
         _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: time.time(),
     }
     if existing != credentials:
-        manager.save_credentials(_GOOGLE_CLIENT_CONFIG_SERVICE, credentials)
+        await run_blocking_until_complete(manager.save_credentials, _GOOGLE_CLIENT_CONFIG_SERVICE, credentials)
     return _google_runtime_endpoints()
 
 
@@ -168,7 +166,7 @@ async def _fetch_provisioned_google_client(
 
     if not response.is_success:
         if response.status_code in {401, 403}:
-            msg = "MindRoom pairing credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
+            msg = "MindRoom pairing credentials are invalid or revoked. Run `mindroom connect` again."
         elif response.status_code == 503:
             msg = "The MindRoom provisioning service has not configured the Google OAuth client yet."
         else:
@@ -212,10 +210,16 @@ def _google_token_parser(
         msg = "Google did not return a verifiable identity token"
         raise OAuthClaimValidationError(msg)
     else:
+        # google-auth and requests load only when a Google sign-in completes.
+        from google.auth import exceptions as google_auth_exceptions  # noqa: PLC0415
+        from google.auth.transport.requests import Request as GoogleRequest  # noqa: PLC0415
+        from google.oauth2 import id_token as google_id_token  # noqa: PLC0415
+        from requests import exceptions as requests_exceptions  # noqa: PLC0415
+
         try:
             claims = google_id_token.verify_oauth2_token(
                 id_token,
-                GoogleRequest(),
+                partial(GoogleRequest(), timeout=_GOOGLE_IDENTITY_VERIFICATION_TIMEOUT_SECONDS),
                 client_config.client_id,
             )
         except (ValueError, google_auth_exceptions.GoogleAuthError, requests_exceptions.RequestException) as exc:
@@ -230,19 +234,15 @@ def _google_token_parser(
             msg = "Google identity token verification did not return claims"
             raise OAuthClaimValidationError(msg)
 
-    scopes = provider.scopes
-    response_scope = token_response.get("scope")
-    if isinstance(response_scope, str) and response_scope.strip():
-        scopes = tuple(response_scope.split())
-
     token_data: dict[str, Any] = {
         "token": access_token,
-        "token_uri": provider.token_url,
         "client_id": client_config.client_id,
-        "scopes": list(scopes),
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
+    response_scope = token_response.get("scope")
+    if isinstance(response_scope, str) and response_scope.strip():
+        token_data["scopes"] = response_scope.split()
     if isinstance(refresh_token, str) and refresh_token:
         token_data["refresh_token"] = refresh_token
     token_type = token_response.get("token_type")
@@ -267,7 +267,7 @@ def _google_oauth_provider(
     display_name: str,
     scopes: tuple[str, ...],
     credential_service: str,
-    tool_config_service: str,
+    tool_config_service: str | None,
     client_config_services: tuple[str, ...],
     status_capabilities: tuple[str, ...],
     include_granted_scopes: bool = True,

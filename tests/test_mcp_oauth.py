@@ -5,29 +5,47 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, credential_service_policy
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import (
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
+from mindroom.credentials.policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    credential_service_policy,
+)
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
+    _mcp_oauth_provider_is_configured,
     _oauth_discovery_config,
     mcp_oauth_provider,
     mcp_oauth_provider_id,
+)
+from mindroom.oauth.credential_lifecycle import (
+    load_oauth_credentials_snapshot,
+    refresh_oauth_credentials,
+    resolve_oauth_credential_context,
 )
 from mindroom.oauth.discovery import (
     _DISCOVERY_CACHE,
     _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
     _discover_metadata,
 )
-from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
+from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_target
+from tests.oauth_test_utils import oauth_authorization_url, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -79,6 +97,20 @@ def test_mcp_oauth_helpers_reject_non_oauth_server_consistently() -> None:
         mcp_oauth_provider("example", server_config)
 
 
+def test_mcp_oauth_provider_lookup_ignores_disabled_shadow_server() -> None:
+    """Reset retirement must select the enabled server that owns the live OAuth session."""
+    base = _oauth_mcp_server_config()
+    assert base.auth is not None
+    auth = base.auth.model_copy(update={"provider_id": "shared-provider"})
+    disabled = base.model_copy(update={"enabled": False, "auth": auth})
+    enabled = base.model_copy(update={"auth": auth})
+
+    assert _mcp_oauth_provider_is_configured(
+        {"disabled": disabled, "enabled": enabled},
+        "shared-provider",
+    )
+
+
 def _oauth_mcp_server_config() -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
@@ -98,7 +130,7 @@ def _oauth_mcp_server_config() -> MCPServerConfig:
     )
 
 
-def _auto_oauth_mcp_server_config() -> MCPServerConfig:
+def _auto_oauth_mcp_server_config(*, dynamic_client_registration: bool = True) -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example.test/mcp",
@@ -111,6 +143,7 @@ def _auto_oauth_mcp_server_config() -> MCPServerConfig:
             "scopes": ["mcp.read"],
             "extra_auth_params": {"audience": "example"},
             "extra_token_params": {"resource": "https://mcp.example.test/mcp"},
+            "dynamic_client_registration": dynamic_client_registration,
         },
     )
 
@@ -176,6 +209,7 @@ class _FakeDiscoveryClient:
             {
                 "client_id": "registered-client-id",
                 "client_id_issued_at": 123,
+                "redirect_uris": ["http://localhost:8765/api/oauth/mcp_demo/callback"],
                 "registration_client_uri": "https://auth.example.test/register/registered-client-id",
                 "registration_access_token": "registration-token",
                 "token_endpoint_auth_method": "none",
@@ -193,8 +227,52 @@ class _InvalidJsonDiscoveryResponse(_FakeDiscoveryResponse):
         raise ValueError(msg)
 
 
+class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
+    """Serve protected-resource metadata whose authorization server the MCP server can move."""
+
+    authorization_server: ClassVar[str] = "https://auth.example.test"
+    supports_registration: ClassVar[bool] = False
+
+    async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
+        del headers
+        if url == "https://mcp.example.test/.well-known/oauth-protected-resource/mcp":
+            return _FakeDiscoveryResponse({"authorization_servers": [self.authorization_server]})
+        if url == f"{self.authorization_server}/.well-known/oauth-authorization-server":
+            metadata = {
+                "issuer": self.authorization_server,
+                "authorization_endpoint": f"{self.authorization_server}/authorize",
+                "token_endpoint": f"{self.authorization_server}/token",
+                "token_endpoint_auth_methods_supported": ["none"],
+                "code_challenge_methods_supported": ["S256"],
+            }
+            if self.supports_registration:
+                metadata["registration_endpoint"] = f"{self.authorization_server}/register"
+            return _FakeDiscoveryResponse(metadata)
+        return _FakeDiscoveryResponse({}, status_code=404)
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> _FakeDiscoveryResponse:
+        del headers
+        self.posts.append((url, json))
+        assert url == f"{self.authorization_server}/register"
+        return _FakeDiscoveryResponse(
+            {"client_id": f"client-of-{urlparse(url).netloc}", "redirect_uris": json["redirect_uris"]},
+            status_code=201,
+        )
+
+
+class _UnexpectedTokenClient:
+    def __init__(self, **_kwargs: object) -> None:
+        pytest.fail("no token request may be sent after the token endpoint changed")
+
+
 def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
-    """Generated MCP OAuth providers use deterministic services and public-client defaults."""
+    """Generated MCP OAuth providers use deterministic services and follow the agent credential scope."""
     provider = mcp_oauth_provider("demo", _oauth_mcp_server_config())
 
     assert provider.id == "mcp_demo"
@@ -209,6 +287,7 @@ def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.extra_auth_params == {"audience": "example"}
     assert provider.extra_token_params == {"resource": "https://mcp.example.test/mcp"}
+    assert provider.requester_scoped_credentials is False
 
 
 def test_custom_mcp_oauth_provider_id_keeps_generated_credential_services_mcp_scoped() -> None:
@@ -259,7 +338,8 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
 
-    auth_url = await provider.authorization_uri_async(
+    auth_url = await oauth_authorization_url(
+        provider,
         runtime_paths,
         state="state-token",
         code_verifier=code_verifier,
@@ -295,6 +375,8 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     assert stored_client == {
         "client_id": "registered-client-id",
         "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: "https://auth.example.test/token",
         "client_id_issued_at": 123,
         "registration_client_uri": "https://auth.example.test/register/registered-client-id",
         "registration_access_token": "registration-token",
@@ -327,7 +409,8 @@ async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
 
-    auth_url = await provider.authorization_uri_async(
+    auth_url = await oauth_authorization_url(
+        provider,
         runtime_paths,
         state="state-token",
         code_verifier=code_verifier,
@@ -395,6 +478,7 @@ async def test_mcp_oauth_dynamic_client_registration_is_serialized(
                 {
                     "client_id": "registered-client-id",
                     "client_id_issued_at": 123,
+                    "redirect_uris": ["http://localhost:8765/api/oauth/mcp_demo/callback"],
                     "token_endpoint_auth_method": "none",
                 },
                 status_code=201,
@@ -410,7 +494,8 @@ async def test_mcp_oauth_dynamic_client_registration_is_serialized(
     assert second_verifier is not None
 
     first_call = asyncio.create_task(
-        provider.authorization_uri_async(
+        oauth_authorization_url(
+            provider,
             runtime_paths,
             state="first-state",
             code_verifier=first_verifier,
@@ -418,7 +503,8 @@ async def test_mcp_oauth_dynamic_client_registration_is_serialized(
     )
     await first_post_started.wait()
     second_call = asyncio.create_task(
-        provider.authorization_uri_async(
+        oauth_authorization_url(
+            provider,
             runtime_paths,
             state="second-state",
             code_verifier=second_verifier,
@@ -463,7 +549,8 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
     assert code_verifier is not None
 
     with pytest.raises(OAuthProviderError, match="refused unsafe URL"):
-        await provider.authorization_uri_async(
+        await oauth_authorization_url(
+            provider,
             runtime_paths,
             state="state-token",
             code_verifier=code_verifier,
@@ -531,6 +618,246 @@ async def test_oauth_provider_still_requires_confidential_client_secret(tmp_path
         await provider.require_client_config_async(runtime_paths)
 
 
+async def _authorized_client_id(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
+    _DISCOVERY_CACHE.clear()
+    auth_url = await oauth_authorization_url(
+        provider,
+        runtime_paths,
+        state="state-token",
+        code_verifier=provider.issue_pkce_code_verifier(),
+    )
+    return parse_qs(urlparse(auth_url).query)["client_id"][0]
+
+
+def _stored_mcp_client(runtime_paths: RuntimePaths) -> dict[str, Any]:
+    stored = get_runtime_credentials_manager(runtime_paths).load_credentials("mcp_demo_oauth_client")
+    assert stored is not None
+    return stored
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_reregisters_dynamic_client_when_token_endpoint_moves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration issued by one authorization server is never presented to another one."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+
+    assert await _authorized_client_id(provider, runtime_paths) == "client-of-auth.example.test"
+    assert await _authorized_client_id(provider, runtime_paths) == "client-of-auth.example.test"
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "authorization_server",
+        "https://moved.example.test",
+    )
+    with capture_logs() as logs:
+        assert await _authorized_client_id(provider, runtime_paths) == "client-of-moved.example.test"
+
+    assert [entry for entry in logs if entry["event"] == "oauth_dynamic_client_reregistered"] == [
+        {
+            "event": "oauth_dynamic_client_reregistered",
+            "log_level": "warning",
+            "provider_id": "mcp_demo",
+            "previous_token_endpoint_origin": "https://auth.example.test",
+            "current_token_endpoint_origin": "https://moved.example.test",
+        },
+    ]
+    assert [url for url, _payload in _MovableAuthorizationServerDiscoveryClient.posts] == [
+        "https://auth.example.test/register",
+        "https://moved.example.test/register",
+    ]
+    stored = _stored_mcp_client(runtime_paths)
+    assert stored[OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY] == "https://moved.example.test/token"
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_rejects_dynamic_registration_after_move_to_server_without_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale registration is refused when the new authorization server cannot issue a replacement."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    assert await _authorized_client_id(provider, runtime_paths) == "client-of-auth.example.test"
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", False)
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "authorization_server",
+        "https://moved.example.test",
+    )
+
+    with pytest.raises(OAuthProviderError, match="belongs to a different token endpoint"):
+        await _authorized_client_id(provider, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_refuses_bound_dynamic_client_after_move_with_registration_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabling registration never lets a client registered at one server be sent to another."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
+    assert (
+        await _authorized_client_id(mcp_oauth_provider("demo", _auto_oauth_mcp_server_config()), runtime_paths)
+        == "client-of-auth.example.test"
+    )
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config(dynamic_client_registration=False))
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "authorization_server",
+        "https://moved.example.test",
+    )
+
+    with pytest.raises(OAuthProviderError, match="belongs to a different token endpoint"):
+        await _authorized_client_id(provider, runtime_paths)
+    with pytest.raises(OAuthProviderError, match="belongs to a different token endpoint"):
+        await provider.exchange_code(
+            "authorization-code",
+            runtime_paths,
+            token_url="https://moved.example.test/token",  # noqa: S106
+            code_verifier=provider.issue_pkce_code_verifier(),
+        )
+    assert len(_MovableAuthorizationServerDiscoveryClient.posts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dynamic_client_registration", [True, False], ids=["registration", "no-registration"])
+async def test_mcp_oauth_binds_legacy_dynamic_registration_to_current_token_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dynamic_client_registration: bool,
+) -> None:
+    """A registration stored before endpoint recording keeps its client and is bound on first use."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    legacy_registration = {
+        "client_id": "legacy-client-id",
+        "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
+        "_source": "oauth_dynamic_client_registration",
+        "_oauth_provider": "mcp_demo",
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+    }
+    get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", legacy_registration)
+    provider = mcp_oauth_provider(
+        "demo",
+        _auto_oauth_mcp_server_config(dynamic_client_registration=dynamic_client_registration),
+    )
+
+    assert await _authorized_client_id(provider, runtime_paths) == "legacy-client-id"
+
+    assert _MovableAuthorizationServerDiscoveryClient.posts == []
+    assert _stored_mcp_client(runtime_paths) == {
+        **legacy_registration,
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: "https://auth.example.test/token",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_code_exchange_rejects_token_endpoint_discovered_after_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flow straddling a discovery refresh never sends its code and verifier to a newly discovered endpoint."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "mcp_demo_oauth_client",
+        {"client_id": "registered-client-id"},
+    )
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    code_verifier = provider.issue_pkce_code_verifier()
+    assert code_verifier is not None
+    endpoints = await provider.runtime_endpoints(runtime_paths)
+    auth_url = await provider.authorization_uri_async(
+        runtime_paths,
+        endpoints,
+        state="state-token",
+        code_verifier=code_verifier,
+    )
+    assert urlparse(auth_url).netloc == "auth.example.test"
+
+    _DISCOVERY_CACHE.clear()
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "authorization_server",
+        "https://attacker.example.test",
+    )
+
+    with pytest.raises(OAuthProviderError, match="token endpoint changed since authorization"):
+        await provider.exchange_code(
+            "authorization-code",
+            runtime_paths,
+            token_url=endpoints.token_url,
+            code_verifier=code_verifier,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_token_url", "stored_origin"),
+    [("https://auth.example.test/token", "https://auth.example.test"), (None, None)],
+    ids=["changed", "missing"],
+)
+async def test_mcp_oauth_refresh_rejects_token_endpoint_discovered_after_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored_token_url: str | None,
+    stored_origin: str | None,
+) -> None:
+    """A remote MCP server that moves discovery to another authorization server never receives the refresh grant."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(
+        _MovableAuthorizationServerDiscoveryClient,
+        "authorization_server",
+        "https://attacker.example.test",
+    )
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("mcp_demo_oauth_client", {"client_id": "registered-client-id"})
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    credentials: dict[str, Any] = {
+        "token": "expired-access-token",
+        "refresh_token": "stored-refresh-token",
+        "client_id": "registered-client-id",
+        "scopes": ["mcp.read"],
+        "expires_at": 1.0,
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+    }
+    if stored_token_url is not None:
+        credentials["token_uri"] = stored_token_url
+    publish_oauth_credentials(provider, credentials, credentials_manager=manager, worker_target=None)
+    context = resolve_oauth_credential_context(provider, runtime_paths, manager, None)
+
+    with capture_logs() as logs, pytest.raises(OAuthRefreshRejectedError):
+        await refresh_oauth_credentials(context)
+
+    assert (await load_oauth_credentials_snapshot(context)).credentials is None
+    warnings = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert [entry["event"] for entry in warnings] == ["oauth_credentials_refresh_failed"]
+    fields = warnings[0]
+    assert fields["reason"] == "token_endpoint_changed"
+    assert fields["stored_token_endpoint_origin"] == stored_origin
+    assert fields["current_token_endpoint_origin"] == "https://attacker.example.test"  # noqa: S105
+    assert "stored-refresh-token" not in repr(logs)
+
+
 def test_mcp_oauth_credentials_are_primary_runtime_scoped_for_user_agents(tmp_path: Path) -> None:
     """Requester-scoped MCP OAuth tokens should not be saved as worker-global credentials."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -557,3 +884,63 @@ def test_mcp_oauth_credentials_are_primary_runtime_scoped_for_user_agents(tmp_pa
 
     assert manager.load_credentials("mcp_demo_oauth") is None
     assert manager.for_worker(worker_target.worker_key).load_credentials("mcp_demo_oauth") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
+async def test_mcp_oauth_scope_policy_ignores_json_credentials_after_empty_requester_store(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """A matching JSON connection remains inert after a requester store was created."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.test",
+        room_id="!room:example.test",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=None,
+        tenant_id="tenant",
+        account_id=None,
+    )
+    worker_target = resolve_worker_target(worker_scope, "code", identity)
+    provider = mcp_oauth_provider("demo", _oauth_mcp_server_config())
+    json_credentials = {
+        "token": "json-token",
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+    }
+    save_scoped_credentials(
+        provider.credential_service,
+        json_credentials,
+        credentials_manager=manager,
+        worker_target=worker_target,
+    )
+    json_path = scoped_credentials_path(
+        provider.credential_service,
+        credentials_manager=manager,
+        worker_target=worker_target,
+    )
+
+    requester_only_context = resolve_oauth_credential_context(
+        replace(provider, requester_scoped_credentials=True),
+        runtime_paths,
+        manager,
+        worker_target,
+    )
+    assert (await load_oauth_credentials_snapshot(requester_only_context)).credentials is None
+
+    scope_context = resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        manager,
+        worker_target,
+    )
+    snapshot = await load_oauth_credentials_snapshot(scope_context)
+
+    assert scope_context.worker_target == worker_target
+    assert snapshot.credentials is None
+    assert json_path.exists()

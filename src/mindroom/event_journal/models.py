@@ -7,9 +7,36 @@ from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
+from mindroom.reply_lifecycle import WriteStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from uuid import UUID
+
+    from mindroom.reply_lifecycle import Reply
+    from mindroom.turn_record import TurnRecord
+
+    from .projection import ProjectedEvent
+    from .replies import PostCommitEffect
+
+
+class IngestionConsumerBindingError(RuntimeError):
+    """The durable consumer identity disagrees with a requested binding."""
+
+
+class IngestionBatchValidationError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchIntegrityError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchSequenceError(RuntimeError): ...  # noqa: D101
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionConsumer:  # noqa: D101
+    generation: UUID
+    stream_id: UUID | None
 
 
 DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
@@ -18,8 +45,9 @@ DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
 class EventClass(StrEnum):
     """Whether an admitted event may start semantic work.
 
-    Derived once, at admission, from nio's per-event provenance. MindRoom never
-    recomputes it from cursors, timestamps, or pagination shapes.
+    Timeline classes come from nio's per-event provenance at admission;
+    membership state snapshots are always context-only. MindRoom never
+    recomputes actionability from cursors, timestamps, or pagination shapes.
     """
 
     ACTIONABLE = "actionable"
@@ -31,11 +59,13 @@ class EventKind(StrEnum):
 
     MESSAGE = "message"
     MEDIA = "media"
+    SCHEDULE_TRIGGER = "schedule_trigger"
     REACTION = "reaction"
     APPROVAL = "approval"
     ROOM_LIFECYCLE = "room_lifecycle"
+    RTC = "rtc"
     REDACTION = "redaction"
-    DECRYPTION_FAILURE = "decryption_failure"
+    OPAQUE_HISTORY = "opaque_history"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a
@@ -45,9 +75,9 @@ class EventKind(StrEnum):
 # them, because the journal's own reads need it too: a replay guard asking
 # "is there newer unfinished work here" means work that can still answer, and
 # pending alone does not mean that. Thread membership is derived from content
-# for every kind alike, so a pending reaction, approval, or undecryptable
-# message can sit in a thread and be mistaken for an unanswered turn.
-TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
+# for every readable kind alike, so a pending reaction or approval can sit
+# in a thread and be mistaken for an unanswered turn.
+TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER})
 
 
 class SemanticConsumer(StrEnum):
@@ -74,55 +104,63 @@ class AdmissionResult(StrEnum):
     DUPLICATE = "duplicate"
 
 
+class IngestionRecordDisposition(StrEnum):
+    """The one durable application owned by an ingestion record."""
+
+    SEMANTIC_EVENT = "semantic_event"
+    ROOM_LIFECYCLE = "room_lifecycle"
+    HISTORY_LOSS = "history_loss"
+    COMPATIBILITY_ONLY = "compatibility_only"
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionFacts:
+    """Receipt novelty and fresh semantic-dispatch eligibility."""
+
+    receipt_new: bool
+    semantic_event_new: bool
+    record_facts: tuple[AdmissionFacts, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject malformed or impossible protocol facts."""
+        if type(self.receipt_new) is not bool or type(self.semantic_event_new) is not bool:
+            msg = "Admission facts must be exact booleans"
+            raise TypeError(msg)
+        if self.semantic_event_new and not self.receipt_new:
+            msg = "A new semantic effect requires a new receipt"
+            raise ValueError(msg)
+
+
 class DeliveryProjectionPendingError(RuntimeError):
     """An interactive source arrived before a visible delivery was projected."""
 
 
-class DeliveryStage(StrEnum):
-    """The delivery points that must survive a crash."""
-
-    INITIAL = "initial"
-    FINAL = "final"
+# The delivery points that must survive a crash: one durable write's stage, as the reply rules name it.
+DeliveryStage = WriteStage
 
 
 class DepartureSource(StrEnum):
-    """Which of the two observers of one departure is speaking."""
+    """The producer source of one admitted membership transition."""
 
-    # The bot left the room itself, and knows a sync report of it is coming.
     LOCAL = "local"
-    # A sync response reported a departure, which may be the report a local
-    # departure is owed, or a departure the bot never initiated.
     REPORTED = "reported"
 
 
-class DepartureObservation(StrEnum):
-    """What one observation of a departure did to the room's derived state."""
-
-    FENCED = "fenced"
-    # The sync report a local departure was waiting for. Fencing again would
-    # delete whatever the membership after it has already built.
-    OWED_REPORT_CONSUMED = "owed_report_consumed"
-    # The same departure observed again, by either observer, with no rejoin in
-    # between for a second departure to have happened in.
-    ALREADY_FENCED = "already_fenced"
-    # The same stable Matrix departure observation was replayed after its first
-    # application had already committed.
-    REPEATED_REPORT = "repeated_report"
-
-
 @dataclass(frozen=True, slots=True)
-class DepartureOutcome:
-    """What one durably applied departure observation decided."""
+class RoomMembershipPosition:
+    """A canonical membership and epoch within its journal or producer domain."""
 
-    observation: DepartureObservation
+    membership: str
     membership_epoch: int
-    owed_reports: int
-    reported_run_epoch: int | None = None
 
-    @property
-    def fenced(self) -> bool:
-        """Return whether this observation invalidated the room's derived state."""
-        return self.observation is DepartureObservation.FENCED
+    def __post_init__(self) -> None:
+        """Reject noncanonical membership positions at the typed boundary."""
+        if type(self.membership) is not str or self.membership not in {"join", "leave"}:
+            msg = "membership must be exactly 'join' or 'leave'"
+            raise ValueError(msg)
+        if type(self.membership_epoch) is not int or self.membership_epoch < 0:
+            msg = "membership_epoch must be a nonnegative int"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +179,28 @@ class InboundEvent:
     sender: str
     origin_server_ts: int
     source: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionRecordAdmission:  # noqa: D101
+    disposition: IngestionRecordDisposition
+    source: DepartureSource | None = None
+    room_id: str | None = None
+    previous_membership: str | None = None
+    membership: str | None = None
+    previous_membership_epoch: int | None = None
+    membership_epoch: int | None = None
+    event: InboundEvent | None = None
+    projected: ProjectedEvent | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionBatchAdmission:
+    """Ordered effects from one batch on the principal-bound stream."""
+
+    stream_id: UUID
+    sequence: int
+    records: tuple[IngestionRecordAdmission, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +297,9 @@ class HydrationPolicy(IntEnum):
     """
 
     PROMPT = 10
-    EXPORT = 20
+    # Rank20 also spent the allowance on unreadable history. A new rank gives
+    # those ambiguous incomplete rows one revalidation; complete rows stay warm.
+    EXPORT = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +382,16 @@ class ConversationPage:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyRowFacts:
+    """What a reply row's acknowledgement and late edit target need, recorded beside its payload."""
+
+    # Whether the row shows only the reply's placeholder.
+    placeholder_only: bool
+    # The body an edit carries when its target was bound after the row was prepared.
+    new_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MatrixDelivery:
     """One claimed, immutable Matrix delivery."""
 
@@ -335,6 +407,9 @@ class MatrixDelivery:
     # The scan key recovery pages on. Without it a pass that fails a whole page
     # re-reads the same page forever and never reaches what is behind it.
     created_at_ns: int
+    # Semantic facts retained locally for post-acknowledgement recovery. They
+    # are intentionally separate from ``payload``, which is Matrix wire data.
+    result: Mapping[str, object] | None = None
     event_type: str = "m.room.message"
     # Whether this row has already been offered to the homeserver. Together
     # with the device below it answers the only question a resend needs: can
@@ -344,11 +419,26 @@ class MatrixDelivery:
     # An obsolete delivery stays as an identity tombstone so late work cannot
     # cross into a newer membership, but recovery never sends it again.
     retired: bool = False
+    # A definitive refusal of this immutable payload. Unlike retirement, this
+    # records a delivery failure rather than an obsolete membership identity.
+    permanent_failure_reason: str | None = None
     # The device that offered it, or None when none is recorded. A Matrix
     # transaction ID deduplicates within one device, so a row attempted by a
     # device this process is no longer logged in as carries an ID the
     # homeserver would accept as new.
     sending_device_id: str | None = None
+    # Set on rows that write an agent or team reply: the rows of one reply
+    # are sent in ``reply_sequence`` order, across all of its delivery ids.
+    reply_id: str | None = None
+    span_id: str | None = None
+    reply_sequence: int | None = None
+    # What the row's acknowledgement and late edit target need; never sent.
+    reply_row: ReplyRowFacts | None = None
+
+    @property
+    def permanently_failed(self) -> bool:
+        """Return whether this immutable payload has a terminal refusal."""
+        return self.permanent_failure_reason is not None
 
     @property
     def has_interactive_prompt(self) -> bool:
@@ -368,24 +458,49 @@ class UnreadableMatrixDelivery:
 
 
 @dataclass(frozen=True, slots=True)
-class DeliveryAcknowledgement:
-    """What one delivery's row names afterwards, and who put it there.
+class ResponseRecoveryState:
+    """One consistent snapshot of a response's durable ownership or termination."""
 
-    The two are separate facts and cannot be recovered from each other. Two
-    processes can send the same frozen transaction ID from the same device;
-    Matrix deduplicates and hands both callers the *same* event ID, while only
-    one conditional update binds the row. Comparing the settled event to the
-    one just sent therefore tells a loser it won, which is precisely when it
-    goes on to publish a record the database does not hold.
+    pending_sources: tuple[bool, ...]
+    final_delivery: MatrixDelivery | None
+    sources_settled_by_departure: bool
+    redacted_sources: tuple[bool, ...]
+    turn_records: tuple[TurnRecord | None, ...]
+    # The newest reply answering the sources, which owns an AI turn's outcome.
+    reply: Reply | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryAcknowledgement:
+    """What one delivery's row names afterwards, and what binding it committed.
+
+    Two processes can send the same frozen transaction ID from the same
+    device; Matrix deduplicates and hands both callers the *same* event ID,
+    while only one conditional update binds the row. The settled event
+    therefore cannot tell a loser it lost: only the caller that bound the row
+    gets the terminal turn record its transaction committed, and so only it
+    publishes one.
     """
 
     # The event the row names now: this call's if it bound the row, the
     # winner's if it did not, and ``None`` when there is no row left to name
     # one. Membership fences retain rows as retired identity tombstones.
     settled_event_id: str | None
-    # Whether this call's conditional update is the one that bound the row.
-    # The only thing that licenses writing anything beside the row.
-    bound: bool
+    # The terminal turn record this call's binding of a FINAL row committed.
+    terminal_turn: TerminalTurnWrite | None = None
+    # Work a reply row's acknowledgement left for after the commit, such as
+    # cancelling a span a Stop that waited for this event now reaches.
+    reply_effects: tuple[PostCommitEffect, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PermanentDeliveryFailure:
+    """What recording one definitive refusal of a delivery decided."""
+
+    # The event a concurrent acknowledgement bound, which wins over the refusal.
+    acknowledged_event_id: str | None = None
+    # Work refused reply rows left for after the commit.
+    reply_effects: tuple[PostCommitEffect, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

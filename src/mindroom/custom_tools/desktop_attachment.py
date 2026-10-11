@@ -42,7 +42,7 @@ def screenshot_attachment_result_fields(attachment: RuntimeEncryptedMediaAttachm
         "attachment": attachment.tool_payload(),
         "attachment_lifetime": "current_turn",
         "attachment_usage": (
-            "Send this screenshot in the current turn with matrix_message attachment_ids; "
+            "Send this screenshot in the current turn with matrix_message(attachments=[attachment_id]); "
             "the handle expires when the turn ends."
         ),
     }

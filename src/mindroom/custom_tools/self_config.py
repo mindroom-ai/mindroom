@@ -13,7 +13,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.agent_repository import AGENT_REPOSITORY_TOOL_NAME
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
-from mindroom.custom_tools.config_manager import preserve_tool_overrides, validate_knowledge_bases
+from mindroom.custom_tools.config_manager import (
+    platform_administrator_error,
+    preserve_tool_overrides,
+    redaction_marker_error,
+    validate_knowledge_bases,
+)
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
@@ -24,6 +29,9 @@ logger = get_logger(__name__)
 
 _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager", AGENT_REPOSITORY_TOOL_NAME}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
+_PLATFORM_ADMIN_REQUIRED_MESSAGE = (
+    "Error: Reading or changing this agent's configuration requires an active platform administrator requester."
+)
 
 
 def _changed_privileged_tools(current_tools: list[str], requested_tools: list[str]) -> list[str]:
@@ -43,9 +51,14 @@ class SelfConfigTools(Toolkit):
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],
         )
+        # A human confirms every write, even under tool_approval.default: auto_approve,
+        # because the model issuing the call also reads untrusted content.
+        self.functions["update_own_config"].requires_confirmation = True
 
     def get_own_config(self) -> str:
-        """Get this agent's current configuration as YAML.
+        """Get this agent's current redacted configuration as YAML.
+
+        Requires a platform administrator requester.
 
         Returns:
             The agent's configuration formatted as YAML, or an error message.
@@ -58,15 +71,18 @@ class SelfConfigTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
+        if authorization_error is not None:
+            return authorization_error
 
-        if self.agent_name not in config.agents:
+        agent_dict = config.redacted_authored_model_dump().get("agents", {}).get(self.agent_name)
+        if agent_dict is None:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
 
-        agent_dict = config.agents[self.agent_name].authored_model_dump()
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         return f"## Configuration for '{self.agent_name}':\n\n```yaml\n{yaml_str}```"
 
-    def update_own_config(  # noqa: C901, PLR0912, PLR0911
+    def update_own_config(  # noqa: C901, PLR0912, PLR0911, PLR0915
         self,
         display_name: str | None = None,
         role: str | None = None,
@@ -123,6 +139,15 @@ class SelfConfigTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
+
+        authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
+        if authorization_error is not None:
+            return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+        marker_error = redaction_marker_error(
+            {"display_name": display_name, "role": role, "instructions": instructions},
+        )
+        if marker_error is not None:
+            return marker_error
 
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."

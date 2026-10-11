@@ -13,13 +13,19 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
+    SCHEDULED_MODEL_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
+from mindroom.dispatch_source import (
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+    is_voice_event,
+)
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.response_admission import admitted_response_decision
+from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -37,7 +43,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.commands.parsing import Command
     from mindroom.dispatch_handoff import (
         DispatchEvent,
@@ -212,7 +218,6 @@ async def _prepare_text_dispatch(
         handled_turn=canonicalize_turn_record(
             handled_turn,
             requester_id=prepared.dispatch.requester_user_id,
-            correlation_id=prepared.dispatch.correlation_id,
         ),
         command=command,
         dispatch=prepared.dispatch,
@@ -230,7 +235,12 @@ def _parsed_command_for_event(
 ) -> Command | None:
     if media_events:
         return None
-    if ingress_metadata is not None and ingress_metadata.source_kind == VOICE_SOURCE_KIND:
+    # Scheduled fires carry their creator as requester, but an agent can write their text.
+    if ingress_metadata is not None and ingress_metadata.source_kind in {
+        VOICE_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
+    }:
         return None
     if is_audio_message_event(event) or is_voice_event(
         event,
@@ -238,19 +248,6 @@ def _parsed_command_for_event(
     ):
         return None
     return command_parser.parse(event.body)
-
-
-def _turn_sources_all_from_requester(handled_turn: TurnRecord, requester_user_id: str) -> bool:
-    """Return whether every replayable source in one turn was sent by ``requester_user_id``.
-
-    Whole-turn suppression settles every source in a coalesced batch, so it is only safe when the
-    turn provably belongs to that one requester, and a source the record cannot attribute fails
-    closed. Redacted sources are excluded because they own no reply.
-    """
-    return all(
-        handled_turn.requester_id_for_source(source_event_id) == requester_user_id
-        for source_event_id in handled_turn.replay_source_event_ids
-    )
 
 
 async def _blocked_before_plan(
@@ -279,9 +276,22 @@ async def _blocked_before_plan(
         await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return True
 
+    coalescing_key = prepared.turn.ingress.coalescing_key
     may_be_superseded = (
         prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
-        and _turn_sources_all_from_requester(prepared.handled_turn, requester_user_id)
+        and prepared.handled_turn.replay_sources_all_from_requester(requester_user_id)
+        # While another run still waits in the queue, whether another
+        # requester's follow-ups, an entity's reply written for this
+        # requester, or this requester's message for another participant, a
+        # newer message from this requester may only be answered after it, so
+        # letting it absorb this turn would answer out of receipt order or not at all.
+        and not (
+            coalescing_key is not None
+            and controller.deps.coalescing_gate.queues_other_run(
+                coalescing_key,
+                requester_user_id,
+            )
+        )
     )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_journal_thread_event(
@@ -307,7 +317,7 @@ async def _blocked_before_plan(
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
     if skips_turn:
-        await visible_responses.settle_source_events_ignored(prepared.handled_turn)
+        return await visible_responses.settle_superseded_turn(prepared.handled_turn)
     return skips_turn
 
 
@@ -339,10 +349,18 @@ def _attachment_parts(
         extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
     if prepared.dispatch.scheduled_history_budget is not None:
         extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_budget.limit
+    if prepared.dispatch.scheduled_model is not None:
+        extra_content[SCHEDULED_MODEL_KEY] = prepared.dispatch.scheduled_model
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
-async def _apply_turn_plan(
+def _ensure_response_admission_open(controller: TurnController) -> None:
+    """Refuse response planning after orderly shutdown closes task ownership."""
+    if controller.deps.response_runner.process_shutdown_started:
+        raise ResponseAdmissionRefusedError
+
+
+async def _apply_turn_plan(  # noqa: C901
     controller: TurnController,
     room: nio.MatrixRoom,
     prepared: _PreparedTextDispatch,
@@ -369,16 +387,18 @@ async def _apply_turn_plan(
         await _execute_route_plan(controller, room, prepared, plan, media_events=media_events)
         return
 
-    assert plan.response_action is not None
+    response_action = plan.response_action
+    assert response_action is not None
+    _ensure_response_admission_open(controller)
     reconcile_visible_response = controller.deps.turn_store.has_pending_response_intent(
         prepared.handled_turn.source_event_ids,
     )
     response_history_scope = (
         controller.deps.turn_store.response_history_scope(
-            plan.response_action,
+            response_action,
             requester_user_id=prepared.dispatch.requester_user_id,
         )
-        if plan.response_action.kind in {"individual", "team"}
+        if response_action.kind in {"individual", "team"}
         else None
     )
 
@@ -405,15 +425,27 @@ async def _apply_turn_plan(
     # The inbox handoff is complete once the runner takes the conversation's
     # response lock; the response itself keeps running on a runner-owned task.
     response_started = asyncio.Event()
+    response_claim_released = False
+
+    def release_response_claim() -> None:
+        nonlocal response_claim_released
+        if response_claim_released:
+            return
+        response_claim_released = True
+        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+
+    async def response_recovery_ready() -> bool:
+        return await controller.deps.response_recovery_ready(handled_turn)
+
     response_task = controller.deps.response_runner.track_inbox_response(
-        _run_claimed_response(
+        _run_lazily_claimed_response(
             controller,
             turn_claim,
-            controller._execute_response_action(
+            lambda: controller._execute_response_action(
                 room,
                 prepared.event,
                 prepared.dispatch,
-                plan.response_action,
+                response_action,
                 payload_inputs,
                 processing_log="Processing",
                 dispatch_started_at=prepared.dispatch_started_at,
@@ -422,15 +454,17 @@ async def _apply_turn_plan(
                 on_lifecycle_lock_acquired=response_started.set,
                 reconcile_visible_response=reconcile_visible_response,
             ),
+            release_response_claim,
         ),
         name=f"inbox_response:{prepared.event.event_id}",
-        recovery_proof_ready=lambda: (
-            prepared.dispatch.target.resolved_thread_id is not None
-            and controller.deps.interrupted_turn_rooms.contains(prepared.event.event_id)
-        ),
+        room_id=room.room_id,
+        recovery_proof_ready=response_recovery_ready,
         on_failure=lambda: (
-            controller.deps.retry_dispatch_sources(handled_turn.source_event_ids) if response_started.is_set() else None
+            controller.deps.retry_dispatch_sources(room.room_id, handled_turn.source_event_ids)
+            if response_started.is_set()
+            else None
         ),
+        on_terminal=release_response_claim,
         source_event_ids=handled_turn.source_event_ids,
     )
     # Ownership moves synchronously after task creation. If this dispatch task
@@ -456,12 +490,26 @@ async def _run_claimed_response(
     controller: TurnController,
     turn_claim: TurnRecord,
     response: Awaitable[None],
+    release_claim: Callable[[], None] | None = None,
 ) -> None:
     """Release exclusive response ownership after every terminal path."""
     try:
         await response
     finally:
-        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+        if release_claim is None:
+            controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+        else:
+            release_claim()
+
+
+async def _run_lazily_claimed_response(
+    controller: TurnController,
+    turn_claim: TurnRecord,
+    response_factory: Callable[[], Awaitable[None]],
+    release_claim: Callable[[], None],
+) -> None:
+    """Create a claimed response only after its runner task starts."""
+    await _run_claimed_response(controller, turn_claim, response_factory(), release_claim)
 
 
 async def _run_admitted_router_relay(

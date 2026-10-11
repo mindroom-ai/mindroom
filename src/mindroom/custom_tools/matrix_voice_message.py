@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
 
-from mindroom.credentials_sync import get_secret_from_env
+from mindroom.credentials.sync import get_secret_from_env
 from mindroom.custom_tools.attachment_helpers import (
     resolve_context_thread_id,
     resolve_optional_room_id,
@@ -24,14 +24,13 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_audio_message
 from mindroom.matrix.voice_message import prepare_voice_audio_bytes
-from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 _OPUS_FILENAME = "voice-message.opus"
 _DEFAULT_RESPONSE_FORMAT = "opus"
 _SpeechResponseFormat = Literal["aac", "flac", "mp3", "opus", "wav"]
 _ALLOWED_RESPONSE_FORMATS = frozenset(get_args(_SpeechResponseFormat))
-_OPENROUTER_TTS_BASE_URL = "https://openrouter.ai/api/v1"
 # OpenRouter's /audio/speech endpoint only returns mp3 or pcm; mp3 is the one we can turn into a Matrix voice message.
 _OPENROUTER_RESPONSE_FORMAT = "mp3"
 logger = get_logger(__name__)
@@ -152,7 +151,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 model=self._model,
                 reason="provider_prefixed_model_without_explicit_base_url",
             )
-            return _OPENROUTER_TTS_BASE_URL
+            return OPENROUTER_BASE_URL_DEFAULT
         return None
 
     def _api_key_for_context(self, context: ToolRuntimeContext, *, base_url: str | None) -> str | None:
@@ -204,18 +203,17 @@ class MatrixVoiceMessageTools(Toolkit):
 
         return await self._message_operations.dispatch_action(
             context,
-            action="thread-reply" if thread_id is not None else "send",
+            action="send",
             message=companion_text,
-            attachment_ids=[],
-            attachment_file_paths=[],
+            attachments=[],
             room_id=room_id,
-            target=None,
+            event_id=None,
             thread_id=thread_id,
-            ignore_mentions=True,
+            recipient_user_id=None,
+            room_mode=thread_id is None,
+            new_thread=False,
             message_extras=None,
             read_limit=1,
-            page_token=None,
-            room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
         )
 
     def _companion_event_id_or_error(
@@ -239,7 +237,7 @@ class MatrixVoiceMessageTools(Toolkit):
             message="Failed to send companion message to Matrix.",
         )
 
-    def _preflight(
+    async def _preflight(
         self,
         context: ToolRuntimeContext,
         *,
@@ -260,7 +258,7 @@ class MatrixVoiceMessageTools(Toolkit):
         response_format = self._response_format_for_target(base_url)
 
         resolved_room_id = resolve_optional_room_id(context, room_id)
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return None, self._payload(
                 "error",
                 room_id=resolved_room_id,
@@ -357,7 +355,7 @@ class MatrixVoiceMessageTools(Toolkit):
         if validation_error is not None:
             return self._payload("error", message=validation_error)
 
-        preflight, preflight_error = self._preflight(context, text=text, room_id=room_id)
+        preflight, preflight_error = await self._preflight(context, text=text, room_id=room_id)
         if preflight_error is not None or preflight is None:
             return preflight_error or self._context_error()
 

@@ -51,6 +51,7 @@ def _publish_static_site(test_client: TestClient) -> tuple[str, str]:
             title="Demo Site",
             requested_by="@alice:example.org",
             artifact_kind="static_site",
+            artifact_root=source_dir.parent,
         ),
         published_by="@alice:example.org",
         base_url="https://mindroom.lab.mindroom.chat",

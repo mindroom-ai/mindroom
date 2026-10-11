@@ -49,7 +49,8 @@ from mindroom.hooks.execution import emit, emit_collect
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.scheduling import ScheduledWorkflow
+from mindroom.response_sources import ResponseSources
+from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -105,6 +106,7 @@ def _plugin(name: str, callbacks: list[object]) -> object:
         {
             "name": name,
             "discovered_hooks": tuple(callbacks),
+            "discovered_automations": (),
             "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
             "plugin_order": 0,
         },
@@ -780,6 +782,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-late-workloop-cleanup",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import socket
 import threading
@@ -13,7 +14,9 @@ import httpx
 import pytest
 from bs4 import BeautifulSoup
 
+from mindroom.custom_tools import website
 from mindroom.custom_tools.website import (
+    _MAX_PAGE_BYTES,
     _MAX_REDIRECTS,
     _TOO_MANY_REDIRECTS,
     WebsiteTools,
@@ -647,3 +650,36 @@ def test_website_docs_describe_mindroom_reader() -> None:
     docs = Path("docs/tools/web-scraping-and-browser.md").read_text(encoding="utf-8")
 
     assert "MindRoom's WebsiteReader variant" in docs
+
+
+@pytest.mark.parametrize(
+    ("headers", "body", "refused"),
+    [
+        pytest.param({"Content-Encoding": "gzip"}, gzip.compress(b"a" * 10_000_000), True, id="compressed"),
+        pytest.param({}, b"a" * (_MAX_PAGE_BYTES + 1), True, id="oversized"),
+        pytest.param({"Content-Encoding": "identity"}, b"<p>whole page</p>", False, id="identity"),
+    ],
+)
+def test_server_fetch_reads_only_uncompressed_pages_within_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    body: bytes,
+    refused: bool,
+) -> None:
+    """Pages are requested uncompressed, and neither a compressed nor an oversized body is inflated or buffered."""
+    requested_encodings: list[str | None] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        requested_encodings.append(request.headers.get("accept-encoding"))
+        chunks = [body[start : start + 65536] for start in range(0, len(body), 65536)]
+        return httpx.Response(200, headers=headers, content=iter(chunks))
+
+    monkeypatch.setattr(website, "ServerFetchHTTPTransport", lambda: httpx.MockTransport(serve))
+
+    if refused:
+        with pytest.raises(httpx.DecodingError):
+            website._server_fetch_get("https://example.com/", timeout=5, follow_redirects=False)
+    else:
+        response = website._server_fetch_get("https://example.com/", timeout=5, follow_redirects=False)
+        assert response.content == body
+    assert requested_encodings == ["identity"]

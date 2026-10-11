@@ -46,6 +46,7 @@ def test_matrix_state_cache_invalidates_after_write(tmp_path: Path) -> None:
     first = matrix_state_for_runtime(runtime_paths)
     assert first.get_room("dev") is not None
     assert first.get_room("research") is None
+    assert matrix_state.resolve_room_id("research", runtime_paths) == "research"
 
     fresh = MatrixState.load(runtime_paths=runtime_paths)
     fresh.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
@@ -54,6 +55,7 @@ def test_matrix_state_cache_invalidates_after_write(tmp_path: Path) -> None:
     second = matrix_state_for_runtime(runtime_paths)
     assert second is not first
     assert second.get_room("research") is not None
+    assert matrix_state.resolve_room_id("research", runtime_paths) == "!research:localhost"
 
 
 def test_matrix_state_load_returns_isolated_deep_copy(tmp_path: Path) -> None:
@@ -161,6 +163,41 @@ def test_matrix_state_cached_reads_do_not_stat_the_file(tmp_path: Path, monkeypa
     assert stat_calls == 0
 
 
+def test_resolve_room_aliases_reuses_mapping_for_unchanged_state(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """Repeated lookups must not rescan every persisted room for every agent."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+    builds = 0
+    original_get_room_aliases = MatrixState.get_room_aliases
+
+    def counted_get_room_aliases(self: MatrixState) -> dict[str, str]:
+        nonlocal builds
+        builds += 1
+        return original_get_room_aliases(self)
+
+    monkeypatch.setattr(MatrixState, "get_room_aliases", counted_get_room_aliases)
+
+    for _ in range(20):
+        resolved = matrix_state.resolve_room_aliases(["dev", "#dev:localhost", "!external:localhost"], runtime_paths)
+        assert resolved == ["!dev:localhost", "!dev:localhost", "!external:localhost"]
+        resolved.clear()
+        assert matrix_state.get_room_alias_from_id("!dev:localhost", runtime_paths) == "dev"
+
+    assert builds == 1
+
+
+def test_room_alias_cache_isolates_runtimes(tmp_path: Path) -> None:
+    """Identical aliases in separate runtime state files must resolve independently."""
+    first_paths = test_runtime_paths(tmp_path / "first")
+    second_paths = test_runtime_paths(tmp_path / "second")
+    _seed_state(first_paths, "dev", "!first:localhost")
+    _seed_state(second_paths, "dev", "!second:localhost")
+
+    for _ in range(2):
+        assert matrix_state.resolve_room_id("dev", first_paths) == "!first:localhost"
+        assert matrix_state.resolve_room_id("dev", second_paths) == "!second:localhost"
+
+
 def test_matrix_state_cache_observes_first_write_after_missing_read(tmp_path: Path) -> None:
     """A write must invalidate a cached empty state for a previously missing file."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -186,6 +223,7 @@ def test_matrix_state_cache_observes_external_write_after_stat_ttl(tmp_path: Pat
     monkeypatch.setattr(matrix_state, "_MATRIX_STATE_STAT_TTL_SECONDS", 1.0)
 
     first = matrix_state_for_runtime(runtime_paths)
+    assert matrix_state.resolve_room_id("research", runtime_paths) == "research"
     external = first.model_copy(deep=True)
     external.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
     state_file.write_text(
@@ -202,3 +240,4 @@ def test_matrix_state_cache_observes_external_write_after_stat_ttl(tmp_path: Pat
 
     assert second is not first
     assert second.get_room("research") is not None
+    assert matrix_state.resolve_room_id("research", runtime_paths) == "!research:localhost"

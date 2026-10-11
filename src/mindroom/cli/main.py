@@ -3,36 +3,53 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import shlex
+import signal
 import socket
 import sys
+from contextlib import nullcontext
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
+from rich.markup import escape
 
+from mindroom.constants import ensure_writable_config_path
+
+from .api import is_loopback_host
 from .banner import make_banner
 from .config import (
+    DEFAULT_API_HOST,
+    DEFAULT_API_PORT,
     activate_cli_runtime,
     check_env_keys,
     config_app,
     console,
+    create_first_run_config,
+    ensure_worker_dashboard_api_key,
     format_validation_errors,
     load_config_quiet,
     print_config_search_locations,
+    warn_dashboard_without_key,
 )
+from .config_bundle import (
+    config_apply_bundle,
+    config_classify_change,
+    config_install_bundle,
+    initialize_runtime_bundle,
+)
+from .config_reload import config_check_applied, config_fingerprint
+from .debug_report import debug_report
 from .desktop import desktop_app
 from .local_stack import local_stack_setup
 from .migrate import config_migrate
 from .plugins import plugins_app
-from .service import service_app
+from .response_activity import check_active_responses
+from .service import require_login_service, service_app, start_login_service
 from .trigger import trigger_app
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    import httpx
+    from collections.abc import Callable, Mapping
+    from types import FrameType
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -42,12 +59,17 @@ _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
 
 [bold]Quick start:[/bold]
-  [cyan]mindroom config init[/cyan]   Create a starter config
-  [cyan]mindroom run[/cyan]           Start the system\
+  [cyan]mindroom run[/cyan]           Set up on first run, pair, and start
+  [cyan]mindroom config init[/cyan]   Create a starter config without starting\
 """
 _CONFIG_INIT_PROVIDER_CHOICES = (
     "{openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude,llama.cpp,vertexai_claude}"
 )
+# Exit code of `mindroom connect` when it declines to re-pair a connected machine (no terminal, no --force).
+# The macOS app matches it as `MindRoomCommand.alreadyConnectedExitCode`; change both together.
+_CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
+# Matches `MindRoomCommand.pairingCancelledExitCode` in the macOS app.
+_CONNECT_CANCELLED_EXIT_CODE = 130
 
 app = typer.Typer(
     help=_HELP,
@@ -62,6 +84,11 @@ avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 threads_app = typer.Typer(help="Export Matrix threads to local files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
 config_app.command("migrate")(config_migrate)
+config_app.command("fingerprint")(config_fingerprint)
+config_app.command("install-bundle")(config_install_bundle)
+config_app.command("classify-change")(config_classify_change)
+config_app.command("apply-bundle")(config_apply_bundle)
+config_app.command("check-applied")(config_check_applied)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
 app.add_typer(desktop_app, name="desktop")
@@ -70,19 +97,8 @@ app.add_typer(threads_app, name="threads")
 app.add_typer(journal_app, name="journal")
 app.add_typer(service_app, name="service")
 app.add_typer(trigger_app, name="trigger")
-
-
-def _httpx_post(
-    url: str,
-    *,
-    json: Mapping[str, object],
-    timeout: float,
-    verify: bool,
-) -> httpx.Response:
-    """Call httpx.post without importing httpx during CLI help rendering."""
-    import httpx  # noqa: PLC0415
-
-    return httpx.post(url, json=json, timeout=timeout, verify=verify)
+app.command()(check_active_responses)
+app.command("debug-report")(debug_report)
 
 
 @app.command()
@@ -116,30 +132,125 @@ def run(
         "-s",
         help="Base directory for persistent MindRoom data (state, sessions, tracking)",
     ),
+    bootstrap_config_bundle: Path | None = typer.Option(  # noqa: B008
+        None,
+        help="Initialize the selected config directory from this bundle only when the directory is absent.",
+    ),
+    bootstrap_config_bundle_revision: str | None = typer.Option(
+        None,
+        help="Install a changed bootstrap revision through native validation; preserve a matching active revision.",
+    ),
     api: bool = typer.Option(
         True,
         "--api/--no-api",
         help="Start the bundled dashboard/API server alongside the bot",
     ),
     api_port: int = typer.Option(
-        8765,
+        DEFAULT_API_PORT,
         "--api-port",
         help="Port for the bundled dashboard/API server",
     ),
     api_host: str = typer.Option(
-        "0.0.0.0",  # noqa: S104
+        DEFAULT_API_HOST,
         "--api-host",
         help="Host for the bundled dashboard/API server",
+    ),
+    provider: str | None = typer.Option(
+        None,
+        "--provider",
+        help=(
+            "Model provider preset for the starter config when none exists, with the choices of "
+            "`config init --provider`. It also lets setup run without a terminal, taking the API key "
+            "from the environment."
+        ),
+    ),
+    service: bool | None = typer.Option(
+        None,
+        "--service/--no-service",
+        help=(
+            "After setup and pairing, install and start MindRoom as a login service (systemd or launchd) "
+            "instead of running it here, or never offer to. A first run in a terminal asks."
+        ),
     ),
 ) -> None:
     """Run the mindroom multi-agent system.
 
     This command starts the multi-agent bot system which automatically:
+    - Creates a hosted starter config on first run in a terminal, or with --provider
+    - Pairs hosted installs with your MindRoom Chat account on first run
+    - Offers on first run to keep running as a background service that starts at login (--service/--no-service)
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
     - Manages agent room memberships
     - Starts the bundled dashboard/API server (disable with --no-api)
     """
+    if bootstrap_config_bundle_revision is not None and bootstrap_config_bundle is None:
+        typer.echo("--bootstrap-config-bundle-revision requires --bootstrap-config-bundle.", err=True)
+        raise typer.Exit(2)
+    # The service runs a plain `mindroom run`, so it only takes over runs with the default paths and API options.
+    plain_run = (
+        config_path is None
+        and storage_path is None
+        and api
+        and api_host == DEFAULT_API_HOST
+        and api_port == DEFAULT_API_PORT
+    )
+    if service and not plain_run:
+        typer.echo(
+            "--service runs a plain `mindroom run`, so it cannot be combined with "
+            "--config, --storage-path, --no-api, --api-host, or --api-port.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    # Fail before setup and pairing ask a person for anything when this machine cannot run the service.
+    service_manager = require_login_service() if service else None
+    if bootstrap_config_bundle is not None:
+        initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
+
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    interactive = _terminal_is_interactive()
+    first_run = not ensure_writable_config_path(runtime_paths=runtime_paths) and (interactive or provider is not None)
+    if first_run:
+        try:
+            create_first_run_config(runtime_paths, provider=provider, interactive=interactive)
+        except (OSError, ValueError) as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from None
+        # Pick up the new config and .env before pairing and startup.
+        runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    runtime_paths = _protect_dashboard_from_workers(runtime_paths, config_path, storage_path)
+    # Report a broken config or missing model keys before any pairing waits for a human.
+    config = _load_active_config_or_exit(runtime_paths)
+    if not first_run:
+        # First-run setup has already said which provider credentials are still missing.
+        check_env_keys(config, runtime_paths=runtime_paths)
+    try:
+        if local_pairing_required(runtime_paths):
+            import mindroom.cli.connect as cli_connect  # noqa: PLC0415
+            from mindroom.cli.pairing_probes import serve_pairing_probes  # noqa: PLC0415
+
+            # Container health probes must see a live process while the run waits for a human to approve it.
+            with serve_pairing_probes(api_host, api_port) if api else nullcontext():
+                cli_connect.pair_local_install(
+                    runtime_paths,
+                    console=console,
+                    # `mindroom connect` or the macOS app may pair this machine while the run waits.
+                    stop_waiting=lambda: _paired_elsewhere(config_path, storage_path),
+                    confirm_approver=_approver_confirmation(),
+                )
+    except (OSError, TypeError, ValueError) as exc:
+        # Pairing errors can carry text the provisioning service chose, such as an approver or error detail.
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from None
+    ask_service = service is None and first_run and interactive and plain_run
+    if (service or ask_service) and start_login_service(runtime_paths, service_manager):
+        console.print(f"Dashboard: http://localhost:{api_port}")
+        console.print(f"After editing {runtime_paths.env_path}, run [cyan]mindroom service restart[/cyan].")
+        # The service runs MindRoom now; starting it here as well would run it twice.
+        return
+
     asyncio.run(
         _run(
             log_level=log_level.upper(),
@@ -152,10 +263,25 @@ def run(
     )
 
 
+def _protect_dashboard_from_workers(
+    runtime_paths: RuntimePaths,
+    config_path: Path | None,
+    storage_path: Path | None,
+) -> RuntimePaths:
+    """Give the dashboard API a generated key when dedicated workers could reach it, then reload that runtime."""
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    if ensure_worker_dashboard_api_key(
+        runtime_paths,
+        dashboard_has_credential=dashboard_requires_credential(runtime_paths),
+    ):
+        return activate_cli_runtime(path=config_path, storage_path=storage_path)
+    return runtime_paths
+
+
 def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
     """Load the active config file or exit with friendly validation errors."""
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-    from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415
 
     ensure_writable_config_path(runtime_paths=runtime_paths)
 
@@ -186,13 +312,11 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
-    from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
+    from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    config = _load_active_config_or_exit(runtime_paths)
-
-    # Check for missing API keys
-    check_env_keys(config, runtime_paths=runtime_paths)
+    # Validate again: pairing may have rewritten owner placeholders in the config.
+    _load_active_config_or_exit(runtime_paths)
 
     console.print(make_banner())
     console.print()
@@ -201,13 +325,14 @@ async def _run(
         from mindroom.frontend_assets import ensure_frontend_dist_dir  # noqa: PLC0415
 
         frontend_dir = ensure_frontend_dist_dir(runtime_paths)
-        display_host = "localhost" if api_host == "0.0.0.0" else api_host  # noqa: S104
+        display_host = "localhost" if api_host == DEFAULT_API_HOST else api_host
         if frontend_dir is None:
             console.print("Dashboard: unavailable (frontend assets missing)")
             console.print("  Install Bun or provide MINDROOM_FRONTEND_DIST when running from a source checkout.")
         else:
             console.print(f"Dashboard: http://{display_host}:{api_port}")
         console.print(f"API: http://{display_host}:{api_port}/api")
+        _warn_if_dashboard_is_open_beyond_loopback(runtime_paths, api_host, api_port)
     console.print("Press Ctrl+C to stop\n")
 
     try:
@@ -225,7 +350,7 @@ async def _run(
     except ConnectionError as exc:
         _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
-    except PermanentStartupError as exc:
+    except (PermanentStartupError, EventJournalHoldLostError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
@@ -233,6 +358,19 @@ async def _run(
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
+
+
+def _warn_if_dashboard_is_open_beyond_loopback(runtime_paths: RuntimePaths, api_host: str, api_port: int) -> None:
+    """Warn when anyone who can reach a non-loopback bind address would administer MindRoom."""
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    if is_loopback_host(api_host) or dashboard_requires_credential(runtime_paths):
+        return
+    address_host = f"[{api_host}]" if ":" in api_host else api_host
+    warn_dashboard_without_key(
+        f"{address_host}:{api_port}",
+        f"Set MINDROOM_API_KEY in {runtime_paths.env_path}, or pass --api-host 127.0.0.1.",
+    )
 
 
 @app.command()
@@ -316,6 +454,11 @@ def avatars_sync(
 
 @threads_app.command("export")
 def _threads_export_command(
+    url: str | None = typer.Option(
+        None,
+        "--url",
+        help="Running MindRoom URL; defaults to MINDROOM_URL or localhost:8765.",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -361,10 +504,11 @@ def _threads_export_command(
         help="Include rooms joined through authorized invites (user-created rooms).",
     ),
 ) -> None:
-    """Export Matrix threads to YAML files for grep/ripgrep search."""
+    """Export Matrix threads through a running MindRoom instance to searchable YAML files."""
     asyncio.run(
         _threads_export(
             config_path=config_path,
+            url=url,
             storage_path=storage_path,
             output=output,
             room=room,
@@ -384,7 +528,7 @@ async def _journal_adopt(
     force: bool,
 ) -> None:
     """Bind this install to whatever event-journal database is configured right now."""
-    from mindroom.event_journal_open import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
+    from mindroom.event_journal.opening import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
         EventJournalBindingError,
         adopt_event_journal,
         current_binding_description,
@@ -493,6 +637,7 @@ def _is_connection_os_error(exc: BaseException) -> bool:
 async def _threads_export(
     *,
     config_path: Path | None,
+    url: str | None = None,
     storage_path: Path | None,
     output: Path | None,
     room: str | None,
@@ -502,10 +647,9 @@ async def _threads_export(
     include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
-    from mindroom.thread_export import export_threads_once  # noqa: PLC0415
+    from mindroom.cli.thread_export import request_thread_export  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    config = _load_active_config_or_exit(runtime_paths)
     if interval < 1:
         console.print("[red]Error:[/red] --interval must be at least 1 second")
         raise typer.Exit(1)
@@ -515,14 +659,18 @@ async def _threads_export(
 
     while True:
         try:
-            stats = await export_threads_once(
-                config=config,
+            stats = await request_thread_export(
+                url=url,
                 runtime_paths=runtime_paths,
                 output_dir=output,
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
                 include_invited_rooms=include_invited_rooms,
             )
+        except ValueError as exc:
+            # A refused URL stays refused, so watching would only repeat the error.
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from None
         except (OSError, RuntimeError) as exc:
             _handle_thread_export_error(exc, runtime_paths, watch=watch)
         else:
@@ -537,11 +685,6 @@ async def _threads_export(
 
 @app.command()
 def connect(
-    pair_code: str = typer.Option(
-        ...,
-        "--pair-code",
-        help="Pair code shown in chat UI (format: ABCD-EFGH).",
-    ),
     provisioning_url: str | None = typer.Option(
         None,
         "--provisioning-url",
@@ -557,132 +700,133 @@ def connect(
         "--persist-env/--no-persist-env",
         help="Persist local provisioning credentials to .env next to config.yaml.",
     ),
+    open_browser: bool = typer.Option(
+        False,
+        "--open-browser",
+        help="Open the approval link in the default browser.",
+    ),
     path: Path | None = typer.Option(  # noqa: B008
         None,
         "--path",
         "-p",
         help="Override auto-detection and use this config file path for .env persistence.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Pair again even when this machine is already connected.",
+    ),
+    graceful_cancel: bool = typer.Option(
+        False,
+        "--graceful-cancel",
+        help="Cancel on SIGTERM while waiting; finish an in-flight approval or save (used by the macOS app).",
+    ),
 ) -> None:
-    """Pair this local MindRoom install with the hosted provisioning service."""
+    """Connect this local MindRoom to your MindRoom Chat account by approving a link.
+
+    When this machine is already connected, a terminal asks before pairing again.
+    Without a terminal it exits with code 3 unless --force is given.
+    With --graceful-cancel, SIGTERM while waiting exits with code 130 without saving.
+    """
     import mindroom.cli.connect as cli_connect  # noqa: PLC0415
-    from mindroom import constants  # noqa: PLC0415
 
-    normalized_pair_code = pair_code.strip().upper()
-    if not cli_connect.is_valid_pair_code(normalized_pair_code):
-        console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
-        raise typer.Exit(1)
-
-    runtime_paths = activate_cli_runtime(path)
-    resolved_provisioning_url = (
-        provisioning_url or runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "https://mindroom.chat"
-    ).strip()
-    if not resolved_provisioning_url:
-        console.print("[red]Error:[/red] Invalid provisioning URL.")
-        raise typer.Exit(1)
-
-    resolved_config_path = runtime_paths.config_path
-    normalized_client_name = client_name.strip() or socket.gethostname()
     try:
-        credentials = cli_connect.complete_local_pairing(
-            provisioning_url=resolved_provisioning_url,
-            pair_code=normalized_pair_code,
-            client_name=normalized_client_name,
-            client_fingerprint=_local_client_fingerprint(config_path=resolved_config_path),
-            matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
-            post_request=_httpx_post,
-        )
+        runtime_paths = activate_cli_runtime(path)
+        if provisioning_url is None and (refusal := cli_connect.self_hosted_pairing_error(runtime_paths)):
+            console.print(f"[red]Error:[/red] {escape(refusal)}")
+            raise typer.Exit(1)
+        if runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") and runtime_paths.env_value(
+            "MINDROOM_LOCAL_CLIENT_SECRET",
+        ):
+            console.print(
+                "[yellow]Warning:[/yellow] This machine is already connected. "
+                "Pairing again creates a new connection and a new agent namespace: "
+                "existing agents keep working, and new agents get the new namespace.",
+            )
+            if not force:
+                _confirm_reconnect()
+        cancelled = False
+
+        def request_cancel(_signum: int, _frame: FrameType | None) -> None:
+            nonlocal cancelled
+            cancelled = True
+
+        def stop_waiting() -> bool:
+            if cancelled:
+                console.print("Connection cancelled. Nothing was saved.")
+                raise typer.Exit(_CONNECT_CANCELLED_EXIT_CODE)
+            return False
+
+        if graceful_cancel:
+            signal.signal(signal.SIGTERM, request_cancel)
+        try:
+            cli_connect.pair_local_install(
+                runtime_paths,
+                console=console,
+                provisioning_url=provisioning_url,
+                client_name=client_name,
+                persist_env=persist_env,
+                open_browser=open_browser,
+                renew_expired=False,
+                stop_waiting=stop_waiting if graceful_cancel else None,
+                confirm_approver=_approver_confirmation(),
+            )
+            console.print("\nNext step:\n  mindroom run")
+        finally:
+            if graceful_cancel:
+                # Preserve the result through shutdown; Python resets callable handlers during finalization.
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
     except (TypeError, ValueError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from None
 
-    if credentials.owner_user_id_invalid:
-        console.print(
-            "[yellow]Warning:[/yellow] Pairing response included malformed owner_user_id; skipping config owner autofill.",
-        )
-    if credentials.namespace_invalid:
-        console.print(
-            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; leaving MINDROOM_NAMESPACE empty.",
-        )
 
-    if persist_env:
-        env_path = cli_connect.persist_local_provisioning_env(
-            provisioning_url=resolved_provisioning_url,
-            client_id=credentials.client_id,
-            client_secret=credentials.client_secret,
-            namespace=credentials.namespace,
-            owner_user_id=credentials.owner_user_id,
-            config_path=resolved_config_path,
-        )
-        console.print("[green]Paired successfully.[/green]")
-        console.print(f"  Saved credentials to: {env_path}")
-        if credentials.owner_user_id and cli_connect.replace_owner_placeholders_in_config(
-            config_path=resolved_config_path,
-            owner_user_id=credentials.owner_user_id,
-        ):
-            console.print(f"  Updated owner placeholder(s) in: {resolved_config_path}")
-        console.print("\nNext step:")
-        console.print("  uv run mindroom run")
-        return
+def _confirm_reconnect() -> None:
+    """Confirm re-pairing in a terminal, or let the macOS app ask via exit code 3."""
+    if not _stdin_is_interactive():
+        console.print("Run `mindroom connect --force` to pair again.")
+        raise typer.Exit(_CONNECT_ALREADY_CONNECTED_EXIT_CODE)
+    typer.confirm("Pair again?", abort=True)
 
-    _print_pairing_success_with_exports(
-        provisioning_url=resolved_provisioning_url,
-        client_id=credentials.client_id,
-        client_secret=credentials.client_secret,
-        namespace=credentials.namespace,
-        owner_user_id=credentials.owner_user_id,
-    )
+
+def _stdin_is_interactive() -> bool:
+    """Whether a person can answer prompts; the macOS app and services run without a terminal."""
+    return sys.stdin.isatty()
+
+
+def _terminal_is_interactive() -> bool:
+    """Whether a person can answer prompts and see their output; services, Docker, and the macOS app cannot."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _paired_elsewhere(config_path: Path | None, storage_path: Path | None) -> bool:
+    """Whether another process made pairing unnecessary since this run resolved its runtime."""
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
+    try:
+        return not local_pairing_required(activate_cli_runtime(path=config_path, storage_path=storage_path))
+    except ValueError:
+        # A half-written or undecodable .env keeps the run waiting because its writer may not have finished.
+        return False
+
+
+def _approver_confirmation() -> Callable[[], bool] | None:
+    """Ask whether the approving account is the user's own, only when a person can answer."""
+    if not _stdin_is_interactive():
+        return None
+
+    def confirm() -> bool:
+        try:
+            return typer.confirm("Is this your account?", default=True)
+        except typer.Abort:
+            # Ctrl+C or EOF is not a yes: discard the credentials with the revoke hint instead of a bare abort.
+            console.print()
+            return False
+
+    return confirm
 
 
 app.command("local-stack-setup")(local_stack_setup)
-
-
-def _print_pairing_success_with_exports(
-    *,
-    provisioning_url: str,
-    client_id: str,
-    client_secret: str,
-    namespace: str,
-    owner_user_id: str | None,
-) -> None:
-    """Print non-persisted exports for local provisioning credentials."""
-    console.print("[green]Paired successfully.[/green]")
-    console.print("\nExport these variables before running MindRoom:")
-    console.print(
-        f"  export MINDROOM_PROVISIONING_URL={shlex.quote(provisioning_url)}",
-        markup=False,
-        soft_wrap=True,
-    )
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={shlex.quote(client_id)}", markup=False, soft_wrap=True)
-    console.print(
-        f"  export MINDROOM_LOCAL_CLIENT_SECRET={shlex.quote(client_secret)}",
-        markup=False,
-        soft_wrap=True,
-    )
-    console.print(f"  export MINDROOM_NAMESPACE={shlex.quote(namespace)}", markup=False, soft_wrap=True)
-    if owner_user_id:
-        console.print(
-            f"  export MINDROOM_OWNER_USER_ID={shlex.quote(owner_user_id)}",
-            markup=False,
-            soft_wrap=True,
-        )
-        console.print(
-            f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
-            markup=False,
-        )
-        console.print(
-            "Update your config.yaml owner placeholder(s) manually if you rely on authorization defaults.",
-        )
-    console.print("\nThen run:")
-    console.print("  uv run mindroom run")
-
-
-def _local_client_fingerprint(*, config_path: Path) -> str:
-    """Return a stable, non-secret local fingerprint."""
-    resolved_config_path = config_path.expanduser().resolve()
-    raw = f"{socket.gethostname()}:{resolved_config_path}"
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +843,15 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
         f"  [cyan]mindroom config init --provider {_CONFIG_INIT_PROVIDER_CHOICES}[/cyan]    Choose a model provider",
         soft_wrap=True,
     )
-    console.print("  [cyan]mindroom run[/cyan]            Start MindRoom after setup\n")
+    console.print(
+        "  [cyan]mindroom run[/cyan]            In an interactive terminal: create a hosted starter config, pair, and start",
+        soft_wrap=True,
+    )
+    console.print(
+        f"  [cyan]mindroom run --provider {_CONFIG_INIT_PROVIDER_CHOICES} [--service][/cyan]    "
+        "Without a terminal: the same, with the API key from the environment\n",
+        soft_wrap=True,
+    )
     print_config_search_locations(process_env, title="Config search locations (first match wins):")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 

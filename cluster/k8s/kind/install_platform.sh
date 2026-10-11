@@ -30,6 +30,8 @@ helm lint "${CHART_DIR}" || true
 
 echo "[k8s] Ensuring namespace 'mindroom-instances' exists (for RBAC)..."
 kubectl get ns mindroom-instances >/dev/null 2>&1 || kubectl create namespace mindroom-instances
+# Match the hosted namespace so the smoke run proves tenant pods pass the enforced Pod Security profile.
+kubectl label namespace mindroom-instances pod-security.kubernetes.io/enforce=baseline --overwrite
 
 echo "[helm] Installing/upgrading ${RELEASE_NAME}..."
 helm_args=(

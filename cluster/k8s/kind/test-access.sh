@@ -3,8 +3,6 @@ set -euo pipefail
 
 # Test access to the kind cluster services
 
-export KUBECONFIG=~/.kube/kind-mindroom
-
 echo "🧪 Testing MindRoom kind cluster access"
 echo "========================================"
 echo ""
@@ -19,16 +17,61 @@ log_info() { echo -e "${GREEN}✓${NC} $1"; }
 log_error() { echo -e "${RED}✗${NC} $1"; }
 log_warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 
-# Kill any existing port-forwards
-echo "🔧 Cleaning up existing port-forwards..."
-pkill -f "kubectl port-forward" 2>/dev/null || true
-sleep 2
+# Forwarders run sequentially; retain only the process owned by this invocation.
+PORT_FORWARD_PID=""
+PORT_FORWARD_LOG=""
+cleanup_port_forward() {
+    if [[ -n "$PORT_FORWARD_PID" ]]; then
+        kill "$PORT_FORWARD_PID" 2>/dev/null || true
+        # Give the child a short grace period before enforcing bounded cleanup.
+        for _ in {1..10}; do
+            if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        if kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
+            kill -KILL "$PORT_FORWARD_PID" 2>/dev/null || true
+        fi
+        wait "$PORT_FORWARD_PID" 2>/dev/null || true
+        PORT_FORWARD_PID=""
+    fi
+    if [[ -n "$PORT_FORWARD_LOG" ]]; then
+        rm -f -- "$PORT_FORWARD_LOG"
+        PORT_FORWARD_LOG=""
+    fi
+}
+trap cleanup_port_forward EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+start_port_forward() {
+    local namespace="$1" service="$2" mapping="$3"
+    local readiness="Forwarding from 127.0.0.1:${mapping%:*} -> ${mapping#*:}"
+    local deadline=$((SECONDS + 30))
+    PORT_FORWARD_LOG=$(mktemp "${TMPDIR:-/tmp}/mindroom-port-forward.XXXXXX")
+    kubectl --context kind-mindroom port-forward --address 127.0.0.1 -n "$namespace" "$service" "$mapping" > "$PORT_FORWARD_LOG" 2>&1 &
+    PORT_FORWARD_PID=$!
+    while kill -0 "$PORT_FORWARD_PID" 2>/dev/null; do
+        if grep -Fxq -- "$readiness" "$PORT_FORWARD_LOG" && kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
+            return
+        fi
+        if (( SECONDS >= deadline )); then
+            log_error "Timed out waiting for port-forward to listen on 127.0.0.1:${mapping%:*}."
+            cat "$PORT_FORWARD_LOG"
+            exit 1
+        fi
+        sleep 0.1
+    done
+    log_error "Port-forward failed to start; the local port may already be in use."
+    cat "$PORT_FORWARD_LOG"
+    exit 1
+}
 
 # Start port-forward for ingress
 echo "🔌 Starting ingress port-forward..."
-kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 8080:80 > /tmp/ingress-pf.log 2>&1 &
-INGRESS_PF_PID=$!
-sleep 3
+start_port_forward ingress-nginx svc/ingress-nginx-controller 8080:80
 
 # Test platform access
 echo ""
@@ -37,7 +80,7 @@ echo "--------------------------"
 
 # Test platform frontend
 echo -n "Testing platform frontend (http://platform.local:8080)... "
-if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 -H "Host: platform.local" | grep -q "200"; then
+if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080 -H "Host: platform.local" | grep -q "200"; then
     log_info "Working!"
 else
     log_error "Failed"
@@ -45,7 +88,7 @@ fi
 
 # Test platform API
 echo -n "Testing platform API (http://platform.local:8080/api/health)... "
-API_RESPONSE=$(curl -s http://localhost:8080/api/health -H "Host: platform.local" 2>/dev/null || echo "error")
+API_RESPONSE=$(curl -s http://127.0.0.1:8080/api/health -H "Host: platform.local" 2>/dev/null || echo "error")
 if echo "$API_RESPONSE" | grep -q "ok\|health"; then
     log_info "Working!"
 elif echo "$API_RESPONSE" | grep -q "Invalid host"; then
@@ -59,10 +102,10 @@ echo ""
 echo "📊 Testing Instance Access"
 echo "-------------------------"
 
-INSTANCE_EXISTS=$(kubectl get pods -n mindroom-instances --no-headers 2>/dev/null | wc -l)
+INSTANCE_EXISTS=$(kubectl --context kind-mindroom get pods -n mindroom-instances --no-headers 2>/dev/null | wc -l)
 if [ "$INSTANCE_EXISTS" -gt 0 ]; then
     echo -n "Testing instance frontend (http://instance1.local:8080)... "
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 -H "Host: instance1.local" | grep -q "200\|404"; then
+    if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080 -H "Host: instance1.local" | grep -q "200\|404"; then
         log_info "Reachable!"
     else
         log_error "Failed"
@@ -77,40 +120,36 @@ echo "📊 Direct Service Access (without ingress)"
 echo "-----------------------------------------"
 
 # Kill ingress port-forward
-kill $INGRESS_PF_PID 2>/dev/null || true
+cleanup_port_forward
 
 # Platform frontend direct
 echo "Testing direct platform frontend access..."
-kubectl port-forward -n mindroom-staging svc/platform-frontend 3000:3000 > /tmp/pf-frontend.log 2>&1 &
-PF_FRONTEND_PID=$!
-sleep 3
+start_port_forward mindroom-staging svc/platform-frontend 3000:3000
 
-if curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 | grep -q "200"; then
+if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000 | grep -q "200"; then
     log_info "Platform frontend direct: http://localhost:3000 ✓"
 else
     log_error "Platform frontend direct access failed"
 fi
-kill $PF_FRONTEND_PID 2>/dev/null || true
+cleanup_port_forward
 
 # Platform backend direct
 echo "Testing direct platform backend access..."
-kubectl port-forward -n mindroom-staging svc/platform-backend 8000:8000 > /tmp/pf-backend.log 2>&1 &
-PF_BACKEND_PID=$!
-sleep 3
+start_port_forward mindroom-staging svc/platform-backend 8000:8000
 
-if curl -s http://localhost:8000/health 2>/dev/null | grep -q "ok"; then
+if curl -s http://127.0.0.1:8000/health 2>/dev/null | grep -q "ok"; then
     log_info "Platform backend direct: http://localhost:8000 ✓"
 else
     log_error "Platform backend direct access failed"
 fi
-kill $PF_BACKEND_PID 2>/dev/null || true
+cleanup_port_forward
 
 # Show pod status
 echo ""
 echo "📊 Pod Status"
 echo "------------"
 echo "Platform pods:"
-kubectl get pods -n mindroom-staging --no-headers | while read line; do
+kubectl --context kind-mindroom get pods -n mindroom-staging --no-headers | while read line; do
     NAME=$(echo $line | awk '{print $1}')
     READY=$(echo $line | awk '{print $2}')
     STATUS=$(echo $line | awk '{print $3}')
@@ -124,7 +163,7 @@ done
 if [ "$INSTANCE_EXISTS" -gt 0 ]; then
     echo ""
     echo "Instance pods:"
-    kubectl get pods -n mindroom-instances --no-headers | while read line; do
+    kubectl --context kind-mindroom get pods -n mindroom-instances --no-headers | while read line; do
         NAME=$(echo $line | awk '{print $1}')
         READY=$(echo $line | awk '{print $2}')
         STATUS=$(echo $line | awk '{print $3}')
@@ -146,13 +185,13 @@ echo "  127.0.0.1 platform.local"
 echo "  127.0.0.1 instance1.local"
 echo ""
 echo "Then run port-forward and access:"
-echo "  kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 8080:80"
+echo "  kubectl --context kind-mindroom port-forward -n ingress-nginx svc/ingress-nginx-controller 8080:80"
 echo "  → Platform: http://platform.local:8080"
 echo "  → Instance: http://instance1.local:8080"
 echo ""
 echo "Direct access (no /etc/hosts needed):"
-echo "  Platform Frontend: kubectl port-forward -n mindroom-staging svc/platform-frontend 3000:3000"
-echo "  Platform Backend:  kubectl port-forward -n mindroom-staging svc/platform-backend 8000:8000"
+echo "  Platform Frontend: kubectl --context kind-mindroom port-forward -n mindroom-staging svc/platform-frontend 3000:3000"
+echo "  Platform Backend:  kubectl --context kind-mindroom port-forward -n mindroom-staging svc/platform-backend 8000:8000"
 echo ""
 echo "Clean up:"
 echo "  kind delete cluster --name mindroom"

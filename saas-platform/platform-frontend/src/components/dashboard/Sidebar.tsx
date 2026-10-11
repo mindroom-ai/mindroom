@@ -7,7 +7,6 @@ import {
   Home,
   Server,
   CreditCard,
-  BarChart3,
   Settings,
   HelpCircle,
   LogOut,
@@ -21,7 +20,6 @@ const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: Home },
   { name: 'Instance', href: '/dashboard/instance', icon: Server },
   { name: 'Billing', href: '/dashboard/billing', icon: CreditCard },
-  { name: 'Usage', href: '/dashboard/usage', icon: BarChart3 },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
   { name: 'Support', href: '/dashboard/support', icon: HelpCircle },
 ]

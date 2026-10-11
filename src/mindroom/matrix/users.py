@@ -1,21 +1,35 @@
 """Matrix user account management for agents."""
 
+import asyncio
+import contextlib
 import hashlib
 import hmac
 import secrets
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
+from uuid import UUID
 
 import httpx
 import nio
+from aiohttp import ClientError, ClientResponse
 from nio import crypto
+from nio.durable import DurableSyncConfig
 
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix import appservice, provisioning
+from mindroom.matrix import appservice, provisioning, provisioning_env
+from mindroom.matrix._owned_session import (
+    IngestionConsumerStore,
+    MatrixCredentials,
+    OwnedMatrixSession,
+    login_password_credentials,
+    open_owned_matrix_session,
+    restore_credentials,
+)
 from mindroom.matrix.client_session import (
     DEFAULT_MATRIX_SYNC_STORAGE,
     MatrixSyncStorage,
+    create_matrix_http_client,
     login,
     matrix_client,
     matrix_startup_error,
@@ -29,6 +43,7 @@ from mindroom.matrix_identifiers import agent_username_localpart, extract_server
 
 logger = get_logger(__name__)
 
+_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS = 10
 _INVALID_REGISTRATION_TOKEN_MESSAGE = (
     "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "  # noqa: S105
     "Generate/issue a valid token for bot provisioning and try again."
@@ -175,6 +190,22 @@ def load_agent_user(agent_name: str, runtime_paths: RuntimePaths) -> AgentMatrix
         device_id=credentials["device_id"],
         access_token=credentials["access_token"],
     )
+
+
+def create_agent_http_client(agent_name: str, runtime_paths: RuntimePaths) -> nio.AsyncClient:
+    """Use saved account credentials for HTTP without owning crypto or renewing login."""
+    agent_user = load_agent_user(agent_name, runtime_paths)
+    if agent_user is None or not agent_user.access_token:
+        msg = f"An authenticated Matrix account for {agent_name!r} is required; start MindRoom first"
+        raise ValueError(msg)
+    client = create_matrix_http_client(
+        runtime_matrix_homeserver(runtime_paths),
+        runtime_paths,
+        agent_user.user_id,
+    )
+    client.access_token = agent_user.access_token
+    client.device_id = agent_user.device_id or ""
+    return client
 
 
 def _save_agent_credentials(
@@ -570,6 +601,11 @@ def _direct_token_registration_error(
     return None
 
 
+# LEGACY_COMPAT: Persisted Matrix accounts without the requested username.
+# Legacy format: Persisted internal Matrix accounts omitted requested_username.
+# Last legacy release: v2026.5.160; replacement: v2026.5.161 persisted the immutable creation request.
+# Handling: Use the actual stored username as the original request only when the dedicated field is absent.
+# Coverage: tests/test_matrix_agent_manager.py::TestAgentUserCreation::test_create_internal_user_legacy_state_uses_actual_username_as_original_request.
 def _validate_existing_internal_user_request(
     *,
     agent_name: str,
@@ -789,8 +825,8 @@ async def _register_user(
     """
     server_name = extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
     user_id = MatrixID.from_username(username, server_name).full_id
-    registration_token = provisioning.registration_token_from_env(runtime_paths=runtime_paths)
-    registration_shared_secret = provisioning.registration_shared_secret_from_env(runtime_paths=runtime_paths)
+    registration_token = provisioning_env.registration_token_from_env(runtime_paths=runtime_paths)
+    registration_shared_secret = provisioning_env.registration_shared_secret_from_env(runtime_paths=runtime_paths)
 
     provisioning_result = await _register_user_via_provisioning_if_configured(
         homeserver=homeserver,
@@ -842,7 +878,7 @@ async def _register_user_via_provisioning_if_configured(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Register through the provisioning service when local client creds are configured."""
-    provisioning_url = provisioning.provisioning_url_from_env(runtime_paths=runtime_paths)
+    provisioning_url = provisioning_env.provisioning_url_from_env(runtime_paths=runtime_paths)
     creds = provisioning.required_local_provisioning_client_credentials_for_registration(
         provisioning_url=provisioning_url,
         registration_token=registration_token,
@@ -858,15 +894,21 @@ async def _register_user_via_provisioning_if_configured(
         client_secret=client_secret,
         homeserver=homeserver,
         username=username,
-        password=password,
         display_name=display_name,
-        runtime_paths=runtime_paths,
     )
     provisioning_user_id = _validated_returned_user_id(
         provisioning_result.user_id,
         source="Provisioning service",
     )
     if provisioning_result.status == "created":
+        assert provisioning_result.password is not None
+        await _replace_one_time_password(
+            homeserver=homeserver,
+            user_id=provisioning_user_id,
+            one_time_password=provisioning_result.password,
+            password=password,
+            runtime_paths=runtime_paths,
+        )
         logger.info("matrix_user_registered_via_provisioning", user_id=provisioning_user_id)
         return provisioning_user_id
 
@@ -878,6 +920,51 @@ async def _register_user_via_provisioning_if_configured(
         display_name=display_name,
         runtime_paths=runtime_paths,
     )
+
+
+def _one_time_password_error(user_id: str, detail: str) -> ValueError:
+    msg = (
+        f"Matrix account {user_id} was created, but replacing its one-time password failed{detail}. "
+        "Nobody knows this account's password now, so it cannot be used again. "
+        "Run `mindroom connect --force` to pair again, which gives new agent accounts a new namespace, then restart."
+    )
+    return matrix_startup_error(msg, permanent=True)
+
+
+async def _replace_one_time_password(
+    *,
+    homeserver: str,
+    user_id: str,
+    one_time_password: str,
+    password: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Change a provisioned account's one-time password to this install's own password."""
+    client = create_matrix_http_client(homeserver, runtime_paths, user_id)
+    try:
+        try:
+            response = await client.login(one_time_password)
+            if isinstance(response, nio.LoginResponse):
+                auth = {
+                    "type": "m.login.password",
+                    "identifier": {"type": "m.id.user", "user": user_id},
+                    "password": one_time_password,
+                }
+                response = await client.change_password(auth, password)
+        except (ClientError, TimeoutError) as exc:
+            raise _one_time_password_error(user_id, f": {exc!r}") from exc
+        # nio parses a non-JSON error body as {}, which passes the empty ChangePasswordResponse schema.
+        transport = response.transport_response
+        status = transport.status if isinstance(transport, ClientResponse) else None
+        if not (isinstance(response, nio.ChangePasswordResponse) and status is not None and 200 <= status < 300):
+            detail = f": {response}" if isinstance(response, nio.ErrorResponse) else ""
+            raise _one_time_password_error(user_id, f" (HTTP {status}){detail}")
+        # Best effort: the password is already replaced, so a failed logout only leaves an unused session behind.
+        with contextlib.suppress(ClientError, TimeoutError):
+            async with asyncio.timeout(_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS):
+                await client.logout()
+    finally:
+        await client.close()
 
 
 async def _register_user_without_token(
@@ -1049,6 +1136,129 @@ async def _login_agent_with_configured_auth(
         sync_storage=sync_storage,
     )
     return client, "Matrix password login"
+
+
+async def _owned_agent_credentials(
+    homeserver: str,
+    agent_user: AgentMatrixUser,
+    expected_user_id: str,
+    auth: appservice.ManagedAccountAuth,
+    runtime_paths: RuntimePaths,
+) -> tuple[MatrixCredentials, str, bool]:
+    """Resolve exact credentials without opening an ordinary MatrixStore."""
+    if agent_user.device_id is not None:
+        if not olm_store_exists(expected_user_id, agent_user.device_id, runtime_paths):
+            msg = "The Matrix device store is missing; restore its backup before restarting. Automatic device replacement is unsupported"
+            raise matrix_startup_error(msg, permanent=True)
+        if not agent_user.access_token:
+            msg = "Stored Matrix device credentials are incomplete; restore them before restarting"
+            raise matrix_startup_error(msg, permanent=True)
+        restored = await restore_credentials(
+            homeserver,
+            expected_user_id,
+            agent_user.device_id,
+            agent_user.access_token,
+            runtime_paths,
+        )
+        if restored is not None:
+            return restored, "Matrix session restore", False
+
+    if auth.mode == "appservice":
+        assert auth.appservice_token is not None
+        credentials = await appservice.login_appservice_credentials(
+            homeserver,
+            user_id=expected_user_id,
+            token=auth.appservice_token,
+            runtime_paths=runtime_paths,
+            device_id=agent_user.device_id,
+        )
+        return (
+            MatrixCredentials(*credentials),
+            "Matrix application-service login",
+            True,
+        )
+    if agent_user.password is None:
+        msg = f"Stored Matrix password for {agent_user.agent_name} is missing"
+        raise matrix_startup_error(msg, permanent=True)
+    return (
+        await login_password_credentials(
+            homeserver,
+            expected_user_id,
+            agent_user.password,
+            runtime_paths,
+            device_id=agent_user.device_id,
+        ),
+        "Matrix password login",
+        False,
+    )
+
+
+async def _close_failed_owned_agent_login(opened: OwnedMatrixSession) -> None:
+    """Release session ownership before HTTP despite either cleanup error."""
+    try:
+        await opened.session.close()
+    except BaseException:
+        logger.exception("owned_matrix_session_cleanup_failed")
+    try:
+        await opened.client.close()
+    except BaseException:
+        logger.exception("owned_matrix_http_cleanup_failed")
+
+
+async def login_agent_owned_session(
+    homeserver: str,
+    agent_user: AgentMatrixUser,
+    runtime_paths: RuntimePaths,
+    *,
+    consumer_store: IngestionConsumerStore,
+    new_consumer_generation: UUID,
+    config: DurableSyncConfig,
+) -> OwnedMatrixSession:
+    """Authenticate and open one agent's exclusive durable Matrix session."""
+    auth = appservice.resolve_managed_account_auth(runtime_paths)
+    expected_user_id = _validated_expected_agent_user_id(agent_user)
+    credentials, source, set_appservice_display_name = await _owned_agent_credentials(
+        homeserver,
+        agent_user,
+        expected_user_id,
+        auth,
+        runtime_paths,
+    )
+    if credentials.user_id != expected_user_id or (
+        agent_user.device_id is not None and credentials.device_id != agent_user.device_id
+    ):
+        msg = f"{source} changed the managed account or device; restore the original device before restarting"
+        raise matrix_startup_error(msg, permanent=True)
+    opened = await open_owned_matrix_session(
+        homeserver,
+        credentials,
+        runtime_paths,
+        consumer_store=consumer_store,
+        new_consumer_generation=new_consumer_generation,
+        config=config,
+        persist_credentials=partial(
+            _persist_authenticated_agent_session,
+            agent_user,
+            runtime_paths=runtime_paths,
+            matrix_id=MatrixID.parse(expected_user_id),
+        ),
+    )
+    try:
+        if set_appservice_display_name:
+            display_response = await opened.client.set_displayname(
+                agent_user.display_name,
+            )
+            if isinstance(display_response, nio.ErrorResponse):
+                logger.warning(
+                    "matrix_user_display_name_sync_failed",
+                    user_id=expected_user_id,
+                    error=str(display_response),
+                )
+        await ensure_agent_cross_signing(opened.client, agent_user)
+    except BaseException:
+        await _close_failed_owned_agent_login(opened)
+        raise
+    return opened
 
 
 async def login_agent_user(

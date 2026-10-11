@@ -103,7 +103,7 @@ class TestGetOwnedInstance:
         assert instances_data.get_owned_instance(sb, 123, "acc-1") == ROW_A
         assert sb.calls == [
             ("table", "instances"),
-            ("select", "id,instance_id,subscription_id,account_id"),
+            ("select", "id,instance_id,subscription_id,account_id,lifecycle_stopped_at"),
             ("eq", ("instance_id", "123")),
             ("eq", ("account_id", "acc-1")),
             ("limit", 1),
@@ -174,6 +174,13 @@ class TestUpdateInstance:
 
     def test_returns_empty_list_when_no_rows_matched(self):
         assert instances_data.update_instance(StubSupabase([]), "123", {"status": "error"}) == []
+
+    def test_expected_status_updates_only_a_row_still_in_that_status(self):
+        sb = StubSupabase([ROW_A])
+        instances_data.update_instance(sb, "123", {"status": "provisioning"}, expected_status="deprovisioned")
+        update_payload = next(payload for call, payload in sb.calls if call == "update")
+        assert update_payload["status"] == "provisioning"
+        assert ("eq", ("status", "deprovisioned")) in sb.calls
 
 
 class TestUpdateInstanceStatus:

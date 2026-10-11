@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MindRoom — living light</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; min-height: 100vh; display: grid; place-content: center;
+        gap: 18px; padding: 24px; color: #d8eee9; background: #0b2434;
+        font: 14px system-ui, sans-serif;
+      }
+      object { width: min(86vw, 78vh, 820px); aspect-ratio: 1; border-radius: 16px; overflow: hidden; }
+      footer { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+      span { color: #91b5bf; }
+      button { border: 1px solid #547d88; border-radius: 20px; background: #153c4a; color: #eaffeb; padding: 9px 20px; cursor: pointer; }
+      button:focus-visible { outline: 2px solid #ffe6a2; outline-offset: 4px; }
+      button:disabled { cursor: default; opacity: 0.65; }
+    </style>
+  </head>
+  <body>
+    <object id="logo" data="logo-animated.svg" type="image/svg+xml" aria-label="MindRoom logo with gently pulsing light and gold currents"></object>
+    <footer>
+      <div>MindRoom <span>· Living light</span></div>
+      <button id="motion" type="button" aria-pressed="false">Pause</button>
+    </footer>
+    <script>
+      const logo = document.getElementById('logo');
+      const button = document.getElementById('motion');
+      const preference = matchMedia('(prefers-reduced-motion: reduce)');
+      let paused = false;
+      function syncMotion() {
+        button.disabled = preference.matches;
+        button.textContent = preference.matches ? 'Reduced motion' : paused ? 'Play' : 'Pause';
+        button.setAttribute('aria-pressed', String(paused || preference.matches));
+        for (const animation of logo.contentDocument?.getAnimations() ?? []) {
+          if (paused || preference.matches) animation.pause();
+          else animation.play();
+        }
+      }
+      logo.addEventListener('load', () => {
+        const svg = logo.contentDocument.documentElement;
+        svg.style.width = '100%';
+        svg.style.height = '100%';
+        syncMotion();
+      });
+      button.addEventListener('click', () => { paused = !paused; syncMotion(); });
+      preference.addEventListener('change', syncMotion);
+      syncMotion();
+    </script>
+  </body>
+</html>

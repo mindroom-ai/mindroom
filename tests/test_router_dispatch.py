@@ -10,6 +10,7 @@ import nio
 import pytest
 
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
+from mindroom.authorization import ResponderCandidatePermissions
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -28,6 +29,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _attachment_record_stub,
@@ -45,6 +47,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
+    make_matrix_client_mock,
     runtime_paths_for,
 )
 from tests.identity_helpers import entity_ids
@@ -96,10 +99,10 @@ class TestAgentBot(AgentBotTestBase):
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageImage.from_dict(
@@ -119,14 +122,17 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
-            mock_get_available.return_value = [
-                entity_ids(config, runtime_paths_for(config))["general"],
-                entity_ids(config, runtime_paths_for(config))["calculator"],
-            ]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
@@ -225,10 +231,10 @@ class TestAgentBot(AgentBotTestBase):
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageFile.from_dict(
@@ -264,18 +270,21 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ) as mock_register_file,
         ):
-            mock_get_available.return_value = [
-                entity_ids(config, runtime_paths_for(config))["general"],
-                entity_ids(config, runtime_paths_for(config))["calculator"],
-            ]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
@@ -285,6 +294,98 @@ class TestAgentBot(AgentBotTestBase):
         assert call_kwargs["message"] == "[Attached file]"
         assert call_kwargs["requester_user_id"] == "@user:localhost"
         assert call_kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@user:localhost"}
+
+    @pytest.mark.parametrize("caption_in_upload_thread", [True, False])
+    @pytest.mark.asyncio
+    async def test_router_leaves_an_upload_to_the_agent_its_caption_names(
+        self,
+        tmp_path: Path,
+        caption_in_upload_thread: bool,
+    ) -> None:
+        """An upload whose caption names an agent must not also be routed elsewhere."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+
+        config = self._config_for_storage(tmp_path)
+        # A top-level caption joins its upload only when sent within the debounce window of it.
+        config.defaults.coalescing.debounce_ms = 1000
+        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+        bot.logger = MagicMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
+        bot._turn_controller._execute_router_relay = AsyncMock()
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        for user_id in (
+            "@mindroom_router:localhost",
+            "@mindroom_general:localhost",
+            "@mindroom_calculator:localhost",
+            "@user:localhost",
+        ):
+            room.add_member(user_id, None, None)
+        room.members_synced = True
+
+        upload = nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$upload",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://localhost/test_file",
+                    "info": {"mimetype": "application/pdf"},
+                },
+            },
+        )
+        caption_content: dict[str, object] = {
+            "msgtype": "m.text",
+            "body": "@mindroom_general:localhost review this",
+            "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
+        }
+        if caption_in_upload_thread:
+            caption_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$upload"}
+        caption = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$caption",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567891,
+                "content": caption_content,
+            },
+        )
+        root_response = nio.RoomGetEventResponse()
+        root_response.event = upload
+        bot.client.room_get_event.return_value = root_response
+        plans: list[tuple[str, str | None, tuple[str, ...]]] = []
+
+        async def record_plan(_controller: object, _room: object, prepared: object, plan: object, **_: object) -> None:
+            plans.append((plan.kind, plan.ignore_reason, tuple(prepared.handled_turn.source_event_ids)))
+
+        with (
+            patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+            patch("mindroom.text_ingress_dispatch._apply_turn_plan", new=record_plan),
+        ):
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
+            await bot._on_media_message(room, upload)
+            await bot._on_message(room, caption)
+            await drain_coalescing(bot)
+
+        assert plans == [("ignore", "router", ("$upload", "$caption"))]
+        bot._turn_controller._execute_router_relay.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_routing_registers_file_with_effective_thread_scope(
@@ -468,12 +569,14 @@ class TestAgentBot(AgentBotTestBase):
     async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
         """A file event in a multi-responder room should register exactly one attachment."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                        "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -527,10 +630,10 @@ class TestAgentBot(AgentBotTestBase):
         router_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         general_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
         room_users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
         router_room.users = room_users
         general_room.users = room_users
@@ -567,7 +670,7 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_record is not None
 
         with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -605,12 +708,14 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -633,6 +738,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {
             "@mindroom_router:localhost": MagicMock(),
@@ -653,13 +759,16 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                return_value=[
-                    entity_ids(config, runtime_paths_for(config))["calculator"],
-                    entity_ids(config, runtime_paths_for(config))["general"],
-                ],
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions(
+                    [
+                        entity_ids(config, runtime_paths_for(config))["calculator"],
+                        entity_ids(config, runtime_paths_for(config))["general"],
+                    ],
+                    [],
+                ),
             ),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -687,12 +796,14 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -715,6 +826,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {
             "@mindroom_router:localhost": MagicMock(),
@@ -741,11 +853,14 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                return_value=[
-                    entity_ids(config, runtime_paths_for(config))["calculator"],
-                    entity_ids(config, runtime_paths_for(config))["general"],
-                ],
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions(
+                    [
+                        entity_ids(config, runtime_paths_for(config))["calculator"],
+                        entity_ids(config, runtime_paths_for(config))["general"],
+                    ],
+                    [],
+                ),
             ),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
@@ -777,9 +892,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -826,9 +943,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -870,9 +989,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -895,6 +1016,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {
             "@mindroom_router:localhost": MagicMock(),
@@ -909,10 +1031,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                return_value=[entity_ids(config, runtime_paths_for(config))["calculator"]],
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions(
+                    [entity_ids(config, runtime_paths_for(config))["calculator"]],
+                    [],
+                ),
             ),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -943,6 +1068,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.encrypted = False
         room.users = {
@@ -963,7 +1089,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await bot._on_message(room, event)
@@ -975,7 +1101,9 @@ class TestAgentBot(AgentBotTestBase):
         assert "router is not a conversational AI agent" in content["body"]
         assert "mention a specific agent or team" in content["body"]
         assert "one human and one agent or team are already talking in a thread" in content["body"]
-        assert "thread has multiple human users or multiple agent/team participants" in content["body"]
+        assert "eligible ad-hoc team of participating individual agents" in content["body"]
+        assert "In multi-human threads, explicitly tag who should answer" in content["body"]
+        assert "adaptive participation, but teams do not form automatically" in content["body"]
         assert "automatic routing can still choose an agent or team" in content["body"]
 
     @pytest.mark.asyncio
@@ -1025,10 +1153,13 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.responder_candidate_entities_for_room", return_value=[]),
+            patch(
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                return_value=ResponderCandidatePermissions([], []),
+            ),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
                 new_callable=AsyncMock,

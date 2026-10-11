@@ -26,9 +26,7 @@ EXTERNAL_TRIGGER_SOURCE_KIND = "external_trigger"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 INTERACTIVE_SELECTION_SOURCE_KIND = "interactive_selection"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
-AUTO_RESUME_MESSAGE = (
-    "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
-)
+SILENT_SCHEDULE_SOURCE_KIND = "silent_scheduled"
 _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         MESSAGE_SOURCE_KIND,
@@ -41,6 +39,7 @@ _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_DISPATCH_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
     },
 )
 _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
@@ -49,6 +48,7 @@ _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
     },
 )
 _COALESCING_BYPASS_SOURCE_KINDS: frozenset[str] = _AUTOMATION_SOURCE_KINDS | frozenset(
@@ -63,6 +63,7 @@ _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         VOICE_SOURCE_KIND,
     },
@@ -85,6 +86,8 @@ _PER_FIRE_THREAD_ROOT_SOURCE_KINDS: frozenset[str] = frozenset(
         SCHEDULED_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        # Automations start each prompt in a thread of its own, even for an agent in room mode.
+        HOOK_DISPATCH_SOURCE_KIND,
     },
 )
 
@@ -188,11 +191,6 @@ def is_visible_router_voice_echo_content(content: object) -> bool:
     if not isinstance(content, Mapping):
         return False
     return cast("Mapping[str, object]", content).get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
-
-
-def is_auto_resume_relay_body(body: object) -> bool:
-    """Return whether one message body is the restart auto-resume relay."""
-    return isinstance(body, str) and AUTO_RESUME_MESSAGE in body
 
 
 def _trusted_source_kind_from_event_content(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,12 +13,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 import pytest
 import yaml
+from structlog.testing import capture_logs
 
-from mindroom.agents import _load_context_files
 from mindroom.config.main import load_config
 from mindroom.constants import (
     RuntimePaths,
@@ -25,23 +27,37 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
     runtime_paths_with_storage_root,
+    sandbox_startup_manifest_path,
 )
-from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.runtime_env_policy import (
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SHARED_CREDENTIALS_PATH_ENV,
+    WORKER_COMPUTER_ENABLED_ENV,
+)
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_state_root_path,
+    private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
     worker_root_path,
 )
+from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import docker as docker_backend_module
+from mindroom.workers.backends import docker_projection as docker_projection_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
+    _WORKER_CONTROL_DIRNAME,
     DockerWorkerBackend,
     _DockerLaunchConfig,
     _load_docker_client_and_errors,
     _worker_health_compatibility_error,
     _WorkerImageIncompatibleError,
+    check_docker_workers_absent_for_storage_upgrade,
     ensure_docker_dependencies,
 )
 from mindroom.workers.backends.docker_config import (
@@ -52,18 +68,27 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import (
     _PROJECTED_CONFIGS_DIRNAME,
-    _WORKER_CONFIG_STATE_DIRNAME,
     DockerProjectionManager,
 )
+from mindroom.workers.backends.legacy_state_root_mounts import _remove_docker_workers_mounting_state_roots
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
 _TEST_UNSCOPED_WORKER_KEY = "v1:default:unscoped:code"
+
+
+def _control_metadata_path(storage_root: Path, worker_key: str) -> Path:
+    """Return one worker's control metadata, which lives outside its mounted state root."""
+    control_root = storage_root / "workers" / _WORKER_CONTROL_DIRNAME / worker_dir_name(worker_key)
+    return control_root / "metadata" / "worker.json"
 
 
 class _FakeDockerError(Exception):
@@ -121,13 +146,13 @@ class _FakeContainer:
         self.reload()
 
     def stop(self, timeout: int = 10) -> None:
-        assert timeout == 10
+        assert timeout > 0
         self.stopped += 1
         self.status = "exited"
         self.reload()
 
     def remove(self, force: bool = True) -> None:
-        assert force is True
+        del force
         self.removed += 1
         self.status = "removed"
 
@@ -146,6 +171,7 @@ class _FakeContainersApi:
         self.by_name: dict[str, _FakeContainer] = {}
         self.created_containers: list[_FakeContainer] = []
         self.run_calls: list[dict[str, object]] = []
+        self.list_calls: list[dict[str, object]] = []
         self.next_host_port = 43001
         self.images = images
         self.auto_pull_missing_image = auto_pull_missing_image
@@ -155,6 +181,24 @@ class _FakeContainersApi:
         if container is None or container.status == "removed":
             raise _FakeNotFoundError(name)
         return container
+
+    def list(self, **kwargs: object) -> Sequence[_FakeContainer]:
+        assert kwargs.get("all") is True
+        raw_filters = kwargs.get("filters")
+        applied_filters = dict(raw_filters) if isinstance(raw_filters, dict) else {}
+        self.list_calls.append(applied_filters)
+        label_filters = applied_filters.get("label", [])
+        expected_labels = {
+            item.split("=", 1)[0]: item.split("=", 1)[1]
+            for item in label_filters
+            if isinstance(item, str) and "=" in item
+        }
+        return [
+            container
+            for container in self.by_name.values()
+            if container.status != "removed"
+            and not any(container.attrs["Config"]["Labels"].get(key) != value for key, value in expected_labels.items())
+        ]
 
     def run(self, image: str, **kwargs: object) -> _FakeContainer:
         if self.auto_pull_missing_image and self.images is not None and image not in self.images.by_name:
@@ -180,17 +224,23 @@ class _FakeContainersApi:
             labels=dict(labels) if isinstance(labels, dict) else {},
             user=str(kwargs["user"]) if kwargs.get("user") is not None else None,
         )
-        if isinstance(volumes, dict):
+        container.attrs["HostConfig"] = {
+            "Privileged": bool(kwargs.get("privileged", False)),
+            "CapAdd": None,
+            "CapDrop": list(kwargs.get("cap_drop", [])),
+            "SecurityOpt": list(kwargs.get("security_opt", [])),
+            "ReadonlyRootfs": bool(kwargs.get("read_only", False)),
+        }
+        if isinstance(volumes, list):
             container.attrs["Mounts"] = [
                 {
                     "Type": "bind",
                     "Source": source,
-                    "Destination": str(spec.get("bind", "")),
-                    "Mode": str(spec.get("mode", "")),
-                    "RW": str(spec.get("mode", "rw")) != "ro",
+                    "Destination": destination,
+                    "Mode": mode,
+                    "RW": mode != "ro",
                 }
-                for source, spec in volumes.items()
-                if isinstance(source, str) and isinstance(spec, dict)
+                for source, destination, mode in (volume.rsplit(":", 2) for volume in volumes)
             ]
         self.by_name[container.name] = container
         self.created_containers.append(container)
@@ -208,8 +258,10 @@ class _FakeImagesApi:
         self.by_name: dict[str, _FakeImage] = {}
         self.pulls: list[str] = []
         self.pull_image_id: str | None = None
+        self.gets: list[str] = []
 
     def get(self, name: str) -> _FakeImage:
+        self.gets.append(name)
         image = self.by_name.get(name)
         if image is None:
             raise _FakeNotFoundError(name)
@@ -227,6 +279,7 @@ class _FakeImagesApi:
 
 class _FakeDockerClient:
     def __init__(self, *, auto_pull_missing_image: bool = False) -> None:
+        self.api = SimpleNamespace(timeout=None)
         self.images = _FakeImagesApi()
         self.containers = _FakeContainersApi(
             images=self.images,
@@ -332,16 +385,14 @@ teams:
   helpers:
     agents: [code]
     mode: collaborate
-cultures:
-  engineering:
-    description: Keep things clean
-    agents: [code]
-    mode: automatic
-authorization:
-  global_users:
+administrators:
+  - "@owner:example.org"
+room_defaults:
+  invite_users:
     - "@owner:example.org"
-matrix_room_access:
-  mode: single_user_private
+rooms:
+  lobby:
+    display_name: Lobby
 mindroom_user:
   username: mindroom
 """.lstrip(),
@@ -496,6 +547,15 @@ models:
 """.lstrip()
 
 
+def _volumes_by_source(volumes: object) -> dict[str, dict[str, str]]:
+    """Index single-destination fixtures; alias tests inspect the full mount list."""
+    assert isinstance(volumes, list)
+    return {
+        source: {"bind": destination, "mode": mode}
+        for source, destination, mode in (volume.rsplit(":", 2) for volume in volumes)
+    }
+
+
 def _projection_root(volumes: dict[str, dict[str, str]]) -> Path:
     return next(Path(source) for source, spec in volumes.items() if spec["bind"] == "/app/config-host")
 
@@ -529,22 +589,17 @@ def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> 
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
     assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
-    assert f"path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/memory/file" in projected_config
-    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
+    assert "context.md" not in projected_config
+    assert "memory_files" not in projected_config
 
-    projected_context_path = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    )
-    assert projected_context_path.read_text(encoding="utf-8") == "# Context\n"
+    assert (tmp_path / "agents/code/workspace/context.md").read_text(encoding="utf-8") == "# Context\n"
     projected_plugin_path = projection_root / ".mindroom-worker-assets" / "plugins" / "00-my-plugin" / "plugin.py"
     assert projected_plugin_path.read_text(encoding="utf-8") == "PLUGIN_VERSION = 'v1'\n"
     projected_knowledge_path = projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md"
     assert projected_knowledge_path.read_text(encoding="utf-8") == "# Guide v1\n"
     assert (projection_root / ".env").read_text(encoding="utf-8") == ""
     assert (projection_root / ".projection-ready").read_text(encoding="utf-8") == "ready\n"
-    assert (
-        worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file"
-    ).is_dir()
+    assert not (projection_root / ".mindroom-worker-assets" / "agents").exists()
 
 
 def test_docker_worker_projection_rewrites_mapping_plugin_paths(
@@ -619,10 +674,12 @@ def _backend(
     tmp_path: Path,
     *,
     idle_timeout_seconds: float = 60.0,
+    security_policy: Literal["runtime_default", "computer"] = "runtime_default",
     config_text: str = "agents: {}\n",
     runtime_paths: RuntimePaths | None = None,
     storage_path: Path | None = None,
     host_config_path: Path | None = None,
+    tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, frozenset[str]]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
@@ -631,6 +688,7 @@ def _backend(
         config_path="/app/config-host/config.yaml",
         host_config_path=tmp_path / "config.yaml" if host_config_path is None else host_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
+        security_policy=security_policy,
         ready_timeout_seconds=5.0,
         name_prefix="mindroom-worker",
         publish_host="127.0.0.1",
@@ -673,6 +731,7 @@ def _backend(
         auth_token=_TEST_AUTH_TOKEN,
         storage_path=tmp_path if storage_path is None else storage_path,
         runtime_paths=runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
     )
     monkeypatch.setattr(
         backend,
@@ -680,6 +739,197 @@ def _backend(
         lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
     )
     return backend, fake_client, sync_calls
+
+
+def _docker_preflight_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_LABELS_JSON": json.dumps({"mindroom.ai/tenant": "test"}),
+        },
+    )
+
+
+@pytest.mark.parametrize("status", ["running", "exited"])
+@pytest.mark.parametrize("label", ["test", "historical"])
+def test_docker_storage_preflight_rejects_workers_without_changing_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status: str,
+    label: str,
+) -> None:
+    """Any remaining container blocks relocation, even with stale labels and metadata."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    container = fake_client.containers.get(handle.worker_id)
+    container.status = status
+    container.attrs["Config"]["Labels"]["mindroom.ai/tenant"] = label
+    metadata = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    before = metadata.read_bytes()
+    sentinel = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "retained.bin"
+    sentinel.write_bytes(b"retained worker bytes")
+
+    with pytest.raises(WorkerBackendError, match=r"(?i)remove|absent"):
+        check_docker_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert container.stopped == 0
+    assert container.removed == 0
+    assert metadata.read_bytes() == before
+    assert sentinel.read_bytes() == b"retained worker bytes"
+
+
+@pytest.mark.parametrize("metadata_bytes", [None, b"invalid json", b"{}"])
+def test_docker_storage_preflight_ignores_stale_metadata_and_foreign_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    metadata_bytes: bytes | None,
+) -> None:
+    """Only the live runtime namespace decides absence; durable metadata stays untouched."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    container = fake_client.containers.get(handle.worker_id)
+    container.attrs["Config"]["Labels"]["mindroom.ai/runtime-namespace"] = "another-runtime"
+    metadata = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    if metadata_bytes is None:
+        metadata.unlink()
+    else:
+        metadata.write_bytes(metadata_bytes)
+
+    check_docker_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert container.stopped == 0
+    assert container.removed == 0
+    assert (metadata.read_bytes() if metadata.exists() else None) == metadata_bytes
+    assert 0.0 < fake_client.api.timeout <= 5.0
+
+
+@pytest.mark.parametrize("inventory", [None, {}, "", [object()]])
+def test_docker_storage_preflight_rejects_unverified_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    inventory: object,
+) -> None:
+    """Malformed or nonempty API results cannot authorize migration."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    _worker_backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    monkeypatch.setattr(fake_client.containers, "list", lambda **_kwargs: inventory)
+    with pytest.raises(WorkerBackendError):
+        check_docker_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+
+@pytest.mark.parametrize("failure", ["api", "malformed", "timeout"])
+def test_docker_storage_preflight_blocks_unavailable_or_late_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    """An API error or exhausted overall deadline cannot authorize migration."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    _worker_backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    now = [0.0]
+    monkeypatch.setattr("mindroom.workers.backends.docker.time.monotonic", lambda: now[0])
+
+    def inventory(**kwargs: object) -> list[object]:
+        assert kwargs["all"] is True
+        assert kwargs["sparse"] is True
+        if failure == "api":
+            message = "unavailable"
+            raise _FakeDockerError(message)
+        if failure == "malformed":
+            message = "invalid API payload"
+            raise ValueError(message)
+        now[0] = 6.0
+        return []
+
+    monkeypatch.setattr(fake_client.containers, "list", inventory)
+    with pytest.raises(WorkerBackendError):
+        check_docker_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+
+def test_docker_startup_retirement_installs_the_docker_extra_like_first_use(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Retirement runs before any first use, so it must auto-install the Docker SDK just as first use would."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    loader = docker_backend_module._load_docker_client_and_errors
+    requested: list[bool] = []
+
+    def record_loader(*args: object, ensure_dependencies: bool = True, **kwargs: object) -> object:
+        requested.append(ensure_dependencies)
+        return loader(*args, **kwargs)
+
+    monkeypatch.setattr(docker_backend_module, "_load_docker_client_and_errors", record_loader)
+    _remove_docker_workers_mounting_state_roots(runtime_paths)
+
+    assert requested == [True]
+
+
+def test_docker_startup_removes_workers_mounting_state_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Containers from releases that mounted whole state roots are removed and recreated on their next ensure."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    current = backend.ensure_worker(WorkerSpec("v1:default:shared:current"), now=0.0)
+    legacy = backend.ensure_worker(WorkerSpec("v1:default:shared:legacy"), now=0.0)
+    foreign = backend.ensure_worker(WorkerSpec("v1:default:shared:foreign"), now=0.0)
+    legacy_container = fake_client.containers.get(legacy.worker_id)
+    foreign_container = fake_client.containers.get(foreign.worker_id)
+    # Older releases never labeled their containers with the storage layout.
+    del legacy_container.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"]
+    del foreign_container.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"]
+    foreign_container.attrs["Config"]["Labels"]["mindroom.ai/runtime-namespace"] = "another-runtime"
+    sentinel = worker_root_path(tmp_path, "v1:default:shared:legacy") / "retained.bin"
+    sentinel.write_bytes(b"retained worker bytes")
+
+    with capture_logs() as logs:
+        _remove_docker_workers_mounting_state_roots(runtime_paths)
+    [warning] = [entry for entry in logs if entry["log_level"] == "warning"]
+    assert warning["workers"] == [legacy_container.id]
+
+    assert legacy_container.removed == 1
+    assert fake_client.containers.get(current.worker_id).removed == 0
+    assert foreign_container.removed == 0
+    assert sentinel.read_bytes() == b"retained worker bytes"
+    backend.ensure_worker(WorkerSpec("v1:default:shared:legacy"), now=10.0)
+    recreated = fake_client.containers.get(legacy.worker_id)
+    assert recreated is not legacy_container
+    assert recreated.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"] == "workspaces"
+
+
+def test_docker_retirement_keeps_removing_old_containers_after_one_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A container Docker refuses to remove never shields the old containers listed after it."""
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    containers = []
+    for name in ("first", "second", "third"):
+        handle = backend.ensure_worker(WorkerSpec(f"v1:default:shared:{name}"), now=0.0)
+        container = fake_client.containers.get(handle.worker_id)
+        del container.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"]
+        containers.append(container)
+
+    def refuse_removal(force: bool = True) -> None:
+        del force
+        message = "removal of container is already in progress"
+        raise _FakeDockerError(message)
+
+    monkeypatch.setattr(containers[0], "remove", refuse_removal)
+
+    with pytest.raises(WorkerBackendError, match=containers[0].id):
+        _remove_docker_workers_mounting_state_roots(runtime_paths)
+
+    assert [container.removed for container in containers[1:]] == [1, 1]
 
 
 def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWorkerBackend) -> None:
@@ -751,7 +1001,7 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (config_dir / ".env").write_text(
@@ -1058,6 +1308,8 @@ def test_docker_worker_config_allows_explicit_endpoint_host_with_wildcard_publis
         "mindroom.ai/launch-config-hash",
         "mindroom.ai/worker-key",
         "mindroom.ai/component",
+        # An operator override would make startup remove every container as one from an older release.
+        "mindroom.ai/storage-layout",
     ],
 )
 def test_docker_worker_backend_rejects_reserved_extra_labels(
@@ -1293,7 +1545,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert isinstance(env, dict)
     assert env["MINDROOM_SANDBOX_RUNNER_MODE"] == "true"
     assert env["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "forkserver"
-    assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _TEST_AUTH_TOKEN
+    assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == handle.auth_token
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == _TEST_UNSCOPED_WORKER_KEY
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == "/app/worker"
     assert env["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
@@ -1302,12 +1554,14 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert env["HOME"] == "/app/worker/agents/code/workspace"
     assert env["EXTRA_ENV"] == "present"
 
-    volumes = run_call["volumes"]
+    volumes = _volumes_by_source(run_call["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _assert_projected_worker_mounts(tmp_path, volumes, projected_paths)
     _assert_projected_config_snapshot(projection_root, tmp_path)
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
+    assert "cap_drop" not in run_call
+    assert "security_opt" not in run_call
 
     labels = run_call["labels"]
     assert isinstance(labels, dict)
@@ -1316,10 +1570,262 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert labels["mindroom.ai/runtime-namespace"]
     assert labels["mindroom.ai/tenant"] == "test"
 
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
+
+
+@pytest.mark.parametrize("computer_enabled", [False, True])
+def test_docker_computer_worker_uses_argument_filtered_browser_seccomp_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    computer_enabled: bool,
+) -> None:
+    """Computer workers retain syscall filtering while allowing Chromium's namespace sandbox."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower()},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy="computer",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert fake_client.containers.run_calls[0]["cap_drop"] == ["ALL"]
+    security_opt = fake_client.containers.run_calls[0]["security_opt"]
+    assert isinstance(security_opt, list)
+    assert security_opt[0] == "no-new-privileges:true"
+    assert len(security_opt) == 2
+    profile = json.loads(str(security_opt[1]).removeprefix("seccomp="))
+    assert profile["defaultAction"] == "SCMP_ACT_ERRNO"
+    assert set(profile) == {"defaultAction", "defaultErrnoRet", "syscalls"}
+    assert "includes" not in json.dumps(profile)
+    assert "excludes" not in json.dumps(profile)
+    assert not any(
+        rule["action"] == "SCMP_ACT_ALLOW"
+        and not rule.get("args")
+        and {"clone", "unshare", "setns"}.intersection(rule["names"])
+        for rule in profile["syscalls"]
+    )
+    namespace_rules = [
+        rule
+        for rule in profile["syscalls"]
+        if rule["action"] == "SCMP_ACT_ALLOW" and rule.get("args") and "clone" in rule["names"]
+    ]
+    assert {
+        (rule["args"][0]["value"], rule["args"][0].get("valueTwo"))
+        for rule in namespace_rules
+        if rule["args"][0]["op"] == "SCMP_CMP_MASKED_EQ"
+    }.issuperset(
+        {
+            (0x7E020000, 0x10000000),
+            (0x7E020000, 0x20000000),
+            (0x7E020000, 0x70000000),
+        },
+    )
+    allowed_names = {
+        name for rule in profile["syscalls"] if rule["action"] == "SCMP_ACT_ALLOW" for name in rule["names"]
+    }
+    assert {
+        "bpf",
+        "delete_module",
+        "init_module",
+        "mount",
+        "perf_event_open",
+        "reboot",
+        "setns",
+        "swapon",
+        "swapoff",
+        "syslog",
+        "umount2",
+    }.isdisjoint(allowed_names)
+    assert "chroot" in allowed_names
+
+
+def test_docker_backend_writes_authoritative_worker_validation_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker workers should inherit primary validation state instead of rebuilding it per call."""
+    validation_snapshot = {"shell": {"name": "shell", "config_fields": []}}
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot=validation_snapshot,
+    )
+    backend.config = replace(
+        backend.config,
+        extra_env={"MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/untrusted/manifest.json"},
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    worker_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    manifest = json.loads((worker_root / ".runtime" / "startup_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tool_validation_snapshot"] == validation_snapshot
+    assert manifest["runtime_paths"]["storage_root"] == "/app/worker"
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert isinstance(env, dict)
+    assert env["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] == "/app/worker/.runtime/startup_manifest.json"
+
+
+def test_docker_workers_run_with_read_only_root_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool code must not rewrite the image's /app tree, which the runner imports from and keeps across restarts."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    assert run_call["read_only"] is True
+    assert run_call["tmpfs"] == {"/tmp": "rw,nosuid,nodev,mode=1777,size=1g"}  # noqa: S108
+    writable_container = fake_client.containers.by_name[handle.worker_id]
+    writable_container.attrs["HostConfig"]["ReadonlyRootfs"] = False
+    writable_container.stop()
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert writable_container.removed == 1
+    assert writable_container.started == 0
+    assert fake_client.containers.run_calls[1]["read_only"] is True
+
+
+def test_docker_workers_reach_the_docker_host_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Minimal-mode shells call the MindRoom API back through the Docker host by default."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert fake_client.containers.run_calls[0]["extra_hosts"] == {"host.docker.internal": "host-gateway"}
+
+
+def test_docker_workers_mount_the_startup_manifest_directory_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool code must not rewrite the manifest the runner boots from, so `.runtime` is a read-only bind."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    worker_root = handle.debug_metadata["state_root"]
+    run_call = fake_client.containers.run_calls[0]
+    assert f"{worker_root}/.runtime:/app/worker/.runtime:ro" in run_call["volumes"]
+    assert run_call["environment"]["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] == (
+        "/app/worker/.runtime/startup_manifest.json"
+    )
+    container = fake_client.containers.by_name[handle.worker_id]
+    runtime_mount = next(mount for mount in container.attrs["Mounts"] if mount["Destination"] == "/app/worker/.runtime")
+    runtime_mount["Mode"] = "rw"
+    runtime_mount["RW"] = True
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert container.removed == 1
+    assert f"{worker_root}/.runtime:/app/worker/.runtime:ro" in fake_client.containers.run_calls[1]["volumes"]
+
+
+def test_docker_backend_replaces_stale_validation_manifest_for_snapshotless_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A snapshotless worker must not reuse validation state persisted by an older worker."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"name": "shell", "config_fields": []}},
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    manifest_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime" / "startup_manifest.json"
+    assert manifest_path.exists()
+
+    snapshotless_backend = DockerWorkerBackend(
+        config=backend.config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+    )
+    monkeypatch.setattr(
+        snapshotless_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{snapshotless_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+
+    snapshotless_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == {}
+    assert first_container.removed == 1
+
+
+def test_docker_script_worker_profile_mirrors_no_global_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A script-specific Docker worker denies automatic credential mirroring."""
+    backend, _fake_client, sync_calls = _backend(monkeypatch, tmp_path)
+    backend.worker_grantable_credentials = frozenset({"openai", "github_private"})
+
+    backend.ensure_worker(
+        WorkerSpec(
+            _TEST_UNSCOPED_WORKER_KEY,
+            mirrored_credential_services=frozenset(),
+        ),
+        now=10.0,
+    )
+
+    assert sync_calls == [(_TEST_UNSCOPED_WORKER_KEY, frozenset())]
+
+
+def test_docker_backend_keeps_run_pinned_worker_roots_out_of_sibling_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two script worker keys create distinct containers that mount only their own run roots."""
+    config_text = """
+agents:
+  watcher:
+    display_name: Watcher
+    role: Watch values
+    model: default
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip()
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    base_key = "v1:default:user_agent:@alice:example.test:watcher"
+    broad_key = script_worker_key_for_run(base_key, f"script-{'a' * 32}")
+    narrow_key = script_worker_key_for_run(base_key, f"script-{'b' * 32}")
+
+    broad = backend.ensure_worker(WorkerSpec(broad_key, private_agent_names=frozenset()), now=10.0)
+    narrow = backend.ensure_worker(WorkerSpec(narrow_key, private_agent_names=frozenset()), now=10.0)
+
+    assert broad.worker_id != narrow.worker_id
+    broad_root = worker_root_path(tmp_path, broad_key)
+    narrow_root = worker_root_path(tmp_path, narrow_key)
+    assert broad.debug_metadata["state_root"] == str(broad_root)
+    assert narrow.debug_metadata["state_root"] == str(narrow_root)
+    broad_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    narrow_volumes = _volumes_by_source(fake_client.containers.run_calls[1]["volumes"])
+    assert isinstance(broad_volumes, dict)
+    assert isinstance(narrow_volumes, dict)
+    assert str(broad_root) in broad_volumes
+    assert str(narrow_root) not in broad_volumes
+    assert str(narrow_root) in narrow_volumes
+    assert str(broad_root) not in narrow_volumes
 
 
 def test_docker_backend_accepts_manager_progress_sink(
@@ -1353,9 +1859,7 @@ def test_docker_backend_projects_assets_from_runtime_storage_root(
     knowledge_root = runtime_storage / "knowledge_docs"
     knowledge_root.mkdir()
     (knowledge_root / "guide.md").write_text("# Runtime Guide\n", encoding="utf-8")
-    context_file = runtime_storage / "agents" / "code" / "workspace" / "context.md"
-    context_file.parent.mkdir(parents=True, exist_ok=True)
-    context_file.write_text("# Runtime Context\n", encoding="utf-8")
+    (runtime_storage / "agents" / "code" / "workspace").mkdir(parents=True)
 
     config_path = tmp_path / "config.yaml"
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=runtime_storage)
@@ -1374,8 +1878,6 @@ agents:
     role: Test
     model: default
     knowledge_bases: [docs]
-    context_files:
-      - context.md
 models:
   default:
     provider: openai
@@ -1387,23 +1889,160 @@ models:
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
 
     assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-runtime-plugin" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
-    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
     assert (projection_root / ".mindroom-worker-assets" / "plugins" / "00-runtime-plugin" / "plugin.py").read_text(
         encoding="utf-8",
     ) == "PLUGIN_VERSION = 'runtime'\n"
     assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md").read_text(
         encoding="utf-8",
     ) == "# Runtime Guide\n"
-    assert (
-        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    ).read_text(encoding="utf-8") == "# Runtime Context\n"
+    assert volumes[str(runtime_storage / "agents/code/workspace")]["bind"] == "/app/worker/agents/code/workspace"
+
+
+_KNOWLEDGE_CONFIG = """
+knowledge_bases:
+  docs:
+    path: ${{MINDROOM_STORAGE_PATH}}/{source}
+agents:
+  code:
+    display_name: Code
+    knowledge_bases: [docs]
+  other:
+    display_name: Other
+"""
+
+
+@pytest.mark.parametrize(
+    ("source", "planted"),
+    [
+        ("agents/other/workspace/docs", "link"),
+        ("agents/other/workspace/docs", "directory"),
+        ("private_instances/someone/docs", "directory"),
+        ("workers/other/docs", "directory"),
+        ("knowledge/docs", "link"),
+    ],
+)
+def test_docker_projection_never_copies_knowledge_another_worker_could_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    planted: str,
+) -> None:
+    """Knowledge is projected from its configured path: never through a link, never from what other workers write."""
+    storage = tmp_path / "storage"
+    victim = storage / "private_instances" / "victim" / "data"
+    victim.mkdir(parents=True)
+    (victim / "secret.md").write_text("victim-only note\n", encoding="utf-8")
+    docs = storage / source
+    docs.parent.mkdir(parents=True, exist_ok=True)
+    if planted == "link":
+        docs.symlink_to(victim, target_is_directory=True)
+    else:
+        docs.mkdir()
+        (docs / "secret.md").write_text("victim-only note\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_KNOWLEDGE_CONFIG.format(source=source),
+        runtime_paths=runtime_paths,
+        storage_path=storage,
+    )
+
+    with capture_logs() as logs:
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    projection_root = _projection_root(_volumes_by_source(fake_client.containers.run_calls[0]["volumes"]))
+    assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in (projection_root / "config.yaml").read_text()
+    assert not any("victim-only" in path.read_text() for path in projection_root.rglob("*.md"))
+    assert any(entry["log_level"] in {"warning", "error"} and "knowledge" in entry["event"] for entry in logs)
+
+
+def test_docker_projection_maps_workspace_paths_without_resolving_them(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Knowledge inside the mounted workspace maps to the mount, so a swap cannot become an asset."""
+    storage = tmp_path / "storage"
+    victim = storage / "private_instances" / "victim" / "code" / "code_data"
+    victim.mkdir(parents=True)
+    (victim / "secret.md").write_text("victim-only note\n", encoding="utf-8")
+    workspace = storage / "agents" / "code" / "workspace"
+    (workspace / "kb").mkdir(parents=True)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=(
+            "knowledge_bases:\n  docs:\n    path: ${MINDROOM_STORAGE_PATH}/agents/code/workspace/kb\n"
+            "agents:\n  code:\n    display_name: Code\n    knowledge_bases: [docs]\n"
+        ),
+        runtime_paths=runtime_paths,
+        storage_path=storage,
+    )
+    swaps = {workspace / "kb": victim}
+    is_symlink = Path.is_symlink
+
+    def swap_after_check(path: Path) -> bool:
+        checked = is_symlink(path)
+        if (target := swaps.pop(path, None)) is not None:
+            # Worker code swaps the entry for a link right after the link check saw a plain entry.
+            path.rename(path.with_name(f"{path.name}-moved"))
+            path.symlink_to(target, target_is_directory=target.is_dir())
+        return checked
+
+    monkeypatch.setattr(Path, "is_symlink", swap_after_check)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    projection_root = _projection_root(_volumes_by_source(fake_client.containers.run_calls[0]["volumes"]))
+    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+    assert "path: /app/worker/agents/code/workspace/kb" in projected_config
+    assert not any(
+        "victim-only" in path.read_text(encoding="utf-8") for path in projection_root.rglob("*") if path.is_file()
+    )
+
+
+def test_docker_projection_copy_refuses_an_entry_swapped_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected assets are copied through no-follow descriptors, so a file swapped for a link is never copied."""
+    storage = tmp_path / "storage"
+    docs = storage / "knowledge" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    victim = tmp_path / "victim.md"
+    victim.write_text("victim-only note\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage)
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_KNOWLEDGE_CONFIG.format(source="knowledge/docs"),
+        runtime_paths=runtime_paths,
+        storage_path=storage,
+    )
+    validate = docker_projection_module.validate_local_copy_source_dir
+
+    def validate_then_swap(source_dir: Path, **kwargs: object) -> Path:
+        validated = validate(source_dir, **kwargs)
+        if validated.name == "docs":
+            (docs / "guide.md").unlink()
+            (docs / "guide.md").symlink_to(victim)
+        return validated
+
+    monkeypatch.setattr(docker_projection_module, "validate_local_copy_source_dir", validate_then_swap)
+
+    with pytest.raises((WorkerBackendError, OSError, ValueError)):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert not any("victim-only" in path.read_text() for path in storage.rglob("guide.md") if not path.is_symlink())
 
 
 def test_docker_backend_rejects_symlinked_projected_directory_assets(
@@ -1445,32 +2084,45 @@ def test_docker_backend_rejects_symlinked_projected_file_assets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Projected file assets must reject symlink roots instead of escaping the agent workspace."""
+    """Projected file assets must reject symlink roots instead of copying the link target."""
     secret_path = tmp_path / "secret.md"
     secret_path.write_text("secret\n", encoding="utf-8")
-    context_path = tmp_path / "agents" / "code" / "workspace" / "context.md"
-    context_path.parent.mkdir(parents=True)
-    context_path.symlink_to(secret_path)
+    (tmp_path / "guide.md").symlink_to(secret_path)
     backend, _fake_client, _sync_calls = _backend(
         monkeypatch,
         tmp_path,
         config_text="""
+knowledge_bases:
+  docs:
+    path: ./guide.md
 agents:
   code:
     display_name: Code
-    role: Test
-    model: default
-    context_files:
-      - context.md
-models:
-  default:
-    provider: openai
-    id: test-model
+    knowledge_bases: [docs]
 """.lstrip(),
+        storage_path=tmp_path / "storage",
     )
 
-    with pytest.raises(WorkerBackendError, match="Agent-owned paths must stay within"):
+    with pytest.raises(WorkerBackendError, match="Docker worker asset must not contain symlinks"):
         backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+
+def test_docker_backend_mounts_shared_credential_mirror_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker code must not be able to delete or relink the primary's credential mirror."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    worker_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    assert volumes[str(worker_root)] == {"bind": "/app/worker", "mode": "rw"}
+    assert volumes[str(worker_root / ".shared_credentials")] == {
+        "bind": "/app/worker/.shared_credentials",
+        "mode": "ro",
+    }
 
 
 def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
@@ -1543,7 +2195,9 @@ def test_docker_backend_commits_parent_runtime_env_into_worker_payload(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     credentials_path = tmp_path / "google-credentials.json"
     credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
@@ -1611,7 +2265,9 @@ def test_docker_backend_excludes_internal_file_secrets_from_worker_payload(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     secret_path = tmp_path / "control-secret.txt"
     secret_path.write_text("supersecret\n", encoding="utf-8")
@@ -1658,7 +2314,9 @@ def test_docker_backend_excludes_relative_file_backed_secrets_from_worker_payloa
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     secret_path = config_dir / "secrets" / "openai.key"
     secret_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1701,7 +2359,9 @@ def test_docker_backend_excludes_relative_process_file_backed_secrets_from_worke
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     secret_path = config_dir / "secrets" / "openai.key"
     secret_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1746,7 +2406,7 @@ def test_docker_backend_preserves_container_config_path_without_host_projection(
     """Dedicated Docker workers without a host config mount must keep the in-container config path."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
@@ -1812,7 +2472,9 @@ def test_docker_backend_ignores_symlinked_google_application_credentials_path(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     runtime_storage = (tmp_path / "runtime-storage").resolve()
     real_credentials_path = tmp_path / "real-adc.json"
@@ -1854,7 +2516,9 @@ def test_docker_backend_does_not_overwrite_google_application_credentials_destin
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     runtime_storage = (tmp_path / "runtime-storage").resolve()
     credentials_path = tmp_path / "google-credentials.json"
@@ -1893,28 +2557,109 @@ def test_docker_backend_does_not_overwrite_google_application_credentials_destin
     assert victim_path.read_text(encoding="utf-8") == "victim\n"
 
 
-def test_docker_backend_redacts_projected_config_secrets_and_support_state(
+def test_docker_backend_projects_only_the_config_fields_workers_resolve(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Projected worker config should omit live secrets and strip unrelated runtime state."""
-    config_text, _projected_paths = _projected_config_fixture(tmp_path)
+    """The worker-readable config keeps only runner fields, so secrets in any other field never reach it."""
+    (tmp_path / "plugins" / "my-plugin").mkdir(parents=True)
+    (tmp_path / "knowledge_docs").mkdir()
+    config_text = """
+plugins:
+  - path: ./plugins/my-plugin
+    settings:
+      key: plugin-setting-secret
+knowledge_bases:
+  docs:
+    path: ./knowledge_docs
+    git:
+      repo_url: https://oauth2:git-url-secret@git.example.org/docs.git
+memory:
+  backend: file
+  embedder:
+    provider: openai
+    config:
+      api_key: embedder-secret
+mcp_servers:
+  files:
+    transport: stdio
+    command: npx
+    args: [--api-key, mcp-arg-secret]
+    env:
+      AWS_SECRET_ACCESS_KEY: mcp-env-secret
+  remote:
+    transport: streamable-http
+    url: https://user:mcp-url-secret@mcp.example.org/mcp
+    headers:
+      X-Upstream-Key: mcp-header-secret
+event_journal:
+  backend: postgres
+  database_url: postgresql://mindroom:journal-dsn-secret@db/x
+defaults:
+  file_access: unrestricted
+  tools:
+    - custom_api:
+        base_url: https://user:default-tool-override-secret@api.example.org
+agents:
+  code:
+    display_name: Code
+    role: Test
+    model: default
+    instructions: [agent-instructions-secret]
+    knowledge_bases: [docs]
+    tools:
+      - shell
+      - custom_api:
+          base_url: https://user:tool-override-secret@api.example.org
+models:
+  default:
+    provider: openai
+    id: test-model
+    api_key: sk-model-secret
+    extra_kwargs:
+      aws_secret_access_key: model-extra-kwarg-secret
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+    api_key: sk-voice-secret
+administrators:
+  - "@owner-secret:example.org"
+""".lstrip()
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
-    assert isinstance(volumes, dict)
-    projection_root = _projection_root(volumes)
-    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    projected_text = (_projection_root(volumes) / "config.yaml").read_text(encoding="utf-8")
+    assert "secret" not in projected_text
+    assert yaml.safe_load(projected_text) == {
+        "defaults": {"file_access": "unrestricted", "tools": ["custom_api"]},
+        "agents": {
+            "code": {"display_name": "Code", "knowledge_bases": ["docs"], "tools": ["shell", "custom_api"]},
+        },
+        "plugins": [{"path": "./.mindroom-worker-assets/plugins/00-my-plugin"}],
+        "memory": {"backend": "file"},
+        "knowledge_bases": {"docs": {"path": "./.mindroom-worker-assets/knowledge_bases/docs"}},
+    }
 
-    assert "api_key" not in projected_config["models"]["default"]
-    assert "api_key" not in projected_config["voice"]["stt"]
-    assert projected_config["teams"] == {}
-    assert projected_config["cultures"] == {}
-    assert projected_config["authorization"] == {}
-    assert projected_config["matrix_room_access"] == {}
-    assert projected_config["mindroom_user"] is None
+
+def test_docker_projection_error_for_a_malformed_tool_entry_omits_its_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A tool entry the projection cannot read fails without repeating the credential written into it."""
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="agents:\n  code:\n    tools:\n      - openbb: {}\n        extra: inline-secret-value\n",
+    )
+
+    with pytest.raises(WorkerBackendError) as exc_info:
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert "inline-secret-value" not in str(exc_info.value)
 
 
 def test_load_docker_client_auto_installs_optional_runtime(
@@ -1948,6 +2693,44 @@ def test_load_docker_client_auto_installs_optional_runtime(
     assert errors is fake_errors
 
 
+def test_load_docker_client_applies_migration_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Migration client construction carries the remaining overall deadline."""
+    captured: dict[str, object] = {}
+    fake_client = object()
+    fake_errors = SimpleNamespace(DockerException=_FakeDockerError, NotFound=_FakeNotFoundError)
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
+
+    def from_env(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return fake_client
+
+    def import_module(name: str) -> object:
+        if name == "docker":
+            return SimpleNamespace(from_env=from_env)
+        if name == "docker.errors":
+            return fake_errors
+        msg = f"Unexpected import: {name}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.ensure_docker_dependencies",
+        lambda _paths: pytest.fail("migration client must not install dependencies"),
+    )
+    monkeypatch.setattr("mindroom.workers.backends.docker.importlib.import_module", import_module)
+
+    client, _errors = _load_docker_client_and_errors(
+        runtime_paths=runtime_paths,
+        timeout_seconds=4.5,
+        ensure_dependencies=False,
+    )
+
+    assert client is fake_client
+    assert captured == {"environment": runtime_paths.process_env, "timeout": 4.5}
+
+
 def test_ensure_docker_dependencies_uses_explicit_runtime_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1955,7 +2738,7 @@ def test_ensure_docker_dependencies_uses_explicit_runtime_paths(
     """Docker dependency bootstrap should honor the active runtime's config-adjacent .env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("MINDROOM_NO_AUTO_INSTALL_TOOLS=true\n", encoding="utf-8")
@@ -2015,7 +2798,7 @@ def test_docker_backend_cleanup_stops_idle_workers(
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["last_used_at"] = 0.0
     metadata["status"] = "ready"
@@ -2034,6 +2817,452 @@ def test_docker_backend_cleanup_stops_idle_workers(
     worker_file.parent.mkdir(parents=True, exist_ok=True)
     worker_file.write_text("still here", encoding="utf-8")
     assert worker_file.read_text(encoding="utf-8") == "still here"
+
+
+def test_docker_backend_retires_only_one_exact_run_worker_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement removes one run container and root without touching its ordinary worker."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'c' * 32}")
+    ordinary = backend.ensure_worker(WorkerSpec(base_key, private_agent_names=frozenset()), now=1.0)
+    retired = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    retired_root = worker_root_path(tmp_path, run_key)
+    retired_projection_root = backend._projection_manager._worker_projected_configs_root(
+        local_worker_state_paths_for_root(retired_root),
+    )
+    (retired_root / "workspace").mkdir(parents=True, exist_ok=True)
+    (retired_root / "workspace" / "note.txt").write_text("retire me", encoding="utf-8")
+
+    backend.retire_worker(run_key)
+    backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[retired.worker_id].removed == 1
+    assert fake_client.containers.by_name[ordinary.worker_id].removed == 0
+    assert retired_root.exists() is False
+    assert retired_projection_root.exists() is False
+    assert worker_root_path(tmp_path, base_key).is_dir()
+    assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_docker_backend_refuses_retirement_when_live_container_key_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale container name cannot authorize deletion when its live worker identity differs."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'f' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    raw_env = container.attrs["Config"]["Env"]
+    worker_key_env = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
+    container.attrs["Config"]["Env"] = [
+        f"{worker_key_env}={base_key}" if entry.startswith(f"{worker_key_env}=") else entry for entry in raw_env
+    ]
+
+    with pytest.raises(WorkerBackendError, match="does not match retirement key"):
+        backend.retire_worker(run_key)
+
+    assert container.removed == 0
+    assert worker_root_path(tmp_path, run_key).is_dir()
+
+
+def _foreign_container(fake_client: _FakeDockerClient, name: str) -> _FakeContainer:
+    """Register one unrelated container (a homeserver, a database) on the same Docker daemon."""
+    container = _FakeContainer(
+        name=name,
+        image="matrixdotorg/synapse:latest",
+        image_identity="sha256:foreign",
+        host_port=8008,
+        environment={},
+        labels={},
+        user=None,
+    )
+    fake_client.containers.by_name[name] = container
+    return container
+
+
+def _write_mounted_worker_metadata(storage_root: Path, worker_key: str, overrides: dict[str, object]) -> Path:
+    """Write metadata inside one worker's bind-mounted root, as its tool code could."""
+    control_metadata = json.loads(_control_metadata_path(storage_root, worker_key).read_text(encoding="utf-8"))
+    mounted_metadata_path = worker_root_path(storage_root, worker_key) / "metadata" / "worker.json"
+    mounted_metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    mounted_metadata_path.write_text(json.dumps(control_metadata | overrides), encoding="utf-8")
+    return mounted_metadata_path
+
+
+def test_docker_worker_cannot_retarget_the_backend_from_its_mounted_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Metadata written inside a worker's own mount never decides which container the primary touches."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    victim_key = "v1:default:unscoped:victim"
+    attacker = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    victim = backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    victim_container = fake_client.containers.by_name[victim.worker_id]
+    foreign_container = _foreign_container(fake_client, "synapse")
+
+    attacker_state_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    control_metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    assert control_metadata_path.is_file()
+    assert not control_metadata_path.is_relative_to(attacker_state_root)
+    assert list(attacker_state_root.rglob("worker.json")) == []
+
+    _write_mounted_worker_metadata(
+        tmp_path,
+        _TEST_UNSCOPED_WORKER_KEY,
+        {"container_name": "synapse", "worker_id": "synapse", "worker_key": victim_key},
+    )
+
+    reused = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.cleanup_idle_workers(now=10_000.0)
+
+    assert reused.worker_id == attacker.worker_id
+    assert victim_container.removed == 0
+    assert fake_client.containers.by_name[attacker.worker_id].removed == 0
+    assert sorted(handle.worker_key for handle in backend.list_workers()) == [
+        _TEST_UNSCOPED_WORKER_KEY,
+        victim_key,
+    ]
+
+    backend.shutdown()
+
+    assert foreign_container.removed == 0
+    assert foreign_container.stopped == 0
+
+
+def test_docker_backend_leaves_foreign_containers_named_by_control_records_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A recorded container name only ever reaps this backend's own container for that worker key."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    foreign_container = _foreign_container(fake_client, "synapse")
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["container_name"] = "synapse"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.cleanup_idle_workers(now=10_000.0)
+
+    assert foreign_container.removed == 0
+    assert foreign_container.stopped == 0
+
+
+def test_docker_backend_refuses_foreign_container_holding_the_derived_worker_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unowned container answering to the derived name fails the request instead of being destroyed."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    squatter = _foreign_container(fake_client, backend._container_name_for_worker(_TEST_UNSCOPED_WORKER_KEY))
+
+    with pytest.raises(WorkerBackendError, match="not owned by this MindRoom worker runtime"):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert squatter.removed == 0
+    assert squatter.stopped == 0
+    assert fake_client.containers.run_calls == []
+
+
+def test_docker_backend_refuses_symlinked_startup_manifest_directory_in_worker_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A directory symlink planted in a worker's own mount cannot redirect the primary's manifest write."""
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"available": True}},
+    )
+    victim_key = "v1:default:unscoped:victim"
+    backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    victim_control_metadata = _control_metadata_path(tmp_path, victim_key)
+    victim_metadata_before = victim_control_metadata.read_bytes()
+
+    runtime_dir = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime"
+    runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+    runtime_dir.symlink_to(victim_control_metadata.parent, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="real directory"):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert victim_control_metadata.read_bytes() == victim_metadata_before
+    assert not (victim_control_metadata.parent / "startup_manifest.json").exists()
+
+
+def test_docker_backend_replaces_symlinked_startup_manifest_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A file symlink planted as the manifest is replaced by a complete manifest instead of being followed."""
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"available": True}},
+    )
+    victim_key = "v1:default:unscoped:victim"
+    backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    victim_control_metadata = _control_metadata_path(tmp_path, victim_key)
+    victim_metadata_before = victim_control_metadata.read_bytes()
+
+    manifest_path = sandbox_startup_manifest_path(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.symlink_to(victim_control_metadata)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert victim_control_metadata.read_bytes() == victim_metadata_before
+    assert not manifest_path.is_symlink()
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == {
+        "shell": {"available": True},
+    }
+    assert [entry.name for entry in manifest_path.parent.iterdir()] == [manifest_path.name]
+
+
+def test_docker_backend_retires_worker_despite_tampered_mounted_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Retirement identity comes from control state, so a worker cannot pin its own state tree."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'d' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    _write_mounted_worker_metadata(tmp_path, run_key, {"worker_key": "v1:t:user_agent:mallory:watcher"})
+
+    backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 1
+    assert worker_root_path(tmp_path, run_key).exists() is False
+    assert _control_metadata_path(tmp_path, run_key).exists() is False
+
+
+def _restart_backend(backend: DockerWorkerBackend, storage_root: Path) -> DockerWorkerBackend:
+    """Construct a new primary over the same storage root and fake Docker daemon."""
+    return DockerWorkerBackend(config=backend.config, auth_token=_TEST_AUTH_TOKEN, storage_path=storage_root)
+
+
+def _move_control_record_into_mounted_root(storage_root: Path, worker_key: str, overrides: dict[str, object]) -> None:
+    """Rewrite one worker into the pre-control-directory layout its last release left on disk."""
+    _write_mounted_worker_metadata(storage_root, worker_key, overrides)
+    control_metadata_path = _control_metadata_path(storage_root, worker_key)
+    control_metadata_path.unlink()
+    control_metadata_path.parent.rmdir()
+    control_metadata_path.parent.parent.rmdir()
+
+
+def test_docker_backend_adopts_legacy_mounted_worker_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Workers recorded inside their mount before the upgrade stay managed, trusting only their digest-bound key."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    legacy_container = fake_client.containers.by_name[handle.worker_id]
+    foreign_container = _foreign_container(fake_client, "synapse")
+    _move_control_record_into_mounted_root(
+        tmp_path,
+        _TEST_UNSCOPED_WORKER_KEY,
+        {"container_name": "synapse", "worker_id": "synapse", "status": "failed", "last_used_at": 1e12},
+    )
+    assert backend.list_workers() == []
+
+    upgraded = _restart_backend(backend, tmp_path)
+
+    adopted = json.loads(_control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).read_text(encoding="utf-8"))
+    assert adopted["worker_key"] == _TEST_UNSCOPED_WORKER_KEY
+    assert adopted["container_name"] == handle.worker_id
+    assert adopted["status"] == "idle"
+    assert adopted["last_used_at"] < 1e12
+    assert [listed.worker_id for listed in upgraded.list_workers()] == [handle.worker_id]
+
+    cleaned = upgraded.cleanup_idle_workers(now=adopted["last_used_at"] + 120.0)
+
+    assert [worker.worker_key for worker in cleaned] == [_TEST_UNSCOPED_WORKER_KEY]
+    assert legacy_container.stopped == 1
+    assert foreign_container.stopped == 0
+
+    upgraded.retire_worker(_TEST_UNSCOPED_WORKER_KEY)
+
+    assert legacy_container.removed == 1
+    assert foreign_container.removed == 0
+    assert worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+    assert _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+
+
+@pytest.mark.parametrize("tampering", ["foreign_key", "symlinked_record", "malformed_record"])
+def test_docker_backend_skips_unverifiable_legacy_worker_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tampering: str,
+) -> None:
+    """A legacy mounted record never claims another worker's key or follows a planted link."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    victim_key = "v1:default:unscoped:victim"
+    victim = backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    _move_control_record_into_mounted_root(tmp_path, victim_key, {})
+    _move_control_record_into_mounted_root(tmp_path, _TEST_UNSCOPED_WORKER_KEY, {})
+    victim_record = worker_root_path(tmp_path, victim_key) / "metadata" / "worker.json"
+    attacker_record = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    victim_record.unlink()
+    if tampering == "foreign_key":
+        attacker_record.write_text(json.dumps({"worker_key": victim_key}), encoding="utf-8")
+    elif tampering == "symlinked_record":
+        victim_record.write_text(json.dumps({"worker_key": victim_key}), encoding="utf-8")
+        attacker_record.unlink()
+        attacker_record.symlink_to(victim_record)
+    else:
+        attacker_record.write_text("{malformed", encoding="utf-8")
+
+    upgraded = _restart_backend(backend, tmp_path)
+
+    assert _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+    expected_victims = [victim_key] if tampering == "symlinked_record" else []
+    assert [listed.worker_key for listed in upgraded.list_workers()] == expected_victims
+    with pytest.raises(WorkerBackendError, match="missing the control identity metadata"):
+        upgraded.retire_worker(_TEST_UNSCOPED_WORKER_KEY)
+    assert fake_client.containers.by_name[victim.worker_id].removed == 0
+
+
+def test_docker_backend_refuses_symlinked_run_root_with_malformed_target_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Malformed metadata cannot redirect Docker worker-state retirement through a run-key symlink."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'1' * 32}")
+    target_root = worker_root_path(tmp_path, base_key)
+    (target_root / "metadata").mkdir(parents=True)
+    (target_root / "metadata" / "worker.json").write_text("{malformed", encoding="utf-8")
+    sentinel = target_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    worker_root_path(tmp_path, run_key).symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="symbolic link"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("metadata_contents", [None, "{malformed"])
+def test_docker_backend_refuses_existing_run_root_without_exact_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    metadata_contents: str | None,
+) -> None:
+    """An existing Docker state root needs readable exact-key metadata before recursive deletion."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'2' * 32}")
+    state_root = worker_root_path(tmp_path, run_key)
+    state_root.mkdir(parents=True)
+    sentinel = state_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    if metadata_contents is not None:
+        metadata_file = _control_metadata_path(tmp_path, run_key)
+        metadata_file.parent.mkdir(parents=True)
+        metadata_file.write_text(metadata_contents, encoding="utf-8")
+
+    with pytest.raises(WorkerBackendError, match="identity metadata"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_docker_backend_refuses_worker_root_swapped_after_identity_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement cannot recursively delete a replacement after validating exact state."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'3' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    state_root = worker_root_path(tmp_path, run_key)
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+    sentinel = replacement_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    retired_root = tmp_path / "retired-original"
+    swapped = False
+    original_stat = worker_retirement_module.os.stat
+
+    def stat_after_swap(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> object:
+        nonlocal swapped
+        if path == state_root.name and dir_fd is not None and not swapped:
+            descriptor_root = Path(f"/proc/self/fd/{dir_fd}").resolve()
+            if descriptor_root == backend._workers_root:
+                state_root.rename(retired_root)
+                replacement_root.rename(state_root)
+                replacement_root.symlink_to(state_root, target_is_directory=True)
+                swapped = True
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(worker_retirement_module.os, "stat", stat_after_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 0
+    assert swapped is True
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_docker_backend_refuses_projection_root_swapped_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement cannot recursively delete a replacement projection root."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'4' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    worker_name = worker_dir_name(run_key)
+    projected_configs_root = backend._projection_manager._projected_configs_root
+    projection_root = projected_configs_root / worker_name
+    projection_root.mkdir(parents=True, exist_ok=True)
+    (projection_root / "old.txt").write_text("old", encoding="utf-8")
+    replacement_root = tmp_path / "replacement-projection"
+    replacement_root.mkdir()
+    (replacement_root / "keep.txt").write_text("keep", encoding="utf-8")
+    retired_projection_root = tmp_path / "retired-projection"
+    swapped = False
+    original_stat = worker_retirement_module.os.stat
+
+    def stat_after_swap(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> object:
+        nonlocal swapped
+        if path == worker_name and dir_fd is not None and not swapped:
+            descriptor_root = Path(f"/proc/self/fd/{dir_fd}").resolve()
+            if descriptor_root == projected_configs_root:
+                projection_root.rename(retired_projection_root)
+                replacement_root.rename(projection_root)
+                swapped = True
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(worker_retirement_module.os, "stat", stat_after_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 1
+    assert swapped is True
+    assert worker_root_path(tmp_path, run_key).is_dir()
+    assert (projection_root / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_docker_backend_records_failure_and_stops_container(
@@ -2087,6 +3316,27 @@ def test_docker_worker_ready_failure_surfaces_container_logs(
     assert len(message) < 4300
 
 
+def test_warm_ensure_resolves_image_once_and_detects_next_call_tag_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Avoid repeated daemon lookups without caching image identity across calls."""
+    backend, client, _ = _backend(monkeypatch, tmp_path)
+    spec = WorkerSpec(_TEST_UNSCOPED_WORKER_KEY)
+    backend.ensure_worker(spec)
+    original = client.containers.created_containers[-1]
+    client.images.gets.clear()
+
+    backend.ensure_worker(spec)
+
+    assert client.containers.by_name[original.name] is original
+    assert client.images.gets == [backend.config.image]
+    client.images.by_name[backend.config.image] = _FakeImage("sha256:image-v2")
+    backend.ensure_worker(spec)
+    assert original.removed == 1
+    assert client.containers.created_containers[-1].attrs["Image"] == "sha256:image-v2"
+
+
 def test_docker_worker_health_accepts_matching_protocol() -> None:
     """A worker using the host protocol should pass the compatibility handshake."""
     response = httpx.Response(
@@ -2106,6 +3356,8 @@ def test_docker_worker_health_accepts_matching_protocol() -> None:
     [
         {"status": "ok"},
         {"status": "ok", "mindroom_version": "2026.7.1", "worker_protocol": 0},
+        # Workers from releases that mounted whole state roots write private identity records the new mounts forbid.
+        {"status": "ok", "mindroom_version": "2026.9.324", "worker_protocol": 1},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": True},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": 1.0},
     ],
@@ -2293,7 +3545,7 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
 
     replacement = fake_client.containers.created_containers[-1]
     replacement_hash = replacement.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"]
-    failed_metadata = backend._load_metadata(backend._state_paths(_TEST_UNSCOPED_WORKER_KEY))
+    failed_metadata = backend._load_metadata(backend._worker_paths(_TEST_UNSCOPED_WORKER_KEY))
     assert failed_metadata is not None
     assert failed_metadata.launch_config_hash == replacement_hash
 
@@ -2333,8 +3585,8 @@ def test_docker_worker_concurrent_tag_update_keeps_request_local_launch_identity
     replacement_labels = replacement.attrs["Config"]["Labels"]
     stale_reader_container = fake_client.containers.by_name[race.stale_reader_container_name]
     stale_reader_labels = stale_reader_container.attrs["Config"]["Labels"]
-    recovering_metadata = backend._load_metadata(backend._state_paths(recovering_key))
-    stale_reader_metadata = backend._load_metadata(backend._state_paths(stale_reader_key))
+    recovering_metadata = backend._load_metadata(backend._worker_paths(recovering_key))
+    stale_reader_metadata = backend._load_metadata(backend._worker_paths(stale_reader_key))
     assert recovering_metadata is not None
     assert stale_reader_metadata is not None
     assert replacement.attrs["Image"] == "sha256:image-v2"
@@ -2465,64 +3717,6 @@ def test_build_dedicated_worker_runtime_paths_rejects_secret_path_override_extra
         )
 
 
-def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -> None:
-    """Projected Docker context files should still load through the worker runtime."""
-    config_text, _projected_paths = _projected_config_fixture(tmp_path)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(config_text, encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
-    config = _DockerWorkerBackendConfig(
-        image="ghcr.io/mindroom-ai/mindroom:latest",
-        worker_port=8766,
-        storage_mount_path="/app/worker",
-        config_path="/app/config-host/config.yaml",
-        host_config_path=config_path,
-        idle_timeout_seconds=60.0,
-        ready_timeout_seconds=5.0,
-        name_prefix="mindroom-worker",
-        publish_host="127.0.0.1",
-        endpoint_host="127.0.0.1",
-        user="1000:1000",
-        extra_env={},
-        extra_labels={},
-    )
-    manager = DockerProjectionManager(
-        config=config,
-        projected_configs_root=tmp_path / _PROJECTED_CONFIGS_DIRNAME,
-        runtime_paths=runtime_paths,
-    )
-    worker_paths = local_worker_state_paths_for_root(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
-    projection = manager._projected_config(worker_paths, worker_key=_TEST_UNSCOPED_WORKER_KEY, materialize=True)
-    projected_config = yaml.safe_load(projection.projected_yaml)
-    projected_context_file = projected_config["agents"]["code"]["context_files"][0]
-    worker_runtime = build_dedicated_worker_runtime_paths(
-        runtime_paths=runtime_paths,
-        backend_name="Docker",
-        worker_key=_TEST_UNSCOPED_WORKER_KEY,
-        config_path=projection.root / "config.yaml",
-        dedicated_root=worker_paths.root,
-        worker_port=8766,
-        shared_storage_root=str(worker_paths.root),
-        extra_env={},
-    )
-
-    loaded = _load_context_files(
-        [projected_context_file],
-        worker_runtime,
-        agent_name="code",
-        storage_path=worker_runtime.storage_root,
-    )
-
-    assert len(loaded) == 1
-    assert loaded[0].body == "# Context"
-    # The title is the worker-visible path, so the rendered prompt names a file
-    # the worker runtime can actually open.
-    title_path = Path(loaded[0].title)
-    assert title_path.is_absolute()
-    assert title_path.name == "00-context.md"
-    assert title_path.read_text(encoding="utf-8").strip() == "# Context"
-
-
 @pytest.mark.parametrize("worker_scope", ["shared", "unscoped"])
 def test_docker_projection_accepts_normalized_agent_names_in_worker_keys(
     tmp_path: Path,
@@ -2643,14 +3837,14 @@ models:
 
     backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
     assert list(projected_config["agents"]) == ["alpha"]
     assert projected_config["agents"]["alpha"]["delegate_to"] == []
-    assert projected_config["calls"] == {}
+    assert "calls" not in projected_config
 
     projected_runtime_paths = resolve_runtime_paths(
         config_path=projection_root / "config.yaml",
@@ -2684,7 +3878,7 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
         ),
     )
 
-    updated_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    second_handle = updated_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
     second_container = fake_client.containers.by_name[first_handle.worker_id]
     assert second_container is not first_container
@@ -2694,9 +3888,177 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     second_run_call = fake_client.containers.run_calls[-1]
     second_env = second_run_call["environment"]
     assert isinstance(second_env, dict)
-    assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _ROTATED_AUTH_TOKEN
+    assert second_handle.auth_token != first_handle.auth_token
+    assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == second_handle.auth_token
     assert second_env["EXTRA_ENV"] == "updated"
     assert second_run_call["user"] == "2000:2000"
+
+
+def test_docker_backend_recreates_container_missing_runtime_security_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An old matching container must be replaced if its effective host security is stale."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy="computer",
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    first_container.attrs["HostConfig"] = {"CapDrop": [], "SecurityOpt": []}
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "weakened_setting",
+    [
+        "privileged",
+        "cap_add",
+        "missing_drop",
+        "missing_nnp",
+        "unconfined",
+        "normalized_seccomp_marker",
+        "wrong_profile",
+        "invalid_profile",
+        "missing_host_config",
+    ],
+)
+@pytest.mark.parametrize("computer_enabled", [False, True])
+def test_docker_backend_recreates_container_with_weakened_runtime_security(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    weakened_setting: str,
+    computer_enabled: bool,
+) -> None:
+    """A matching worker must not be reused when its effective Docker policy is weaker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower()},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy="computer",
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    host_config = first_container.attrs["HostConfig"]
+    assert isinstance(host_config, dict)
+
+    if weakened_setting == "privileged":
+        host_config["Privileged"] = True
+    elif weakened_setting == "cap_add":
+        host_config["CapAdd"] = ["SYS_ADMIN"]
+    elif weakened_setting == "missing_drop":
+        host_config["CapDrop"] = []
+    elif weakened_setting == "missing_nnp":
+        host_config["SecurityOpt"] = host_config["SecurityOpt"][1:]
+    elif weakened_setting == "invalid_profile":
+        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp={"]
+    elif weakened_setting == "missing_host_config":
+        first_container.attrs.pop("HostConfig")
+    elif weakened_setting == "normalized_seccomp_marker":
+        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp"]
+    else:
+        replacement = (
+            "unconfined"
+            if weakened_setting == "unconfined"
+            else json.dumps({"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []})
+        )
+        host_config["SecurityOpt"] = ["no-new-privileges:true", f"seccomp={replacement}"]
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("computer_enabled", "security_policy"),
+    [(False, "runtime_default"), (False, "computer"), (True, "computer")],
+)
+def test_docker_backend_reuses_container_with_expected_runtime_security(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    computer_enabled: bool,
+    security_policy: Literal["runtime_default", "computer"],
+) -> None:
+    """An unchanged default or computer security policy permits worker reuse."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"} if computer_enabled else {},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy=security_policy,
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    second_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert second_handle.worker_id == first_handle.worker_id
+    assert first_container.removed == 0
+    assert len(fake_client.containers.run_calls) == 1
+
+
+def test_docker_backend_recreates_container_when_validation_snapshot_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A surviving worker must restart when its authoritative validation state changes."""
+    first_snapshot = {"shell": {"name": "shell", "config_fields": []}}
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot=first_snapshot,
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    second_snapshot = {
+        **first_snapshot,
+        "file": {"name": "file", "config_fields": []},
+    }
+    updated_backend = DockerWorkerBackend(
+        config=backend.config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+        tool_validation_snapshot=second_snapshot,
+    )
+    monkeypatch.setattr(
+        updated_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{updated_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+
+    updated_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    second_container = fake_client.containers.by_name[first_handle.worker_id]
+    assert second_container is not first_container
+    assert first_container.removed == 1
+    manifest_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime" / "startup_manifest.json"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == second_snapshot
 
 
 def test_docker_backend_recreates_container_when_name_prefix_changes(
@@ -2904,23 +4266,72 @@ def test_docker_backend_recreates_container_when_host_config_contents_change(
     assert len(fake_client.containers.run_calls) == 2
 
 
+@pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
+@pytest.mark.parametrize("changed_asset", ["history", "context"])
+def test_docker_worker_keeps_running_when_mounted_agent_data_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    worker_scope: str,
+    changed_asset: str,
+) -> None:
+    """A chat export or context edit must not replace a live browser worker."""
+    workspace = tmp_path / "agents" / "alpha" / "workspace"
+    history = workspace / "thread_exports" / "thread.yaml"
+    history.parent.mkdir(parents=True)
+    history.write_text("messages: []\n")
+    context = workspace / "AGENTS.md"
+    context.write_text("Initial context\n")
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=f"""
+agents:
+  alpha:
+    worker_scope: {worker_scope}
+    knowledge_bases: [threads]
+    context_files: [AGENTS.md]
+knowledge_bases:
+  threads:
+    path: ./agents/alpha/workspace/thread_exports
+""",
+    )
+    key = "v1:default:shared:alpha" if worker_scope == "shared" else "v1:default:user_agent:@alice:example.org:alpha"
+    spec = WorkerSpec(key, private_agent_names=frozenset())
+    first = backend.ensure_worker(spec, now=10.0)
+    container = fake_client.containers.created_containers[0]
+    (history if changed_asset == "history" else context).write_text("Updated conversation content\n")
+    second = backend.ensure_worker(spec, now=20.0)
+    assert container.status == "running"
+    assert second.endpoint == first.endpoint
+    assert len(fake_client.containers.created_containers) == 1
+    projection = next(Path(m["Source"]) for m in container.attrs["Mounts"] if m["Destination"] == "/app/config-host")
+    projected = yaml.safe_load((projection / "config.yaml").read_text())
+    assert projected["knowledge_bases"]["threads"]["path"] == "/app/worker/agents/alpha/workspace/thread_exports"
+    # Context files are primary prompt input, so workers never see them.
+    assert "context_files" not in projected["agents"]["alpha"]
+
+
 def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Changing a projected single-file asset should rotate the worker."""
     config_text, projected_paths = _projected_config_fixture(tmp_path)
+    config_data = yaml.safe_load(config_text)
+    config_data["knowledge_bases"]["docs"]["path"] = "./knowledge_docs/guide.md"
+    config_text = yaml.safe_dump(config_data)
+    external_file = projected_paths["knowledge_root"] / "guide.md"
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     first_projection_root = _projection_root(first_volumes)
 
-    updated_context_file = projected_paths["context_file"].with_suffix(".updated.md")
-    updated_context_file.write_text("# Updated Context\n", encoding="utf-8")
-    updated_context_file.replace(projected_paths["context_file"])
+    updated_file = external_file.with_suffix(".updated.md")
+    updated_file.write_text("# Updated Guide\n", encoding="utf-8")
+    updated_file.replace(external_file)
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -2929,14 +4340,12 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
 
-    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     assert second_projection_root != first_projection_root
-    projected_context_path = (
-        second_projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    )
-    assert projected_context_path.read_text(encoding="utf-8") == "# Updated Context\n"
+    projected_file = second_projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs"
+    assert projected_file.read_text(encoding="utf-8") == "# Updated Guide\n"
 
 
 def test_docker_backend_recreates_container_when_projected_directory_asset_changes(
@@ -2949,7 +4358,7 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     first_projection_root = _projection_root(first_volumes)
 
@@ -2978,7 +4387,7 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
     assert removal_checks == [True]
     assert len(fake_client.containers.run_calls) == 2
 
-    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     assert second_projection_root != first_projection_root
@@ -3000,26 +4409,20 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
     projected_config_data = yaml.safe_load(projected_config)
 
-    assert "- ./.mindroom-worker-assets/agents/alpha/context_files/00-alpha.md" in projected_config
-    assert ".mindroom-worker-assets/agents/beta/context_files/00-beta.md" not in projected_config
+    assert "alpha.md" not in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/a" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/b" not in projected_config
     assert set(projected_config_data["agents"]) == {"alpha"}
     assert set(projected_config_data["knowledge_bases"]) == {"a"}
 
-    projected_alpha_context = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
-    )
-    assert projected_alpha_context.read_text(encoding="utf-8") == "# Alpha\n"
-    assert not (
-        projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
-    ).exists()
+    assert volumes[str((tmp_path / "agents/alpha/workspace").resolve())]["bind"] == "/app/worker/agents/alpha/workspace"
+    assert not (projection_root / ".mindroom-worker-assets" / "agents").exists()
 
     projected_alpha_knowledge = projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "a" / "a.txt"
     assert projected_alpha_knowledge.read_text(encoding="utf-8") == "alpha knowledge\n"
@@ -3029,46 +4432,6 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert projected_paths["beta_context"].resolve() not in projection_root.parents
     assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
     assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
-
-
-def test_docker_backend_projects_context_files_from_canonical_agent_workspace(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Shared workers should project context files from the agent workspace, not the config dir."""
-    (tmp_path / "README.md").write_text("CONFIG ROOT FILE\n", encoding="utf-8")
-    workspace_readme = tmp_path / "agents" / "alpha" / "workspace" / "README.md"
-    workspace_readme.parent.mkdir(parents=True)
-    workspace_readme.write_text("AGENT WORKSPACE FILE\n", encoding="utf-8")
-    backend, fake_client, _sync_calls = _backend(
-        monkeypatch,
-        tmp_path,
-        config_text="""
-agents:
-  alpha:
-    display_name: Alpha
-    role: Alpha test
-    model: default
-    worker_scope: shared
-    context_files:
-      - README.md
-models:
-  default:
-    provider: openai
-    id: test-model
-""".lstrip(),
-    )
-
-    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
-
-    volumes = fake_client.containers.run_calls[0]["volumes"]
-    assert isinstance(volumes, dict)
-    projection_root = _projection_root(volumes)
-    projected_readme = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-README.md"
-    )
-
-    assert projected_readme.read_text(encoding="utf-8") == "AGENT WORKSPACE FILE\n"
 
 
 def test_docker_backend_projects_only_private_user_agent_assets_for_private_agent(
@@ -3096,19 +4459,14 @@ def test_docker_backend_projects_only_private_user_agent_assets_for_private_agen
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
     assert set(projected_config_data["agents"]) == {"alpha"}
     assert set(projected_config_data["knowledge_bases"]) == {"a"}
-    assert (
-        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
-    ).read_text(encoding="utf-8") == "# Alpha\n"
-    assert not (
-        projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
-    ).exists()
+    assert not (projection_root / ".mindroom-worker-assets" / "agents").exists()
     assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "a" / "a.txt").read_text(
         encoding="utf-8",
     ) == "alpha knowledge\n"
@@ -3164,7 +4522,7 @@ models:
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
@@ -3194,11 +4552,11 @@ models:
     assert (workspace.root / "README.md").read_text(encoding="utf-8") == "template scaffold\n"
 
 
-def test_docker_backend_shared_worker_mounts_canonical_agent_root(
+def test_docker_backend_shared_worker_mounts_only_the_canonical_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Shared workers should mount the canonical shared agent root into the container."""
+    """Shared workers mount the canonical workspace, created before Docker could create it as root, and use it as HOME."""
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     worker_key = resolve_worker_key(
@@ -3218,11 +4576,13 @@ def test_docker_backend_shared_worker_mounts_canonical_agent_root(
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     expected_agent_root = (tmp_path / "agents" / "alpha").resolve()
-    assert volumes[str(expected_agent_root)] == {
-        "bind": "/app/worker/agents/alpha",
+    assert str(expected_agent_root) not in volumes
+    assert (expected_agent_root / "workspace").is_dir()
+    assert volumes[str(expected_agent_root / "workspace")] == {
+        "bind": "/app/worker/agents/alpha/workspace",
         "mode": "rw",
     }
     env = fake_client.containers.run_calls[0]["environment"]
@@ -3366,22 +4726,167 @@ def test_docker_backend_rejects_stale_user_agent_worker_keys_for_projection(
     assert fake_client.containers.run_calls == []
 
 
-def test_docker_backend_rejects_user_agent_worker_keys_when_agent_is_shared(
+def test_docker_backend_projects_shared_agent_for_narrower_user_agent_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A user-agent worker key must fail closed when the agent still exists but is not user_agent scoped."""
+    """A script-isolated worker should project its agent even when normal tools use shared scope."""
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:@alice:example.org:alpha"
 
-    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
+    backend.ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=frozenset()),
+        now=10.0,
+    )
+
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    projected_config = yaml.safe_load((_projection_root(volumes) / "config.yaml").read_text(encoding="utf-8"))
+    assert list(projected_config["agents"]) == ["alpha"]
+    assert str(agent_state_root_path(tmp_path, "alpha") / "workspace") in volumes
+    assert str(agent_state_root_path(tmp_path, "alpha")) not in volumes
+
+
+def test_docker_backend_precreates_nested_storage_mount_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker must not create nested worker mount targets with daemon ownership."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:@alice:example.org:alpha"
+    worker_root = worker_root_path(tmp_path, worker_key)
+    original_run = fake_client.containers.run
+
+    def run_after_asserting_mount_target(image: str, **kwargs: object) -> _FakeContainer:
+        assert (worker_root / "agents" / "alpha" / "workspace").is_dir()
+        return original_run(image, **kwargs)
+
+    monkeypatch.setattr(fake_client.containers, "run", run_after_asserting_mount_target)
+
+    backend.ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=frozenset()),
+        now=10.0,
+    )
+
+    assert (worker_root / "agents" / "alpha" / "workspace").is_dir()
+    assert len(fake_client.containers.run_calls) == 1
+
+    backend.retire_worker(worker_key)
+
+    assert not worker_root.exists()
+
+
+def test_docker_backend_refuses_a_linked_nested_mount_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker code owns its worker root, so a link planted where a mount target belongs is refused, not followed."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:@alice:example.org:alpha"
+    worker_root = worker_root_path(tmp_path, worker_key)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    worker_root.mkdir(parents=True)
+    (worker_root / "agents").symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="must be a real directory"):
+        backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+
+    assert fake_client.containers.run_calls == []
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_docker_backend_never_restarts_a_worker_over_a_link_planted_at_a_nested_mount_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker resolves bind destinations again on every start, so a stopped worker's nested targets are walked first."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:@alice:example.org:alpha"
+    spec = WorkerSpec(worker_key, private_agent_names=frozenset())
+    handle = backend.ensure_worker(spec, now=10.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    container.stop()
+    # Worker code renamed the parent it owns and left a link where the workspace mount lands.
+    agents = worker_root_path(tmp_path, worker_key) / "agents"
+    agents.rename(agents.with_name("agents.old"))
+    (agents / "alpha").mkdir(parents=True)
+    (agents / "alpha" / "workspace").symlink_to("/app", target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="must be a real directory"):
+        backend.ensure_worker(spec, now=20.0)
+
+    assert container.started == 0
+    assert len(fake_client.containers.run_calls) == 1
+
+
+def test_docker_backend_never_mounts_a_missing_or_linked_private_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker would create a missing source as root, and a linked one would expose another instance."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:~@mallory:localhost:alpha"
+    spec = WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"}))
+
+    backend.ensure_worker(spec, now=10.0)
+
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
+    assert not any("private_instances" in source for source in first_volumes)
+    assert not (tmp_path / "private_instances").exists()
+
+    victim_workspace = _materialize_private_workspace(
+        tmp_path,
+        "v1:default:user_agent:~@alice:localhost:alpha",
+        "@alice:localhost",
+    )
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="@mallory:localhost")
+    (private_instance_scope_root_path(tmp_path, worker_key) / "alpha").symlink_to(
+        victim_workspace.parent,
+        target_is_directory=True,
+    )
+    backend.ensure_worker(spec, now=20.0)
+
+    volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
+    assert not any("private_instances" in source for source in volumes)
+    assert not any("private_instances" in volume["bind"] for volume in volumes.values())
+
+
+def test_docker_backend_rejects_ambiguous_normalized_user_agent_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A normalized script worker key cannot silently select the first matching agent."""
+    config_text = """
+agents:
+  foo:
+    display_name: Foo
+    tools: [script]
+  foo_:
+    display_name: Foo underscore
+    tools: [script]
+models:
+  default:
+    provider: openai
+    id: test-model
+router:
+  model: default
+"""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="ambiguous normalized agent name"):
         backend.ensure_worker(
             WorkerSpec(
-                "v1:default:user_agent:@alice:example.org:alpha",
-                private_agent_names=frozenset({"alpha"}),
+                "v1:default:user_agent:@alice:example.org:foo",
+                private_agent_names=frozenset(),
             ),
             now=10.0,
         )
+
     assert fake_client.containers.run_calls == []
 
 
@@ -3458,25 +4963,21 @@ models:
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
+    agent_binds = {source: spec["bind"] for source, spec in volumes.items() if "/agents" in spec["bind"]}
+    alpha_workspace = str((tmp_path / "agents" / "alpha" / "workspace").resolve())
+    assert agent_binds == {alpha_workspace: "/app/worker/agents/alpha/workspace"}
+    assert volumes[alpha_workspace]["mode"] == "rw"
     assert set(projected_config_data["agents"]) == {"alpha", "delta"}
     assert set(projected_config_data["knowledge_bases"]) == {"a", "d"}
-    assert (
-        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
-    ).read_text(encoding="utf-8") == "# Alpha\n"
-    assert (
-        projection_root / ".mindroom-worker-assets" / "agents" / "delta" / "context_files" / "00-delta.md"
-    ).read_text(encoding="utf-8") == "# Delta\n"
-    assert not (
-        projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
-    ).exists()
-    assert not (
-        projection_root / ".mindroom-worker-assets" / "agents" / "gamma" / "context_files" / "00-gamma.md"
-    ).exists()
+    # Context files are primary prompt input, so no agent's context files reach the worker.
+    assert "context_files" not in projected_config_data["agents"]["alpha"]
+    assert "context_files" not in projected_config_data["agents"]["delta"]
+    assert not (projection_root / ".mindroom-worker-assets" / "agents").exists()
     assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "a" / "alpha.txt").read_text(
         encoding="utf-8",
     ) == "alpha knowledge\n"
@@ -3500,11 +5001,18 @@ def test_docker_backend_rejects_user_worker_keys_without_user_scoped_agents(
     assert fake_client.containers.run_calls == []
 
 
-def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
+def _materialize_private_workspace(storage_root: Path, worker_key: str, requester_id: str) -> Path:
+    ensure_private_instance_identity(storage_root, worker_key=worker_key, requester_id=requester_id)
+    workspace = private_instance_scope_root_path(storage_root, worker_key) / "alpha" / "alpha_data"
+    workspace.mkdir(parents=True)
+    return workspace
+
+
+def test_docker_backend_user_agent_mounts_only_the_private_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-agent workers should mount their private instance root when explicitly visible."""
+    """A private user-agent worker mounts only its private workspace, never the scope holding the identity record."""
     config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     worker_key = resolve_worker_key(
@@ -3522,19 +5030,97 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
         agent_name="alpha",
     )
 
+    assert worker_key is not None
+    private_workspace = _materialize_private_workspace(tmp_path, worker_key, "@alice:example.org")
+
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
-    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
-    assert volumes[str(expected_private_root)] == {
-        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha",
-        "mode": "rw",
+    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key)).resolve()
+    assert str(expected_private_root) not in volumes
+    assert {source: spec for source, spec in volumes.items() if "private_instances" in source} == {
+        str(private_workspace.resolve()): {
+            "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha/alpha_data",
+            "mode": "rw",
+        },
     }
-    assert all(spec["bind"] != "/app/worker/agents/alpha" for spec in volumes.values())
+    assert all(not spec["bind"].startswith("/app/worker/agents/") for spec in volumes.values())
     env = fake_client.containers.run_calls[0]["environment"]
     assert isinstance(env, dict)
     assert env["HOME"] == "/app/worker"
+
+
+def test_docker_backend_mounts_verified_historical_scope_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Both historical and canonical destinations retain the same source, including on worker reuse."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:~@alice:example.org:alpha"
+    private_workspace = _materialize_private_workspace(tmp_path, worker_key, "@alice:example.org")
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    legacy = private_instance_scope_root_path(tmp_path, "v1:default:user_agent:@alice:example.org:alpha")
+    legacy.symlink_to(canonical.name, target_is_directory=True)
+    worker_root = worker_root_path(tmp_path, worker_key)
+    original_run = fake_client.containers.run
+
+    def run_with_prepared_alias_targets(image: str, **kwargs: object) -> _FakeContainer:
+        for scope in (canonical, legacy):
+            assert (worker_root / "private_instances" / scope.name / "alpha" / "alpha_data").is_dir()
+        return original_run(image, **kwargs)
+
+    monkeypatch.setattr(fake_client.containers, "run", run_with_prepared_alias_targets)
+    spec = WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"}))
+    backend.ensure_worker(spec, now=10.0)
+    backend.ensure_worker(spec, now=11.0)
+
+    assert len(fake_client.containers.run_calls) == 1
+    mounts = fake_client.containers.created_containers[0].attrs["Mounts"]
+    source = str(private_workspace)
+    assert {
+        (mount["Source"], mount["Destination"], mount["RW"])
+        for mount in mounts
+        if "private_instances" in mount["Source"]
+    } == {
+        (source, f"/app/worker/private_instances/{canonical.name}/alpha/alpha_data", True),
+        (source, f"/app/worker/private_instances/{legacy.name}/alpha/alpha_data", True),
+    }
+    assert all(mount["Destination"] != "/app/worker/private_instances" for mount in mounts)
+
+
+def test_docker_script_worker_mounts_the_owning_private_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A script worker mounts only its owning scope's private workspace, not the scope or its identity record."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    state_scope_worker_key = "v1:tenant-123:user_agent:~@alice:example.org:alpha"
+    worker_key = script_worker_key_for_run(state_scope_worker_key, f"script-{'a' * 32}")
+    private_workspace = _materialize_private_workspace(tmp_path, state_scope_worker_key, "@alice:example.org")
+
+    backend.ensure_worker(
+        WorkerSpec(
+            worker_key,
+            private_agent_names=frozenset({"alpha"}),
+            state_scope_worker_key=state_scope_worker_key,
+        ),
+        now=10.0,
+    )
+
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    assert isinstance(volumes, dict)
+    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(state_scope_worker_key)).resolve()
+    expected_run_root = worker_root_path(tmp_path, worker_key)
+    assert str(expected_private_root) not in volumes
+    assert volumes[str(private_workspace.resolve())] == {
+        "bind": f"/app/worker/private_instances/{worker_dir_name(state_scope_worker_key)}/alpha/alpha_data",
+        "mode": "rw",
+    }
+    assert str(expected_run_root) in volumes
+    assert str(tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha") not in volumes
 
 
 def test_docker_backend_rejects_private_user_agent_container_without_target_visibility(
@@ -3563,53 +5149,17 @@ def test_docker_backend_rejects_private_user_agent_container_without_target_visi
         backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
     assert fake_client.containers.run_calls == []
 
+    assert worker_key is not None
+    private_workspace = _materialize_private_workspace(tmp_path, worker_key, "@alice:example.org")
     handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=20.0)
     assert len(fake_client.containers.run_calls) == 1
-    second_volumes = fake_client.containers.run_calls[0]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(second_volumes, dict)
-    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
-    assert second_volumes[str(expected_private_root)] == {
-        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha",
+    assert second_volumes[str(private_workspace.resolve())] == {
+        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha/alpha_data",
         "mode": "rw",
     }
     assert handle.status == "ready"
-
-
-def test_docker_backend_redacts_authorization_headers_in_projected_model_extra_kwargs(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Projected config should drop auth headers nested under model extra_kwargs."""
-    backend, fake_client, _sync_calls = _backend(
-        monkeypatch,
-        tmp_path,
-        config_text="""
-agents:
-  code:
-    display_name: Code
-    role: Test
-    model: default
-    worker_scope: shared
-models:
-  default:
-    provider: openai
-    id: test-model
-    extra_kwargs:
-      headers:
-        Authorization: Bearer super-secret-token
-        X-Trace-Id: keep-me
-""".lstrip(),
-    )
-
-    backend.ensure_worker(WorkerSpec("v1:default:shared:code"), now=10.0)
-
-    volumes = fake_client.containers.run_calls[0]["volumes"]
-    assert isinstance(volumes, dict)
-    projection_root = _projection_root(volumes)
-    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
-
-    assert "Authorization" not in projected_config["models"]["default"]["extra_kwargs"]["headers"]
-    assert projected_config["models"]["default"]["extra_kwargs"]["headers"]["X-Trace-Id"] == "keep-me"
 
 
 def test_docker_backend_reconciles_missing_container_metadata_without_stale_endpoint(
@@ -3630,7 +5180,7 @@ def test_docker_backend_reconciles_missing_container_metadata_without_stale_endp
     assert handles[0].endpoint == "/api/sandbox-runner/execute"
     assert handle.endpoint != handles[0].endpoint
 
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["host_port"] is None
     assert metadata["container_id"] is None
@@ -3860,7 +5410,7 @@ def test_docker_backend_rebuilds_incomplete_projection_snapshot(
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     projection_root = _projection_root(first_volumes)
 
@@ -3869,7 +5419,7 @@ def test_docker_backend_rebuilds_incomplete_projection_snapshot(
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
-    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     replacement_container = fake_client.containers.by_name[handle.worker_id]
@@ -3893,7 +5443,7 @@ def test_docker_backend_rebuilds_corrupted_ready_projection_snapshot(
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     projection_root = _projection_root(first_volumes)
 
@@ -3925,7 +5475,7 @@ def test_docker_backend_disambiguates_colliding_projected_knowledge_base_ids(
 
     backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_knowledge_root = projection_root / ".mindroom-worker-assets" / "knowledge_bases"
@@ -3992,7 +5542,7 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
     assert fake_client.containers.by_name[second_handle.worker_id] is first_container
     assert len(fake_client.containers.run_calls) == 1
     assert first_container.removed == 0
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["startup_count"] == 1
     assert metadata["last_started_at"] == 10.0
@@ -4018,3 +5568,321 @@ def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_workers_get_their_own_runner_tokens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A runner token taken from one requester's worker must not authenticate to another requester's worker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: _TEST_AUTH_TOKEN},
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    keys = ("v1:default:user_agent:@alice:example.org:code", "v1:default:user_agent:@bob:example.org:code")
+    handles = [backend.ensure_worker(WorkerSpec(key, private_agent_names=frozenset()), now=10.0) for key in keys]
+
+    assert handles[0].auth_token != handles[1].auth_token
+    for call, handle in zip(fake_client.containers.run_calls, handles, strict=True):
+        assert call["environment"][SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]] == handle.auth_token
+        assert _TEST_AUTH_TOKEN not in json.dumps(call, default=str)
+
+
+@pytest.mark.parametrize("flag", [None, "false"])
+@pytest.mark.parametrize("check", ["launch", "signature", "kwargs", "reuse"])
+def test_docker_ordinary_workers_preserve_pre_computer_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flag: str | None,
+    check: str,
+) -> None:
+    """Historical identities and default Docker HostConfig remain reusable without the opt-in."""
+    env = {
+        "MINDROOM_WORKER_BACKEND": "docker",
+        "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
+    }
+    if flag is not None:
+        env[WORKER_COMPUTER_ENABLED_ENV] = flag
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=env,
+    )
+    backend, client, _ = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    # Captured from actual main74bc modules: substitute only the test root, never
+    # reconstruct the production hash payload or require git/history at runtime.
+    baseline = json.loads((Path(__file__).parent / "fixtures/docker_pre_computer_identity.json").read_text())
+    serialized = baseline["launch_payload"].replace("__TEST_ROOT__", str(tmp_path))
+    expected_hash = hashlib.sha256(serialized.encode()).hexdigest()
+    if check == "launch":
+        assert backend._compute_launch_config_hash() == expected_hash
+        return
+    if check == "signature":
+        expected_signature = tuple(
+            part.replace("__TEST_ROOT__", str(tmp_path))
+            for part in baseline["backend_signatures"]["absent" if flag is None else flag]
+        )
+        assert docker_backend_config_signature(runtime_paths, auth_token=_TEST_AUTH_TOKEN) == expected_signature
+        return
+    first = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = client.containers.by_name[first.worker_id]
+    if check == "kwargs":
+        assert "cap_drop" not in client.containers.run_calls[0]
+        assert "security_opt" not in client.containers.run_calls[0]
+        return
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    metadata = json.loads(metadata_path.read_text())
+    metadata["launch_config_hash"] = expected_hash
+    metadata_path.write_text(json.dumps(metadata))
+    container.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"] = expected_hash
+    container.attrs["HostConfig"] = {
+        "Privileged": False,
+        "CapAdd": None,
+        "CapDrop": None,
+        "SecurityOpt": None,
+        "ReadonlyRootfs": True,
+    }
+
+    second = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert second.worker_id == first.worker_id
+    assert container.removed == 0
+    assert len(client.containers.run_calls) == 1
+
+
+@pytest.mark.parametrize("initial_policy", ["runtime_default", "computer"])
+def test_docker_security_policy_changes_identity_and_replaces_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    initial_policy: Literal["runtime_default", "computer"],
+) -> None:
+    """The operator policy replaces workers in either direction with Computer disabled."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        WORKER_COMPUTER_ENABLED_ENV: "false",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": initial_policy,
+    }
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    backend, client, _ = _backend(monkeypatch, tmp_path, runtime_paths=paths, security_policy=initial_policy)
+    first = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = client.containers.by_name[first.worker_id]
+    changed_policy = "computer" if initial_policy == "runtime_default" else "runtime_default"
+    changed_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={**env, "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": changed_policy},
+    )
+    replacement = DockerWorkerBackend(
+        config=replace(backend.config, security_policy=changed_policy),
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+        runtime_paths=changed_paths,
+    )
+    monkeypatch.setattr(replacement, "_wait_for_ready", backend._wait_for_ready)
+    assert replacement._compute_launch_config_hash() != backend._compute_launch_config_hash()
+    assert docker_backend_config_signature(paths, auth_token=_TEST_AUTH_TOKEN) != docker_backend_config_signature(
+        changed_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+    )
+
+    replacement.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert container.removed == 1
+    assert len(client.containers.run_calls) == 2
+    latest = client.containers.run_calls[-1]
+    if initial_policy == "computer":
+        assert "cap_drop" not in latest
+        assert "security_opt" not in latest
+    else:
+        assert latest["cap_drop"] == ["ALL"]
+        assert latest["security_opt"][0] == "no-new-privileges:true"
+
+
+@pytest.mark.parametrize("policy", [None, "runtime_default"])
+@pytest.mark.parametrize(("primary_flag", "worker_flag"), [("true", None), ("false", " YES "), ("true", "false")])
+def test_docker_computer_requires_explicit_security_policy(
+    tmp_path: Path,
+    policy: str | None,
+    primary_flag: str,
+    worker_flag: str | None,
+) -> None:
+    """Enabling Computer cannot silently select or bypass the operator security policy."""
+    env = {"MINDROOM_DOCKER_WORKER_IMAGE": "test-image", WORKER_COMPUTER_ENABLED_ENV: primary_flag}
+    if worker_flag is not None:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: worker_flag})
+    if policy is not None:
+        env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_docker_security_policy_rejects_unknown_choice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    direct: bool,
+) -> None:
+    """Neither env parsing nor supplied config can bypass the bounded policy choices."""
+    backend, _, _ = _backend(monkeypatch, tmp_path)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "unconfined",
+        },
+    )
+    if direct:
+        with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY"):
+            replace(backend.config, security_policy="unconfined")
+    else:
+        with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY"):
+            _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+@pytest.mark.parametrize("worker_override", [False, True])
+def test_docker_direct_backend_rejects_incompatible_computer_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    worker_override: bool,
+) -> None:
+    """A supplied default config cannot enable Computer even when env claims a compatible policy."""
+    backend, _, _ = _backend(monkeypatch, tmp_path)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            WORKER_COMPUTER_ENABLED_ENV: "false" if worker_override else "true",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        },
+    )
+    config = (
+        replace(backend.config, extra_env={WORKER_COMPUTER_ENABLED_ENV: "true"}) if worker_override else backend.config
+    )
+
+    def forbidden_client(**_kwargs: object) -> None:
+        pytest.fail("Incompatible policy reached Docker client construction")
+
+    monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
+    with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer"):
+        DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+
+
+@pytest.mark.parametrize(
+    ("computer_enabled", "worker_flag", "policy", "expected"),
+    [
+        (False, None, None, "runtime_default"),
+        (False, None, "runtime_default", "runtime_default"),
+        (False, None, "computer", "computer"),
+        (True, None, "computer", "computer"),
+        (False, "false", None, "runtime_default"),
+        (False, "true", "computer", "computer"),
+    ],
+)
+def test_docker_security_policy_resolution(
+    tmp_path: Path,
+    *,
+    computer_enabled: bool,
+    worker_flag: str | None,
+    policy: str | None,
+    expected: str,
+) -> None:
+    """Availability cannot override the explicit pool policy or its historical default."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
+        WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower(),
+    }
+    if worker_flag is not None:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: worker_flag})
+    if policy is not None:
+        env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    assert _DockerWorkerBackendConfig.from_runtime(paths).security_policy == expected
+
+
+@pytest.mark.parametrize("user", ["0", "0:0", "000:1000", "+0:0", "-0:0", "root", "root:users"])
+@pytest.mark.parametrize("worker_override", [False, True])
+def test_docker_computer_rejects_root_user(tmp_path: Path, user: str, *, worker_override: bool) -> None:
+    """Known root identities fail configuration before sandboxed Chromium starts."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        "MINDROOM_DOCKER_WORKER_USER": user,
+        WORKER_COMPUTER_ENABLED_ENV: "false" if worker_override else "true",
+    }
+    if worker_override:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: "true"})
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+def test_docker_computer_rejects_inherited_root_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The POSIX host-user default must pass the same Computer identity check."""
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: 0)
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        WORKER_COMPUTER_ENABLED_ENV: "true",
+    }
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+@pytest.mark.parametrize("user", ["0:0", "root"])
+def test_docker_direct_computer_rejects_root_before_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    user: str,
+) -> None:
+    """Supplied configuration cannot skip the user check at backend construction."""
+    backend, _, _ = _backend(monkeypatch, tmp_path)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
+    )
+    config = replace(backend.config, user=user, security_policy="computer")
+
+    def forbidden_client(**_kwargs: object) -> None:
+        pytest.fail("Root Computer configuration reached Docker client construction")
+
+    monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "policy", "user"),
+    [
+        (False, "runtime_default", "root"),
+        (False, "computer", "0:0"),
+        (True, "computer", "1000:0"),
+        (True, "computer", "mindroom:users"),
+        (True, "computer", ""),
+    ],
+)
+def test_docker_computer_identity_validation_preserves_supported_users(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    policy: str,
+    user: str,
+) -> None:
+    """Ordinary workers, nonroot identities and the image default remain configurable."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": policy,
+            "MINDROOM_DOCKER_WORKER_USER": user,
+            WORKER_COMPUTER_ENABLED_ENV: str(enabled).lower(),
+        },
+    )
+    assert _DockerWorkerBackendConfig.from_runtime(paths).user == (user or None)

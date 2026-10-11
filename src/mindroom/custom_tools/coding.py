@@ -20,16 +20,27 @@ import shutil
 import subprocess
 import unicodedata
 from dataclasses import dataclass
+from glob import has_magic
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
+from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tools.path_safety import (
+    blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
+    read_resolved_file,
     resolve_base_dir_path,
+    resolve_tool_base_dir,
     split_search_pattern,
+    write_resolved_file,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
@@ -364,9 +375,10 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
     payload = "\0".join(path_map.keys()) + "\0"
     try:
         result = subprocess.run(
-            ["git", "check-ignore", "--stdin", "-z"],
+            hardened_git_command(["check-ignore", "--stdin", "-z"]),
             check=False,
             cwd=str(base_dir),
+            env=hardened_git_env(),
             input=payload.encode("utf-8"),
             capture_output=True,
             timeout=5,
@@ -480,7 +492,10 @@ def _find_files_in(
         return f"Error: Invalid glob pattern '{pattern}': {e}"
 
     filter_root = base_dir if restrict_to_base_dir else search_path
-    filtered = _filter_hidden_and_ignored(candidates, filter_root)
+    # A dot directory named in `path` or in the pattern's literal prefix was asked for, so only dot paths below it hide.
+    parts = Path(pattern).parts
+    named = parts[: next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))]
+    filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
     matches: list[str] = []
     for candidate in filtered:
         try:
@@ -504,12 +519,20 @@ def _find_files_in(
     return result
 
 
-def _resolve_and_read(base_dir: Path, path: str, restrict_to_base_dir: bool = True) -> tuple[Path, str] | str:
+def _resolve_and_read(
+    base_dir: Path,
+    path: str,
+    restrict_to_base_dir: bool = True,
+    *,
+    writable: bool = False,
+) -> tuple[Path, str] | str:
     """Resolve path and read file content. Returns (resolved, content) or error string."""
     try:
         resolved = resolve_base_dir_path(base_dir, path, restrict_to_base_dir)
     except ValueError as e:
         return f"Error: {e}"
+    if writable and is_git_metadata_path(resolved):
+        return blocked_git_metadata_message("writing file", path)
 
     if not resolved.exists():
         return f"Error: File not found: {path}"
@@ -517,8 +540,8 @@ def _resolve_and_read(base_dir: Path, path: str, restrict_to_base_dir: bool = Tr
         return f"Error: Not a file: {path}"
 
     try:
-        return resolved, resolved.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
+        return resolved, read_resolved_file(base_dir, resolved).decode("utf-8", errors="replace")
+    except (OSError, ValueError) as e:
         return f"Error reading file: {e}"
 
 
@@ -529,9 +552,13 @@ class CodingTools(Toolkit):
     smart truncation, fuzzy matching, and actionable pagination hints.
     """
 
-    def __init__(self, base_dir: str | None = None, restrict_to_base_dir: bool = True) -> None:
-        self.base_dir = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
-        self.restrict_to_base_dir = restrict_to_base_dir
+    def __init__(
+        self,
+        base_dir: str | None = None,
+        file_access: FileAccess = "workspace",
+    ) -> None:
+        self.base_dir = resolve_tool_base_dir(base_dir)
+        self.restrict_to_base_dir = file_access == "workspace"
         super().__init__(
             name="coding",
             tools=[
@@ -584,7 +611,7 @@ class CodingTools(Toolkit):
         if not old_text:
             return "Error: old_text must be non-empty."
 
-        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir)
+        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir, writable=True)
         if isinstance(result, str):
             return result
         resolved, content = result
@@ -599,7 +626,7 @@ class CodingTools(Toolkit):
         new_content = content[: match.start] + new_text + content[match.end :]
 
         try:
-            resolved.write_text(new_content, encoding="utf-8")
+            write_resolved_file(self.base_dir, resolved, new_content.encode("utf-8"))
         except OSError as e:
             return f"Error writing file: {e}"
 
@@ -623,10 +650,11 @@ class CodingTools(Toolkit):
             resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
+        if is_git_metadata_path(resolved):
+            return blocked_git_metadata_message("writing file", path)
 
         try:
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding="utf-8")
+            write_resolved_file(self.base_dir, resolved, content.encode("utf-8"))
         except OSError as e:
             return f"Error writing file: {e}"
 
@@ -663,9 +691,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = (
-                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
-            )
+            search_path = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
         effective_glob = glob
@@ -719,14 +745,13 @@ class CodingTools(Toolkit):
 
         Returns:
             List of matching file paths, one per line.
-            Hidden files/directories and gitignored files are automatically
-            excluded from results.
+            Hidden files/directories below the searched directory and gitignored
+            files are automatically excluded from results; a hidden directory
+            named in path or in the pattern's leading directories is searched.
 
         """
         try:
-            search_path = (
-                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
-            )
+            search_path = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
         search_pattern = pattern
@@ -762,7 +787,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            target = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            target = resolve_base_dir_path(self.base_dir, path or ".", self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
 
@@ -1007,9 +1032,10 @@ def _grep_file(
     return match_count
 
 
-def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Path]:
-    """Filter out hidden files (dotfiles) and gitignored files."""
+def _filter_hidden_and_ignored(files: list[Path], search_path: Path, visible_root: Path | None = None) -> list[Path]:
+    """Filter out files outside ``search_path``, gitignored files, and dotfiles below ``visible_root``."""
     search_root = search_path.resolve()
+    hidden_root = search_path if visible_root is None else visible_root
     visible: list[Path] = []
     for filepath in files:
         if not is_within_base_dir(filepath, search_root):
@@ -1017,7 +1043,7 @@ def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Pat
         if not filepath.is_file():
             continue
         try:
-            rel = filepath.relative_to(search_path)
+            rel = filepath.relative_to(hidden_root)
         except ValueError:
             rel = filepath.resolve()
         if any(part.startswith(".") for part in rel.parts):

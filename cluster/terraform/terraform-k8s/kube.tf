@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.5.0"
 
   required_providers {
     hcloud = {
@@ -110,6 +110,19 @@ module "kube-hetzner" {
 
   # Ingress controller - nginx
   ingress_controller = "nginx"
+
+  # Replaces kube-hetzner's ingress-nginx values. Clients reach this single node directly, so the controller must not
+  # take their address from X-Forwarded-For or a PROXY header, and the Local traffic policy keeps the client's source
+  # address instead of the node's. The platform backend keys rate limits and its auth lockout on the resulting X-Real-IP.
+  nginx_values = <<-EOT
+    controller:
+      watchIngressWithoutClass: "true"
+      config:
+        use-forwarded-headers: "false"
+        use-proxy-protocol: "false"
+      service:
+        externalTrafficPolicy: Local
+  EOT
 
   # Enable cert-manager for SSL
   enable_cert_manager = true

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -22,6 +23,11 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
     send_room_event_result,
 )
+from mindroom.matrix.large_messages import _MATRIX_EVENT_HARD_LIMIT, _calculate_delivery_event_size
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from io import BytesIO
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -31,6 +37,9 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
     client.olm = MagicMock() if encrypted else None
+    client.device_id = "DEVICE"
+    if client.olm is not None:
+        client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
 
@@ -43,6 +52,19 @@ async def test_send_message_result_ignores_unverified_devices() -> None:
     await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+
+
+@pytest.mark.asyncio
+async def test_send_message_result_forwards_explicit_event_type_and_defaults_to_message() -> None:
+    """The delivery boundary preserves a requested event type while visible callers keep their default."""
+    client = _mock_client()
+    content = {"body": "scheduled trigger", "msgtype": "m.text"}
+
+    await send_message_result(client, "!room:localhost", content, message_type="io.mindroom.scheduled.trigger")
+    await send_message_result(client, "!room:localhost", content)
+
+    assert client.room_send.await_args_list[0].kwargs["message_type"] == "io.mindroom.scheduled.trigger"
+    assert client.room_send.await_args_list[1].kwargs["message_type"] == "m.room.message"
 
 
 @pytest.mark.asyncio
@@ -251,6 +273,8 @@ def _cache_bypass_client(*, encrypted: bool | None) -> AsyncMock:
         encryption_state.status_code = "M_NOT_FOUND"
     client.room_get_state_event = AsyncMock(return_value=encryption_state)
     client.olm = MagicMock() if encrypted else None
+    if client.olm is not None:
+        client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
 
@@ -304,12 +328,77 @@ async def test_send_message_outcome_maps_send_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_message_outcome_maps_an_unrepresentable_payload() -> None:
+    """Irreducible metadata is a typed refusal and never reaches Matrix."""
+    client = _mock_client()
+    client.upload.return_value = (
+        nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/impossible-message"}),
+        None,
+    )
+    content = {
+        "body": "x" * 70_000,
+        "msgtype": "m.text",
+        "io.mindroom.required_metadata": "m" * 70_000,
+    }
+
+    outcome = await send_message_outcome(client, "!room:localhost", content)
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_message_outcome_maps_unexpected_response() -> None:
     """A non-send response maps to the unexpected-response kind."""
     client = _mock_client()
     client.room_send.return_value = MagicMock(spec=nio.RoomSendError)
 
     outcome = await send_message_outcome(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_maps_server_too_large_response() -> None:
+    """A definite homeserver size refusal is distinguishable from retryable failures."""
+    client = _mock_client()
+    client.room_send.return_value = nio.RoomSendError(
+        message="event too large",
+        status_code="M_TOO_LARGE",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
+
+    assert outcome == MatrixDeliveryFailure(
+        MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE,
+        "event too large",
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_keeps_other_server_refusals_retryable() -> None:
+    """A server refusal is not permanent merely because it is a client error."""
+    client = _mock_client()
+    client.room_send.return_value = nio.RoomSendError(
+        message="forbidden",
+        status_code="M_FORBIDDEN",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
 
     assert isinstance(outcome, MatrixDeliveryFailure)
     assert outcome.kind is MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
@@ -326,6 +415,118 @@ async def test_send_message_outcome_success_returns_delivered_event() -> None:
     assert isinstance(outcome, DeliveredMatrixEvent)
     assert outcome.event_id == "$event:localhost"
     assert outcome.content_sent == content
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_fits_for_encryption_enabled_during_sidecar_upload() -> None:
+    """A direct plaintext sidecar is rebuilt if encryption turns on during upload."""
+    client = _mock_client()
+    client.device_id = "D"
+    upload_requests: list[tuple[str, str]] = []
+
+    async def upload_and_enable_encryption(**kwargs: object) -> tuple[nio.UploadResponse, None]:
+        data_provider = cast("Callable[[object, object], BytesIO]", kwargs["data_provider"])
+        data_provider(None, None).read()
+        content_type = cast("str", kwargs["content_type"])
+        filename = cast("str", kwargs["filename"])
+        upload_requests.append((content_type, filename))
+        if len(upload_requests) == 1:
+            client.rooms["!room:localhost"].encrypted = True
+            client.olm = MagicMock()
+            client.olm.device_id = "D"
+        return nio.UploadResponse(f"mxc://server/direct-sidecar-{len(upload_requests)}"), None
+
+    client.upload.side_effect = upload_and_enable_encryption
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "x" * 100_000, "msgtype": "m.text"},
+    )
+
+    assert isinstance(outcome, DeliveredMatrixEvent)
+    assert upload_requests == [
+        ("application/json", "message-content.json"),
+        ("application/octet-stream", "message-content.json.enc"),
+    ]
+    encrypted_file = cast("dict[str, object]", outcome.content_sent["file"])
+    assert encrypted_file["url"] == "mxc://server/direct-sidecar-2"
+    assert encrypted_file["key"]
+    assert encrypted_file["iv"]
+    assert encrypted_file["hashes"]
+    assert "url" not in outcome.content_sent
+    assert (
+        _calculate_delivery_event_size(
+            outcome.content_sent,
+            room_id="!room:localhost",
+            room_encrypted=True,
+            device_id="D",
+        )
+        <= _MATRIX_EVENT_HARD_LIMIT
+    )
+
+
+@pytest.mark.asyncio
+async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() -> None:
+    """An uncached room enabling encryption during upload must not use the plaintext fallback."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    client.olm = MagicMock()
+    client.olm.device_id = "D"
+    client.device_id = "D"
+    client.access_token = "token"  # noqa: S105
+    client.room_get_state_event = AsyncMock(
+        side_effect=[
+            nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+            nio.RoomGetStateEventResponse(
+                {"algorithm": "m.megolm.v1.aes-sha2"},
+                "m.room.encryption",
+                "",
+                "!room:localhost",
+            ),
+        ],
+    )
+    client.upload.side_effect = [
+        (nio.UploadResponse("mxc://server/uncached-sidecar-1"), None),
+        (nio.UploadResponse("mxc://server/uncached-sidecar-2"), None),
+    ]
+    client._send.return_value = nio.RoomSendResponse("$raw", "!room:localhost")
+    client.room_send.side_effect = [
+        nio.SendRetryError("Classic Sync room state is being rebuilt."),
+        nio.RoomSendResponse("$encrypted", "!room:localhost"),
+    ]
+
+    async def restore_encrypted_room(_delay: float) -> None:
+        room = MagicMock()
+        room.encrypted = True
+        client.rooms["!room:localhost"] = room
+
+    with patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_encrypted_room):
+        outcome = await send_message_outcome(
+            client,
+            "!room:localhost",
+            {"body": "x" * 100_000, "msgtype": "m.text"},
+        )
+
+    assert isinstance(outcome, DeliveredMatrixEvent)
+    assert outcome.event_id == "$encrypted"
+    encrypted_file = cast("dict[str, object]", outcome.content_sent["file"])
+    assert encrypted_file["url"] == "mxc://server/uncached-sidecar-2"
+    assert encrypted_file["key"]
+    assert encrypted_file["iv"]
+    assert encrypted_file["hashes"]
+    assert "url" not in outcome.content_sent
+    assert [call.kwargs["content_type"] for call in client.upload.await_args_list] == [
+        "application/json",
+        "application/octet-stream",
+    ]
+    assert [call.kwargs["filename"] for call in client.upload.await_args_list] == [
+        "message-content.json",
+        "message-content.json.enc",
+    ]
+    assert client.room_get_state_event.await_count == 2
+    assert client.room_send.await_count == 2
+    client._send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 """Agent rescue docs seeded into the config directory by `mindroom config init`.
 
-The config directory gets an AGENTS.md (plus a CLAUDE.md symlink) so that when an
+The config directory gets an AGENTS.md so that when an
 installation breaks — typically after an upgrade with an incompatible config — the
 user can point any coding agent at the directory and it knows what MindRoom is,
 where the docs are, and how to diagnose and fix the problem.
@@ -8,7 +8,10 @@ where the docs are, and how to diagnose and fix the problem.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _AGENT_DOCS_TEMPLATE = """\
 # MindRoom Configuration
@@ -55,7 +58,6 @@ Use `mindroom <command>` if MindRoom is installed, otherwise `uvx mindroom <comm
 """
 
 _AGENTS_DOC_NAME = "AGENTS.md"
-_CLAUDE_DOC_NAME = "CLAUDE.md"
 
 
 def _render_config_agent_docs(*, config_path: Path, storage_root: Path) -> str:
@@ -72,36 +74,20 @@ def ensure_config_agent_docs(
     config_path: Path,
     storage_root: Path,
     force: bool = False,
-) -> list[Path]:
-    """Seed AGENTS.md and a CLAUDE.md symlink next to the config file.
+) -> Path | None:
+    """Seed AGENTS.md next to the config file.
 
-    Existing files are left untouched unless ``force`` is set. Returns the paths
-    that were created or replaced.
+    An existing file is left untouched unless ``force`` is set. Returns the path
+    when it was created or replaced.
     """
-    content = _render_config_agent_docs(config_path=config_path, storage_root=storage_root)
-    created: list[Path] = []
-
     agents_path = config_dir / _AGENTS_DOC_NAME
-    if force or not (agents_path.is_symlink() or agents_path.exists()):
-        # Unlink first so --force replaces a symlinked AGENTS.md instead of
-        # writing through it into the symlink target.
-        agents_path.unlink(missing_ok=True)
-        agents_path.write_text(content, encoding="utf-8")
-        created.append(agents_path)
-
-    claude_path = config_dir / _CLAUDE_DOC_NAME
-    if claude_path.is_symlink() and claude_path.readlink() == Path(_AGENTS_DOC_NAME):
-        return created
-    if (claude_path.is_symlink() or claude_path.exists()) and not force:
-        return created
-
-    claude_path.unlink(missing_ok=True)
-    try:
-        claude_path.symlink_to(_AGENTS_DOC_NAME)
-    except OSError:
-        # Symlinks can be unavailable (e.g. Windows without developer mode);
-        # a plain copy of AGENTS.md — which may hold preserved user content —
-        # gives coding agents the same entry point.
-        claude_path.write_text(agents_path.read_text(encoding="utf-8"), encoding="utf-8")
-    created.append(claude_path)
-    return created
+    if not force and (agents_path.is_symlink() or agents_path.exists()):
+        return None
+    # Unlink first so --force replaces a symlinked AGENTS.md instead of
+    # writing through it into the symlink target.
+    agents_path.unlink(missing_ok=True)
+    agents_path.write_text(
+        _render_config_agent_docs(config_path=config_path, storage_root=storage_root),
+        encoding="utf-8",
+    )
+    return agents_path

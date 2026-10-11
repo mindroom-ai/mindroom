@@ -1,390 +1,110 @@
-"""One-shot retry of responses cancelled by sync-restart recovery."""
+"""A retried edit regeneration runs again only while its reply's records say the edit is unanswered."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from contextlib import suppress
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
-from structlog.testing import capture_logs
 
-from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
-from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history.types import HistoryScope
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
-from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
-from mindroom.sync_restart_retry import InterruptedTurnRooms, interrupted_source_needs_retry
-from tests.conftest import delivered_matrix_event, request_envelope, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _plain_request, _target
+from mindroom import reply_lifecycle as rl
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from tests.bot_helpers import unique_room_send_responses
+from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.test_reply_records_turns import (
+    _answer,
+    _regeneration,
+    _reply,
+    _sent_bodies,
+    _span_outcomes,
+    _streaming_bot,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
+    from mindroom.response_runner import ResponseRequest
 
-def _stored_run(
-    scope: HistoryScope,
-    run_id: str,
-    *,
-    source_event_id: str | None = "$source",
-    interrupted: bool = False,
-) -> RunOutput | TeamRunOutput:
-    metadata = {} if source_event_id is None else {MATRIX_EVENT_ID_METADATA_KEY: source_event_id}
-    if interrupted:
-        metadata["mindroom_replay_state"] = "interrupted"
-    run_kwargs = {
-        "run_id": run_id,
-        "status": RunStatus.completed,
-        "content": "answer",
-        "metadata": metadata,
-    }
-    if scope.kind == "team":
-        return TeamRunOutput(team_id=scope.scope_id, **run_kwargs)
-    return RunOutput(agent_id=scope.scope_id, **run_kwargs)
+pytestmark = pytest.mark.asyncio
 
 
-def test_retry_history_uses_latest_matching_visible_run() -> None:
-    """Only latest model-visible run for same source and scope decides retry eligibility."""
-    scope = HistoryScope(kind="agent", scope_id="general")
-    interrupted = _stored_run(scope, "interrupted", interrupted=True)
-
-    assert interrupted_source_needs_retry([interrupted], scope=scope, source_event_id="$source") is True
-    assert interrupted_source_needs_retry([], scope=scope, source_event_id="$source") is False
-    for later in (_stored_run(scope, "completed"), _stored_run(scope, "failed-replay", interrupted=True)):
-        assert interrupted_source_needs_retry([interrupted, later], scope=scope, source_event_id="$source") is False
-    unrelated_runs = [
-        interrupted,
-        _stored_run(scope, "other-source", source_event_id="$other"),
-        _stored_run(HistoryScope(kind="team", scope_id="team"), "other-scope"),
-    ]
-    assert interrupted_source_needs_retry(unrelated_runs, scope=scope, source_event_id="$source") is True
-    ambiguous_runs = [interrupted, _stored_run(scope, "ambiguous", source_event_id=None)]
-    assert interrupted_source_needs_retry(ambiguous_runs, scope=scope, source_event_id="$source") is False
+def _retry() -> ResponseRequest:
+    """Return the edit regenerator's retry of the regeneration ``$edit`` drives."""
+    return _regeneration(answer_event_id="$sent1")
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("is_team", [False, True])
-@pytest.mark.parametrize("history_case", ["current", "superseded", "missing", "degraded", "error"])
-async def test_locked_retry_guard_precedes_payload_and_fails_closed(
-    tmp_path: Path,
-    *,
-    is_team: bool,
-    history_case: str,
-) -> None:
-    """Agent and team retries check history after lock and before payload work."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(reply_to_event_id="$source")
-    execution_identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
-    history_scope = (
-        runner.deps.state_writer.team_history_scope([bot.matrix_id], requester_user_id=execution_identity.requester_id)
-        if is_team
-        else runner.deps.state_writer.history_scope()
-    )
-    runs = [_stored_run(history_scope, "interrupted", interrupted=True)]
-    if history_case == "superseded":
-        runs.append(_stored_run(history_scope, "completed"))
-    session = (
-        TeamSession(session_id=target.session_id, team_id=history_scope.scope_id, runs=runs)
-        if is_team
-        else AgentSession(session_id=target.session_id, agent_id=history_scope.scope_id, runs=runs)
-    )
-    storage = MagicMock()
-    storage.get_session.return_value = {"missing": None, "degraded": object()}.get(history_case, session)
-    if history_case == "error":
-        storage.get_session.side_effect = RuntimeError("history unavailable")
-
-    events: list[str] = []
-
-    def create_storage(*_args: object, **_kwargs: object) -> MagicMock:
-        events.append("history")
-        return storage
-
-    async def prepare_payload(_request: ResponseRequest) -> ResponseRequest:
-        events.append("prepare")
-        message = "payload preparation reached"
-        raise RuntimeError(message)
-
-    request = replace(
-        _plain_request(target, source_event_id="$source"),
-        payload_preparation=MagicMock(),
-        sync_restart_retry_source_event_id="$source",
-        on_lifecycle_lock_acquired=lambda: events.append("lock"),
-    )
-    with (
-        patch.object(runner.deps.state_writer, "create_storage", side_effect=create_storage),
-        patch.object(runner.deps.request_preparer, "prepare", new=AsyncMock(side_effect=prepare_payload)),
-    ):
-        response = (
-            runner.generate_team_response_helper(request, team_agents=[bot.matrix_id], team_mode="coordinate")
-            if is_team
-            else runner.generate_response(request)
-        )
-        lifecycle = runner._lifecycle_coordinator
-        lock = lifecycle._response_lifecycle_lock(target)
-        queued_signal = lifecycle._get_or_create_queued_signal(target)
-        await lock.acquire()
-        queued_signal.begin_response_turn()
-        task = asyncio.create_task(response)
-        try:
-            await asyncio.sleep(0)
-            assert queued_signal.pending_human_messages == 0
-        finally:
-            lock.release()
-            queued_signal.finish_response_turn()
-        if history_case == "current":
-            with pytest.raises(PostLockRequestPreparationError):
-                await task
-        else:
-            assert await task is None
-
-    assert events == (["history", "lock", "history", "prepare"] if history_case == "current" else ["history"])
-    if history_case == "current":
-        bot.client.room_send.assert_awaited_once()
-    else:
-        bot.client.room_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("interrupted", [False, True])
-async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path, *, interrupted: bool) -> None:
-    """Only a still-interrupted team edit retry may deliver its availability reason."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(reply_to_event_id="$source")
-    execution_identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
-    history_scope = runner.deps.state_writer.team_history_scope(
-        [bot.matrix_id],
-        requester_user_id=execution_identity.requester_id,
-    )
-    storage = MagicMock()
-    storage.get_session.return_value = TeamSession(
-        session_id=target.session_id,
-        team_id=history_scope.scope_id,
-        runs=[_stored_run(history_scope, "run", interrupted=interrupted)],
-    )
-    request = replace(
-        _plain_request(target, source_event_id="$source"),
-        existing_event_id="$existing",
-        sync_restart_retry_source_event_id="$source",
-    )
-
-    edit_message = AsyncMock(return_value=delivered_matrix_event("$edit"))
-    with (
-        patch.object(runner.deps.state_writer, "create_storage", return_value=storage),
-        patch("mindroom.delivery_gateway.send_message_outcome", new=edit_message),
-    ):
-        response = await runner.generate_team_response_helper(
-            request,
-            team_agents=[bot.matrix_id],
-            team_mode="coordinate",
-            resolution_reason="No team available",
-        )
-
-    assert response == ("$existing" if interrupted else None)
-    assert edit_message.await_count == int(interrupted)
-
-
-@pytest.mark.asyncio
-async def test_team_resolution_fallback_without_terminal_note_does_not_register_retry(tmp_path: Path) -> None:
-    """Cancellation while editing a prior response cannot prove a terminal note landed."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(reply_to_event_id="$source")
-    execution_identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
-    history_scope = runner.deps.state_writer.team_history_scope(
-        [bot.matrix_id],
-        requester_user_id=execution_identity.requester_id,
-    )
-    storage = MagicMock()
-    storage.get_session.return_value = TeamSession(
-        session_id=target.session_id,
-        team_id=history_scope.scope_id,
-        runs=[_stored_run(history_scope, "run", interrupted=True)],
-    )
-    retries: list[str] = []
-    request = replace(
-        _plain_request(target, source_event_id="$source"),
-        existing_event_id="$existing",
-        sync_restart_retry_source_event_id="$source",
-        on_interrupted_response_recoverable=lambda: retries.append("retry"),
-    )
-    edit_message = AsyncMock(
-        side_effect=[asyncio.CancelledError("sync_restart"), delivered_matrix_event("$cancelled")],
-    )
-
-    with (
-        patch.object(runner.deps.state_writer, "create_storage", return_value=storage),
-        patch("mindroom.delivery_gateway.send_message_outcome", new=edit_message),
-    ):
-        response = await runner.generate_team_response_helper(
-            request,
-            team_agents=[bot.matrix_id],
-            team_mode="coordinate",
-            resolution_reason="No team available",
-        )
-
-    assert response == "$existing"
-    assert retries == []
-    assert edit_message.await_count == 1
-
-
-def _request(on_interrupted_response_recoverable: Callable[[], None] | None = None) -> ResponseRequest:
-    return ResponseRequest(
-        thread_history=[],
-        prompt="Hello",
-        response_envelope=request_envelope(thread_id="$thread"),
-        on_interrupted_response_recoverable=on_interrupted_response_recoverable,
-    )
-
-
-def _cancelled_outcome(
-    *,
-    failure_reason: str,
-    visible: bool = True,
-    final_visible_body: str | None = None,
-    terminal_update_committed: bool = True,
-) -> FinalDeliveryOutcome:
-    if visible and final_visible_body is None:
-        final_visible_body = (
-            RESTART_INTERRUPTED_RESPONSE_NOTE
-            if failure_reason == "sync_restart_cancelled"
-            else INTERRUPTED_RESPONSE_NOTE
-        )
-    return FinalDeliveryOutcome(
-        terminal_status="cancelled",
-        event_id="$interrupted_note" if visible else None,
-        is_visible_response=visible,
-        final_visible_body=final_visible_body,
-        delivery_kind="edited" if visible and terminal_update_committed else None,
-        failure_reason=failure_reason,
-    )
-
-
-def _notify(
-    runner: ResponseRunner,
-    request: ResponseRequest,
-    outcome: FinalDeliveryOutcome,
-) -> None:
-    runner._notify_interrupted_response_recoverable(request, outcome)
-
-
-def test_notify_fires_for_marked_handled_sync_restart_cancellation() -> None:
-    """A sync-restart cancellation that left a visible note must report itself."""
-    calls: list[str] = []
-    _notify(
-        ResponseRunner(deps=MagicMock()),
-        _request(on_interrupted_response_recoverable=lambda: calls.append("retry")),
-        _cancelled_outcome(failure_reason="sync_restart_cancelled"),
-    )
-    assert calls == ["retry"]
-
-
-def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
-    """User stops and turns without a visible note must not request a retry."""
-    calls: list[str] = []
-    runner = ResponseRunner(deps=MagicMock())
-    request = _request(on_interrupted_response_recoverable=lambda: calls.append("retry"))
-
-    _notify(runner, request, _cancelled_outcome(failure_reason="cancelled_by_user"))
-    _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled", visible=False))
-    _notify(
-        runner,
-        request,
-        _cancelled_outcome(
-            failure_reason="sync_restart_cancelled",
-            terminal_update_committed=False,
+async def _answered(tmp_path: Path) -> AgentBot:
+    """Answer ``$event``, then admit its edit ``$edit``, pending until a regeneration answers it."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id=_target().room_id,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={},
         ),
     )
-    _notify(
-        runner,
-        request,
-        _cancelled_outcome(
-            failure_reason="sync_restart_cancelled",
-            final_visible_body="partial answer",
-        ),
-    )
-
-    assert calls == []
+    return bot
 
 
-def test_notify_uses_only_the_canonical_final_delivery_outcome() -> None:
-    """Transient cancellation state must not retry a turn whose final outcome completed."""
-    calls: list[str] = []
-    _notify(
-        ResponseRunner(deps=MagicMock()),
-        _request(on_interrupted_response_recoverable=lambda: calls.append("retry")),
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            failure_reason=None,
-        ),
-    )
-    assert calls == []
+async def test_a_retry_of_an_edit_its_reply_answered_runs_nothing(tmp_path: Path) -> None:
+    """The regeneration already finished, so its retry claims nothing and the answer stands."""
+    bot = await _answered(tmp_path)
+    await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(return_value="Edited answer."))
+    answered = await _reply(bot)
+    sends = len(_sent_bodies(bot))
+
+    answer = AsyncMock(return_value="Answered twice.")
+    assert await _answer(bot, _retry(), answer) is None
+
+    answer.assert_not_awaited()
+    assert len(_sent_bodies(bot)) == sends
+    assert await _reply(bot) == answered
+    assert await _span_outcomes(bot, answered) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.COMPLETED]
 
 
-def test_interrupted_turn_rooms_record_each_source_once() -> None:
-    """One interrupted source must claim exactly one room-scoped recovery slot."""
-    rooms = InterruptedTurnRooms()
+async def test_a_retry_of_an_edit_a_restart_interrupted_runs_it_again(tmp_path: Path) -> None:
+    """A regeneration the restart cut short is re-run as the same regeneration, and answers."""
+    old = await _answered(tmp_path)
+    runner = unwrap_extracted_collaborator(old._response_runner)
+    answering = asyncio.Event()
 
-    with capture_logs() as logs:
-        assert rooms.register("$event", room_id="!room:localhost") is True
-    assert rooms.register("$event", room_id="!other:localhost") is False
-    assert rooms.contains("$event") is True
-    assert rooms.contains("$missing") is False
-    assert rooms.pending_room_ids == {"!room:localhost"}
-    assert [entry["event"] for entry in logs] == ["interrupted_turn_recovery_recorded"]
+    async def interrupted(*_args: object, **_kwargs: object) -> str:
+        answering.set()
+        await asyncio.Event().wait()
+        return "Never answered."
 
+    with patch_response_runner_module(
+        ai_response=AsyncMock(side_effect=interrupted),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        cut_short = asyncio.create_task(runner.generate_response(_regeneration(answer_event_id="$sent1")))
+        await asyncio.wait_for(answering.wait(), timeout=5)
 
-def test_interrupted_turn_rooms_collect_every_interrupted_room() -> None:
-    """The orchestrator hands the replacement bot every room holding a terminal note."""
-    rooms = InterruptedTurnRooms()
-
-    rooms.register("$first", room_id="!one:localhost")
-    rooms.register("$second", room_id="!two:localhost")
-    rooms.register("$third", room_id="!one:localhost")
-
-    assert rooms.pending_room_ids == {"!one:localhost", "!two:localhost"}
-
-
-def test_bot_replacement_cancellation_records_the_interrupted_room() -> None:
-    """The dispatch seam hands a replacement-cancelled turn to room-scoped recovery."""
-    rooms = InterruptedTurnRooms()
-    runner = ResponseRunner(deps=MagicMock())
-
-    def record_interrupted_turn() -> None:
-        rooms.register("$source", room_id="!room:localhost")
-
-    _notify(
-        runner,
-        _request(on_interrupted_response_recoverable=record_interrupted_turn),
-        _cancelled_outcome(failure_reason="sync_restart_cancelled"),
-    )
-
-    assert rooms.pending_room_ids == {"!room:localhost"}
-
-
-@pytest.mark.asyncio
-async def test_user_stopped_response_is_not_recovered() -> None:
-    """A user stop must leave no room queued for replacement recovery."""
-    rooms = InterruptedTurnRooms()
-    runner = ResponseRunner(deps=MagicMock())
-
-    def record_interrupted_turn() -> None:
-        rooms.register("$source", room_id="!room:localhost")
-
-    _notify(
-        runner,
-        _request(on_interrupted_response_recoverable=record_interrupted_turn),
-        _cancelled_outcome(failure_reason="cancelled_by_user"),
-    )
-
-    assert not rooms.pending_room_ids
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._reply_runtime.start()
+    try:
+        assert await _answer(restarted, _retry(), AsyncMock(return_value="Edited answer.")) == "$sent1"
+        reply = await _reply(restarted)
+        assert reply.state is rl.ReplyState.COMPLETED
+        assert await _span_outcomes(restarted, reply) == [
+            rl.SpanOutcome.COMPLETED,
+            rl.SpanOutcome.LOST,
+            rl.SpanOutcome.COMPLETED,
+        ]
+        assert _sent_bodies(restarted)[-1] == "Edited answer."
+    finally:
+        cut_short.cancel()
+        with suppress(asyncio.CancelledError):
+            await cut_short

@@ -3,6 +3,8 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: mindroom
 nodes:
 - role: control-plane
+  # Default node image of the kind release pinned in smoke-stacks.yml, pulled from mirror.gcr.io instead of Docker Hub.
+  image: mirror.gcr.io/kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
   kubeadmConfigPatches:
   - |
     kind: InitConfiguration

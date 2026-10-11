@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="brandfetch",
+    file_access=ToolFileAccess.NONE,
     display_name="Brandfetch",
     description="Retrieve brand data including logos, colors, and fonts by domain or name",
     category=ToolCategory.RESEARCH,
@@ -66,13 +67,6 @@ if TYPE_CHECKING:
         ConfigField(
             name="all",
             label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="async_tools",
-            label="Async Tools (Deprecated)",
             type="boolean",
             required=False,
             default=False,

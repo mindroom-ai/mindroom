@@ -4,14 +4,47 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from weakref import ref
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 
 MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
 MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
+
+_SCHEMA_SOURCE_ATTRIBUTE = "__mindroom_tool_schema_source__"
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolSchemaSource:
+    """A wrapper-owned declaration; copied decorator attributes confer no identity."""
+
+    wrapper: ref[Callable[..., object]]
+    source: Callable[..., object]
+
+
+def tool_schema_source(entrypoint: Callable[..., object]) -> Callable[..., object]:
+    """Resolve only schema identity explicitly preserved by a MindRoom wrapper."""
+    declaration = getattr(entrypoint, _SCHEMA_SOURCE_ATTRIBUTE, None)
+    if isinstance(declaration, _ToolSchemaSource) and declaration.wrapper() is entrypoint:
+        return declaration.source
+    return entrypoint
+
+
+def declare_tool_schema_source(wrapper: Callable[..., object], source: Callable[..., object]) -> None:
+    """Declare the source definition used by an owned tool wrapper."""
+    setattr(wrapper, _SCHEMA_SOURCE_ATTRIBUTE, _ToolSchemaSource(ref(wrapper), tool_schema_source(source)))
+
+
+@runtime_checkable
+class SupportsPrimaryCallPlacement(Protocol):
+    """Toolkit-owned placement for calls that need the live primary runtime."""
+
+    def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
+        """Return whether one bound call must keep its original primary entrypoint."""
+        ...
 
 
 class ToolAuthoredOverrideValidator(str, Enum):
@@ -59,15 +92,27 @@ class ToolExecutionTarget(str, Enum):
     WORKER = "worker"
 
 
+class ToolFileAccess(str, Enum):
+    """How a tool's own local file access relates to the agent ``file_access`` setting."""
+
+    NONE = "none"  # takes no local file paths
+    AGENT = "agent"  # follows the agent's file_access setting
+    UNCONFINED = "unconfined"  # not confined by file_access; only a worker isolates its local file access
+
+
 class ToolManagedInitArg(str, Enum):
     """Explicit MindRoom-managed constructor inputs."""
 
     RUNTIME_PATHS = "runtime_paths"
     CREDENTIALS_MANAGER = "credentials_manager"
     WORKER_TARGET = "worker_target"
+    RUNTIME_CONFIG = "runtime_config"
     TOOL_OUTPUT_WORKSPACE_ROOT = "tool_output_workspace_root"
     WORKER_TOOLS_OVERRIDE = "worker_tools_override"
     CURRENT_ROOM_ID = "current_room_id"
+    AGENT_NAME = "agent_name"
+    FILE_ACCESS = "file_access"
+    AGENT_STATE_ROOT = "agent_state_root"
 
 
 @dataclass
@@ -94,25 +139,39 @@ class ToolValidationInfo:
     config_fields: tuple[ConfigField, ...] = ()
     agent_override_fields: tuple[ConfigField, ...] = ()
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
+    file_access: ToolFileAccess = ToolFileAccess.NONE
     supports_toolkit_filters: bool = False
     requires_room_context: bool = False
+    requires_primary_runtime: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
 
 
 @dataclass
 class ToolMetadata:
-    """Complete metadata for a tool."""
+    """Complete metadata for a tool.
+
+    ``requires_room_context`` marks toolkits that need the live Matrix room
+    runtime, including its client, requester, and conversation context.
+    ``requires_primary_runtime`` prevents worker routing even when an authored
+    ``worker_tools`` override selects the tool. It is independent from the
+    overridable ``default_execution_target``.
+    """
 
     name: str
     display_name: str
     description: str
     category: ToolCategory
+    # Required so every tool, including plugins and MCP servers, states how it reaches local files.
+    file_access: ToolFileAccess
     status: ToolStatus = ToolStatus.AVAILABLE
     setup_type: SetupType = SetupType.NONE
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
+    requires_primary_runtime: bool = False
     consumes_workspace_paths: bool = False
     supports_output_redirection: bool = True
+    # Runs arbitrary programs (shell, interpreters, containers); independent of the file_access class.
+    executes_code: bool = False
     requires_room_context: bool = False
     icon: str | None = None
     icon_color: str | None = None
@@ -125,6 +184,8 @@ class ToolMetadata:
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
+    # SDK functions that accept, but never use, an injected Agent or Team.
+    worker_inert_agent_functions: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
     supports_toolkit_filters: bool = False
     factory: Callable[[], type] | None = None

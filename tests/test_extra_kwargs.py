@@ -1,12 +1,12 @@
 """Test extra_kwargs functionality in model configuration."""
 
 import asyncio
-import gc
 import importlib
+import inspect
 import os
 import tempfile
 import threading
-import warnings
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import httpx
@@ -25,25 +25,31 @@ from agno.utils.models.claude import format_messages
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
-from mindroom.claude_prompt_cache import (
-    _DEFERRED_TOOL_NAMES_ATTR,
-    _MAX_CACHE_MARKERS,
-    _count_cache_markers,
-    _prompt_cache_control,
-    _PromptCacheClientProxy,
-    _request_kwargs_with_prompt_cache_ladder,
-    _request_kwargs_with_replay_safe_tool_search_results,
-    install_claude_deferred_tool_search,
-    install_claude_prompt_cache_hook,
-    native_tool_search_supported,
-)
+import mindroom.providers.bedrock_claude as bedrock_claude_module
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import render_transient_context
-from mindroom.model_loading import get_model_instance
+from mindroom.providers.agno_compat_claude import request_kwargs_with_replay_safe_tool_search_results
+from mindroom.providers.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
+from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
+from mindroom.providers.claude_prompt_cache import (
+    _DEFERRED_TOOL_NAMES_ATTR,
+    MAX_CACHE_MARKERS,
+    _count_cache_markers,
+    _PromptCacheClientProxy,
+    _request_kwargs_with_prompt_cache_ladder,
+    _request_kwargs_without_unavailable_tool_references,
+    aclose_anthropic_async_client,
+    install_claude_deferred_tool_search,
+    install_claude_prompt_cache_hook,
+    native_tool_search_supported,
+    prewarm_anthropic_async_client,
+    prompt_cache_control,
+)
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
 
 
 def _config_with_runtime_paths(
@@ -73,7 +79,7 @@ def test_model_config_with_extra_kwargs() -> None:
 
     model_config = ModelConfig(
         provider="openrouter",
-        id="openai/gpt-4",
+        id="openai/gpt-6-astra",
         extra_kwargs=extra_kwargs,
     )
 
@@ -87,7 +93,7 @@ def test_config_yaml_with_extra_kwargs() -> None:
         "models": {
             "test_model": {
                 "provider": "openrouter",
-                "id": "openai/gpt-4",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {
                     "request_params": {
                         "provider": {
@@ -148,7 +154,7 @@ def test_get_model_instance_with_extra_kwargs() -> None:
         "models": {
             "test_model": {
                 "provider": "openrouter",
-                "id": "openai/gpt-4",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {
                     "request_params": {
                         "provider": {
@@ -183,7 +189,7 @@ def test_get_model_instance_with_extra_kwargs() -> None:
     model = get_model_instance(config, runtime_paths, "test_model")
 
     # Check that the model has the correct parameters
-    assert model.id == "openai/gpt-4"
+    assert model.id == "deepseek/deepseek-v4.1-flash"
     assert model.request_params is not None
     assert model.request_params["provider"]["order"] == ["Cerebras"]
     assert model.request_params["provider"]["allow_fallbacks"] is False
@@ -198,12 +204,12 @@ def test_openrouter_provider_defaults_to_uncapped_max_tokens() -> None:
         "models": {
             "uncapped": {
                 "provider": "openrouter",
-                "id": "deepseek/deepseek-v4-pro",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {"api_key": "test-key"},
             },
             "capped": {
                 "provider": "openrouter",
-                "id": "deepseek/deepseek-v4-pro",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {"api_key": "test-key", "max_tokens": 4096},
             },
         },
@@ -223,7 +229,7 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
         "models": {
             "local_model": {
                 "provider": "llama_cpp",
-                "id": "gemma-4:31b-q4-uncensored",
+                "id": "local-model",
                 "extra_kwargs": {
                     "api_key": "sk-no-key-required",
                     "base_url": "http://llama.local/v1",
@@ -242,7 +248,7 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
     model = get_model_instance(config, runtime_paths, "local_model")
 
     assert isinstance(model, LlamaCpp)
-    assert model.id == "gemma-4:31b-q4-uncensored"
+    assert model.id == "local-model"
     assert model.api_key == "sk-no-key-required"
     assert model.base_url == "http://llama.local/v1"
     assert model.max_tokens == 32000
@@ -255,7 +261,7 @@ def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.Monk
         "models": {
             "local_model": {
                 "provider": "llama_cpp",
-                "id": "gemma-4:31b-q4-uncensored",
+                "id": "local-model",
                 "extra_kwargs": {
                     "base_url": "http://llama.local/v1",
                 },
@@ -274,7 +280,7 @@ def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.Monk
         provider_lookups.append(provider)
         return "unexpected-credential"
 
-    monkeypatch.setattr("mindroom.model_loading.get_api_key_for_provider", get_api_key)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_api_key_for_provider", get_api_key)
 
     model = get_model_instance(config, runtime_paths, "local_model")
 
@@ -349,7 +355,7 @@ def test_model_without_extra_kwargs() -> None:
         "models": {
             "simple_model": {
                 "provider": "openai",
-                "id": "gpt-3.5-turbo",
+                "id": "gpt-5.6-luna",
                 # No extra_kwargs
             },
         },
@@ -374,7 +380,7 @@ def test_model_without_extra_kwargs() -> None:
 
     # Should work without any issues
     model = get_model_instance(config, runtime_paths, "simple_model")
-    assert model.id == "gpt-3.5-turbo"
+    assert model.id == "gpt-5.6-luna"
     assert model.provider == "OpenAI"
 
 
@@ -384,7 +390,7 @@ def test_vertexai_claude_provider() -> None:
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4@20250514",
+                "id": "claude-sonnet-5",
                 "context_window": 200000,
                 "extra_kwargs": {
                     "project_id": "demo-project",
@@ -414,7 +420,7 @@ def test_vertexai_claude_provider() -> None:
 
     assert isinstance(model, VertexAIClaude)
     assert isinstance(model, MindroomVertexAIClaude)
-    assert model.id == "claude-sonnet-4@20250514"
+    assert model.id == "claude-sonnet-5"
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
@@ -467,6 +473,133 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
     assert model.aws_region == "us-east-1"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+
+
+def test_session_backed_bedrock_async_client_is_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session-backed model must reuse the client built before its request."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    factory_calls: list[dict[str, object]] = []
+
+    class _FakeAsyncClient:
+        def is_closed(self) -> bool:
+            return False
+
+    built_client = _FakeAsyncClient()
+
+    def _build_client(**kwargs: object) -> _FakeAsyncClient:
+        factory_calls.append(kwargs)
+        return built_client
+
+    monkeypatch.setattr(bedrock_claude_module, "AsyncAnthropicBedrockMantle", _build_client)
+    vars(model)["_get_client_params"] = dict
+
+    first_client = model.get_async_client()
+    second_client = model.get_async_client()
+
+    assert first_client is built_client
+    assert second_client is built_client
+    assert model.async_client is built_client
+    assert factory_calls == [{}]
+
+
+def test_prewarm_anthropic_async_client_builds_cacheable_bedrock_client() -> None:
+    """A non-session Bedrock model should build its retained client off-loop."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    built_client = object()
+    calls: list[None] = []
+
+    def _build_client() -> object:
+        calls.append(None)
+        return built_client
+
+    vars(model)["get_async_client"] = _build_client
+
+    prewarm_anthropic_async_client(model)
+
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_aclose_anthropic_async_client_closes_cacheable_bedrock_client() -> None:
+    """A retained non-session Bedrock client should be closed and detached."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
+
+    await aclose_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
+
+
+@pytest.mark.asyncio
+async def test_aclose_anthropic_async_client_closes_session_backed_bedrock_client() -> None:
+    """A retained session-backed client must have the same deterministic owner."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
+
+    await aclose_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
+
+
+def test_prewarm_anthropic_async_client_closes_partial_client_on_failure() -> None:
+    """A client retained before a failed prewarm must not lose its owner."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    partial_client = _FakeAsyncClient()
+
+    def _fail_after_retaining_client() -> object:
+        model.async_client = partial_client  # type: ignore[assignment]
+        msg = "client initialization failed"
+        raise RuntimeError(msg)
+
+    vars(model)["get_async_client"] = _fail_after_retaining_client
+
+    with pytest.raises(RuntimeError, match="client initialization failed"):
+        prewarm_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
 
 
 def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
@@ -554,7 +687,7 @@ def test_bedrock_claude_provider_auto_installs_boto3(
         calls.append((dependencies, extra_name))
         return False
 
-    monkeypatch.setattr("mindroom.model_loading.ensure_optional_deps", ensure)
+    monkeypatch.setattr("mindroom.providers.model_loading.ensure_optional_deps", ensure)
 
     get_model_instance(config, runtime_paths, "bedrock_model")
 
@@ -651,8 +784,8 @@ def test_azure_openai_provider_uses_endpoint_file_and_canonical_runtime_env() ->
 
 def test_prompt_cache_control_ttl() -> None:
     """Extended cache time selects the 1h TTL; the default omits the ttl field."""
-    assert _prompt_cache_control() == {"type": "ephemeral"}
-    assert _prompt_cache_control(extended_cache_time=True) == {"type": "ephemeral", "ttl": "1h"}
+    assert prompt_cache_control() == {"type": "ephemeral"}
+    assert prompt_cache_control(extended_cache_time=True) == {"type": "ephemeral", "ttl": "1h"}
 
 
 def _strict_tool_definition() -> dict[str, object]:
@@ -679,7 +812,7 @@ def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
     """Vertex Claude rejects provider-level strict, but schema fields named strict are valid."""
     tool = _strict_tool_definition()
 
-    sanitized = _strip_vertex_claude_tool_strict([tool])
+    sanitized = strip_vertex_claude_tool_strict([tool])
 
     assert sanitized is not None
     assert "strict" not in sanitized[0]["function"]
@@ -690,7 +823,7 @@ def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
 def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
     """Mindroom's Vertex Claude model should not send strict in the provider tool payload."""
     model = MindroomVertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=False,
@@ -716,9 +849,74 @@ def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
     assert model._has_beta_features(tools=[_strict_tool_definition()]) is False
 
 
+@pytest.mark.parametrize(
+    "codex_provider_data",
+    [{"response_id": "response-1"}, {"signature": ""}],
+    ids=["missing-signature", "empty-signature"],
+)
+@pytest.mark.asyncio
+async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_provider_replay(
+    codex_provider_data: dict[str, str],
+) -> None:
+    """Codex reasoning without an Anthropic signature must not become a thinking block."""
+    model = MindroomVertexAIClaude(
+        id="claude-opus-5",
+        project_id="demo-project",
+        region="global",
+    )
+    codex_message = Message(
+        role="assistant",
+        content="Codex answer",
+        reasoning_content="Unsigned Codex reasoning",
+        provider_data=codex_provider_data,
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "demo_tool", "arguments": "{}"},
+            },
+        ],
+        from_history=True,
+    )
+    claude_message = Message(
+        role="assistant",
+        content="Claude answer",
+        reasoning_content="Signed Claude reasoning",
+        provider_data={"signature": "signature-1"},
+        from_history=True,
+    )
+    messages = [
+        Message(role="user", content="First question", from_history=True),
+        codex_message,
+        Message(role="user", content="Second question", from_history=True),
+        claude_message,
+        Message(role="user", content="Current question"),
+    ]
+
+    fitted_messages = await model._fit_request_messages(
+        messages,
+        tools=None,
+        response_format=None,
+        compress_tool_results=False,
+    )
+    chat_messages, _system_prompt = format_messages(fitted_messages)
+
+    assert [block.type for block in chat_messages[1]["content"]] == ["text", "tool_use"]
+    assert [block.type for block in chat_messages[3]["content"]] == ["thinking", "text"]
+    fitted_codex_message = fitted_messages[1]
+    assert fitted_codex_message is not codex_message
+    assert fitted_codex_message.reasoning_content is None
+    assert fitted_codex_message.content == "Codex answer"
+    assert fitted_codex_message.tool_calls == codex_message.tool_calls
+    assert fitted_codex_message.provider_data == codex_provider_data
+    assert fitted_messages[3] == claude_message
+    assert codex_message.reasoning_content == "Unsigned Codex reasoning"
+    assert codex_message.provider_data == codex_provider_data
+
+
 def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:
     return VertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=True,
@@ -754,7 +952,7 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
 
     prepared = _request_kwargs_with_prompt_cache_ladder(
         request_kwargs,
-        _prompt_cache_control(extended_cache_time=True),
+        prompt_cache_control(extended_cache_time=True),
     )
 
     expected_cache_control = {"type": "ephemeral", "ttl": "1h"}
@@ -763,7 +961,7 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
     assert tool_result_block["cache_control"] == expected_cache_control
     assert prepared["messages"][0]["content"][-1]["cache_control"] == expected_cache_control
     assert prepared["tools"][-1]["cache_control"] == expected_cache_control
-    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_context() -> None:
@@ -794,8 +992,8 @@ def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_conte
         "messages": second_turn_messages,
     }
 
-    first_prepared = _request_kwargs_with_prompt_cache_ladder(first_request, _prompt_cache_control())
-    second_prepared = _request_kwargs_with_prompt_cache_ladder(second_request, _prompt_cache_control())
+    first_prepared = _request_kwargs_with_prompt_cache_ladder(first_request, prompt_cache_control())
+    second_prepared = _request_kwargs_with_prompt_cache_ladder(second_request, prompt_cache_control())
 
     first_current_turn = first_prepared["messages"][0]
     second_replayed_turn = second_prepared["messages"][0]
@@ -822,14 +1020,14 @@ def test_prompt_cache_ladder_does_not_double_count_existing_message_markers() ->
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     # Budget: 4 total minus system marker minus the pre-existing message
     # marker leaves room for one new rung (on m3) and the tools marker.
     assert prepared["messages"][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in prepared["messages"][0]["content"][0]
     assert prepared["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_client_proxy_delegates_context_manager() -> None:
@@ -865,10 +1063,10 @@ def test_prompt_cache_ladder_respects_marker_budget() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     assert prepared is request_kwargs
-    assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
+    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
 
 
 def test_prompt_cache_ladder_skips_unmarkable_blocks() -> None:
@@ -886,7 +1084,7 @@ def test_prompt_cache_ladder_skips_unmarkable_blocks() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     assert "cache_control" not in str(prepared["messages"][1])
     assert prepared["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
@@ -898,7 +1096,7 @@ def test_prompt_cache_ladder_does_not_mutate_input() -> None:
     tools = [{"name": "demo_tool", "input_schema": {"type": "object"}}]
     request_kwargs = {"messages": messages, "tools": tools}
 
-    _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
 
     assert messages == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
     assert tools == [{"name": "demo_tool", "input_schema": {"type": "object"}}]
@@ -963,7 +1161,7 @@ def test_prompt_cache_hook_inert_when_cache_disabled() -> None:
 
 def test_prompt_cache_hook_applies_to_direct_anthropic_claude() -> None:
     """The hook must ladder direct Anthropic Claude models, not only Vertex."""
-    model = Claude(id="claude-sonnet-4-6", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-sonnet-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
@@ -1030,7 +1228,7 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("anthropic", "claude-opus-4-20250514", False),
         ("anthropic", "claude-3-5-sonnet-20241022", False),
         ("vertexai_claude", "claude-sonnet-4@20250514", False),
-        ("openai", "gpt-5.6", False),
+        ("openai", "gpt-6-astra", False),
         ("bedrock_claude", "anthropic.claude-opus-5", False),
     ],
 )
@@ -1210,10 +1408,10 @@ def test_server_tool_search_blocks_round_trip_in_assistant_history() -> None:
 
     assistant_wires = [message for message in captured_kwargs[1]["messages"] if message["role"] == "assistant"]
     assert len(assistant_wires) == 1
-    replayed_dict_blocks = [block for block in assistant_wires[0]["content"] if isinstance(block, dict)]
-    assert replayed_dict_blocks == [
-        first_response.content[1].model_dump(),
-        first_response.content[2].model_dump(),
+    assert assistant_wires[0]["content"] == [
+        {"type": "text", "text": "I'll search for a weather tool."},
+        _SERVER_TOOL_USE_BLOCK,
+        _TOOL_SEARCH_RESULT_BLOCK,
     ]
 
 
@@ -1225,7 +1423,7 @@ def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() 
         provider_data={"server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_TOOL_SEARCH_RESULT_BLOCK)]},
     )
 
-    formatted = OpenAIChat(id="gpt-5.6", api_key="test-key")._format_message(assistant)
+    formatted = OpenAIChat(id="gpt-6-astra", api_key="test-key")._format_message(assistant)
 
     assert formatted["role"] == "assistant"
     assert formatted["content"] == "I'll search for a weather tool."
@@ -1243,12 +1441,12 @@ def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"][0] == _TOOL_SEARCH_RESULT_BLOCK
     assert prepared["messages"][0]["content"][1] == {"type": "text", "text": "found it"}
     assert "citations" in request_kwargs["messages"][0]["content"][0]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> None:
@@ -1269,7 +1467,7 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
@@ -1279,13 +1477,13 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
     ]
     assert request_kwargs["messages"][0]["content"][0] == _ORPHAN_TOOL_SEARCH_USE_BLOCK
     assert "citations" in request_kwargs["messages"][0]["content"][3]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
+def test_unavailable_tool_references_drops_unavailable_references() -> None:
     """A replayed search result should retain only tools available on the current request."""
     result_block = {
-        **_DIRTY_TOOL_SEARCH_RESULT_BLOCK,
+        **_TOOL_SEARCH_RESULT_BLOCK,
         "content": {
             "tool_references": [
                 {"type": "tool_reference", "tool_name": "get_weather"},
@@ -1305,7 +1503,7 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _SERVER_TOOL_USE_BLOCK,
@@ -1318,12 +1516,11 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
         },
     ]
     assert len(request_kwargs["messages"][0]["content"][1]["content"]["tool_references"]) == 4
-    assert "citations" in request_kwargs["messages"][0]["content"][1]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unavailable() -> None:
-    """A search use and result should both disappear when no referenced tool remains available."""
+def test_unavailable_tool_references_empties_result_when_all_references_are_unavailable() -> None:
+    """A search whose referenced tools are all unavailable keeps its pair with an empty result."""
     request_kwargs = {
         "tools": [_wire_tool("other_tool")],
         "messages": [
@@ -1332,26 +1529,32 @@ def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unav
                 "content": [
                     dict(_OTHER_SERVER_TOOL_USE_BLOCK),
                     dict(_SERVER_TOOL_USE_BLOCK),
-                    dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK),
+                    dict(_TOOL_SEARCH_RESULT_BLOCK),
                     {"type": "text", "text": "found it"},
                 ],
             },
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_01ABC",
+            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+        },
         {"type": "text", "text": "found it"},
     ]
     assert request_kwargs["messages"][0]["content"][1] == _SERVER_TOOL_USE_BLOCK
-    assert request_kwargs["messages"][0]["content"][2] == _DIRTY_TOOL_SEARCH_RESULT_BLOCK
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert request_kwargs["messages"][0]["content"][2] == _TOOL_SEARCH_RESULT_BLOCK
+    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_pairs_without_a_tools_array() -> None:
-    """Missing current tools means every replayed tool reference is stale."""
+def test_unavailable_tool_references_empties_results_without_a_tools_array() -> None:
+    """Missing current tools means every replayed tool reference is stale, so the result is emptied."""
     request_kwargs = {
         "messages": [
             {
@@ -1365,18 +1568,26 @@ def test_replay_safe_tool_search_results_drops_pairs_without_a_tools_array() -> 
         ],
     }
 
-    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
 
-    assert prepared["messages"][0]["content"] == [_OTHER_SERVER_TOOL_USE_BLOCK]
+    assert prepared["messages"][0]["content"] == [
+        _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_01ABC",
+            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+        },
+    ]
     assert request_kwargs["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
         _SERVER_TOOL_USE_BLOCK,
         _TOOL_SEARCH_RESULT_BLOCK,
     ]
-    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_returns_original_when_references_are_available() -> None:
+def test_unavailable_tool_references_returns_original_when_references_are_available() -> None:
     """A clean replay should preserve both payload bytes and object identity."""
     request_kwargs = {
         "tools": [_wire_tool("get_weather")],
@@ -1392,7 +1603,71 @@ def test_replay_safe_tool_search_results_returns_original_when_references_are_av
         ],
     }
 
-    assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
+    assert _request_kwargs_without_unavailable_tool_references(request_kwargs) is request_kwargs
+
+
+def test_unavailable_tool_references_keeps_empty_search_between_signed_thinking() -> None:
+    """A search that matched nothing must stay, or the tool loop's two thinking blocks become adjacent."""
+    request_kwargs = {
+        "tools": [_wire_tool("get_weather")],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "What is the weather?"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig-before-search"},
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    {
+                        **_TOOL_SEARCH_RESULT_BLOCK,
+                        "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+                    },
+                    {"type": "thinking", "thinking": "", "signature": "sig-after-search"},
+                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "sunny"}]},
+        ],
+    }
+
+    assert _request_kwargs_without_unavailable_tool_references(request_kwargs) is request_kwargs
+
+
+def test_unavailable_tool_references_empties_filtered_search_between_signed_thinking() -> None:
+    """A search whose found tools are all gone keeps its pair, so signed thinking blocks never become adjacent."""
+    thinking_before = {"type": "thinking", "thinking": "", "signature": "sig-before-search"}
+    thinking_after = {"type": "thinking", "thinking": "", "signature": "sig-after-search"}
+    request_kwargs = {
+        "tools": [_wire_tool("bridge_call_tool")],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "List the open jobs."}]},
+            {
+                "role": "assistant",
+                "content": [
+                    dict(thinking_before),
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    dict(_TOOL_SEARCH_RESULT_BLOCK),
+                    dict(thinking_after),
+                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "done"}]},
+        ],
+    }
+
+    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
+
+    content = prepared["messages"][1]["content"]
+    assert [block["type"] for block in content] == [
+        "thinking",
+        "server_tool_use",
+        "tool_search_tool_result",
+        "thinking",
+        "tool_use",
+    ]
+    assert content[0] == thinking_before
+    assert content[3] == thinking_after
+    assert content[2]["content"]["tool_references"] == []
+    assert request_kwargs["messages"][1]["content"][2] == _TOOL_SEARCH_RESULT_BLOCK
 
 
 @pytest.mark.asyncio
@@ -1546,7 +1821,7 @@ async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_b
 @pytest.mark.parametrize("cancel_before_setup", [False, True])
 @pytest.mark.parametrize("use_beta", [False, True])
 @pytest.mark.asyncio
-async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(  # noqa: PLR0915
+async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(
     monkeypatch: pytest.MonkeyPatch,
     *,
     cancel_before_setup: bool,
@@ -1566,11 +1841,24 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         api_key="test-key",
         http_client=httpx.AsyncClient(transport=_RecordingTransport()),
     )
+    request_coroutines: list[Coroutine[object, object, object]] = []
+    request_created = threading.Event()
+    original_post: Callable[..., Coroutine[object, object, object]] = client.post
+
+    def observed_post(*args: object, **kwargs: object) -> Coroutine[object, object, object]:
+        request = original_post(*args, **kwargs)
+        request_coroutines.append(request)
+        request_created.set()
+        return request
+
+    # Observe the real SDK request before the messages resource binds client.post.
+    # Its closed state proves cleanup directly, without collecting the whole
+    # pytest worker's object graph repeatedly to provoke an unawaited warning.
+    monkeypatch.setattr(client, "post", observed_post)
     model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     setup_started = threading.Event()
     allow_setup = threading.Event()
     setup_finished = threading.Event()
-    manager_created = threading.Event()
 
     def blocking_prepare(_model: object, request_kwargs: dict[str, object]) -> dict[str, object]:
         setup_started.set()
@@ -1578,17 +1866,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         setup_finished.set()
         return request_kwargs
 
-    messages_namespace = client.beta.messages if use_beta else client.messages
-    namespace_type = type(messages_namespace)
-    original_stream = namespace_type.stream
-
-    def observed_stream(self: object, **kwargs: object) -> object:
-        stream_manager = original_stream(self, **kwargs)
-        manager_created.set()
-        return stream_manager
-
-    monkeypatch.setattr("mindroom.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
-    monkeypatch.setattr(namespace_type, "stream", observed_stream)
+    monkeypatch.setattr("mindroom.providers.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
     vars(model)["get_async_client"] = lambda: client
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
     vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
@@ -1609,30 +1887,26 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         ]
 
     setup_task = asyncio.create_task(consume_stream())
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        try:
-            assert await asyncio.to_thread(setup_started.wait, 2.0)
-            if not cancel_before_setup:
-                for _ in range(cancel_count):
-                    setup_task.cancel()
-            allow_setup.set()
-            with pytest.raises(asyncio.CancelledError):
-                await setup_task
-        finally:
-            allow_setup.set()
+    try:
+        assert await asyncio.to_thread(setup_started.wait, 2.0)
+        if not cancel_before_setup:
+            for _ in range(cancel_count):
+                setup_task.cancel()
+        allow_setup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup_task
 
         assert await asyncio.to_thread(setup_finished.wait, 2.0)
-        assert await asyncio.to_thread(manager_created.wait, 2.0)
+        assert await asyncio.to_thread(request_created.wait, 2.0)
         assert setup_task.cancelling() == cancel_count
-        del setup_task
-        for _ in range(3):
-            gc.collect()
-            await asyncio.sleep(0)
-
-    await client.close()
-    assert transport_calls == 0
-    assert not any("was never awaited" in str(warning.message) for warning in caught)
+        assert len(request_coroutines) == 1
+        assert inspect.getcoroutinestate(request_coroutines[0]) == inspect.CORO_CLOSED
+        assert transport_calls == 0
+    finally:
+        allow_setup.set()
+        await client.close()
+        for request in request_coroutines:
+            request.close()
 
 
 def _dirty_replay_messages() -> list[Message]:
@@ -1660,15 +1934,22 @@ def _wire_tool_search_results(wire_messages: list[dict[str, object]]) -> list[ob
     ]
 
 
+_EMPTIED_TOOL_SEARCH_RESULT_BLOCK = {
+    "type": "tool_search_tool_result",
+    "tool_use_id": "srvtoolu_01ABC",
+    "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+}
+
+
 def test_prompt_cache_hook_sanitizes_replayed_tool_search_results() -> None:
-    """A replayed search pair with no currently available tool must not reach the wire."""
+    """A replayed search result with no currently available tool reaches the wire emptied and schema-clean."""
     model = _vertex_claude_model()
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
-    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == []
+    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
 
 
 def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_tools() -> None:
@@ -1686,7 +1967,7 @@ def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
     wire_messages = captured_kwargs[0]["messages"]
-    assert _wire_tool_search_results(wire_messages) == []
+    assert _wire_tool_search_results(wire_messages) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
     assert _count_cache_markers({"messages": list(wire_messages)}) == 0
 
 
@@ -1696,7 +1977,7 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4@20250514",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1750,7 +2031,7 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
             return type("FakeOauthCredentialsModule", (), {"Credentials": FakeAuthorizedUserCredentials})
         return original_import_module(module_name)
 
-    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("mindroom.providers.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
@@ -1766,7 +2047,7 @@ def test_vertexai_claude_rejects_missing_runtime_google_application_credentials(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1801,7 +2082,7 @@ def test_vertexai_claude_rejects_invalid_runtime_google_application_credentials(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1836,7 +2117,7 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1879,7 +2160,7 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
             return type("FakeServiceAccountModule", (), {"Credentials": FakeServiceAccountCredentials})
         return original_import_module(module_name)
 
-    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("mindroom.providers.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
@@ -1895,12 +2176,12 @@ def test_get_model_instance_supports_zai_provider() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {"api_key": "test-zai-key"},
             },
             "glm_custom": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {
                     "api_key": "test-zai-key",
                     "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -1917,7 +2198,7 @@ def test_get_model_instance_supports_zai_provider() -> None:
 
     model = get_model_instance(config, runtime_paths, "glm")
     assert isinstance(model, OpenAILike)
-    assert model.id == "glm-5.2"
+    assert model.id == "glm-5.3"
     assert model.api_key == "test-zai-key"
     assert model.base_url == "https://api.z.ai/api/paas/v4"
     assert model.name == "ZAI"
@@ -1933,7 +2214,7 @@ def test_zai_provider_resolves_api_key_from_runtime_env() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
             },
         },
         "router": {
@@ -1955,7 +2236,7 @@ def test_zai_provider_drops_falsy_api_key() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {"api_key": None},
             },
         },

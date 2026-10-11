@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="tavily",
+    file_access=ToolFileAccess.NONE,
     display_name="Tavily",
     description="Real-time web search API for retrieving current information",
     category=ToolCategory.RESEARCH,
@@ -125,6 +126,86 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default="markdown",
+        ),
+        ConfigField(
+            name="topic",
+            label="Topic",
+            type="text",
+            required=False,
+            default=None,
+            description="Search category: general, news, or finance",
+        ),
+        ConfigField(
+            name="time_range",
+            label="Time Range",
+            type="text",
+            required=False,
+            default=None,
+            description="Time window for results: day, week, month, year (or d/w/m/y)",
+        ),
+        ConfigField(
+            name="start_date",
+            label="Start Date",
+            type="text",
+            required=False,
+            default=None,
+            description="Only include results published after this date (YYYY-MM-DD)",
+        ),
+        ConfigField(
+            name="end_date",
+            label="End Date",
+            type="text",
+            required=False,
+            default=None,
+            description="Only include results published before this date (YYYY-MM-DD)",
+        ),
+        ConfigField(
+            name="days",
+            label="Days",
+            type="number",
+            required=False,
+            default=None,
+            description="Number of days back to include results (news topic only)",
+        ),
+        ConfigField(
+            name="include_domains",
+            label="Include Domains",
+            type="string[]",
+            required=False,
+            default=None,
+            description="Restrict results to these domains",
+        ),
+        ConfigField(
+            name="exclude_domains",
+            label="Exclude Domains",
+            type="string[]",
+            required=False,
+            default=None,
+            description="Exclude these domains from results",
+        ),
+        ConfigField(
+            name="country",
+            label="Country",
+            type="text",
+            required=False,
+            default=None,
+            description="Boost results from this country (e.g. united states)",
+        ),
+        ConfigField(
+            name="auto_parameters",
+            label="Auto Parameters",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Let Tavily auto-tune search parameters; explicitly set parameters take precedence",
+        ),
+        ConfigField(
+            name="chunks_per_source",
+            label="Chunks Per Source",
+            type="number",
+            required=False,
+            default=None,
+            description="Number of content chunks per source (1-3), advanced search only",
         ),
     ],
     dependencies=["tavily-python"],

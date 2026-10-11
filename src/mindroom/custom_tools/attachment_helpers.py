@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import is_authorized_sender
+from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.state import resolve_room_id
+from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
+from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -29,18 +32,44 @@ def normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[li
     return normalized, None
 
 
-def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
+async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str) -> bool:
+    """Return whether the requester currently belongs to one requested room.
+
+    Responder access answers whether a requester may converse with this agent,
+    never whether they belong to one specific room, so any room other than the
+    conversation room additionally requires proven current membership. A
+    membership fetch that fails counts as not joined.
+
+    Only a human principal can hold that membership. A managed sender is joined
+    to every room its agent serves, so its own membership would prove nothing,
+    and an agent relaying another agent's message must stay in their shared
+    conversation.
+    """
+    if room_id == context.room_id:
+        return True
+    config = context.current_config
+    if not is_human_requester_id(context.requester_id, config, context.runtime_paths):
+        return False
+    member_ids = await get_room_members(context.client, room_id)
+    return member_ids is not None and not member_ids.isdisjoint(
+        equivalent_requester_ids(context.requester_id, config, context.runtime_paths),
+    )
+
+
+async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester may act in the given room."""
     if not isinstance(room_id, str) or not room_id:
         return False
     if room_id == context.room_id:
         return True
-    return is_authorized_sender(
+    return is_sender_allowed_for_responder(
         context.requester_id,
-        context.current_config,
+        context.agent_name,
         room_id,
+        context.current_config,
         context.runtime_paths,
-    )
+        context.require_agent_reply_memberships(),
+    ) and await requester_joined_target_room(context, room_id)
 
 
 def resolve_requested_room_id(
@@ -140,3 +169,31 @@ async def resolve_canonical_tool_thread_target(
         requested_thread_id=requested_thread_id,
         canonical_thread_id=canonical_thread_id,
     )
+
+
+async def resolve_current_room_thread_root(
+    context: ToolRuntimeContext,
+    thread_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Return the root of one thread in the current room, or why none resolves.
+
+    The active thread is already its root; an explicit thread root or reply
+    event ID resolves through the thread's relations and fails closed.
+    """
+    if thread_id is None:
+        if context.resolved_thread_id is None:
+            return None, "thread_id is required when no active thread context is available."
+        return context.resolved_thread_id, None
+    target = await resolve_canonical_tool_thread_target(
+        context,
+        room_id=context.room_id,
+        thread_id=thread_id,
+        normalize_thread_id=lambda room_id, event_id: resolve_thread_root_event_id_for_client(
+            context.client,
+            room_id,
+            event_id,
+            relations=context.relations,
+        ),
+        fail_closed_on_normalization_error=True,
+    )
+    return target.canonical_thread_id, target.error

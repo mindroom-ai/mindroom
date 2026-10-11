@@ -14,8 +14,13 @@ export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
+  display_name?: string | null;
+  icon?: string | null;
+  api?: "responses" | "chat_completions" | null;
   context_window?: number | null;
+  stream_idle_timeout_seconds?: number | null;
   host?: string; // For ollama
+  api_key?: string | null; // Model-specific key from config.yaml
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
 }
 
@@ -34,6 +39,7 @@ export interface MemoryConfig {
   file?: {
     path?: string | null;
     max_entrypoint_lines?: number;
+    max_entrypoint_tokens?: number;
   };
   search?: {
     mode?: MemorySearchMode;
@@ -107,9 +113,14 @@ export interface AgentPrivateConfig {
 }
 
 export type LearningMode = "always" | "agentic";
-export type CultureMode = "automatic" | "agentic" | "manual";
 
 export type ThreadMode = "thread" | "room";
+
+export interface ResponderAccessConfig {
+  current_room_members?: boolean;
+  members_of_rooms?: string[];
+  users?: string[];
+}
 
 export interface CompactionConfig {
   enabled?: boolean;
@@ -216,6 +227,8 @@ export interface Agent {
   skills: string[];
   instructions: string[];
   rooms: string[];
+  access?: ResponderAccessConfig;
+  credential_managers?: string[];
   knowledge_bases?: string[];
   context_files?: string[]; // Workspace-relative files loaded into each freshly built agent instance
   markdown?: boolean; // Per-agent markdown override
@@ -235,6 +248,7 @@ export interface Agent {
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
   compress_tool_results?: boolean; // Compress tool results in history
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
+  max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
   allow_self_config?: boolean; // Allow agent to modify its own configuration via a tool
 }
 
@@ -244,24 +258,19 @@ export interface Team {
   role: string;
   agents: string[]; // List of agent IDs
   rooms: string[];
+  access?: ResponderAccessConfig;
   mode: "coordinate" | "collaborate";
-  model?: string; // Optional team-specific model
+  model?: string | null; // Optional team-specific model; explicit null is invalid at runtime
   compaction?: CompactionConfig | null; // Per-team required-compaction overrides
   num_history_runs?: number | null; // Number of prior scoped runs to include as team history
   num_history_messages?: number | null; // Max team-scoped history messages (mutually exclusive with num_history_runs)
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history
+  max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
 }
 
 export type TeamConfig = Omit<Team, "id" | "rooms"> & {
   rooms?: string[];
 };
-
-export interface Culture {
-  id: string; // The key in the cultures object
-  description: string;
-  agents: string[]; // List of agent IDs
-  mode: CultureMode;
-}
 
 export interface Room {
   id: string; // Room identifier
@@ -274,6 +283,19 @@ export interface Room {
 export interface RoomConfig {
   display_name?: string;
   description?: string;
+  join_policy?: "invite" | "knock" | "public";
+  listed?: boolean;
+  encrypted?: boolean;
+  invite_users?: string[];
+  admins?: string[];
+}
+
+export interface RoomDefaultsConfig {
+  join_policy?: "invite" | "knock" | "public";
+  listed?: boolean;
+  encrypted?: boolean;
+  invite_users?: string[];
+  admins?: string[];
 }
 
 export interface VoiceSTTConfig {
@@ -295,23 +317,13 @@ export interface VoiceConfig {
   intelligence: VoiceLLMConfig;
 }
 
-export interface MatrixRoomAccessConfig {
-  mode?: "single_user_private" | "multi_user";
-  multi_user_join_rule?: "public" | "knock";
-  publish_to_room_directory?: boolean;
-  invite_only_rooms?: string[];
-  reconcile_existing_rooms?: boolean;
-  encrypt_managed_rooms?: boolean;
-  room_admins?: string[]; // Matrix user IDs granted admin power (100) in every managed room
-}
-
 export interface Config {
+  administrators?: string[];
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
-  cultures?: Record<string, Omit<Culture, "id">>; // Culture configurations
   models: Record<string, ModelConfig>;
   agents: Record<string, Omit<Agent, "id">>;
-  defaults: {
+  defaults?: {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;
@@ -321,22 +333,24 @@ export interface Config {
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
     tools?: string[];
     enable_streaming?: boolean;
+    large_message_strategy?: "sidecar" | "split"; // Oversized message delivery strategy (defaults to sidecar)
     show_stop_button?: boolean;
     num_history_runs?: number | null;
     num_history_messages?: number | null;
     compress_tool_results?: boolean;
     max_tool_calls_from_history?: number | null;
+    max_tool_calls_per_turn?: number; // Default per-turn tool-call budget (1000)
     allow_self_config?: boolean;
   };
   router: {
     model: string;
+    access?: ResponderAccessConfig;
   };
   rooms?: Record<string, RoomConfig>; // Managed Matrix room metadata
+  room_defaults?: RoomDefaultsConfig; // Defaults for managed Matrix rooms
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, TeamConfig>; // Teams configuration
-  tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
-  matrix_room_access?: MatrixRoomAccessConfig; // Managed room access policy
 }
 
 export interface AgentPolicy {

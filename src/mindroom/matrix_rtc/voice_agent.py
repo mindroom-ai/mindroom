@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
         ConversationItemAddedEvent,
         ErrorEvent,
         FunctionToolsExecutedEvent,
+        SessionUsageUpdatedEvent,
         SpeechCreatedEvent,
     )
     from livekit.agents.voice.io import AudioInput
@@ -80,17 +84,30 @@ class _AudioFrameStream:
 class _AuthorizedParticipantAudioInput:
     """Mix microphone audio only from identities in the Matrix call roster."""
 
-    def __init__(self, room: rtc.Room, rtc_module: ModuleType, participant_identities: frozenset[str]) -> None:
+    def __init__(
+        self,
+        room: rtc.Room,
+        rtc_module: ModuleType,
+        participant_identities: frozenset[str],
+        *,
+        continuous_audio: bool = False,
+    ) -> None:
         self._room = room
         self._rtc = rtc_module
         self._participant_identities = participant_identities
+        self._continuous_audio = continuous_audio
+        self._pending_frame: asyncio.Task[rtc.AudioFrame] | None = None
+        self._next_frame_at = 0.0
+        self._closed_event = asyncio.Event()
         self._mixer = rtc_module.AudioMixer(
             _AUDIO_SAMPLE_RATE,
             _AUDIO_CHANNELS,
             blocksize=_AUDIO_SAMPLE_RATE * _AUDIO_FRAME_SIZE_MS // 1000,
+            capacity=1 if continuous_audio else 100,
         )
         self._streams: dict[str, tuple[str, _AudioFrameStream]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
+        self._close_task: asyncio.Task[None] | None = None
         self._closed = False
         room.on("participant_connected", self._on_participant_connected)
         room.on("participant_disconnected", self._on_participant_disconnected)
@@ -110,7 +127,38 @@ class _AuthorizedParticipantAudioInput:
         return "authorized MatrixRTC participants"
 
     async def __anext__(self) -> rtc.AudioFrame:
-        return await self._mixer.__anext__()
+        if not self._continuous_audio:
+            return await self._mixer.__anext__()
+        if self._closed:
+            raise StopAsyncIteration
+        if self._pending_frame is None:
+            self._pending_frame = asyncio.create_task(self._mixer.__anext__())
+
+        # Keep one mixer read across silence deadlines and consumer cancellation.
+        # Cancelling and restarting reads can lose a frame arriving at the boundary.
+        loop = asyncio.get_running_loop()
+        try:
+            async with asyncio.timeout(max(0.0, self._next_frame_at - loop.time())):
+                await self._closed_event.wait()
+        except TimeoutError:
+            pass
+        if self._closed:
+            raise StopAsyncIteration
+        # Carry ordinary late wakeups forward without accumulating audio latency.
+        # After a full missed frame, rebase rather than emitting a catch-up burst.
+        now = loop.time()
+        frame_duration = _AUDIO_FRAME_SIZE_MS / 1000
+        if self._next_frame_at < now - frame_duration:
+            self._next_frame_at = now
+        self._next_frame_at += frame_duration
+        if self._pending_frame.done():
+            pending_frame, self._pending_frame = self._pending_frame, None
+            return pending_frame.result()
+        return self._rtc.AudioFrame.create(
+            _AUDIO_SAMPLE_RATE,
+            _AUDIO_CHANNELS,
+            _AUDIO_SAMPLE_RATE * _AUDIO_FRAME_SIZE_MS // 1000,
+        )
 
     @property
     def source(self) -> AudioInput | None:
@@ -161,6 +209,8 @@ class _AuthorizedParticipantAudioInput:
                 sample_rate=_AUDIO_SAMPLE_RATE,
                 num_channels=_AUDIO_CHANNELS,
                 frame_size_ms=_AUDIO_FRAME_SIZE_MS,
+                # Keep at most 500 ms of recent microphone audio if Live stalls.
+                capacity=10 if self._continuous_audio else 0,
             ),
             participant_identity,
         )
@@ -226,9 +276,14 @@ class _AuthorizedParticipantAudioInput:
 
     async def aclose(self) -> None:
         """Unregister room listeners and close every participant stream."""
-        if self._closed:
-            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await wait_for_future_until_complete(self._close_task)
+
+    async def _close(self) -> None:
+        """Own teardown until every audio resource has settled, even on cancellation."""
         self._closed = True
+        self._closed_event.set()
         self._room.off("participant_connected", self._on_participant_connected)
         self._room.off("participant_disconnected", self._on_participant_disconnected)
         self._room.off("track_published", self._on_track_published)
@@ -237,6 +292,10 @@ class _AuthorizedParticipantAudioInput:
         self._room.off("track_unsubscribed", self._on_track_unsubscribed)
         for publication_sid in list(self._streams):
             self._remove_stream(publication_sid)
+        if self._pending_frame is not None:
+            self._pending_frame.cancel()
+            await asyncio.gather(self._pending_frame, return_exceptions=True)
+            self._pending_frame = None
         await self._mixer.aclose()
         if self._close_tasks:
             await asyncio.gather(*self._close_tasks, return_exceptions=True)
@@ -275,6 +334,8 @@ class VoiceAgentOptions:
     on_session_terminated: Callable[[bool], None] | None = None
     #: Called with a safe, actionable user-facing description of a runtime failure.
     on_session_error: Callable[[str], None] | None = None
+    #: Saves the speech model's cumulative token usage for the call after each update.
+    record_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -304,7 +365,60 @@ class CascadedVoiceAgentOptions:
     on_session_error: Callable[[str], None] | None = None
 
 
-type CallVoiceAgentOptions = VoiceAgentOptions | CascadedVoiceAgentOptions
+@dataclass(frozen=True)
+class LiveVoiceUsage:
+    """Cumulative provider duration for one GPT-Live session."""
+
+    provider_session_id: str
+    model: str
+    created_at: float
+    duration_seconds: float
+    finalized: bool
+
+
+@dataclass(frozen=True)
+class _RealtimeResponseUsage:
+    """Token usage of one realtime speech-model response."""
+
+    created_at: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    reasoning_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class RealtimeCallUsage:
+    """Every response's token usage so far in one realtime call."""
+
+    usage_id: str
+    model: str
+    created_at: float
+    responses: tuple[_RealtimeResponseUsage, ...]
+
+
+@dataclass(frozen=True)
+class LiveVoiceAgentOptions:
+    """GPT-Live speech with delegation to the normal MindRoom agent."""
+
+    get_instructions: Callable[[], Awaitable[str]]
+    model: str
+    api_key: str
+    voice: str
+    respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]]
+    record_usage: Callable[[LiveVoiceUsage], Awaitable[None]] | None = None
+    close_responder: Callable[[], Awaitable[None]] | None = None
+    greeting_instructions: str | None = None
+    on_conversation_turn: Callable[[str, str], None] | None = None
+    on_tools_executed: Callable[[list[str]], None] | None = None
+    on_session_terminated: Callable[[bool], None] | None = None
+    on_session_error: Callable[[str], None] | None = None
+
+
+type CallVoiceAgentOptions = VoiceAgentOptions | CascadedVoiceAgentOptions | LiveVoiceAgentOptions
 
 
 class RealtimeVoiceBridge:
@@ -318,6 +432,10 @@ class RealtimeVoiceBridge:
         self._session: Any = None
         self._owned_speech_resource_closers: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._session_event_tasks: set[asyncio.Future[None]] = set()
+        self._usage_lock = asyncio.Lock()
+        self._realtime_usage: RealtimeCallUsage | None = None
+        self._saved_realtime_usage: RealtimeCallUsage | None = None
+        self._record_realtime_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
         self._reported_error_notices: set[str] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
@@ -420,7 +538,12 @@ class RealtimeVoiceBridge:
             msg = "connect() must succeed before start_agent()"
             raise RuntimeError(msg)
         self._session = session
-        audio_input = _AuthorizedParticipantAudioInput(self._room, rtc_module, self._participant_identities)
+        audio_input = _AuthorizedParticipantAudioInput(
+            self._room,
+            rtc_module,
+            self._participant_identities,
+            continuous_audio=isinstance(options, LiveVoiceAgentOptions),
+        )
         self._audio_input = audio_input
         session.input.audio = cast("AudioInput", audio_input)
         self._register_session_listeners(session, options)
@@ -475,6 +598,69 @@ class RealtimeVoiceBridge:
 
         self._register_termination_listener(session, options)
         self._register_error_listener(session, options)
+        if isinstance(options, VoiceAgentOptions) and options.record_usage is not None:
+            self._register_usage_listener(session, options.model, options.record_usage)
+
+    def _register_usage_listener(
+        self,
+        session: AgentSession,
+        model: str,
+        record_usage: Callable[[RealtimeCallUsage], Awaitable[None]],
+    ) -> None:
+        """Keep the realtime speech model's cumulative token usage saved for the call."""
+        from livekit.agents.metrics.usage import LLMModelUsage  # noqa: PLC0415
+
+        usage_id = uuid4().hex
+        created_at = time.time()
+        self._record_realtime_usage = record_usage
+
+        totals = (0, 0, 0, 0, 0, 0, 0)
+        responses: list[_RealtimeResponseUsage] = []
+
+        def _on_usage(event: SessionUsageUpdatedEvent) -> None:
+            nonlocal totals
+            # Accept updates while the session drains at hang-up; teardown awaits their saves.
+            llm_usage = [entry for entry in event.usage.model_usage if isinstance(entry, LLMModelUsage)]
+            if not llm_usage:
+                return
+            # LiveKit reports running totals after each response, so the increase is that response's usage.
+            current = (
+                sum(entry.input_tokens for entry in llm_usage),
+                sum(entry.output_tokens for entry in llm_usage),
+                sum(entry.input_cached_tokens for entry in llm_usage),
+                sum(entry.input_cache_creation_tokens for entry in llm_usage),
+                sum(entry.input_audio_tokens for entry in llm_usage),
+                sum(entry.output_audio_tokens for entry in llm_usage),
+                sum(entry.output_reasoning_tokens for entry in llm_usage),
+            )
+            increase = [now - then for now, then in zip(current, totals, strict=True)]
+            totals = current
+            if not any(increase):
+                return
+            responses.append(_RealtimeResponseUsage(time.time(), *increase))
+            self._realtime_usage = RealtimeCallUsage(
+                usage_id=usage_id,
+                model=model,
+                created_at=created_at,
+                responses=tuple(responses),
+            )
+            self._schedule_session_event(self._save_realtime_usage())
+
+        session.on("session_usage_updated", _on_usage)
+
+    async def _save_realtime_usage(self) -> None:
+        # Saves run one at a time and write the newest totals, so a slow save cannot overwrite newer ones.
+        async with self._usage_lock:
+            usage = self._realtime_usage
+            record_usage = self._record_realtime_usage
+            if usage is None or record_usage is None or usage is self._saved_realtime_usage:
+                return
+            try:
+                await record_usage(usage)
+            except Exception as error:
+                logger.warning("call_realtime_usage_save_failed", error_type=type(error).__name__)
+            else:
+                self._saved_realtime_usage = usage
 
     def _register_error_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         """Turn provider/runtime failures into safe, actionable call notices."""
@@ -599,6 +785,11 @@ class RealtimeVoiceBridge:
             try:
                 if self._session_event_tasks:
                     await asyncio.gather(*self._session_event_tasks, return_exceptions=True)
+                if self._record_realtime_usage is not None:
+                    # Retry the call's latest total once if its last save failed.
+                    await self._save_realtime_usage()
+                    if self._realtime_usage is not self._saved_realtime_usage:
+                        logger.error("call_realtime_usage_unpersisted")
             finally:
                 try:
                     await _close_speech_resources(speech_resource_closers)

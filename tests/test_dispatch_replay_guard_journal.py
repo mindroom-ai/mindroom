@@ -27,9 +27,11 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import structlog
 
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_replay_guard import has_newer_unresponded_journal_thread_event
+from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread, has_newer_unresponded_journal_thread_event
 from mindroom.event_journal import EventKind, JournalEvent
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -141,6 +143,59 @@ async def _guard(
         logger=structlog.get_logger("test"),
         # ``Any`` only to satisfy the structlog stub's bound-logger type.
     )  # type: ignore[no-any-return]
+
+
+@pytest.mark.parametrize(
+    ("sender", "body", "handled", "echo", "voice", "expected"),
+    [
+        (ALICE, "new question", False, False, False, True),
+        (BOB, "new question", False, False, False, False),
+        (ALICE, "new question", True, False, False, False),
+        (ALICE, "new question", False, True, False, False),
+        (ALICE, "!help", False, False, False, False),
+        (ALICE, "!help", False, False, True, True),
+        (ALICE, "", False, False, False, True),
+    ],
+)
+async def test_history_and_journal_share_requester_turn_eligibility(
+    sender: str,
+    body: str,
+    handled: bool,
+    echo: bool,
+    voice: bool,
+    expected: bool,
+) -> None:
+    """Both evidence sources apply the same requester, echo, ledger, and command policy."""
+    pending = _pending(sender=sender, body=body)
+    if voice:
+        pending.source["content"][SOURCE_KIND_KEY] = "voice"
+    visible = ResolvedVisibleMessage(
+        sender=sender,
+        body=body,
+        timestamp=pending.origin_server_ts,
+        event_id=NEWER,
+        content=pending.source["content"],
+        thread_id=THREAD,
+        latest_event_id=NEWER,
+    )
+    from_history = has_newer_unresponded_in_thread(
+        _older_turn(),
+        ALICE,
+        [visible],
+        may_be_superseded_by_newer_requester_turn=True,
+        requester_user_id_for_event=lambda sender, _source: sender,
+        is_visible_router_voice_echo=lambda _sender, _content: echo,
+        sender_is_trusted_for_ingress_metadata=lambda _sender: True,
+        is_handled=lambda _event_id: handled,
+        logger=structlog.get_logger("test"),
+    )
+    from_journal = await _guard(
+        _PendingTurns(events=(pending,)),
+        handled_event_ids={NEWER} if handled else (),
+        voice_echo_event_senders={sender} if echo else (),
+    )
+    assert from_history is expected
+    assert from_journal is expected
 
 
 class TestTheTwoRecordsAreBothConsulted:

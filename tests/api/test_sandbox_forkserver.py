@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,7 +27,7 @@ from mindroom.api.sandbox_forkserver import (
 from mindroom.constants import resolve_primary_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -59,6 +62,49 @@ sys.exit(serve_template(sys.argv[1], _run_payload))
 '''
 
 
+def test_runtime_template_preloads_schema_types_without_starting_threads() -> None:
+    """Fork children must inherit expensive schema imports, not live background threads."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import threading
+from mindroom.api import sandbox_runner
+from agno.utils.schema import identity_injected_types
+
+def ready(socket_path, handler):
+    before = set(sys.modules)
+    identity_injected_types()
+    print(json.dumps({
+        "new_modules": sorted(set(sys.modules) - before),
+        "preloaded_modules": sorted(
+            name for name in ("mindroom.tool_system.plugins", "mindroom.mcp.registry") if name in before
+        ),
+        "threads": threading.active_count(),
+    }))
+    return 0
+
+sandbox_runner.sandbox_forkserver.serve_template = ready
+sys.argv = ["runner", "--sandbox-forkserver-template", "unused-test-socket"]
+sandbox_runner._run_forkserver_template()
+""",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    result = json.loads(completed.stdout)
+    assert result == {
+        "new_modules": [],
+        "preloaded_modules": ["mindroom.mcp.registry", "mindroom.tool_system.plugins"],
+        "threads": 1,
+    }
+
+
 @pytest.fixture
 def stub_manager(tmp_path: Path) -> Iterator[tuple[_SandboxForkserver, list[str]]]:
     """Manager whose template runs a fast stub instead of the full runtime import."""
@@ -83,6 +129,7 @@ def _stub_execute(
     request_cwd: str | None = None,
     envelope: str = "payload",
     timeout_seconds: float = 30.0,
+    bind_stop: Callable[[Callable[[], None]], None] = lambda _stop: None,
 ) -> subprocess.CompletedProcess[str]:
     return manager.execute(
         python_executable=None,
@@ -91,6 +138,7 @@ def _stub_execute(
         request_cwd=request_cwd,
         envelope=envelope,
         timeout_seconds=timeout_seconds,
+        bind_stop=bind_stop,
     )
 
 
@@ -122,6 +170,97 @@ def test_execute_round_trips_and_reuses_one_template(
     assert second.stdout.split("|")[2] == "marker-2"
     assert _template_pid(first) == _template_pid(second)
     assert len(spawned) == 1
+
+
+def test_stop_after_its_request_ended_never_signals_the_reaped_child(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The template reaps finished children, so a late stop must not signal a process that reuses the PID."""
+    manager, _spawned = stub_manager
+    stops: list[Callable[[], None]] = []
+
+    completed = _stub_execute(manager, bind_stop=stops.append)
+    signals: list[tuple[int, int]] = []
+    with monkeypatch.context() as patched:
+        patched.setattr(sandbox_forkserver_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+        stops[0]()
+
+    assert completed.returncode == 0
+    assert signals == []
+
+
+def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stopping hangs up on the running child, which exits; no PID is signalled, so none can be reused."""
+    manager, _spawned = stub_manager
+    pid_file = tmp_path / "child.pid"
+    stops: list[Callable[[], None]] = []
+    signals: list[tuple[int, int]] = []
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(_stub_execute, manager, envelope=f"sleep:{pid_file}", bind_stop=stops.append)
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8"):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        with monkeypatch.context() as patched:
+            patched.setattr(sandbox_forkserver_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+            stops[0]()
+            with pytest.raises(ForkserverError):
+                running.result(timeout=10)
+
+    assert signals == []
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+
+def test_request_stopped_before_dispatch_never_runs_and_keeps_the_template(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    tmp_path: Path,
+) -> None:
+    """A stop accepted while the template warmed up keeps the request from starting, without retiring the template."""
+    manager, spawned = stub_manager
+    pid_file = tmp_path / "child.pid"
+
+    # An already cancelled request stops as soon as its stop is bound.
+    with pytest.raises(ForkserverError, match="stopped before it was sent"):
+        _stub_execute(manager, envelope=f"sleep:{pid_file}", bind_stop=lambda stop: stop())
+
+    assert _stub_execute(manager).returncode == 0
+    assert not pid_file.exists()
+    assert len(spawned) == 1
+
+
+def test_child_never_runs_a_request_whose_runner_hung_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child whose runner hung up while handing the request over never starts it."""
+    # The watcher would end this test process; the check before the payload must refuse on its own.
+    monkeypatch.setattr(sandbox_forkserver_module, "_exit_when_runner_hangs_up", lambda _conn: None)
+    runner_end, child_end = socket.socketpair()
+    runner_end.close()
+    ran: list[str] = []
+    try:
+        returncode = sandbox_forkserver_module._run_child_request(
+            child_end,
+            sandbox_forkserver_module._ChildRequest(env=None, cwd=None, envelope="payload", timeout_seconds=1.0),
+            lambda envelope: ran.append(envelope) or (0, "", ""),
+        )
+    finally:
+        signal.alarm(0)
+        child_end.close()
+
+    assert returncode == 1
+    assert ran == []
 
 
 def test_template_recycled_when_env_fingerprint_changes(
@@ -302,7 +441,7 @@ def test_pinned_fingerprint_leaves_healthy_template_of_other_fingerprint_alone(t
 def _forkserver_runtime(tmp_path: Path) -> tuple[RuntimePaths, Config]:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.6\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -379,14 +518,20 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         assert response.ok is True
         assert response.result == "explicit-value"
 
-        # Spawn-per-call parity: `python -m` puts the request cwd on sys.path,
-        # so python-tool code can import modules saved into its workspace.
+        # Python-tool code can import modules saved into its workspace, which
+        # only follows installed modules on sys.path.
         (workdir / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
         response = sandbox_runner_module._execute_request_subprocess_sync(
             sandbox_runner_module.SandboxRunnerExecuteRequest(
                 tool_name="python",
                 function_name="run_python_code",
-                args=["import helper\nresult = helper.VALUE", "result"],
+                args=[
+                    "import os, sys\n"
+                    "import helper\n"
+                    "cwd = os.getcwd()\n"
+                    "result = f'{helper.VALUE}|{sys.path[-1] == cwd}|{cwd in sys.path[:-1]}'",
+                    "result",
+                ],
                 kwargs={},
                 execution_env={"MINDROOM_AGENT_WORKSPACE": str(workdir)},
             ),
@@ -394,11 +539,46 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
             config,
         )
         assert response.ok is True
-        assert response.result == "helper-value"
+        assert response.result == "helper-value|True|False"
     finally:
         manager.shutdown()
 
     assert len(spawned) == 1
+
+
+def test_forkserver_template_ignores_package_planted_in_its_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A `mindroom` package in the template's cwd must not replace the installed runtime."""
+    runtime_paths, config = _forkserver_runtime(tmp_path)
+    planted_cwd = tmp_path / "planted-cwd"
+    (planted_cwd / "mindroom").mkdir(parents=True)
+    marker = tmp_path / "planted-package-ran"
+    (planted_cwd / "mindroom" / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(planted_cwd)
+    manager = _SandboxForkserver()
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
+    try:
+        response = sandbox_runner_module._execute_request_subprocess_sync(
+            sandbox_runner_module.SandboxRunnerExecuteRequest(
+                tool_name="calculator",
+                function_name="add",
+                args=[1, 2],
+                kwargs={},
+            ),
+            runtime_paths,
+            config,
+        )
+    finally:
+        manager.shutdown()
+
+    assert response.ok is True, response.error
+    assert '"result": 3' in str(response.result)
+    assert not marker.exists()
 
 
 def test_forkserver_timeout_maps_to_worker_failure(
@@ -454,7 +634,7 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", _fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(

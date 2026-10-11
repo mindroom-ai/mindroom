@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
-from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.file_memory_knowledge import resolve_agent_file_memory_knowledge
+from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
 from mindroom.knowledge.refresh_policy import (
     RefreshCooldownKey,
     cooldown_elapsed,
@@ -19,7 +22,7 @@ from mindroom.knowledge.refresh_policy import (
     refresh_trigger,
 )
 from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
-from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
+from mindroom.knowledge.source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
@@ -34,10 +37,26 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+__all__ = [
+    "KnowledgeAccessSupport",
+    "KnowledgeAvailabilityDetail",
+    "KnowledgeBaseAccessResolution",
+    "format_knowledge_availability_notice",
+    "knowledge_runtime_identity",
+    "resolve_agent_knowledge_access",
+    "resolve_agent_knowledge_access_async",
+    "resolve_knowledge_base_access",
+    "resolve_knowledge_base_access_async",
+]
+
 logger = get_logger(__name__)
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
 _MAX_MERGED_SOURCE_COVERAGE_RESULTS = 20
 _refresh_scheduled_at: dict[RefreshCooldownKey, float] = {}
+# Metadata may wait on a writer. Keep those waits out of the default executor,
+# which also serves unrelated filesystem and credential work. Threads start
+# lazily and remain bounded for the process lifetime, including after cancellation.
+_KNOWLEDGE_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mindroom_knowledge_lookup")
 
 
 @dataclass(frozen=True)
@@ -214,10 +233,61 @@ def _resolve_base_knowledge(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
+    return _finish_base_knowledge_resolution(
+        base_id,
+        lookup=lookup,
+        config=config,
+        runtime_paths=runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        execution_identity=execution_identity,
+    )
+
+
+async def _resolve_base_knowledge_async(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> tuple[Knowledge | None, KnowledgeAvailability, str | None]:
+    """Resolve one knowledge base without blocking the event loop on storage I/O."""
+    lookup = await asyncio.get_running_loop().run_in_executor(
+        _KNOWLEDGE_LOOKUP_EXECUTOR,
+        contextvars.copy_context().run,
+        partial(
+            _lookup_knowledge_for_base,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        ),
+    )
+    return _finish_base_knowledge_resolution(
+        base_id,
+        lookup=lookup,
+        config=config,
+        runtime_paths=runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        execution_identity=execution_identity,
+    )
+
+
+def _finish_base_knowledge_resolution(
+    base_id: str,
+    *,
+    lookup: PublishedIndexResolution | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> tuple[Knowledge | None, KnowledgeAvailability, str | None]:
+    """Finish one lookup on the caller's thread, including refresh scheduling."""
     # One instant per resolve: the poll-interval boundary must not be evaluated
     # against two different clock readings within a single turn.
     wall_now = datetime.now(tz=UTC)
-    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    # A cold index has a resolution; None means the binding lookup raised.
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.REFRESH_FAILED
     if lookup is not None and availability is KnowledgeAvailability.READY:
         availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
@@ -256,20 +326,62 @@ def resolve_agent_knowledge_access(
     base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
     if file_memory is not None:
         base_ids = (*base_ids, file_memory.base_id)
-    if not base_ids:
-        return _KnowledgeResolution(knowledge=None)
-
-    missing_base_ids: list[str] = []
-    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-    knowledges: list[Knowledge] = []
-    for base_id in base_ids:
-        knowledge, availability, last_error = _resolve_base_knowledge(
+    resolved_bases = [
+        _resolve_base_knowledge(
             base_id,
             config=effective_config,
             runtime_paths=runtime_paths,
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         )
+        for base_id in base_ids
+    ]
+    return _merge_agent_knowledge_resolutions(agent_name, base_ids, resolved_bases)
+
+
+async def resolve_agent_knowledge_access_async(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> _KnowledgeResolution:
+    """Resolve agent knowledge without blocking the event loop on published-index I/O."""
+    file_memory = await asyncio.to_thread(
+        resolve_agent_file_memory_knowledge,
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity,
+    )
+    effective_config = file_memory.config if file_memory is not None else config
+    base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
+    if file_memory is not None:
+        base_ids = (*base_ids, file_memory.base_id)
+    resolved_bases = [
+        await _resolve_base_knowledge_async(
+            base_id,
+            config=effective_config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        )
+        for base_id in base_ids
+    ]
+    return _merge_agent_knowledge_resolutions(agent_name, base_ids, resolved_bases)
+
+
+def _merge_agent_knowledge_resolutions(
+    agent_name: str,
+    base_ids: tuple[str, ...],
+    resolved_bases: list[tuple[Knowledge | None, KnowledgeAvailability, str | None]],
+) -> _KnowledgeResolution:
+    """Merge per-base resolution results into one agent knowledge handle."""
+    initializing_base_ids: list[str] = []
+    missing_base_ids: list[str] = []
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    knowledges: list[Knowledge] = []
+    for base_id, (knowledge, availability, last_error) in zip(base_ids, resolved_bases, strict=True):
         if availability is not KnowledgeAvailability.READY:
             unavailable_bases[base_id] = KnowledgeAvailabilityDetail(
                 availability=availability,
@@ -277,15 +389,25 @@ def resolve_agent_knowledge_access(
                 last_error=last_error,
             )
         if knowledge is None:
-            missing_base_ids.append(base_id)
+            if availability is KnowledgeAvailability.INITIALIZING:
+                initializing_base_ids.append(base_id)
+            else:
+                missing_base_ids.append(base_id)
             continue
         knowledges.append(knowledge)
 
+    if initializing_base_ids:
+        logger.info(
+            "Knowledge bases awaiting first publication for agent",
+            agent_name=agent_name,
+            knowledge_bases=initializing_base_ids,
+        )
     if missing_base_ids:
         logger.warning(
             "Knowledge bases not available for agent",
             agent_name=agent_name,
             knowledge_bases=missing_base_ids,
+            availability={base_id: unavailable_bases[base_id].availability.value for base_id in missing_base_ids},
         )
     return _KnowledgeResolution(
         knowledge=_merge_knowledge(agent_name, knowledges),
@@ -301,19 +423,31 @@ def resolve_knowledge_base_access(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeBaseAccessResolution:
     """Resolve one knowledge base without going through an agent assignment."""
-    lookup = _lookup_knowledge_for_base(
+    knowledge, availability, last_error = _resolve_base_knowledge(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
+        refresh_scheduler=None,
         execution_identity=execution_identity,
     )
-    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
-    if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = ready_index_effective_availability(lookup, config, wall_now=datetime.now(tz=UTC))
-    knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
-    if knowledge is not None:
-        _apply_knowledge_metadata(base_id, knowledge, config)
-    last_error = lookup.state.last_error if lookup is not None and lookup.state is not None else None
+    return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability, last_error=last_error)
+
+
+async def resolve_knowledge_base_access_async(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeBaseAccessResolution:
+    """Resolve one knowledge base without blocking the event loop on index I/O."""
+    knowledge, availability, last_error = await _resolve_base_knowledge_async(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        refresh_scheduler=None,
+        execution_identity=execution_identity,
+    )
     return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability, last_error=last_error)
 
 
@@ -411,6 +545,24 @@ class KnowledgeAccessSupport:
             execution_identity=execution_identity,
         )
 
+    async def resolve_for_agent_async(
+        self,
+        agent_name: str,
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> _KnowledgeResolution:
+        """Return current knowledge without blocking the event loop on index I/O."""
+        orchestrator = self.runtime.orchestrator
+        refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
+
+        return await resolve_agent_knowledge_access_async(
+            agent_name,
+            self.runtime.config,
+            self.runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        )
+
 
 @dataclass
 class _MultiKnowledgeVectorDb:
@@ -477,7 +629,7 @@ class _MultiKnowledgeVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Async variant of ``search`` that searches DBs concurrently."""
+        """Search sources sequentially so one query cannot exhaust native reader slots."""
 
         async def _search_one(
             vdb: _KnowledgeVectorDb,
@@ -500,7 +652,7 @@ class _MultiKnowledgeVectorDb:
                 return None, exc
             return results, None
 
-        outcomes = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
+        outcomes = [await _search_one(vdb) for vdb in self._resolved_vector_dbs()]
         results_by_db = [results for results, _error in outcomes if results is not None]
         if not results_by_db:
             for _results, error in outcomes:

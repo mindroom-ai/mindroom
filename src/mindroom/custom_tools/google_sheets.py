@@ -6,18 +6,23 @@ credentials stored in MindRoom's unified credentials location.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import json
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.google.sheets import GoogleSheetsTools as AgnoGoogleSheetsTools
+from agno.tools.google.sheets import authenticate
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_http_error_result
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -41,6 +46,7 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        runtime_config: Config | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize Google Sheets tools with MindRoom credentials.
@@ -58,6 +64,7 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
+            config=runtime_config,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,
@@ -65,13 +72,51 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
 
         # Pass credentials to parent class
         super().__init__(creds=creds, **kwargs)
+        if "update_sheet" in self.functions:
+            self.register(self.batch_update_sheet)
 
         # Store original auth method for fallback
-        self._set_original_auth(AgnoGoogleSheetsTools._auth)
+        self._set_original_auth(AgnoGoogleSheetsTools._resolve_creds)
         self._wrap_oauth_function_entrypoints()
 
-    def _should_fallback_to_original_auth(self) -> bool:
-        return google_service_account_configured(self.service_account_path, self._runtime_paths)
+    def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
+        return build("sheets", "v4", http=self._google_authorized_http(creds))
+
+    # AGNO_COMPAT: Agno renders Any in tool parameter types as an empty closed object.
+    # Reason: Agno 3.0.9 turns the values of `list[dict[str, Any]]` into
+    # `{"type": "object", "properties": {}, "additionalProperties": false}`, so local
+    # argument validation rejects every real request; bare `dict` yields open objects.
+    # Upstream issue: https://github.com/agno-agi/agno/issues/10422
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10423 (open).
+    # Remove when: the pinned Agno renders `dict[str, Any]` values unconstrained; then annotate
+    # `requests` as `list[dict[str, Any]]`.
+    # Coverage: tests/test_google_sheets_oauth_tool.py::test_google_sheets_batch_update_schema_accepts_sheets_api_requests
+    @authenticate
+    def batch_update_sheet(self, spreadsheet_id: str, requests: list[dict]) -> str:
+        """Apply Google Sheets API batchUpdate requests to one spreadsheet, in order.
+
+        Use this for changes that update_sheet cannot make, such as cell formatting, column widths,
+        frozen rows, filters, conditional formatting, merged cells, and adding or renaming sheets.
+        Each request is one Sheets API Request object, for example
+        {"repeatCell": {"range": {"sheetId": 0, "endRowIndex": 1},
+        "cell": {"userEnteredFormat": {"textFormat": {"bold": true}}}, "fields": "userEnteredFormat.textFormat.bold"}}.
+
+        Args:
+            spreadsheet_id: The ID of the Google Sheet.
+            requests: Sheets API batchUpdate Request objects.
+
+        Returns:
+            JSON with the spreadsheet ID and one reply per request.
+
+        """
+        try:
+            service = cast("Any", self.service)
+            response = (
+                service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
+            )
+        except HttpError as exc:
+            return google_http_error_result("Google Sheets", "batch_update", exc)
+        return json.dumps(response)
 
     def _normalize_dashboard_config_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Map dashboard field names onto Agno's constructor argument names."""

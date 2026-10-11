@@ -10,11 +10,12 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
+from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
     make_test_bot_for_entity,
 )
@@ -278,15 +279,16 @@ class TestBotIntegration:
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
         config = bind_runtime_paths(
-            Config(
-                agents={
-                    "test_agent": AgentConfig(
-                        display_name="Test Agent",
-                        model="gpt-4",
-                        rooms=["#test:localhost"],
-                    ),
-                },
-                authorization=AuthorizationConfig(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "test_agent": AgentConfig(
+                            display_name="Test Agent",
+                            model="gpt-6-astra",
+                            rooms=["#test:localhost"],
+                        ),
+                    },
+                ),
             ),
             test_runtime_paths(tmp_path),
         )
@@ -333,6 +335,10 @@ class TestBotIntegration:
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$msg123",),
+                        logical_source_event_ids=("$msg123",),
+                    ),
                     prompt="Hello bot",
                     thread_history=[],
                     user_id="@user:localhost",
@@ -371,15 +377,16 @@ class TestBotIntegration:
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
         config = bind_runtime_paths(
-            Config(
-                agents={
-                    "test_agent": AgentConfig(
-                        display_name="Test Agent",
-                        model="gpt-4",
-                        rooms=["#test:localhost"],
-                    ),
-                },
-                authorization=AuthorizationConfig(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "test_agent": AgentConfig(
+                            display_name="Test Agent",
+                            model="gpt-6-astra",
+                            rooms=["#test:localhost"],
+                        ),
+                    },
+                ),
             ),
             test_runtime_paths(tmp_path),
         )
@@ -403,6 +410,10 @@ class TestBotIntegration:
         # Simulate a message from a user
         await bot._response_runner.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$msg123",),
+                    logical_source_event_ids=("$msg123",),
+                ),
                 prompt="Hello bot",
                 thread_history=[],
                 user_id="@user:localhost",

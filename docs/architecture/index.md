@@ -40,71 +40,41 @@ MindRoom's architecture consists of several key components working together.
 ## Components
 
 - [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
+- [Internal Turn CLI](agent-cli.md) - Minimal-mode discovery, response ownership, and approval recovery
 - [Agent Orchestration](orchestration.md) - How agents are managed
 - [Bot Runtime](bot-runtime.md) - The inbound turn pipeline and its module boundaries
+- [Reply Messages](reply-messages.md) - The durable records that own every AI reply, and the rules that change them
+- [Code Map](code-map.md) - The inbound turn pipeline at module level, key modules and their purpose, and where persistent state lives
+- [Migration and Compatibility Boundaries](migrations.md) - Current owners for historical formats, dependency migrations, and retained compatibility
 - [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it
 - [Matrix Event-Journal Contracts](../dev/matrix-event-journal-contracts.md) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
-## Key Internal Modules
+## Storage upgrade boundaries
 
-| Module | Purpose |
-|--------|---------|
-| `orchestrator.py` | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload |
-| `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
-| `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
-| `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
-| `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
-| `team_exact_members.py` | Runtime resolution for team member materialization |
-| `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
-| `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
-| `agent_policy.py` | Derives canonical execution policies from authored agent config |
-| `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
-| `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
-| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
-| `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
-| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
-| `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
-| `turn_controller.py` | TurnController — owns one inbound turn from ingress to recorded outcome |
-| `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
-| `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
-| `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
-| `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
-| `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
-| `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
-| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
-| `command_turn_executor.py` | Command execution and durable command/config mutation journals |
-| `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
-| `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
-| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
-| `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
-| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
-| `response_turn.py` | Shared blocking and streaming response-turn drivers, including retries and dynamic-tool continuation |
-| `response_attempt.py` | Executes one visible response attempt with stop tracking |
-| `response_terminal.py` | Classifies pending-visible failures and terminal stream outcomes |
-| `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
-| `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
-| `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
-| `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
-| `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
-| `post_response_effects.py` | Shared post-response effects after Matrix delivery |
-| `routing.py` | Intelligent agent or team selection when no entity is mentioned |
-| `streaming.py` | Streaming state machine and progressive response state |
-| `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
-| `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
-| `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
-| `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
-| `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
-| `topic_generator.py` | AI-generated room topics |
-| `background_tasks.py` | Non-blocking async task management with GC protection |
+Historical formats stay with their storage or lifecycle owners, while current callers consume canonical identities and paths.
+`private_storage/legacy_private_storage_aliases.py` owns historical requester spellings and verified aliases; only startup migration, `private_storage/alias_paths.py`, and `usage/stats_storage.py` can import it.
+Usage discovery uses verified aliases only to classify coverage, skipping duplicate historical paths while scanning their canonical directories.
+Worker mount planning and sandbox path validation use `private_storage/alias_paths.py`, while `private_storage/private_instance_identity_store.py` validates current identities.
+
+`oauth/legacy_credentials.py` owns publication-field normalization and lossless historical requester bindings.
+Only `oauth/credential_store.py` can import it; the store retains schema, scope validation, current credential state, transaction locks, retries, and commit ownership.
+OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
+
+Existing lifecycle adapters remain at their focused entry points: `private_storage/legacy_private_storage.py` at startup, `config/legacy_access.py` during config loading, and Nio journal and crypto adapters when their stores open.
+`session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](orchestration.md#session-storage-recovery).
+Tach visibility rules keep compatibility internals behind their owning boundaries.
 
 ## Data Flow
 
-1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
+1. **Message arrives** from the Matrix homeserver; `matrix/durable_ingestion.py` validates the owned batch, invokes the journal transaction owner to commit it, runs ordered hooks/callbacks, and acknowledges nio.
+   `matrix/journal_ingress.py` supplies typed classification from nio provenance and replay reconstruction.
+   `journal_dispatch.py` hands admitted events through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome.
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
-3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
+3. **Messages are ordered and coalesced**: `coalescing/ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing/gate.py` batches each sender's live conversation burst.
+   Ordinary text completes an utterance and dispatches immediately; adaptive text waits its configured quiet period.
+   Later adaptive text cannot extend an earlier immediate text's wait.
+   A live batch ending in media waits for more attachments or a trailing caption.
+   Follow-up backlogs queued behind an active response flush at idle in receipt order, one combined turn per consecutive same-requester run, so no sender's messages execute under another sender's identity; conversations never wait on each other.
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
 5. **Selected entity processes** the message via `response_runner.py` and the Agno runtime, executing tools as needed
 6. **Response is delivered** through `delivery_gateway.py`, which owns Matrix send/edit/finalization while `streaming.py` owns progressive response state
@@ -112,3 +82,19 @@ MindRoom's architecture consists of several key components working together.
 8. **Memory updates** asynchronously in background
 
 See [Bot Runtime](bot-runtime.md) for the module boundaries and the ongoing simplification roadmap.
+
+## Confined filesystem paths
+
+`mindroom.path_confinement.resolve_path_within_root` is the shared implementation for workspace and artifact path containment.
+Callers supply an authorized root and explicitly choose `internal` (allow links targeting that root), `reject` (reject descendant links), or `preserve_leaf` (reject linked parents while preserving the final entry for unlink or atomic replacement).
+Existing workspace and tool wrappers retain their input rules and error messages.
+Do not add another `resolve()` plus containment check when implementing a file consumer.
+
+Path resolution is a point-in-time check, not protection for a later file open.
+For local I/O requiring protection against symlink swaps, use `open_directory_within_root` or `open_regular_file_within_root` and keep operations relative to the returned descriptor.
+Publish bytes using `atomic_file.atomic_write_bytes_at`, or stream through `atomic_write_file_at`; both use the same atomic transaction and descriptor-relative cleanup.
+The action-based browser publishes captures and completed downloads through these helpers and snapshots upload sources through confined descriptors.
+Upload snapshots remain private until tab or profile teardown because Playwright reads selected files lazily.
+Drive downloads stream into a confined atomic file rooted at the authorized workspace.
+Caller-owned root authorization, directory identity checks, filesystem permissions, and requester isolation remain required.
+These helpers do not prevent hard-link aliasing or arbitrary directory relocation, and do not protect subsequent pathname opens by native MCP browser tools, Drive uploads, shell commands, or ordinary file-tool implementations.

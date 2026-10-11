@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
-from mindroom.shell_execution import _MAX_OUTPUT_BYTES
+from mindroom.shell.execution import _MAX_OUTPUT_BYTES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools.shell import (
     _process_registry,
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("", encoding="utf-8")
@@ -153,6 +153,31 @@ async def test_run_shell_command_accepts_shell_command_string(tmp_path: Path) ->
     result = await entrypoint("echo $HOME")
     assert result
     assert not result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if shopt -q login_shell; then echo login; else echo plain; fi",
+        ["if shopt -q login_shell; then echo login; else echo plain; fi"],
+    ],
+)
+async def test_implicit_shell_does_not_run_login_startup(tmp_path: Path, command: str | list[str]) -> None:
+    """Ordinary commands must not pay for or acquire side effects from login profiles."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    assert await entrypoint(command) == "plain"
+
+
+@pytest.mark.asyncio
+async def test_explicit_login_shell_remains_available(tmp_path: Path) -> None:
+    """Callers opting into login initialization still get it."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    assert await entrypoint(["bash", "-lc", "shopt -q login_shell && echo login"]) == "login"
 
 
 @pytest.mark.asyncio
@@ -279,6 +304,30 @@ async def test_run_shell_command_returns_error_on_nonzero_exit(tmp_path: Path) -
     result = await entrypoint(["bash", "-c", "echo oops >&2; exit 1"])
     assert result.startswith("Error:")
     assert "oops" in result
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_preserves_stdout_receipt_on_nonzero_exit(tmp_path: Path) -> None:
+    """A nonterminal CLI receipt on stdout must retain its continuation handle."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(["bash", "-c", 'printf \'{"status":"queued","call_id":"call-1"}\'; exit 3'])
+
+    assert result == 'Error: {"status":"queued","call_id":"call-1"}'
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_preserves_both_failure_streams(tmp_path: Path) -> None:
+    """Useful stdout must not displace the existing stderr failure detail."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(["bash", "-c", "printf receipt; printf warning >&2; exit 3"])
+
+    assert result == "Error: receipt\nStderr:\nwarning"
 
 
 @pytest.mark.asyncio
@@ -876,6 +925,7 @@ def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: P
     assert "$MINDROOM_AGENT_WORKSPACE" in description
     assert "worker-routed execution maps `~` to the workspace" in description
     assert "local execution maps it to the host home" in description
+    assert description.count("Working method:") == 1
 
 
 def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path: Path) -> None:
@@ -902,12 +952,13 @@ def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path
 
 
 def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tmp_path: Path) -> None:
-    """Without a workspace there is no cwd contract to describe."""
+    """Without a workspace there is no cwd contract to describe, but the working method still applies."""
     tool = _get_toolkit(tmp_path)
 
     description = tool.async_functions["run_shell_command"].description
     assert description is not None
     assert "[cwd:" not in description
+    assert description.count("Working method:") == 1
 
 
 @pytest.mark.asyncio
@@ -915,7 +966,7 @@ async def test_env_passthrough_preserved(tmp_path: Path) -> None:
     """Runtime env values from .env should be visible in shell commands."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("MY_TEST_VAR=async-shell-works\n", encoding="utf-8")
@@ -951,7 +1002,7 @@ async def test_login_bash_preserves_runtime_path_after_profile_reset(tmp_path: P
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -1080,13 +1131,13 @@ async def test_handle_isolation_blocks_cross_runtime_access(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# _MAX_BACKGROUNDED limit
+# MAX_BACKGROUNDED limit
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_max_backgrounded_limit(tmp_path: Path) -> None:
-    """Exceeding _MAX_BACKGROUNDED should return an error and kill the excess process."""
+    """Exceeding MAX_BACKGROUNDED should return an error and kill the excess process."""
     tool = _get_toolkit(tmp_path)
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
@@ -1094,7 +1145,7 @@ async def test_max_backgrounded_limit(tmp_path: Path) -> None:
     handles: list[str] = []
 
     # Patch to a small limit
-    with patch("mindroom.shell_execution._MAX_BACKGROUNDED", 2):
+    with patch("mindroom.shell.execution.MAX_BACKGROUNDED", 2):
         # Fill up to the limit
         for _ in range(2):
             result = await run_fn(["sleep", "300"], timeout=0)

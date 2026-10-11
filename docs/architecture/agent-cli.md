@@ -1,0 +1,67 @@
+# Internal turn CLI
+
+`mindroom-agent` is installed with MindRoom, including in worker images.
+Its stdlib client reads `MINDROOM_AGENT_CLI_URL` and `MINDROOM_AGENT_CLI_TOKEN` from the environment its response gives each Bash command.
+Each command also gets its window ID in `MINDROOM_AGENT_CLI_WINDOW`, which the client sends back in the `X-MindRoom-Agent-CLI-Window` header, so calls from overlapping commands belong to the command that made them; a nested CLI shell gets its parent command's window.
+Bash is the agent's own shell: it runs in the primary for agents without a worker, or in the agent's ordinary worker through the sandbox proxy.
+The token identifies one response turn; arguments cannot select another requester, agent, worker, or credential owner.
+Minimal mode is opt-in through `!mode <agent> minimal` after deployment and shell-permission preflight.
+Standard-mode agents whose shell can reach MindRoom get the same CLI inside their native `run_shell_command`: `agent_cli/cli_shell_agent.py` binds the response owner to a catalog of the tools that finish inside a command and opens its admission window around each native shell call.
+
+Discover tool names and schemas with `tools list`, `tools search`, and `tools describe`.
+Listing accepts `--cursor` and `--limit`; schemas are loaded only when described.
+Call input is one JSON object supplied as a final argument or with `--json`, `--json-file`, or `--json-stdin`.
+These options are exclusive.
+Omission means `{}`.
+
+A call waits up to `--timeout` seconds (default 30) for its result, then prints the live receipt.
+`TOOLKIT.FUNCTION` selects the same function as `TOOLKIT FUNCTION`.
+Exit 3 means it is still pending; shell scripts must preserve that receipt and explicitly wait.
+`--timeout 0` returns the receipt at once, so one command can submit several calls before waiting on them.
+Do not chain the wait with success-only `&&`:
+
+```bash
+# TOOLKIT and FUNCTION come from discovery; arguments.json follows describe.
+status=0
+receipt=$(mindroom-agent tools call "$TOOLKIT" "$FUNCTION" --json-file arguments.json) || status=$?
+case "$status" in
+  0|3) printf '%s\n' "$receipt" ;;
+  *) printf '%s\n' "$receipt"; exit "$status" ;;
+esac
+call_id=$(printf '%s\n' "$receipt" | jq -r .call_id)
+mindroom-agent calls wait "$call_id"
+```
+
+Within the same live response, `--call-id <UUID>` permits retrying the same qualified function and canonical arguments.
+The retry returns that existing call, including its observed result; changed arguments or function reject with 409.
+A lost HTTP reply does not cancel accepted work.
+Transport errors retain the submitted call ID; a fresh ID could invoke the operation again.
+
+Receipts contain call ID, toolkit, function, status, parent Bash call ID, and outcome.
+They are response-owned memory, not journal rows.
+No call timestamp, lease, database generation, or result-reference fields are exposed.
+When the response ends or its process dies, its grants expire/revoke and ordinary call polling becomes unavailable.
+Queued work and unsaved results are lost; effects of interrupted calls may be unknown.
+Live status can be queued, running, waiting, completed, failed, or cancelled.
+
+Approval recovery belongs to the existing native approval continuation owner: waiting/ready confirmations can be recovered, while a claimed attempt settles through the existing final-or-interruption behavior.
+The recovery adapter never directly executes a saved Bash command.
+Existing response failure and automatic model-resumption policy remain unchanged; fresh model calls are not a semantic deduplication guarantee.
+Approval suspension uses the actual provider-batch checkpoint.
+
+Exit codes: 0 completed/read success; 1 tool failure/denial/cancellation; 2 invalid input; 3 queued/running/waiting; 4 unavailable authority or unknown transport/dispatch outcome.
+`--help` needs no runtime configuration.
+
+The existing API exposes only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/{call_id}` for this capability; only a response grant authenticates them.
+Authentication precedes body parsing; invalid authority and another owner's receipt both return the same 401 response.
+The orchestrator owns the registry.
+The response owns its shell, call admission, checkpoint and cleanup across model continuations; HTTP never invokes an Agent.
+Each command of the response's Bash receives the grant in its environment, directly in the primary or with its proxied worker request.
+A primary shell also gets `agent_cli_bin/` in MindRoom's storage first on its `PATH`, a directory only MindRoom's user can change that holds only a `mindroom-agent` launcher.
+The response revokes its grant when it ends, and after a primary crash old grants are invalid immediately.
+
+A Bash window stays open while its admitted calls settle, so an admitted nested shell can still submit its child calls after the outer command returns.
+Admission closes atomically when that work is quiescent, before hooks or model control resume.
+Calls arriving during drainage may join that Bash; calls and describe requests naming no window, or a closed or unknown one, are rejected.
+Revocation and explicit control cancellation fence admission immediately.
+An admitted describe request settles when its task ends, including cancellation before the task starts.

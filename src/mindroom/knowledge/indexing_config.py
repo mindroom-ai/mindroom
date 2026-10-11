@@ -12,9 +12,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, cast
 
-from agno.knowledge.embedder.base import Embedder
-
-from mindroom.embeddings import effective_knowledge_embedder_signature
+from mindroom.embeddings.signatures import effective_knowledge_embedder_signature
+from mindroom.knowledge.legacy_metadata import normalize_legacy_indexing_settings
 from mindroom.knowledge.redaction import credential_free_url_identity
 
 if TYPE_CHECKING:
@@ -132,10 +131,7 @@ class IndexingSettings:
         mode = settings["mode"]
         if mode not in _INDEXING_MODES:
             return None
-
-        # ``indexing_settings_key`` only populates extra_extensions in semantic
-        # mode, emitting "" otherwise, so legacy metadata must normalize to that.
-        semantic_only_empty = _EMPTY_FILTER_KEY if mode == "semantic" else ""
+        settings = normalize_legacy_indexing_settings(settings, empty_filter_key=_EMPTY_FILTER_KEY)
 
         return cls(
             base_id=settings["base_id"],
@@ -154,16 +150,13 @@ class IndexingSettings:
             git_skip_hidden=settings["git_skip_hidden"],
             git_include_patterns=settings["git_include_patterns"],
             git_exclude_patterns=settings["git_exclude_patterns"],
-            include_patterns=_optional_filter_key(settings, "include_patterns"),
-            exclude_patterns=_optional_filter_key(settings, "exclude_patterns"),
+            include_patterns=settings["include_patterns"],
+            exclude_patterns=settings["exclude_patterns"],
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
-            extra_extensions=_optional_filter_key(settings, "extra_extensions", empty_value=semantic_only_empty),
-            # Not normalized on purpose: skip_hidden is a bool string rather than
-            # a filter key, and absent metadata must keep failing the corpus match
-            # so pre-skip_hidden indexes are rebuilt (see the field docstring).
-            skip_hidden=settings.get("skip_hidden", ""),
-            require_content_before_publish=settings.get("require_content_before_publish", ""),
+            extra_extensions=settings["extra_extensions"],
+            skip_hidden=settings["skip_hidden"],
+            require_content_before_publish=settings["require_content_before_publish"],
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -194,7 +187,7 @@ class IndexingSettings:
             "require_content_before_publish": self.require_content_before_publish,
         }
 
-    def query_compatibility_key(self) -> _QueryCompatibilityKey:
+    def _query_compatibility_key(self) -> _QueryCompatibilityKey:
         """Return fields that must match for safe vector queries."""
         return _QueryCompatibilityKey(
             base_id=self.base_id,
@@ -207,7 +200,7 @@ class IndexingSettings:
             embedder_dimensions=self.embedder_dimensions,
         )
 
-    def corpus_compatibility_key(self) -> _CorpusCompatibilityKey:
+    def _corpus_compatibility_key(self) -> _CorpusCompatibilityKey:
         """Return fields that must match for safe source-corpus reuse."""
         return _CorpusCompatibilityKey(
             base_id=self.base_id,
@@ -230,41 +223,22 @@ class IndexingSettings:
         )
 
 
-class _CollectionExistenceEmbedder(Embedder):
-    """Minimal embedder for collection probes that must never embed content."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
+def published_index_settings_compatible(
+    published_settings: IndexingSettings,
+    current_settings: IndexingSettings,
+) -> bool:
+    """Return whether a published index can be queried under the current config."""
+    return (
+        published_settings._query_compatibility_key() == current_settings._query_compatibility_key()
+        and published_settings._corpus_compatibility_key() == current_settings._corpus_compatibility_key()
+    )
 
 
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
-    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
+    from mindroom.knowledge.read_proxy import collection_exists  # noqa: PLC0415
 
-    vector_db = ChromaDb(
-        collection=collection_name,
-        path=str(storage_path),
-        persistent_client=True,
-        embedder=_CollectionExistenceEmbedder(),
-    )
-    return vector_db.exists()
+    return collection_exists(str(storage_path), collection_name)
 
 
 def _safe_identifier(value: str) -> str:
@@ -285,26 +259,30 @@ def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
     return f"{_safe_identifier(base_id)}_{digest}"
 
 
+#: Primary-owned directory holding the Git directory of every Git-backed base.
+#: It sits beside the ``agents/`` and private-instance state roots that workers
+#: mount, never inside one, because a Git directory chooses the programs Git runs.
+_KNOWLEDGE_GIT_DIRNAME = "knowledge_git"
+
+
+def knowledge_git_dir(storage_root: Path, knowledge_path: Path) -> Path:
+    """Return the MindRoom-owned Git directory behind one knowledge checkout.
+
+    Keyed by the resolved checkout path rather than by base: bases that share a
+    folder share its worktree and source lock, so they share one repository.
+    Changing a base's path therefore starts a new repository, and the old one
+    is left behind holding repository content but no credentials.
+    """
+    resolved = knowledge_path.resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
+    return storage_root.resolve() / _KNOWLEDGE_GIT_DIRNAME / f"{_safe_identifier(resolved.name)}_{digest}"
+
+
 def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
 
 
 _EMPTY_FILTER_KEY = _filter_settings_key(())
-
-
-def _optional_filter_key(
-    settings: Mapping[str, str],
-    name: str,
-    *,
-    empty_value: str = _EMPTY_FILTER_KEY,
-) -> str:
-    """Read one optional filter key, normalizing legacy absence to today's producer output.
-
-    Metadata predating these keys omits them entirely. Mapping absence onto what
-    ``indexing_settings_key`` emits now keeps an old index from being misread as
-    config-incompatible and needlessly rebuilt.
-    """
-    return settings.get(name, "") or empty_value
 
 
 def indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:

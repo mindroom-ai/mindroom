@@ -7,11 +7,45 @@
 {{- if contains "$" (.Values.serviceWorker.navigationFallbackExcludePaths | toJson) -}}
 {{- fail "serviceWorker.navigationFallbackExcludePaths cannot contain $ because nginx expands variables in return bodies" -}}
 {{- end -}}
+{{- if .Values.authenticationRecovery.enabled -}}
+{{- if or (not .Values.nginx.create) .Values.nginx.existingConfigMap -}}
+{{- fail "authenticationRecovery requires the chart-managed nginx config" -}}
+{{- end -}}
+{{- $recoveryUrls := dict "probeUrl" .Values.authenticationRecovery.probeUrl "navigationUrl" .Values.authenticationRecovery.navigationUrl -}}
+{{- range $name, $url := $recoveryUrls -}}
+{{- if or (ne $name "navigationUrl") (ne $url "") -}}
+{{- $lowerUrl := lower $url -}}
+{{- $lowerPath := regexFind `^[^?#]*` $lowerUrl -}}
+{{- if or (not (hasPrefix "/" $url)) (hasPrefix "//" $url) (contains "\\" $url) (contains "$" $url) (regexMatch `[[:cntrl:]]` $url) (contains "%2f" $lowerPath) (contains "%5c" $lowerPath) (regexMatch `%0[0-9a-f]|%1[0-9a-f]|%7f` $lowerUrl) (regexMatch `(^|/)(\.|%2e)(\.|%2e)?(/|$)` $lowerPath) -}}
+{{- fail (printf "authenticationRecovery.%s must be a safe same-origin root-relative URL" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $recoveryTimeout := .Values.authenticationRecovery.timeoutMs | toString -}}
+{{- if not (regexMatch `^[0-9]+$` $recoveryTimeout) -}}
+{{- fail "authenticationRecovery.timeoutMs must be an integer from 1000 through 30000" -}}
+{{- end -}}
+{{- $recoveryTimeoutMs := int .Values.authenticationRecovery.timeoutMs -}}
+{{- if or (lt $recoveryTimeoutMs 1000) (gt $recoveryTimeoutMs 30000) -}}
+{{- fail "authenticationRecovery.timeoutMs must be an integer from 1000 through 30000" -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) (not .Values.config.data) (not .Values.matrix.homeserverUrl) (not .Values.matrix.defaultServerName) -}}
 {{- fail "matrix.homeserverUrl or matrix.defaultServerName is required when the chart renders the default client config" -}}
 {{- end -}}
 {{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) -}}
 {{- fail "config.existingConfigMap is required when config.create=false" -}}
+{{- end -}}
+{{- if not (or (kindIs "invalid" .Values.config.values) (kindIs "map" .Values.config.values)) -}}
+{{- fail "config.values must be a map" -}}
+{{- end -}}
+{{- if .Values.config.values -}}
+{{- if or (not .Values.config.create) .Values.config.existingConfigMap -}}
+{{- fail "config.values requires the chart-managed client config" -}}
+{{- end -}}
+{{- if .Values.config.data -}}
+{{- fail "config.values cannot be combined with config.data; move the config.data settings into config.values" -}}
+{{- end -}}
 {{- end -}}
 {{- if and (not .Values.nginx.create) (not .Values.nginx.existingConfigMap) -}}
 {{- fail "nginx.existingConfigMap is required when nginx.create=false" -}}
@@ -27,6 +61,21 @@
 {{- end -}}
 {{- if and .Values.matrixRTC.enabled (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
 {{- fail "matrixRTC.enabled requires the chart-managed nginx config" -}}
+{{- end -}}
+{{- if not (kindIs "slice" .Values.bugReports.admins) -}}
+{{- fail "bugReports.admins must be a list" -}}
+{{- end -}}
+{{- range .Values.bugReports.admins -}}
+{{- /* The client accepts any @localpart:server without whitespace; quotes, backslashes, $, <, > and & would break the nginx return body or its JSON. */ -}}
+{{- if or (not (regexMatch `^@[^\s:'"\\$<>&]+:[^\s'"\\$<>&]+$` (toString .))) (regexMatch `\p{Cc}` (toString .)) -}}
+{{- fail (printf "bugReports.admins entries must be Matrix user IDs such as @admin:example.com, without whitespace, quotes, backslashes, $, <, > or &; got %q" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.bugReports.admins (not .Values.matrix.homeserverUrl) -}}
+{{- fail "matrix.homeserverUrl is required when bugReports.admins is set" -}}
+{{- end -}}
+{{- if and .Values.bugReports.admins (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
+{{- fail "bugReports.admins requires the chart-managed nginx config" -}}
 {{- end -}}
 {{- if and .Values.matrixRTC.proxy.enabled (not .Values.matrixRTC.enabled) -}}
 {{- fail "matrixRTC.proxy.enabled requires matrixRTC.enabled=true" -}}

@@ -7,8 +7,13 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
+from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
+from mindroom.workers.backends.docker_config import docker_backend_config_signature
+from mindroom.workers.backends.kubernetes_config import kubernetes_backend_config_signature
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_AGENT_REPOSITORY_",
@@ -97,8 +102,8 @@ _PROJECTION_MATRIX_EXPECTATIONS = {
     },
     runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: {
         "public_worker_startup_env": False,
-        "isolated_worker_runtime_env": True,
-        "trusted_tool_runtime_paths": True,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": False,
     },
@@ -364,13 +369,11 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
         runtime_paths,
         {},
         include_base_execution_env=True,
-        include_credentials_encryption_key=True,
     )
     execution_tool_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_base_execution_env=False,
-        include_credentials_encryption_key=False,
     )
     public_worker_startup_env = runtime_env_policy.public_worker_startup_env(process_env)
     isolated_worker_runtime_env = runtime_env_policy.isolated_worker_runtime_env(process_env)
@@ -522,6 +525,7 @@ def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() ->
         "MINDROOM_API_KEY": "runtime-api-key",
         "MINDROOM_CONFIG_PATH": "/unsafe/config.yaml",
         "MINDROOM_LOCAL_CLIENT_SECRET": "runtime-client-secret",
+        "MINDROOM_PLATFORM_SSO_SECRET": "runtime-dashboard-signing-key",
         "MINDROOM_SHARED_CREDENTIALS_PATH": "/unsafe/shared-credentials",
         "MINDROOM_STORAGE_PATH": "/unsafe/storage",
         "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
@@ -542,6 +546,15 @@ def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() ->
     }
 
 
+@pytest.mark.parametrize("name", ["MINDROOM_API_KEY", "MINDROOM_PLATFORM_SSO_SECRET"])
+def test_dashboard_credentials_stay_out_of_tool_env(name: str) -> None:
+    """Dashboard credentials and signing keys never reach shell passthrough or trusted tool env."""
+    assert not runtime_env_policy.is_shell_passthrough_allowed_env_name(name)
+    assert not runtime_env_policy.is_trusted_tool_runtime_process_env_name(name)
+    assert not runtime_env_policy.is_trusted_tool_runtime_env_file_name(name)
+    assert not runtime_env_policy.is_isolated_worker_runtime_env_name(name)
+
+
 def test_runtime_control_env_literals_stay_in_policy_module() -> None:
     """Python callers should import centralized runtime env names from the policy module."""
     source_root = Path(__file__).resolve().parents[1] / "src" / "mindroom"
@@ -559,3 +572,47 @@ def test_runtime_control_env_literals_stay_in_policy_module() -> None:
             violations[str(path.relative_to(source_root))] = leaked_names
 
     assert violations == {}
+
+
+def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_identity(tmp_path: Path) -> None:
+    """Opt-in reaches both worker backends and invalidates cached backend configuration."""
+    flag = runtime_env_policy.WORKER_COMPUTER_ENABLED_ENV
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        "MINDROOM_KUBERNETES_WORKER_IMAGE": "worker:test",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "storage",
+    }
+    disabled = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=env,
+    )
+    enabled = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={**env, flag: "true"},
+    )
+    for backend in ("docker", "kubernetes"):
+        worker = build_dedicated_worker_runtime_paths(
+            runtime_paths=enabled,
+            backend_name=backend,
+            worker_key="worker",
+            config_path=tmp_path / "worker-config.yaml",
+            dedicated_root=tmp_path / "worker",
+            worker_port=8766,
+            shared_storage_root=str(tmp_path / "shared"),
+            extra_env={},
+        )
+        assert worker.env_flag(flag)
+        assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
+    for signature in (docker_backend_config_signature, kubernetes_backend_config_signature):
+        assert signature(disabled, auth_token=None) != signature(enabled, auth_token=None)
+
+
+def test_computer_origins_remain_primary_runtime_configuration() -> None:
+    """Browser origin policy must not enter worker startup or execution env."""
+    env = {"MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]'}
+    assert runtime_env_policy.public_worker_startup_env(env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
+    assert runtime_env_policy.worker_extra_env(env) == {}

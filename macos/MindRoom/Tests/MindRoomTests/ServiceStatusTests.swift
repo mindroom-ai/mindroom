@@ -2,11 +2,25 @@ import XCTest
 @testable import MindRoom
 
 final class ServiceStatusTests: XCTestCase {
+    func testMissingConfigurationIsNotMistakenForMissingRuntime() {
+        let status = MindRoomServiceStatus.parse("Error reading config.yaml: No such file or directory")
+        XCTAssertEqual(status.state, .unknown)
+    }
+
     func testParsesRunningServiceStatus() {
         let status = MindRoomServiceStatus.parse("MindRoom service: running (pid 12345)")
 
         XCTAssertEqual(status.state, .running)
         XCTAssertEqual(status.message, "MindRoom is running")
+    }
+
+    func testParsesServiceWaitingForPairing() {
+        let status = MindRoomServiceStatus.parse(
+            "MindRoom service: running (pid 12345)\npairing: required (open the approval link from `mindroom service logs`, or run `mindroom connect`)"
+        )
+
+        XCTAssertEqual(status.state, .pairing)
+        XCTAssertEqual(status.message, "Connect your chat account to finish starting MindRoom.")
     }
 
     func testParsesStoppedServiceStatus() {
@@ -49,10 +63,15 @@ final class ServiceStatusTests: XCTestCase {
 }
 
 final class MindRoomCommandTests: XCTestCase {
-    func testPairCodeIsUppercasedAndTrimmed() {
-        let command = MindRoomCommand.pairHosted(pairCode: " abcd-efgh ")
+    func testPairHostedMapsToRuntimeAction() {
+        let command = MindRoomCommand.pairHosted
 
-        XCTAssertEqual(command.runtimeAction, .pairHosted(pairCode: "ABCD-EFGH"))
+        XCTAssertEqual(command.runtimeAction, .pairHosted)
+    }
+
+    func testReconnectHostedMapsToForcedRuntimeAction() {
+        XCTAssertEqual(MindRoomCommand.reconnectHosted.runtimeAction, .reconnectHosted)
+        XCTAssertEqual(MindRoomCommand.reconnectHosted.title, "Reconnect Chat Account")
     }
 
     func testMenuCommandsExposeTitles() {
@@ -66,7 +85,7 @@ final class MindRoomCommandTests: XCTestCase {
         let commands: [MindRoomCommand] = [
             .installRuntime, .updateRuntime, .installService, .startService, .stopService,
             .restartService, .initializeHostedConfig, .initializeSelfHostedConfig,
-            .localStackSetup, .pairHosted(pairCode: "ABCD-EFGH"),
+            .pairHosted, .reconnectHosted,
         ]
         for command in commands {
             XCTAssertNotNil(command.successMessage, "\(command.title) has no success message")

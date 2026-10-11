@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from backend.deps import verify_user
 from fastapi.testclient import TestClient
 from main import app
@@ -25,3 +27,20 @@ def test_request_too_large_returns_413() -> None:
     r = client.post("/my/sso-cookie", headers=headers, data=big)
     assert r.status_code == 413
     assert r.json().get("detail") == "Request too large"
+
+
+def test_chunked_request_over_limit_returns_413_before_the_route_handles_it() -> None:
+    """A body without Content-Length is counted as it streams, so unauthenticated routes cannot buffer it."""
+    client = TestClient(app)
+    with (
+        patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", "whsec_test"),
+        patch("backend.routes.webhooks.stripe.Webhook.construct_event") as construct_event,
+    ):
+        r = client.post(
+            "/webhooks/stripe",
+            headers={"Stripe-Signature": "x"},
+            content=iter([b"x" * (1024 * 1024 + 1)]),
+        )
+    assert r.status_code == 413
+    assert r.json().get("detail") == "Request too large"
+    construct_event.assert_not_called()

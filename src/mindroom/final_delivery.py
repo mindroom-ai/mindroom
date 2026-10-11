@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.cancellation import cancel_source_from_failure_reason
+from mindroom.constants import AI_RUN_METADATA_KEY
 
 if TYPE_CHECKING:
     from mindroom.cancellation import CancelSource
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 
 _StreamTerminalStatus = Literal["completed", "cancelled", "error"]
 _TerminalStatus = Literal[_StreamTerminalStatus, "suspended"]
-VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
+_VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 _VisibleDeliveryKind = Literal["sent", "edited"]
 
 
@@ -23,7 +24,7 @@ class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
     terminal_status: _StreamTerminalStatus
     rendered_body: str | None
-    visible_body_state: VisibleBodyState
+    visible_body_state: _VisibleBodyState
     terminal_update_committed: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
@@ -66,6 +67,13 @@ class FinalDeliveryOutcome:  # noqa: D101
     def __post_init__(self) -> None:  # noqa: D105
         object.__setattr__(self, "tool_trace", tuple(self.tool_trace or ()))
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
+
+    @property
+    def response_run_id(self) -> str | None:
+        """Read a valid run identity from the authoritative final delivery payload."""
+        metadata = (self.extra_content or {}).get(AI_RUN_METADATA_KEY)
+        run_id = metadata.get("run_id") if isinstance(metadata, dict) else None
+        return run_id if isinstance(run_id, str) and run_id else None
 
     @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102

@@ -10,11 +10,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import inbound_turn_normalizer, interactive, voice_handler
+from mindroom import inbound_turn_normalizer, interactive
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.coalescing.batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
+from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
@@ -25,19 +26,21 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
-from mindroom.matrix.thread_membership import ThreadMembershipLookupError
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.voice import handler as voice_handler
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     make_pending_event,
     prepared_dispatch_result,
+    record_turn_answered,
     replace_interactive_selection_handlers,
     replace_turn_controller_deps,
     unwrap_extracted_collaborator,
 )
+from tests.journal_helpers import admit_dispatch_event
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
     _image_event,
@@ -54,7 +57,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.bot import AgentBot
+    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
 
@@ -100,7 +104,7 @@ def _gate(
     room_scope_is_single_conversation: bool | None = None,
     dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
-    on_undelivered_source: Callable[[str], None] | None = None,
+    on_undelivered_source: Callable[[str, str], None] | None = None,
     on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[CoalescingGate, list[PreparedTurn]]:
     batches: list[PreparedTurn] = []
@@ -266,7 +270,7 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
     )
 
     busy["value"] = False
-    with patch("mindroom.coalescing.logger") as logger_mock:
+    with patch("mindroom.coalescing.gate.logger") as logger_mock:
         release_ready.set()
         await _wait_for(lambda: slot.settled.is_set())
 
@@ -298,7 +302,7 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
     key = CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost"))
 
     slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
-    with patch("mindroom.coalescing.logger") as logger_mock:
+    with patch("mindroom.coalescing.gate.logger") as logger_mock:
         gate.submit_lane_slot(
             slot,
             key=key,
@@ -458,15 +462,9 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
     """The exceptional command notice must not publish after its requester is revoked."""
     sender_id = "@user:localhost"
     bot = _make_bot(tmp_path, agent_name="router")
-    bot.config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={"router": AgentReplyPermission(users=[sender_id])},
-    )
+    bot.config.router.access = ResponderAccessConfig(current_room_members=False, users=[sender_id])
     replacement_config = bot.config.model_copy(deep=True)
-    replacement_config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={"router": AgentReplyPermission(users=[])},
-    )
+    replacement_config.router.access = ResponderAccessConfig(current_room_members=False, users=[])
     room = _make_room()
     command_event = _text_event(
         event_id="$cmd-during-reload",
@@ -561,6 +559,126 @@ async def test_unresolvable_non_command_text_still_rejects_ingress(tmp_path: Pat
     assert not bot._turn_store.is_handled("$m1")
 
 
+def _unplaceable_event(event_id: str, msgtype: str, *, server_timestamp: int) -> nio.Event:
+    """Return a message whose relation names an event no one can fetch."""
+    content: dict[str, object] = {
+        "msgtype": msgtype,
+        "body": "look at this",
+        "m.relates_to": {"rel_type": "m.reference", "event_id": "$fabricated:localhost"},
+    }
+    if msgtype != "m.text":
+        content["url"] = "mxc://localhost/attachment"
+        content["info"] = {"mimetype": "audio/ogg" if msgtype == "m.audio" else "image/jpeg"}
+    return nio.RoomMessage.parse_event(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": server_timestamp,
+            "type": "m.room.message",
+            "room_id": "!room:localhost",
+            "content": content,
+        },
+    )
+
+
+def _turn_controller_dispatcher(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    journal_store: EventJournalStore,
+) -> JournalDispatcher:
+    """Return a journal dispatcher delivering message and media events to the bot's TurnController."""
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    return JournalDispatcher(
+        store=journal_store.principal("agent@lane"),
+        callbacks=JournalCallbacks(
+            on_message=bot._turn_controller.handle_text_event,
+            on_media=bot._turn_controller.handle_media_event,
+            on_reaction=cast("Callable", noop),
+            on_approval=cast("Callable", noop),
+            on_room_lifecycle=cast("Callable", noop),
+            on_redaction=cast("Callable", noop),
+            on_approval_continuation=AsyncMock(return_value=None),
+            source_has_live_owner=lambda _event_id: False,
+            turn_has_live_claim=bot._turn_store.has_live_turn_claim,
+            replies_ended=lambda _reply_ids: None,
+        ),
+        room_for_id=lambda _room_id: room,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("msgtype", "kind"),
+    [("m.text", EventKind.MESSAGE), ("m.image", EventKind.MEDIA), ("m.audio", EventKind.MEDIA)],
+)
+async def test_unplaceable_event_settles_and_its_room_moves_on(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    msgtype: str,
+    kind: EventKind,
+) -> None:
+    """A relation target the homeserver will not serve ends the turn instead of failing it.
+
+    Failing it would put the event back at the head of its room's lane, where
+    it fails the same way on every retry while everything behind it waits.
+    """
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    resolved: list[str] = []
+
+    async def unplaceable(_room: nio.MatrixRoom, event: nio.Event) -> str | None:
+        resolved.append(event.event_id)
+        msg = "Related event $fabricated:localhost is unavailable"
+        raise RelatedEventUnavailableError(msg)
+
+    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
+    poison = _unplaceable_event("$poison", msgtype, server_timestamp=1_000)
+    later = _unplaceable_event("$later", "m.text", server_timestamp=2_000)
+
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unplaceable),
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+    ):
+        await admit_dispatch_event(dispatcher, room, poison, kind, EventClass.ACTIONABLE)
+        await admit_dispatch_event(dispatcher, room, later, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await dispatcher.drain_once()
+
+    assert resolved == ["$poison", "$later"]
+    assert not await dispatcher.store.pending(room_id=room.room_id)
+    assert not bot._turn_store.has_live_turn_claim("$poison")
+    dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_relation_lookup_failure_keeps_the_event_pending(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A lookup that may answer next time leaves the event at the head of its lane for retry."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
+    event = _unplaceable_event("$message", "m.text", server_timestamp=1_000)
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("homeserver unavailable")),
+        ),
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+    ):
+        await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await dispatcher.drain_once()
+
+    assert [pending.event_id for pending in await dispatcher.store.pending(room_id=room.room_id)] == ["$message"]
+    assert not bot._turn_store.is_handled("$message")
+    dispatch_mock.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> None:
     """A failed readiness task settles its slot so later same-lane work delivers."""
@@ -635,19 +753,18 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         on_approval=cast("Callable", noop),
         on_room_lifecycle=cast("Callable", noop),
         on_redaction=cast("Callable", noop),
-        on_decryption_failure=cast("Callable", noop),
         on_approval_continuation=AsyncMock(return_value=None),
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
+        replies_ended=lambda _reply_ids: None,
     )
     dispatcher = JournalDispatcher(
         store=journal_store.principal("agent@lane"),
-        self_sender="@lane:example.org",
         callbacks=callbacks,
         room_for_id=lambda _room_id: _room(),
     )
     event = _image_event(event_id=source_event_id)
-    await dispatcher.admit_out_of_band(_room(), event, EventKind.MEDIA, EventClass.ACTIONABLE)
+    await admit_dispatch_event(dispatcher, _room(), event, EventKind.MEDIA, EventClass.ACTIONABLE)
     await dispatcher.drain_once()
 
     # The gate still owns this source, so the media callback must not run and
@@ -663,7 +780,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
 @pytest.mark.asyncio
 async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() -> None:
     """A failed terminal write must not suppress its own durable retry handoff."""
-    undelivered_sources: list[str] = []
+    undelivered_sources: list[tuple[str, str]] = []
 
     async def fail_settlement(_event_id: str) -> None:
         msg = "tracking store unavailable"
@@ -671,7 +788,7 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
 
     gate, _batches = _gate(
         debounce_seconds=0.0,
-        on_undelivered_source=undelivered_sources.append,
+        on_undelivered_source=lambda room_id, source_id: undelivered_sources.append((room_id, source_id)),
         on_intentionally_ignored_source=fail_settlement,
     )
 
@@ -688,7 +805,7 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
     )
 
     await slot.settled.wait()
-    assert undelivered_sources == ["$ignored-media"]
+    assert undelivered_sources == [("!room:localhost", "$ignored-media")]
 
 
 @pytest.mark.asyncio
@@ -870,7 +987,7 @@ async def test_hung_voice_download_fallback_releases_later_sender_slot(
     monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS", 0.05)
     try:
         with (
-            patch("mindroom.voice_handler._download_audio", side_effect=hung_download),
+            patch("mindroom.voice.handler._download_audio", side_effect=hung_download),
             patch(
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
@@ -1003,6 +1120,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
         if source_event_id == "$a0":
             first_locked.set()
             await release_first_response.wait()
+        await record_turn_answered(bot, request)
         return f"{source_event_id}-response"
 
     async def fake_prepare_dispatch(
@@ -1052,19 +1170,21 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             await bot._turn_controller.handle_text_event(room, first)
             await asyncio.wait_for(first_locked.wait(), timeout=1.0)
 
-            # Matrix sync callbacks run as independent tasks; the answer's
-            # callback parks on the active turn while later ingress arrives.
+            # The answer's callback hands the selection to a runner-owned task and returns while the active turn
+            # still holds this conversation.
             answer_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, answer))
-            await asyncio.wait_for(ack_sent.wait(), timeout=1.0)
+            await asyncio.wait_for(answer_task, timeout=1.0)
             await bot._turn_controller.handle_text_event(room, other_thread)
 
             await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
             assert not release_first_response.is_set()
+            assert "$f1" not in generated
 
             release_first_response.set()
-            await asyncio.wait_for(answer_task, timeout=1.0)
             await bot._coalescing_gate.drain_all()
             await bot._response_runner.drain_inbox_responses()
+            assert ack_sent.is_set()
+            assert "$f1" in generated
     finally:
         release_first_response.set()
         if answer_task is not None and not answer_task.done():
@@ -1204,7 +1324,7 @@ async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
 
 @pytest.mark.asyncio
 async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
-    """Follow-ups queued behind a response that fails still dispatch as the follow-up turn."""
+    """Follow-ups queued behind a response that fails still dispatch, one turn per requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first")
@@ -1267,15 +1387,14 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
 
         fail_response.set()
 
-        await _wait_for(lambda: len(generated) == 2)
-        assert "$f1" in generated[1][1]
-        assert "$f2" in generated[1][1]
+        await _wait_for(lambda: len(generated) == 3)
+        assert [source_event_id for source_event_id, _prompt in generated[1:]] == ["$f1", "$f2"]
         await runner.drain_inbox_responses()
 
 
 @pytest.mark.asyncio
 async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> None:
-    """Follow-ups queued behind a cancelled detached response still dispatch together."""
+    """Follow-ups queued behind a cancelled detached response still dispatch, one turn per requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
@@ -1303,6 +1422,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         blocked_response(),
         name="test_blocked_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(response_running.wait(), timeout=1.0)
     with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
@@ -1323,8 +1443,9 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         response_task.cancel()
         assert await runner.drain_inbox_responses() is True
 
-        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1", "$f2"]])
-    assert calls[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1"], ["$f2"]])
+    assert [batch.requester_user_id for batch in calls] == ["@alice:localhost", "@bob:localhost"]
+    assert all(batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND for batch in calls)
 
 
 @pytest.mark.asyncio
@@ -1451,6 +1572,47 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bounded_drain_shares_one_deadline_across_cancellation_resistant_lanes() -> None:
+    """Each stubborn lane consumes the same bounded-drain deadline."""
+    gate, _ = _gate(debounce_seconds=0.0)
+    release = asyncio.Event()
+    started = [asyncio.Event(), asyncio.Event()]
+    ready_tasks: list[asyncio.Task[ReadyPendingEvent | None]] = []
+
+    async def stubborn_ready(index: int) -> ReadyPendingEvent | None:
+        started[index].set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            return None
+
+    for index in range(2):
+        sender_id = f"@user{index}:localhost"
+        slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id=sender_id))
+        ready_task = asyncio.create_task(stubborn_ready(index))
+        ready_tasks.append(ready_task)
+        gate.submit_lane_slot(
+            slot,
+            key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner(sender_id)),
+            source_event_id=f"$stubborn{index}",
+            source_kind=VOICE_SOURCE_KIND,
+            ready_task=ready_task,
+        )
+
+    await asyncio.gather(*(event.wait() for event in started))
+    try:
+        async with asyncio.timeout(0.07):
+            result = await gate.drain_all(ready_timeout_seconds=0.03)
+    finally:
+        release.set()
+        await asyncio.gather(*ready_tasks, return_exceptions=True)
+
+    assert result.completed is False
+    assert result.cancelled_unready_count == 2
+
+
+@pytest.mark.asyncio
 async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> None:
     """A bounded runner drain cancels a stuck response, runs its cleanup once, and reports incomplete."""
     bot = _make_bot(tmp_path, debounce_ms=0)
@@ -1470,6 +1632,7 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
         stuck_response(),
         name="test_stuck_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
@@ -1479,6 +1642,50 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
     await asyncio.sleep(0)
     assert not runner._inbox_response_tasks
     assert await runner.drain_inbox_responses() is True
+
+
+@pytest.mark.asyncio
+async def test_bounded_inbox_drain_rejects_indefinitely_resistant_response(tmp_path: Path) -> None:
+    """A response that never honors cancellation cannot erase the shutdown deadline."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancel_count = 0
+
+    async def cancellation_resistant_response() -> None:
+        nonlocal cancel_count
+        started.set()
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_count += 1
+                if release.is_set():
+                    raise
+
+    task = runner.track_inbox_response(
+        cancellation_resistant_response(),
+        name="test_cancellation_resistant_response",
+        recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    drain_task = asyncio.create_task(
+        runner.drain_inbox_responses(cancel_after_seconds=0.01),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="response tasks did not stop"):
+            await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.25)
+        assert cancel_count >= 1
+        assert not task.done()
+        assert runner.pending_inbox_response_count == 1
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, drain_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1501,6 +1708,7 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
         stuck_response(),
         name="test_sync_restart_cancelled_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
@@ -1535,6 +1743,7 @@ async def test_failed_inbox_response_is_contained_and_unregistered(tmp_path: Pat
         failing_response(),
         name="test_failing_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.gather(task, return_exceptions=True)
     await asyncio.sleep(0)

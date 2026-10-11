@@ -26,6 +26,7 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import _DispatchPlan
 from tests.conftest import (
     install_relation_lookup,
@@ -1595,6 +1596,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         ):
             request = await bot._response_runner._refresh_model_history_after_lock(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(event.event_id,),
+                        logical_source_event_ids=(event.event_id,),
+                    ),
                     thread_history=degraded_history,
                     prompt="thread follow-up",
                     response_envelope=request_envelope(

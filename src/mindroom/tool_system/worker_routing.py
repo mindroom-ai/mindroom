@@ -9,17 +9,19 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import quote
 
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
 
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
-_ExecutionChannel = Literal["matrix", "openai_compat"]
+_ExecutionChannel = Literal["matrix", "openai_compat", "mcp"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
@@ -28,29 +30,12 @@ _WORKER_ID_DIGEST_LENGTH = 24
 _DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH = 10
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
+WORKER_CREDENTIALS_DIRNAME = "credentials"
+WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "spotify",
         "homeassistant",
-    },
-)
-_LOCAL_ONLY_TOOL_NAMES = frozenset(
-    {
-        "agent_repository",
-        "approved_egress",
-        "attachments",
-        "callback_manager",
-        "desktop",
-        "external_trigger_manager",
-        "github",
-        "gmail",
-        "google_calendar",
-        "google_docs",
-        "google_drive",
-        "google_sheets",
-        "homeassistant",
-        "invite_router",
-        "todo",
     },
 )
 
@@ -110,10 +95,10 @@ def parse_tool_execution_identity_payload(
 
     raw_payload = cast("dict[str, object]", payload)
     channel = raw_payload.get("channel")
-    if channel not in ("matrix", "openai_compat"):
+    if channel not in ("matrix", "openai_compat", "mcp"):
         return _invalid_tool_execution_identity_payload(
             strict,
-            f"{error_prefix}.channel must be matrix or openai_compat",
+            f"{error_prefix}.channel must be matrix, openai_compat, or mcp",
         )
 
     agent_name = raw_payload.get("agent_name")
@@ -294,9 +279,8 @@ def _requester_localpart(requester: str) -> str:
     return requester
 
 
-def _normalize_worker_requester_part(value: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", value.strip()).strip("_")
-    return normalized or "default"
+def _encode_worker_requester_part(value: str) -> str:
+    return "~" + quote(value, safe="._:@+-")
 
 
 def _normalize_worker_dir_part(value: str) -> str:
@@ -306,7 +290,7 @@ def _normalize_worker_dir_part(value: str) -> str:
 
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
-        return _normalize_worker_requester_part(identity.requester_id)
+        return _encode_worker_requester_part(identity.requester_id)
     return None
 
 
@@ -489,11 +473,6 @@ def unsupported_shared_only_integration_names(
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
     return [name for name in names if _requires_shared_only_integration_scope(name)]
-
-
-def tool_stays_local(name: str) -> bool:
-    """Return whether one tool always stays in the primary runtime."""
-    return name in _LOCAL_ONLY_TOOL_NAMES
 
 
 def unsupported_shared_only_integration_message(
@@ -697,52 +676,17 @@ def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
     return resolved_base_path / "agents" / _normalize_worker_dir_part(agent_name)
 
 
+def private_instances_root_path(base_storage_path: Path) -> Path:
+    """Return the directory that holds every worker-scoped private-instance namespace."""
+    return shared_storage_root(base_storage_path) / _PRIVATE_INSTANCE_ROOT_DIRNAME
+
+
 def private_instance_scope_root_path(base_storage_path: Path, worker_key: str) -> Path:
     """Return the canonical shared root for one worker-scoped private-instance namespace."""
     resolved_base_path = shared_storage_root(base_storage_path)
     if _is_resolved_private_instance_scope_root(resolved_base_path, worker_key):
         return resolved_base_path
     return resolved_base_path / _PRIVATE_INSTANCE_ROOT_DIRNAME / worker_dir_name(worker_key)
-
-
-def _private_instance_state_root_path(
-    base_storage_path: Path,
-    *,
-    worker_key: str,
-    agent_name: str,
-) -> Path:
-    """Return the canonical durable state root for one private agent instance."""
-    return private_instance_scope_root_path(base_storage_path, worker_key) / _normalize_worker_dir_part(agent_name)
-
-
-def private_instance_state_root_for_requester(
-    base_storage_path: Path,
-    *,
-    requester_id: str,
-    agent_name: str,
-    worker_scope: WorkerScope,
-    runtime_paths: RuntimePaths,
-) -> Path | None:
-    """Return the private-instance state root one requester would own for an agent.
-
-    Instance directory names embed a one-way digest of the worker key, so ownership can only be
-    established by forward-computing the path a known requester would get and comparing it against
-    the directories that exist on disk.
-    """
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    worker_key = resolve_worker_key(worker_scope, identity, agent_name=agent_name)
-    if worker_key is None:
-        return None
-    return _private_instance_state_root_path(base_storage_path, worker_key=worker_key, agent_name=agent_name)
 
 
 def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:
@@ -762,42 +706,55 @@ def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
     return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
-def visible_state_roots_for_worker_key(
+def written_by_other_workers(relative_path: Path, worker_roots: Path = Path("workers")) -> bool:
+    """Return whether sandbox workers can write below this storage-relative path."""
+    parts = relative_path.parts
+    return (
+        relative_path.is_relative_to(worker_roots)
+        or parts[:1] == (_PRIVATE_INSTANCE_ROOT_DIRNAME,)
+        or (parts[:1] == ("agents",) and parts[2:3] == (_AGENT_WORKSPACE_DIRNAME,))
+    )
+
+
+def private_root_name(agent_name: str, authored_root: str | None) -> str:
+    """Return the private workspace path below one private state root."""
+    return authored_root or f"{agent_name}_data"
+
+
+def visible_workspace_roots(
     base_storage_path: Path,
     worker_key: str,
+    policies: Mapping[str, ResolvedAgentPolicy],
     *,
-    private_agent_names: frozenset[str] = frozenset(),
+    private_agent_names: frozenset[str],
 ) -> tuple[Path, ...]:
-    """Return the canonical durable state roots a worker key is allowed to see by default.
+    """Return the canonical workspaces one worker key may mount and work in.
 
-    Shared agent roots remain canonical for normal agents.
-    Private-instance roots live under a separate shared-storage namespace keyed by
-    worker scope so they are durable without becoming worker-owned state.
-    `user` intentionally sees the shared `agents/` tree plus its own
-    private-instance namespace because it acts as a per-requester multi-agent
-    workstation.
+    Workers see only workspaces, never the state roots or private scopes around them.
+    A ``user`` key is a per-requester workstation that sees every ``worker_scope: user``
+    agent's workspace, private ones below its own scope. A ``user_agent`` key of an
+    agent in ``private_agent_names`` sees only that private workspace, so a stale
+    policy never widens it to the shared one.
     """
     scope = resolved_worker_key_scope(worker_key)
-    if scope is None:
-        return ()
     if scope == "user":
-        return (
-            shared_storage_root(base_storage_path) / "agents",
-            private_instance_scope_root_path(base_storage_path, worker_key),
+        return tuple(
+            private_instance_scope_root_path(base_storage_path, worker_key)
+            / agent_name
+            / private_root_name(agent_name, policy.private_root)
+            if policy.is_private
+            else agent_workspace_root_path(base_storage_path, agent_name)
+            for agent_name, policy in sorted(policies.items())
+            if policy.effective_execution_scope == "user"
         )
-
-    agent_name = worker_key_agent_name(worker_key)
+    agent_name = worker_key_agent_name(worker_key) if scope is not None else None
     if agent_name is None:
         return ()
     if scope == "user_agent" and agent_name in private_agent_names:
-        return (
-            _private_instance_state_root_path(
-                base_storage_path,
-                worker_key=worker_key,
-                agent_name=agent_name,
-            ),
-        )
-    return (agent_state_root_path(base_storage_path, agent_name),)
+        policy = policies.get(agent_name)
+        root = private_root_name(agent_name, policy.private_root if policy is not None else None)
+        return (private_instance_scope_root_path(base_storage_path, worker_key) / agent_name / root,)
+    return (agent_workspace_root_path(base_storage_path, agent_name),)
 
 
 def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:
@@ -851,7 +808,12 @@ def resolve_agent_owned_path(
     files are authoritative.
     """
     relative_target = agent_workspace_relative_path(path_text)
-    agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
+    lexical_workspace_root = agent_workspace_root_path(base_storage_path, agent_name)
+    agent_workspace_root = lexical_workspace_root.resolve()
+    if agent_workspace_root != lexical_workspace_root:
+        # Workers of older releases could replace the workspace; the mount planner refuses such links too.
+        msg = f"Agent workspace must not be reached through a link: {lexical_workspace_root}"
+        raise ValueError(msg)
     return _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
 
 

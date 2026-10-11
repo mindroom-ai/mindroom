@@ -45,6 +45,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.eventCache.postgres.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -65,6 +69,9 @@ spec:
         - name: postgres
           image: {{ include "mindroom-runtime.eventCachePostgresImage" . | quote }}
           imagePullPolicy: {{ .Values.eventCache.postgres.image.pullPolicy }}
+          args:
+            - -p
+            - {{ .Values.eventCache.postgres.service.port | quote }}
           ports:
             - name: postgres
               containerPort: {{ .Values.eventCache.postgres.service.port }}
@@ -85,6 +92,8 @@ spec:
             exec:
               command:
                 - pg_isready
+                - -p
+                - {{ .Values.eventCache.postgres.service.port | quote }}
                 - -U
                 - {{ .Values.eventCache.postgres.auth.username | quote }}
                 - -d
@@ -96,6 +105,8 @@ spec:
             exec:
               command:
                 - pg_isready
+                - -p
+                - {{ .Values.eventCache.postgres.service.port | quote }}
                 - -U
                 - {{ .Values.eventCache.postgres.auth.username | quote }}
                 - -d

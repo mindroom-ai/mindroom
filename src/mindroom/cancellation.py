@@ -20,11 +20,14 @@ __all__ = [
     "cancel_message_for_source",
     "cancel_source_from_failure_reason",
     "classify_cancel_source",
+    "current_task_is_process_shutdown",
     "request_task_cancel",
     "task_cancel_source_from_message",
+    "task_is_process_shutdown",
 ]
 
 _TASK_CANCEL_SOURCES: dict[asyncio.Task[Any], TaskCancelSource] = {}
+_PROCESS_SHUTDOWN_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def cancel_message_for_source(cancel_source: TaskCancelSource | None) -> str | None:
@@ -45,21 +48,45 @@ def task_cancel_source_from_message(cancel_msg: str | None) -> TaskCancelSource 
     return None
 
 
-def _clear_task_cancel_source(task: asyncio.Task[Any]) -> None:
-    """Drop recorded cancellation provenance once one task finishes."""
+def _clear_task_cancel_metadata(task: asyncio.Task[Any]) -> None:
+    """Drop recorded cancellation metadata once one task finishes."""
     _TASK_CANCEL_SOURCES.pop(task, None)
+    _PROCESS_SHUTDOWN_TASKS.discard(task)
 
 
-def request_task_cancel(task: asyncio.Task[Any], *, cancel_source: TaskCancelSource | None = None) -> None:
+def request_task_cancel(
+    task: asyncio.Task[Any],
+    *,
+    cancel_source: TaskCancelSource | None = None,
+    process_shutdown: bool = False,
+) -> None:
     """Cancel one task while preserving the first explicit cancellation source."""
+    had_metadata = task in _TASK_CANCEL_SOURCES or task in _PROCESS_SHUTDOWN_TASKS
     cancel_msg = cancel_message_for_source(cancel_source)
     if cancel_source is not None and task not in _TASK_CANCEL_SOURCES:
         _TASK_CANCEL_SOURCES[task] = cancel_source
-        task.add_done_callback(_clear_task_cancel_source)
+    if process_shutdown:
+        _PROCESS_SHUTDOWN_TASKS.add(task)
+    if not had_metadata and (cancel_source is not None or process_shutdown):
+        task.add_done_callback(_clear_task_cancel_metadata)
     if cancel_msg is None:
         task.cancel()
     else:
         task.cancel(msg=cancel_msg)
+
+
+def current_task_is_process_shutdown() -> bool:
+    """Return whether a shutdown that hands this task's work to a successor runtime cancelled it.
+
+    That is an orderly process shutdown or an entity replacement; either way
+    the task leaves its turn pending for the successor to replay.
+    """
+    return task_is_process_shutdown(asyncio.current_task())
+
+
+def task_is_process_shutdown(task: asyncio.Task[Any] | None) -> bool:
+    """Read shutdown disposition from an explicitly retained response owner task."""
+    return task is not None and task in _PROCESS_SHUTDOWN_TASKS
 
 
 def build_cancelled_error(reason: str | None) -> asyncio.CancelledError:

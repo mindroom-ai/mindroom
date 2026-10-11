@@ -35,17 +35,22 @@ api.mindroom.chat         → Platform API
 - **Staging**: Testing environment with `.staging.mindroom.chat` domains
 - **Production**: Live customer deployments
 
+Production runs published release images.
+Deploy a release tag with `cluster/scripts/deploy-release.sh` and apply database migrations with `cluster/scripts/db/apply-migration.sh`, as described in [Release Deployment](../docs/deployment/saas-platform.md#release-deployment).
+
 ## Repository Structure
 
 ```
 saas-platform/
 ├── platform-backend/     # FastAPI backend service
 ├── platform-frontend/    # Next.js customer portal
+└── docker-compose.yml   # Local development
+cluster/
 ├── k8s/                 # Kubernetes Helm charts
 │   ├── platform/        # Platform services chart
 │   └── instance/        # Customer instance template
-├── terraform-k8s/       # Infrastructure as code
-└── docker-compose.yml   # Local development
+└── terraform/
+    └── terraform-k8s/   # Infrastructure as code
 ```
 
 ## Key Concepts
@@ -67,6 +72,6 @@ Each customer instance runs in isolation with:
 - JWT-based authentication via Supabase
 - Admin access controlled by `is_admin` flag in database
 - API keys for service-to-service communication
-- Network isolation between customer instances
+- Customer-label NetworkPolicy rules for the configured instance traffic
 
-For a detailed explanation of the end-to-end authentication flow across the platform (customer portal) and per-instance deployments (nginx sidecar + backend JWT verification), see docs/authentication.md.
+For the authentication flow across the platform customer portal and each instance's bundled dashboard/API, see [Authentication Overview](docs/authentication.md).

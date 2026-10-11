@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +20,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="file_generation",
+    file_access=ToolFileAccess.NONE,
     display_name="File Generation",
     description="Generate JSON, CSV, PDF, DOCX, HTML, and text files from data",
     category=ToolCategory.DEVELOPMENT,
@@ -27,6 +35,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=None,
+            description="Directory inside the agent workspace where generated files are saved",
         ),
         ConfigField(
             name="enable_json_generation",
@@ -71,6 +80,13 @@ if TYPE_CHECKING:
             default=True,
         ),
         ConfigField(
+            name="enable_code_generation",
+            label="Enable Code Generation",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
             name="save_files",
             label="Save Files",
             type="boolean",
@@ -87,7 +103,9 @@ if TYPE_CHECKING:
     ],
     dependencies=["python-docx", "reportlab"],
     docs_url="https://docs.agno.com/tools/toolkits/others/file_generation",
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
     function_names=(
+        "generate_code_file",
         "generate_csv_file",
         "generate_docx_file",
         "generate_html_file",
@@ -97,7 +115,7 @@ if TYPE_CHECKING:
     ),
 )
 def file_generation_tools() -> type[FileGenerationTools]:
-    """Return File Generation tools for creating JSON, CSV, PDF, DOCX, HTML, and text files."""
-    from agno.tools.file_generation import FileGenerationTools
+    """Return File Generation tools that save generated files only inside the agent workspace."""
+    from mindroom.tools.agno_compat_file_generation import WorkspaceFileGenerationTools
 
-    return FileGenerationTools
+    return WorkspaceFileGenerationTools

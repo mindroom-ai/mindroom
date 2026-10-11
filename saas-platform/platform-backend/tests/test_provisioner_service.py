@@ -1,10 +1,14 @@
 """Focused unit tests for the extracted provisioner service helpers."""
 
 import base64
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import yaml
 from backend.openrouter import CreatedOpenRouterKey
 from backend.services import provisioner_service
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestSecretDerivation:
@@ -65,12 +69,25 @@ class TestHelmArgsAssembly:
         assert "matrixOidc.enabled=true" in set_pairs
         assert "matrixOidc.issuer=https://api.mindroom.test/matrix-oidc" in set_pairs
         assert "matrixOidc.clientId=mindroom-synapse" in set_pairs
-        assert "matrixRoomAccess.mode=multi_user" in set_pairs
-        assert "matrixRoomAccess.multiUserJoinRule=public" in set_pairs
-        assert "matrixRoomAccess.publishToRoomDirectory=false" in set_pairs
-        assert "matrixRoomAccess.reconcileExistingRooms=true" in set_pairs
-        assert set_string_pairs[0] == "matrixAutoJoinRoomKeys[0]=analysis"
+        assert "roomDefaults.joinPolicy=public" in set_pairs
+        assert "roomDefaults.listed=false" in set_pairs
+        assert set_string_pairs[0] == "matrixAutoJoinRoomKeys[0]=personal"
         assert len(set_string_pairs) == len(provisioner_service._HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS)
+
+    def test_matrix_oidc_helm_args_normalize_enabled_flag_for_chart(self):
+        """Any enabled flag spelling renders the chart's OIDC branch, matching the owner authorization gate."""
+        helm_args: list[str] = []
+        with patch.multiple(
+            provisioner_service,
+            INSTANCE_MATRIX_OIDC_ENABLED="1",
+            INSTANCE_MATRIX_OIDC_ISSUER="",
+            INSTANCE_MATRIX_OIDC_CLIENT_ID="",
+        ):
+            provisioner_service._append_matrix_oidc_helm_args(helm_args)
+
+        set_pairs = [helm_args[i + 1] for i, arg in enumerate(helm_args) if arg == "--set"]
+        assert "matrixOidc.enabled=true" in set_pairs
+        assert "matrixOidc.enabled=1" not in set_pairs
 
     def test_matrix_oidc_helm_args_disabled(self):
         """Disabled hosted OIDC adds no Helm arguments."""
@@ -91,6 +108,40 @@ class TestHelmArgsAssembly:
 
         set_pairs = dict(helm_args[i + 1].split("=", 1) for i, arg in enumerate(helm_args) if arg == "--set")
         assert set_pairs == provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
+
+    def test_pro_resource_profile_overrides_every_default_chart_resource_quantity(self):
+        """A larger plan must not keep a default quantity, such as an ephemeral-storage limit, by omission."""
+        chart_values = yaml.safe_load((_REPOSITORY_ROOT / "cluster/k8s/instance/values.yaml").read_text())
+        default_keys = {
+            f"{component}.{kind}.{resource}"
+            for component in ("mindroomResources", "synapseResources", "sandboxRunnerResources")
+            for kind, quantities in chart_values[component].items()
+            for resource in quantities
+        }
+
+        assert "sandboxRunnerResources.limits.ephemeral-storage" in default_keys
+        assert default_keys <= set(provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"])
+
+    def test_pro_resource_profile_doubles_default_ephemeral_storage_limits(self):
+        """Pro containers get twice the default disk headroom, including the primary's room for runtime tool extras."""
+        chart_values = yaml.safe_load((_REPOSITORY_ROOT / "cluster/k8s/instance/values.yaml").read_text())
+        pro = provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
+
+        assert chart_values["mindroomResources"]["limits"]["ephemeral-storage"] == "16Gi"
+        for component in ("mindroomResources", "synapseResources", "sandboxRunnerResources"):
+            default_gib = int(chart_values[component]["limits"]["ephemeral-storage"].removesuffix("Gi"))
+            assert pro[f"{component}.limits.ephemeral-storage"] == f"{2 * default_gib}Gi"
+
+    def test_pro_resource_profile_keeps_ephemeral_storage_requests_small(self):
+        """Every tenant's requests count against the shared node's allocatable ephemeral storage."""
+        pro = provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
+        requests = {key: value for key, value in pro.items() if key.endswith(".requests.ephemeral-storage")}
+
+        assert requests == {
+            "mindroomResources.requests.ephemeral-storage": "64Mi",
+            "synapseResources.requests.ephemeral-storage": "64Mi",
+            "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
+        }
 
     def test_resource_profile_helm_args_unknown_profile_is_noop(self):
         """Unknown resource profiles add no Helm arguments."""

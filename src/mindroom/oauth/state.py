@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import threading
 import time
@@ -12,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
+from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthProviderError
@@ -94,10 +94,13 @@ def _load_state_store(runtime_paths: RuntimePaths, *, now: float) -> tuple[dict[
 
 def _save_state_store(runtime_paths: RuntimePaths, states: dict[str, dict[str, Any]]) -> None:
     path = _state_file(runtime_paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid4().hex}")
-    tmp_path.write_text(json.dumps({"states": states}, sort_keys=True, separators=(",", ":")), encoding="utf-8")
-    tmp_path.replace(path)
+    create_directory_durable(path.parent, mode=0o700)
+    write_json_file_durable(
+        path,
+        {"states": states},
+        strict_atomic_replace=True,
+        sort_keys=True,
+    )
 
 
 def issue_opaque_oauth_state(

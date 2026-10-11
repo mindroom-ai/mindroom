@@ -15,22 +15,21 @@ The configuration file has these common top-level sections; see the exhaustive [
 
 1. **agents** - Configure individual agents and their capabilities
 2. **teams** - Multi-agent collaboration groups
-3. **cultures** - Shared principles and practices applied to groups of agents
-4. **models** - Define available AI models and their providers
-5. **defaults** - Default settings inherited by all agents
-6. **memory** - Memory system configuration (mem0, file-backed, or disabled)
-7. **knowledge_bases** - File-backed RAG knowledge bases
-8. **router** - Agent routing system configuration
-9. **voice** - Voice message processing with STT, mention normalization, and light ASR cleanup
-10. **authorization** - Fine-grained user and room permissions
-11. **matrix_room_access** - Managed room access mode and discoverability
-12. **matrix_space** - Optional root Matrix Space for grouping rooms
-13. **mindroom_user** - Internal MindRoom user account settings
-14. **timezone** - Timezone for scheduled tasks (default: `UTC`)
-15. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
-16. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
-17. **room_models** - Per-room model overrides
-18. **plugins** - Plugin paths for tool/skill extensions
+3. **models** - Define available AI models and their providers
+4. **defaults** - Default settings inherited by all agents
+5. **memory** - Memory system configuration (mem0, file-backed, or disabled)
+6. **knowledge_bases** - File-backed RAG knowledge bases
+7. **router** - Agent routing system configuration
+8. **voice** - Voice message processing with STT, mention normalization, and light ASR cleanup
+9. **administrators** and **authorization** - Platform authority and identity aliases
+10. **room_defaults** and **rooms** - Managed room state, invitations, and Matrix power
+11. **matrix_space** - Optional root Matrix Space for grouping rooms
+12. **mindroom_user** - Internal MindRoom user account settings
+13. **timezone** - Timezone for scheduled tasks (default: `UTC`)
+14. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
+15. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
+16. **room_models** - Per-room model overrides
+17. **plugins** - Plugin paths for tool/skill extensions
 
 ## Model Configuration
 
@@ -41,29 +40,30 @@ MindRoom supports multiple model providers:
 models:
   default:  # Default model used when agent doesn't specify one
     provider: "ollama"
-    id: "devstral:24b"
+    id: "devstral-small-2:24b"
 
   anthropic:
     provider: "anthropic"
-    id: "claude-haiku-4-5"
+    id: "claude-haiku-5-5"
 
   ollama:
     provider: "ollama"
-    id: "devstral:24b"
+    id: "devstral-small-2:24b"
     # For ollama, you can add:
     # host: "http://localhost:11434"
 
   openrouter:
     provider: "openrouter"
-    id: "anthropic/claude-sonnet-5"
+    id: "anthropic/claude-sonnet-5.5"
 ```
 
 Each model entry supports these fields:
 - **provider** (required) - Provider name (see list below)
 - **id** (required) - Model ID specific to the provider
-- **host** - Optional host URL (e.g., for Ollama or OpenAI-compatible servers)
-- **extra_kwargs** - Additional provider-specific parameters (e.g., `base_url`)
+- **host** - Optional host URL for Ollama.
+- **extra_kwargs** - Additional provider-specific parameters; set `extra_kwargs.base_url` for an OpenAI-compatible server.
 - **context_window** - Actual provider context window size in tokens; when set, MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction config sets a smaller `replay_window_tokens`, and applies a final replay-fit step that may reduce or disable persisted replay for that run; on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window
+- **stream_idle_timeout_seconds** - Seconds a streamed request may go without a provider event before MindRoom treats it as stalled and retries once if nothing was streamed yet; unset means 300 for hosted providers on their built-in endpoint and no limit for `ollama`, `llama_cpp`, or a configured endpoint; `0` disables the limit
 
 ### Supported Providers
 
@@ -102,6 +102,7 @@ memory:
   llm: null  # Optional LLM for memory operations (provider + config dict)
   file:
     max_entrypoint_lines: 200  # Max lines preloaded from MEMORY.md
+    max_entrypoint_tokens: 50000  # Max estimated tokens (characters / 4) preloaded from MEMORY.md
   auto_flush:
     enabled: false  # Background file-memory auto-flush (see memory consolidation plan)
     flush_interval_seconds: 1800
@@ -147,7 +148,7 @@ agents:
     rooms:
       - lobby
       - dev
-    accept_invites: true  # Optional: accept direct room invites and auto-join invited rooms
+    accept_invites: true  # Accept all, none, or matching inviter ID patterns
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
     memory_backend: "file"  # Optional: per-agent override ("mem0", "file", or "none")
@@ -166,12 +167,12 @@ agents:
 - **agent_name**: The configured identifier used for agent config and aliases; provisioning may propose a `mindroom_<agent_name>` username when an account is missing, but runtime identity always comes from persisted Matrix account state.
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
-- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides (see Available Tools below and [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration))
+- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides, including `script` controls such as `allowed_tools`, concurrency, call-rate, and runtime limits (see Available Tools below, [Per-Agent Tool Configuration](../tools/index.md#per-agent-tool-configuration), and [Background Python Scripts](../tools/background-scripts.md))
 - **include_default_tools**: Whether to merge `defaults.tools` into this agent's `tools` (default: true)
 - **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior
 - **rooms**: List of room aliases where this agent should be active
-- **accept_invites**: Whether this agent accepts direct Matrix room invites and auto-joins invited rooms (default: `true`)
+- **accept_invites**: Accept every direct Matrix room invite with `true`, none with `false` or `[]`, or exact and wildcard inviter Matrix user IDs from a list (default: `true`)
 - **markdown**: Per-agent override for markdown formatting (default: inherits from `defaults.markdown`; `null` means inherit)
 - **learning**: Enable Agno Learning for this agent (default: inherits from `defaults.learning`, which defaults to `true`)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
@@ -186,20 +187,21 @@ agents:
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override, inherits a default of `false`, and can invalidate Anthropic/Vertex Claude prompt caches when enabled)
 - **compaction**: Optional per-agent required-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, `timeout_seconds`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed.
-Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
+Automatic text compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices; crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
 `replay_window_tokens` can cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 If the active model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Each primary, retry, and fallback summary request uses `timeout_seconds`, which defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
-Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
-With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
+Text compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes text compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 Set `enabled: false` in defaults or the agent override to disable automatic pre-reply compaction.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
-Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
+Compaction moves the oldest runs into the conversation's compaction archive and replays them through `session.summary`, while only recent raw runs remain in `session.runs`.
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
+- **max_tool_calls_per_turn**: Max tool calls one turn may execute (per-agent override of `defaults.max_tool_calls_per_turn`, 1000); later calls return a tool error, and the turn ends with its text so far after this many plus two model requests
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
 - **worker_scope**: Worker runtime reuse mode for routed tools: `shared`, `user`, or `user_agent`
@@ -226,9 +228,11 @@ teams:
     agents: [research, code]
     mode: coordinate  # "coordinate" or "collaborate"
     model: "default"  # Optional model override
+    accept_invites: true  # Accept all, none, or matching inviter ID patterns
     num_history_runs: 8  # Optional team-scoped replay policy
     num_history_messages: null  # Optional; mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6  # Optional replay trimming for tool calls
+    max_tool_calls_per_turn: 200  # Optional coordinator tool-call budget per turn, delegations included
     compaction:  # Optional team-scoped required-compaction overrides
       # Soft thresholds do not compact by themselves while history still fits.
       enabled: true
@@ -241,24 +245,14 @@ teams:
 
 - **coordinate**: A lead agent orchestrates the others
 - **collaborate**: All members respond in parallel with a consensus summary
+- **accept_invites**: Accept every direct Matrix room invite with `true`, none with `false` or `[]`, or exact and wildcard inviter Matrix user IDs from a list
 - **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
 - **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
+- **max_tool_calls_per_turn**: Optional cap on the coordinator's own tool calls per turn, delegations included; members keep their own budgets
 - **compaction**: Optional team-owned required-compaction overrides for the shared team scope
 
 Named teams use these explicit team settings for replay and compaction when provided.
 Dynamic teams have no named config block, so they inherit replay and compaction settings from `defaults`.
-
-## Cultures Configuration
-
-Cultures define shared principles applied to groups of agents:
-
-```yaml
-cultures:
-  engineering:
-    description: "Follow clean code principles and write tests"
-    agents: [code, data_analyst]
-    mode: automatic  # "automatic", "agentic", or "manual"
-```
 
 ## Knowledge Bases Configuration
 
@@ -297,7 +291,7 @@ voice:
   visible_router_echo: true  # Show STT placeholder or direct fallback when STT is disabled
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
     # api_key: null  # Optional API key for STT service
     # host: null  # Optional host URL for self-hosted STT
   intelligence:
@@ -306,45 +300,47 @@ voice:
 
 ## Authorization Configuration
 
-Fine-grained access control for rooms and agents:
+MindRoom separates platform, room, responder, and credential authority:
 
 ```yaml
-authorization:
-  default_room_access: false
-  global_users:
+administrators:
+  - "@owner:example.com"
+room_defaults:
+  join_policy: invite
+  listed: false
+  encrypted: false
+  invite_users:
     - "@owner:example.com"
-  room_permissions:
-    dev: ["@developer:example.com"]
+  admins: []
+rooms:
+  dev:
+    invite_users:
+      - "@developer:example.com"
+    admins: []
+agents:
+  code:
+    display_name: Code
+    rooms: [dev]
+    access:
+      current_room_members: false
+      members_of_rooms: [dev]
+      users: []
+    credential_managers:
+      - "@owner:example.com"
+authorization:
+  config_command_enabled: false
   aliases:
     "@alice:example.com": ["@telegram_123:example.com"]
-  agent_reply_permissions:
-    "*":
-      - "@owner:example.com"
-    code:
-      users:
-        - "@operator:example.com"
-      joined_rooms:
-        - dev
 ```
 
-- **global_users**: Users with access to all rooms
-- **room_permissions**: Per-room user allowlists
+- **administrators**: Concrete Matrix users with platform and credential authority plus responder-policy bypass
+- **room_defaults** and **rooms**: Desired join policy, visibility, encryption, invitation roster, and Matrix admins
+- **access**: Per-responder conversation access through static users or authoritative room membership
+- **credential_managers**: Concrete Matrix users who may manage one agent's credentials and OAuth connections
 - **aliases**: Map canonical Matrix user IDs to bridge aliases
-- **agent_reply_permissions**: Per-agent/team reply policies using the user-list shorthand or structured `users` and managed-room `joined_rooms` grants (`*` applies only when no explicit entity policy exists)
 
-## Matrix Room Access Configuration
-
-Control how managed rooms are created and accessed:
-
-```yaml
-matrix_room_access:
-  mode: single_user_private  # "single_user_private" or "multi_user"
-  multi_user_join_rule: public  # "public" or "knock" (for multi_user mode)
-  publish_to_room_directory: false
-  invite_only_rooms: []  # Room keys that stay invite-only even in multi_user mode
-  reconcile_existing_rooms: false  # Reconcile existing rooms on startup
-  room_admins: []  # Matrix user IDs granted admin power (100) in every managed room
-```
+Retired access fields in a monolithic configuration are migrated automatically when the file loads.
+Access migration fails without writing or creating a backup when any `!include` is present.
 
 ## Matrix Space Configuration
 
@@ -356,11 +352,8 @@ matrix_space:
   name: "MindRoom"  # Display name for the root Space
 ```
 
-Concrete Matrix users in `authorization.global_users` receive root Space admin power.
-The configured `mindroom_user` also receives root Space admin power when the internal account exists.
-Room-specific `authorization.room_permissions` users do not become root Space admins unless they are also global users.
-Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
-Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Managed-room `invite_users` are invited to the root Space without receiving root Space admin power.
+The runtime preserves existing Space admins without adding human admins; managing Space children in a Matrix client requires sufficient existing Matrix power in that Space.
 
 ## Defaults Configuration
 
@@ -391,12 +384,13 @@ defaults:
   # num_history_runs: null  # Default: all
   # num_history_messages: null  # Mutually exclusive with num_history_runs
   # max_tool_calls_from_history: null  # Default: no limit
+  # max_tool_calls_per_turn: 1000  # Default: 1000 tool calls per agent or team turn
   # worker_tools: null  # Default: use built-in routing policy
   # worker_scope: null  # Default: no worker scoping
 ```
 
 Automatic thread summaries use `defaults.thread_summary_temperature` when the selected provider supports runtime temperature overrides.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
+MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.
 When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
 The next scheduled automatic summary refresh also returns one to three tags when the thread has no existing tags, whether the prior summary was automatic or manual.
 Initial tags therefore use the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
@@ -459,7 +453,7 @@ Below is a representative selection:
 ### Research & Information Tools
 - **arxiv** - Search academic papers
 - **duckduckgo** - Web search
-- **googlesearch** - Google search (requires API key)
+- **googlesearch** - Search through DDGS (no API key required).
 - **tavily** - AI-powered search (requires API key)
 - **exa** - Neural search API (requires API key)
 - **wikipedia** - Encyclopedia lookup
@@ -481,14 +475,14 @@ Below is a representative selection:
 - **slack** - Slack messaging (requires bot token)
 - **discord** - Discord messaging (requires bot token)
 - **matrix_message** - Send messages to other Matrix rooms
+- **thread_move** - Move the current Matrix thread into another room with `move_thread`
 - **thread_summary** - Write or update a one-line Matrix thread summary with `set_thread_summary`
 - **thread_model** - Show, switch, or reset the model override for the current Matrix thread (applies from the next message)
 
 ### AI & Generation Tools
-- **dalle** - Generate images with DALL-E
+- **openai** - Generate images with GPT Image 2.5 Sunburst
 - **gemini** - Google Gemini multimodal capabilities
 - **claude_agent** - Spawn Claude sub-agents
-- **subagents** - Delegate tasks to other MindRoom agents
 
 ### Productivity Tools
 - **scheduler** - Schedule recurring tasks (included by default)
@@ -498,13 +492,14 @@ Below is a representative selection:
 - **google_docs** - Google Docs creation, reading, and text editing (requires Google OAuth)
 - **google_drive** - Google Drive file reading and management (requires Google OAuth)
 - **google_sheets** - Spreadsheet operations (requires Google OAuth)
+- **google_tasks** - Google Tasks listing, creation, updates, and completion (requires Google OAuth)
 - **homeassistant** - Home Assistant device control (requires OAuth or long-lived access token)
 - **spotify** - Spotify playback and library (requires OAuth)
 - **todoist** - Task management (requires API key)
 - **notion** - Notion workspace integration (requires API key)
 
 ### Special Tool Bundles
-- **openclaw_compat** - Convenience bundle that expands to shell, coding, duckduckgo, website, browser, scheduler, subagents, and matrix_message, which also implies attachments and matrix_room through `IMPLIED_TOOLS`.
+- **openclaw_compat** - Convenience bundle that expands to shell, coding, duckduckgo, website, browser, scheduler, and matrix_message, which also implies attachments and matrix_room through `IMPLIED_TOOLS`.
 
 ## Example Agent Configurations
 
@@ -602,7 +597,6 @@ To interact with an agent:
 Some tools need additional setup:
 
 ### Tools requiring API keys:
-- **googlesearch** - Set up Google API credentials
 - **tavily** - Get API key from Tavily
 - **exa** - Get API key from Exa
 - **telegram** - Create a Telegram bot and get token
@@ -610,7 +604,7 @@ Some tools need additional setup:
 
 ### Tools requiring OAuth or credentials:
 - **github** - GitHub App user OAuth, with an explicit access token or `GITHUB_ACCESS_TOKEN` as a higher-precedence alternative
-- **gmail**, **google_calendar**, **google_docs**, **google_drive**, **google_sheets** - Google OAuth
+- **gmail**, **google_calendar**, **google_docs**, **google_drive**, **google_sheets**, **google_tasks** - Google OAuth
 - **homeassistant** - Home Assistant OAuth or long-lived access token
 - **spotify** - Manually supplied Spotify OAuth access token
 
@@ -645,11 +639,11 @@ memory:
 models:
   default:
     provider: "ollama"
-    id: "devstral:24b"
+    id: "devstral-small-2:24b"
 
   smart:
     provider: "anthropic"
-    id: "claude-sonnet-5"
+    id: "claude-sonnet-5-5"
 
 # Agent configurations
 agents:
@@ -671,6 +665,7 @@ teams:
     role: "Collaborative research"
     agents: [assistant]
     mode: coordinate
+    accept_invites: true
 
 # Defaults
 defaults:
@@ -687,23 +682,22 @@ router:
   model: "default"
   accept_invites: true
 
-# Managed room access
-matrix_room_access:
-  mode: single_user_private
-  room_admins:
+# Access
+administrators:
+  - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+room_defaults:
+  join_policy: invite
+  invite_users:
     - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  admins: []
 
 # Timezone
 timezone: "America/Los_Angeles"
 
-# Authorization
+# Non-overlapping authorization features
 authorization:
-  default_room_access: false
-  global_users:
-    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
-  agent_reply_permissions:
-    "*":
-      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  config_command_enabled: false
+  aliases: {}
 ```
 
 ## Troubleshooting

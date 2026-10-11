@@ -8,7 +8,7 @@ argument-hint: [file_or_directory]
 
 ## CRITICAL: Scope Analysis
 **Current feature diff from main:**
-!`git diff origin/main`
+!`git diff --merge-base origin/main`
 
 ## ⚠️ STRICT SCOPE LIMITATION ⚠️
 **ONLY modify code that is part of the current feature shown in the diff above!**
@@ -18,14 +18,14 @@ argument-hint: [file_or_directory]
 - Leave all other code untouched, even if it has cruft
 
 ## Review Target
-Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy from CLAUDE.md:
+Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy from AGENTS.md:
 
 ## MANDATORY Principles to Enforce:
 
-### 1. NO Backward Compatibility
-- **This project has ZERO users** - break anything that needs breaking
-- Remove ALL fallback code paths
-- Delete compatibility shims, version checks, deprecated methods
+### 1. Remove Obsolete Compatibility
+- Remove unjustified fallback paths, compatibility shims, version checks, and deprecated methods
+- Preserve required boundaries under the [Legacy Compatibility Policy](../../AGENTS.md#legacy-compatibility-policy) and [Agno Compatibility Policy](../../AGENTS.md#agno-compatibility-policy)
+- Check documented provenance, removal criteria, and regression coverage before deleting a boundary; remove Agno workarounds only when the relevant behavioral tests pass without them
 - One way to do things, not multiple
 
 ### 2. Radical Simplicity
@@ -35,7 +35,8 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 - **No defensive programming**: Assume correct usage - no redundant checks
 
 ### 3. Code Hygiene
-- **Imports at the top**: NEVER in functions (except circular import fixes)
+- **Imports at the top**: Function imports may avoid cycles or defer heavy/optional dependencies until first use, as required by [AGENTS.md](../../AGENTS.md#1-core-philosophy)
+- Keep deferred imports explicit (`from x import Y`) with `# noqa: PLC0415` where needed, and preserve the `tests/test_import_graph.py` contract
 - **No unnecessary try-except**: Only catch what can actually fail
 - **Remove unused code**: Functions, imports, variables - delete ruthlessly
 - **No premature abstraction**: Concrete implementations first
@@ -43,7 +44,7 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 
 ## Check for Common Cruft:
 
-1. **Fallback patterns to DELETE**:
+1. **Unjustified fallback patterns to DELETE** (subject to the compatibility policies above):
    - `if x else default_fallback` when x should always exist
    - `try/except: pass` hiding real issues
    - Multiple ways to configure the same thing
@@ -62,15 +63,15 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 
 ## Action Items (ONLY for files in the current diff):
 
-1. **Check scope first** - Is this file in `git diff origin/main`? If NO, STOP.
-2. Read and apply ALL principles from CLAUDE.md
+1. **Check scope first** - Is this file in `git diff --merge-base origin/main`? If NO, STOP.
+2. Read and apply ALL principles from AGENTS.md
 3. Identify cruft ONLY in the current feature's code
 4. Propose deletions, not additions
 5. Simplify complex patterns to basic functions
 6. Replace class hierarchies with simple dataclasses
-7. Remove ALL backward compatibility code IN THE FEATURE
+7. Remove obsolete or unjustified compatibility code IN THE FEATURE under the policies above
 8. Delete unused imports, functions, variables IN THE FEATURE
-9. Ensure imports are at file top (not in functions)
+9. Keep imports at file top except for the circular-import and heavy/optional-dependency cases above
 
 Remember:
 - **This codebase has NO users yet**. Be ruthless with NEW code.

@@ -5,6 +5,9 @@ decrypted to-device events), reconciles the room's call membership state,
 and starts or stops one ``CallSession`` per room. Reconciliation always
 re-reads the room state from the homeserver, both on call events and after
 each sync-loop start, so a bot recovers calls already active at startup.
+Call, membership, and frame-key events and membership expiries only request a
+background reconcile, coalesced per room, so floods of them neither hold the
+room's event lane nor multiply full state reads.
 """
 
 from __future__ import annotations
@@ -13,22 +16,37 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from datetime import UTC, datetime
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import aiohttp
 import httpx
 import nio
+from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.voice import normalize_speech_base_url
-from mindroom.credentials_sync import get_api_key_for_service
+from mindroom.credentials.sync import get_api_key_for_service
+from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+from mindroom.matrix.olm_to_device import authenticated_sender_is_current
+from mindroom.matrix.room_membership import cached_joined_member_ids
+from mindroom.matrix_rtc.call_origin import (
+    AGENT_CALL_STATE_EVENT_TYPE,
+    CALL_BRIEF_TOKEN_BUDGET,
+    CallOriginContext,
+    build_call_brief,
+    build_call_handoff_note,
+    member_label,
+    parse_call_origin,
+    resolve_call_origin_context,
+)
 from mindroom.matrix_rtc.call_session import (
     CallJoinError,
     CallSession,
@@ -36,7 +54,14 @@ from mindroom.matrix_rtc.call_session import (
     CallStartRevokedError,
     required_device_id,
 )
-from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
+from mindroom.matrix_rtc.call_tools import (
+    CallAgentTooling,
+    build_call_tools,
+    matrix_message_available_during_call,
+    record_call_token_usage,
+    record_call_voice_usage,
+)
+from mindroom.matrix_rtc.call_writeback import format_call_writeback, post_call_writeback
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -47,15 +72,18 @@ from mindroom.matrix_rtc.events import (
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url, request_sfu_grant
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
+from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
+    LiveVoiceAgentOptions,
     RealtimeVoiceBridge,
     SpeechServiceOptions,
     VoiceAgentOptions,
     matrix_calls_dependencies_available,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.response_admission import (
     ResponseAdmissionGate,
@@ -63,20 +91,22 @@ from mindroom.response_admission import (
     admitted_response_decision,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.token_budget import approximate_o200k_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from collections.abc import Set as AbstractSet
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.config.calls import CallProfile, CascadedCallProfile, RealtimeCallProfile
+    from mindroom.config.calls import CallProfile, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix_rtc.call_origin import CallOrigin
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
     from mindroom.matrix_rtc.focus import SfuGrant
     from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
-    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
 
 logger = get_logger(__name__)
 
@@ -89,10 +119,18 @@ def _default_cascaded_bridge_factory(local_identity: str, e2ee_enabled: bool) ->
     return CascadedVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
 
 
+def _default_live_bridge_factory(local_identity: str, e2ee_enabled: bool) -> LiveVoiceBridge:
+    return LiveVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
+
+
 _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
 _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
+_RECONCILE_MIN_INTERVAL_S = 1.0
+# Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
+_ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
+_CALL_WRITEBACK_TIMEOUT_S = 30.0
 _OPENAI_SPEECH_BASE_URL = "https://api.openai.com/v1"
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
@@ -103,6 +141,58 @@ _VOICE_STYLE_ADDENDUM = (
     "aloud: keep responses short, conversational, and natural, and never use markdown, "
     "lists, or other written formatting."
 )
+
+_LIVE_VOICE_INSTRUCTIONS = (
+    "You are speaking as this agent in a live voice call. Use the identity, instructions, "
+    "and context above. Speak briefly and naturally, without markdown. "
+    "Answer directly when the answer is already in the supplied context or conversation. "
+    "Delegate requests needing tools, research, additional memory, or actions to the agent; "
+    "it executes the tool workflows described above. Relay its answer conversationally. Never claim to have "
+    "checked information or completed work until the agent returns the result."
+)
+_LIVE_INSTRUCTION_TOKEN_LIMIT = 16_000
+_LIVE_MIN_BRIEF_TOKENS = 300
+_LIVE_OVERSIZED_INSTRUCTIONS = (
+    "The agent's full caller-bound instructions and context are intentionally held by the delegated agent, "
+    "not this voice model. Delegate every substantive user request to the agent, including questions, requests "
+    "about identity or preferences, research, memory, tools, and actions. Do not answer substantive requests from "
+    "your own knowledge or infer omitted instructions. Relay only the agent's returned answer, briefly and naturally, "
+    "without markdown. Never claim to have checked information or completed work until the agent returns the result."
+)
+
+
+def _build_live_instructions(
+    agent_system_prompt: str,
+    *,
+    agent_display_name: str,
+    origin_context: CallOriginContext | None = None,
+) -> str:
+    """Use full context when it fits, otherwise require full-context delegation."""
+    suffix = f"\n\n{_LIVE_VOICE_INSTRUCTIONS}"
+    complete = f"{agent_system_prompt}{suffix}"
+    complete_tokens = approximate_o200k_tokens(complete)
+    if complete_tokens <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+        # The 8 tokens cover the newlines joining the brief to the prompt.
+        remaining = min(CALL_BRIEF_TOKEN_BUDGET, _LIVE_INSTRUCTION_TOKEN_LIMIT - complete_tokens - 8)
+        if origin_context is not None and remaining >= _LIVE_MIN_BRIEF_TOKENS:
+            brief = build_call_brief(origin_context, token_budget=remaining)
+            if brief:
+                return f"{agent_system_prompt}\n\n{brief}{suffix}"
+        return complete
+
+    bounded = (
+        f"You are speaking as {agent_display_name}, the configured agent in a live voice call. "
+        f"{_LIVE_OVERSIZED_INSTRUCTIONS}"
+    )
+    if approximate_o200k_tokens(bounded) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+        return bounded
+    return f"You are the configured agent in a live voice call. {_LIVE_OVERSIZED_INSTRUCTIONS}"
+
+
+@dataclass(frozen=True)
+class _PendingFrameKey:
+    received: ReceivedFrameKey
+    event: AuthenticatedToDeviceEvent
 
 
 _JoinResult = Literal["joined", "retry", "skip"]
@@ -122,8 +212,16 @@ class _LogicalCallState:
     """State that survives media-session reconnects for one logical call."""
 
     requester_id: str
-    cascaded_session_id: str | None
+    agent_session_id: str
     join_blocked: bool = False
+
+
+@dataclass(frozen=True)
+class _RoomCallState:
+    """One room-state read: current remote call members and the agent-call state events."""
+
+    members: list[CallMember]
+    agent_call_events: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True)
@@ -134,9 +232,21 @@ class _StartingCall:
     task: asyncio.Task[None]
 
 
-def _build_call_instructions(chat_system_prompt: str) -> str:
-    """Append voice-specific delivery guidance to the chat system prompt."""
-    return f"{chat_system_prompt}\n\n{_VOICE_STYLE_ADDENDUM}"
+def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") -> str:
+    """Append the origin brief and voice delivery guidance to the chat system prompt."""
+    parts = [chat_system_prompt, origin_brief, _VOICE_STYLE_ADDENDUM]
+    return "\n\n".join(part for part in parts if part)
+
+
+def preload_matrix_call_dependencies(config: Config) -> None:
+    """Load optional call SDKs before bots start syncing."""
+    if not config.calls.enabled or not matrix_calls_dependencies_available():
+        return
+    # LiveKit registers plugins on the main thread, so this import must not be offloaded.
+    try:
+        from livekit.plugins import openai  # noqa: F401, PLC0415
+    except Exception:
+        logger.warning("calls_dependency_preload_failed", exc_info=True)
 
 
 def maybe_build_call_manager(
@@ -203,8 +313,13 @@ class CallManager:
         self._client = client
         self._runtime_paths = runtime_paths
         self._ssl_verify = ssl_verify
-        self._bridge_factory = bridge_factory or (
-            _default_cascaded_bridge_factory if self._call_config.backend == "cascaded" else _default_bridge_factory
+        self._bridge_factory = (
+            bridge_factory
+            or {
+                "realtime": _default_bridge_factory,
+                "cascaded": _default_cascaded_bridge_factory,
+                "live": _default_live_bridge_factory,
+            }[self._call_config.backend]
         )
         self._tool_support = tool_support
         self._get_invited_rooms_by_agent = get_invited_rooms_by_agent
@@ -215,19 +330,29 @@ class CallManager:
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
         self._starting_calls: dict[str, _StartingCall] = {}
-        self._pending_keys: dict[str, dict[tuple[str, str, int], ReceivedFrameKey]] = {}
+        self._joining_requesters: dict[str, str] = {}
+        self._pending_keys: dict[str, dict[tuple[str, str, int], _PendingFrameKey]] = {}
         self._observed_rooms: dict[str, nio.MatrixRoom] = {}
         self._departed_rooms: set[str] = set()
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._reconcile_requests: dict[str, nio.MatrixRoom] = {}
+        self._reconcile_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_attempts: dict[str, int] = {}
         self._logical_calls: dict[str, _LogicalCallState] = {}
         self._expiry_handles: dict[str, asyncio.TimerHandle] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutting_down = False
 
+    @property
+    def active_call_requesters(self) -> tuple[str, ...]:
+        """Return the requester of each call this agent has joined or is joining."""
+        sessions = {room_id: starting.session for room_id, starting in self._starting_calls.items()} | self._sessions
+        requesters = self._joining_requesters | {room_id: session.requester_id for room_id, session in sessions.items()}
+        return tuple(requesters.values())
+
     def update_config(self, config: Config) -> None:
-        """Replace the live config used by authorization-only hot reloads."""
+        """Adopt a reloaded config for authorization checks and for calls started after this point."""
         self._config = config
         self._call_config = config.calls.resolve_agent_config(self._agent_name)
         if self._shutting_down:
@@ -241,10 +366,13 @@ class CallManager:
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""
-        if event.type not in _CALL_EVENT_TYPES or self._shutting_down or not self._is_configured_call_room(room):
+        if (
+            event.type not in _CALL_EVENT_TYPES
+            or self._shutting_down
+            or not self._is_configured_call_room(room, call_event=event)
+        ):
             return
-        self._observed_rooms[room.room_id] = room
-        await self._reconcile(room)
+        self._request_reconcile(room)
 
     async def on_room_membership_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Reconcile calls when a user's underlying room membership changes."""
@@ -258,10 +386,10 @@ class CallManager:
             return
         if event.state_key == self._client.user_id and event.membership == "join":
             self._departed_rooms.discard(room.room_id)
-        if not self._is_configured_call_room(room):
+        # Display name and avatar edits keep the membership, so the call roster cannot change.
+        if event.membership == event.prev_membership or not self._is_configured_call_room(room):
             return
-        self._observed_rooms[room.room_id] = room
-        await self._reconcile(room)
+        self._request_reconcile(room)
 
     async def on_sync_room_membership(
         self,
@@ -308,7 +436,7 @@ class CallManager:
             logger.warning(
                 "call_frame_key_rejected",
                 sender=event.sender,
-                authenticated_device_id=event.authenticated_device_id,
+                authenticated_device_id=event.authenticated_sender.device_id,
                 reason="invalid_matrixrtc_payload",
             )
             return
@@ -350,16 +478,21 @@ class CallManager:
         session = self._sessions.get(room_id)
         if session is not None and session.on_key_received(received):
             return
-        self._queue_pending_key(room_id, received)
+        self._queue_pending_key(room_id, received, event)
         room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
         if room is not None:
-            await self._reconcile(room)
+            self._request_reconcile(room)
 
-    async def reconcile_joined_rooms(self) -> None:
-        """Reconcile configured calls after a successful Matrix sync response."""
+    async def reconcile_joined_rooms(self, room_ids: AbstractSet[str] | None = None) -> None:
+        """Reconcile all configured calls, or only the requested joined rooms."""
         if self._shutting_down:
             return
-        rooms = [room for room in self._client.rooms.values() if self._is_configured_call_room(room)]
+        candidates = (
+            self._client.rooms.values()
+            if room_ids is None
+            else (room for room_id in room_ids if (room := self._client.rooms.get(room_id)) is not None)
+        )
+        rooms = [room for room in candidates if self._is_configured_call_room(room)]
         self._observed_rooms.update((room.room_id, room) for room in rooms)
         await asyncio.gather(*(self._reconcile(room) for room in rooms))
 
@@ -426,6 +559,8 @@ class CallManager:
         self._starting_calls.clear()
         background_tasks = [*self._retry_tasks.values(), *self._background_tasks]
         self._retry_tasks.clear()
+        self._reconcile_requests.clear()
+        self._reconcile_tasks.clear()
         self._background_tasks.clear()
         self._retry_attempts.clear()
         self._logical_calls.clear()
@@ -449,6 +584,31 @@ class CallManager:
         for session in sessions:
             await self._stop_session(session, event="call_session_shutdown_failed")
 
+    def _request_reconcile(self, room: nio.MatrixRoom) -> None:
+        """Run at most one background reconcile per room, with the latest requested room snapshot.
+
+        The event that requests it settles at once, and requests arriving while a reconcile runs or
+        within the minimum interval after it share one more state read.
+        """
+        room_id = room.room_id
+        self._observed_rooms[room_id] = room
+        self._reconcile_requests[room_id] = room
+        if room_id in self._reconcile_tasks:
+            return
+        task = asyncio.create_task(self._run_reconcile_requests(room_id), name=f"matrix_rtc_reconcile_{room_id}")
+        self._reconcile_tasks[room_id] = task
+        self._track_background_task(task, event="call_reconcile_failed", room_id=room_id)
+
+    async def _run_reconcile_requests(self, room_id: str) -> None:
+        try:
+            while (room := self._reconcile_requests.pop(room_id, None)) is not None:
+                await self._reconcile(room)
+                if self._shutting_down:
+                    return
+                await asyncio.sleep(_RECONCILE_MIN_INTERVAL_S)
+        finally:
+            self._reconcile_tasks.pop(room_id, None)
+
     async def _reconcile(self, room: nio.MatrixRoom, *, retrying: bool = False) -> None:
         if room.room_id in self._departed_rooms or not self._is_configured_call_room(room):
             return
@@ -467,14 +627,20 @@ class CallManager:
                         or not self._is_configured_call_room(room)
                     ):
                         return
-                    members = await self._fetch_remote_members(room_id)
-                    if members is None:
+                    state = await self._fetch_room_call_state(room_id)
+                    if state is None:
                         # Transient state-fetch failure: keep any active session alive
                         # and retry even if no further call event arrives.
                         self._schedule_reconcile_retry(room)
                         return
+                    members = state.members
                     self._schedule_expiry_reconcile(room, members)
-                    await self._apply_reconciled_members(room, members, retrying=retrying)
+                    await self._apply_reconciled_members(
+                        room,
+                        members,
+                        retrying=retrying,
+                        agent_call_events=state.agent_call_events,
+                    )
         except ResponseAdmissionRefusedError:
             logger.info(
                 "call_reconcile_refused_after_runtime_replacement",
@@ -488,6 +654,7 @@ class CallManager:
         members: list[CallMember],
         *,
         retrying: bool = False,
+        agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Apply one authoritative room/call roster to the active session."""
         room_id = room.room_id
@@ -512,12 +679,12 @@ class CallManager:
             self._clear_logical_call(room_id)
             logical_call = self._start_logical_call(room_id, requester_id)
         if session is None:
-            await self._join_if_populated(room, members, retrying=retrying)
+            await self._join_if_populated(room, members, retrying=retrying, agent_call_events=agent_call_events)
             return
         if session.requester_id != requester_id:
             self._sessions.pop(room_id, None)
             await self._stop_session(session)
-            await self._join_if_populated(room, members, retrying=retrying)
+            await self._join_if_populated(room, members, retrying=retrying, agent_call_events=agent_call_events)
             return
         await self._update_session_members(room, session, members)
 
@@ -527,6 +694,7 @@ class CallManager:
         members: list[CallMember],
         *,
         retrying: bool = False,
+        agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Join a populated call or finish a successful empty reconciliation."""
         if not members:
@@ -535,7 +703,16 @@ class CallManager:
         logical_call = self._logical_calls[room.room_id]
         if logical_call.join_blocked or (room.room_id in self._retry_attempts and not retrying):
             return
-        result = await self._join(room, members)
+        if self._response_admission_gate.closed:
+            # A forced replacement may have planned this agent as idle; join once it publishes its config.
+            self._schedule_reconcile_retry(room)
+            return
+        # Count the call as active before tool materialization captures the current config.
+        self._joining_requesters[room.room_id] = members[0].user_id
+        try:
+            result = await self._join(room, members, agent_call_events=agent_call_events)
+        finally:
+            self._joining_requesters.pop(room.room_id, None)
         if result == "joined":
             self._clear_reconcile_retry(room.room_id)
         elif result == "retry":
@@ -561,7 +738,7 @@ class CallManager:
             self._replay_pending_keys(room.room_id, session)
             self._clear_reconcile_retry(room.room_id)
 
-    def _is_configured_call_room(self, room: nio.MatrixRoom) -> bool:
+    def _is_configured_call_room(self, room: nio.MatrixRoom, *, call_event: nio.UnknownEvent | None = None) -> bool:
         """Return whether this agent is configured to join calls in ``room``."""
         room_alias = room.canonical_alias
         room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
@@ -574,9 +751,17 @@ class CallManager:
                 invited_rooms_by_agent=self._get_invited_rooms_by_agent(),
             )
         except ValueError as error:
-            logger.warning("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
+            log = logger.warning if self._has_live_remote_call_signal(room, call_event) else logger.debug
+            log("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
             return False
         return configured_agent == self._agent_name
+
+    def _has_live_remote_call_signal(self, room: nio.MatrixRoom, event: nio.UnknownEvent | None) -> bool:
+        """Check delivered call state without fetching idle rooms just for diagnostics."""
+        member = parse_membership_event(event.source) if event is not None else None
+        if member is None or member.is_expired(self._clock_ms()) or member.user_id == self._client.user_id:
+            return False
+        return member.user_id in cached_joined_member_ids(room)
 
     def _is_configured_call_room_id(self, room_id: str) -> bool:
         """Return whether this agent is configured to join calls in ``room_id``."""
@@ -598,30 +783,35 @@ class CallManager:
             )
         )
 
-    def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey) -> None:
+    def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey, event: AuthenticatedToDeviceEvent) -> None:
         """Retain a bounded, deduplicated key set while a session is starting."""
         pending = self._pending_keys.setdefault(room_id, {})
         cutoff = received.received_at_ms - _PENDING_KEY_TTL_MS
         for identity, queued in list(pending.items()):
-            if queued.received_at_ms < cutoff:
+            if queued.received.received_at_ms < cutoff:
                 pending.pop(identity)
         identity = (received.user_id, received.claimed_device_id, received.key_index)
         pending.pop(identity, None)
         if len(pending) >= _MAX_PENDING_KEYS_PER_ROOM:
             pending.pop(next(iter(pending)))
-        pending[identity] = received
+        pending[identity] = _PendingFrameKey(received, event)
 
     def _replay_pending_keys(self, room_id: str, session: CallSession) -> None:
         """Replay bounded keys after the session receives an authoritative roster."""
         pending = self._pending_keys.get(room_id, {})
         if not pending:
             return
-        retained: dict[tuple[str, str, int], ReceivedFrameKey] = {}
+        retained: dict[tuple[str, str, int], _PendingFrameKey] = {}
         cutoff = self._clock_ms() - _PENDING_KEY_TTL_MS
-        for identity, received in pending.items():
-            if received.received_at_ms < cutoff or session.on_key_received(received):
+        for identity, queued in pending.items():
+            received = queued.received
+            if (
+                received.received_at_ms < cutoff
+                or not authenticated_sender_is_current(self._client, queued.event)
+                or session.on_key_received(received)
+            ):
                 continue
-            retained[identity] = received
+            retained[identity] = queued
             logger.warning(
                 "call_frame_key_waiting_for_membership",
                 room_id=room_id,
@@ -667,8 +857,8 @@ class CallManager:
             return False
         return True
 
-    async def _fetch_remote_members(self, room_id: str) -> list[CallMember] | None:
-        """Current, unexpired call members in the room, excluding ourselves.
+    async def _fetch_room_call_state(self, room_id: str) -> _RoomCallState | None:
+        """Current, unexpired call members in the room, excluding ourselves, and its agent-call state.
 
         Returns ``None`` when the room state could not be read, so callers can
         distinguish "the call is empty" from a transient homeserver error.
@@ -700,9 +890,18 @@ class CallManager:
             if member.user_id == self._client.user_id:
                 continue
             members.append(member)
-        return members
+        agent_call_events = tuple(
+            event for event in response.events if event.get("type") == AGENT_CALL_STATE_EVENT_TYPE
+        )
+        return _RoomCallState(members=members, agent_call_events=agent_call_events)
 
-    async def _join(self, room: nio.MatrixRoom, members: list[CallMember]) -> _JoinResult:  # noqa: C901, PLR0911
+    async def _join(  # noqa: C901, PLR0911
+        self,
+        room: nio.MatrixRoom,
+        members: list[CallMember],
+        *,
+        agent_call_events: tuple[dict[str, Any], ...],
+    ) -> _JoinResult:
         room_id = room.room_id
         logical_call = self._logical_calls[room_id]
         requester_id = members[0].user_id
@@ -720,11 +919,25 @@ class CallManager:
         if service is None:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
             return "skip"
+        # The origin only enriches the call; a slow or broken one must never block it.
+        origin_context = None
+        try:
+            async with asyncio.timeout(_ORIGIN_RESOLUTION_TIMEOUT_S):
+                origin_context = await self._resolve_origin_context(room_id, requester_id, agent_call_events)
+        except TimeoutError:
+            logger.warning(
+                "call_origin_resolution_timed_out",
+                room_id=room_id,
+                agent=self._agent_name,
+                timeout_s=_ORIGIN_RESOLUTION_TIMEOUT_S,
+            )
+        except Exception:
+            logger.warning("call_origin_resolution_failed", room_id=room_id, agent=self._agent_name, exc_info=True)
         try:
             tooling = await self._build_tooling(
                 room_id,
                 requester_id=requester_id,
-                cascaded=self._call_config.backend == "cascaded",
+                origin_context=origin_context,
             )
             transcript = CallTranscript.start(
                 agent_name=self._agent_name,
@@ -763,6 +976,7 @@ class CallManager:
             bridge=bridge,
             backend=backend,
             requester_id=members[0].user_id,
+            origin_context=origin_context,
         )
         try:
             session = CallSession(
@@ -781,9 +995,11 @@ class CallManager:
                         requester_id,
                         logical_call,
                     ),
-                    on_stopped=lambda: transcript.finalize(
-                        config=self._config,
-                        runtime_paths=self._runtime_paths,
+                    on_stopped=lambda: self._finish_call(
+                        transcript,
+                        room_id=room_id,
+                        requester_id=requester_id,
+                        origin_context=origin_context,
                     ),
                     on_failure=lambda message: self._send_call_failure_notice(
                         room_id,
@@ -905,8 +1121,8 @@ class CallManager:
         self._expiry_handles.pop(room.room_id, None)
         if self._shutting_down:
             return
-        task = asyncio.create_task(self._reconcile(room))
-        self._track_background_task(task, event="call_expiry_reconcile_failed", room_id=room.room_id)
+        # Staggered sender-chosen expiries share the coalescer's minimum interval.
+        self._request_reconcile(room)
 
     def _track_background_task(self, task: asyncio.Task[None], *, event: str, room_id: str) -> None:
         self._background_tasks.add(task)
@@ -1003,16 +1219,130 @@ class CallManager:
         except Exception as error:
             logger.warning(event, room_id=session.room_id, error=str(error))
 
+    async def _resolve_origin_context(
+        self,
+        room_id: str,
+        requester_id: str,
+        agent_call_events: tuple[dict[str, Any], ...],
+    ) -> CallOriginContext | None:
+        """Return the validated conversation this call was started from, if any."""
+        origin: CallOrigin | None = parse_call_origin(
+            agent_call_events,
+            requester_id=requester_id,
+            agent_user_id=self._client.user_id,
+        )
+        if origin is None:
+            return None
+        context = self._call_room_context(room_id, requester_id)
+        if context is None:
+            return None
+        return await resolve_call_origin_context(origin, context=context)
+
+    def _call_room_context(self, room_id: str, requester_id: str) -> ToolRuntimeContext | None:
+        """Build the caller's tool context, anchored in the call room rather than the origin."""
+        return self._tool_support.build_context(
+            MessageTarget(
+                room_id=room_id,
+                source_thread_id=None,
+                resolved_thread_id=None,
+                reply_to_event_id=None,
+                session_id=create_session_id(room_id, None),
+            ),
+            user_id=requester_id,
+            agent_name=self._agent_name,
+        )
+
+    async def _finish_call(
+        self,
+        transcript: CallTranscript,
+        *,
+        room_id: str,
+        requester_id: str,
+        origin_context: CallOriginContext | None,
+    ) -> None:
+        """Finalize the transcript, then hand posting it to the origin to a background task.
+
+        Teardown runs under the room lock, sometimes while a config reload keeps
+        response admission closed, so it must never wait for the post.
+        """
+        ended_at = datetime.now(UTC)
+        await transcript.finalize(config=self._config, runtime_paths=self._runtime_paths)
+        if origin_context is None or self._shutting_down:
+            return
+        task = asyncio.create_task(
+            self._post_call_transcript(
+                transcript.spoken_turns,
+                duration_seconds=(ended_at - transcript.started_at).total_seconds(),
+                room_id=room_id,
+                requester_id=requester_id,
+                origin=origin_context.origin,
+            ),
+        )
+        self._track_background_task(task, event="call_writeback_failed", room_id=room_id)
+
+    async def _post_call_transcript(
+        self,
+        turns: tuple[tuple[str, str], ...],
+        *,
+        duration_seconds: float,
+        room_id: str,
+        requester_id: str,
+        origin: CallOrigin,
+    ) -> None:
+        """Post one finished call's transcript once admitted, if the caller can still access the origin."""
+        try:
+            origin_room = self._client.rooms.get(origin.room_id)
+            writeback = format_call_writeback(
+                turns=turns,
+                duration_seconds=duration_seconds,
+                caller_label=member_label(origin_room, requester_id),
+                agent_label=self._config.agents[self._agent_name].display_name,
+            )
+            if writeback is None:
+                return
+            # The timeout starts once admitted: a long config apply holds admission closed and must not eat it.
+            async with (
+                admitted_response_decision(self._response_admission_gate, self._wait_for_admission_or_shutdown),
+                asyncio.timeout(_CALL_WRITEBACK_TIMEOUT_S),
+            ):
+                context = self._call_room_context(room_id, requester_id)
+                if context is None:
+                    return
+                if not await room_access_allowed(context, origin.room_id):
+                    logger.info(
+                        "call_writeback_skipped_access_revoked",
+                        room_id=origin.room_id,
+                        agent=self._agent_name,
+                    )
+                    return
+                await post_call_writeback(context=context, origin=origin, writeback=writeback)
+        except ResponseAdmissionRefusedError:
+            return
+        except TimeoutError:
+            logger.warning(
+                "call_writeback_timed_out",
+                room_id=origin.room_id,
+                agent=self._agent_name,
+                timeout_s=_CALL_WRITEBACK_TIMEOUT_S,
+            )
+        except Exception as error:
+            logger.warning("call_writeback_failed", room_id=origin.room_id, agent=self._agent_name, error=str(error))
+
     async def _build_tooling(
         self,
         room_id: str,
         *,
         requester_id: str,
-        cascaded: bool,
+        origin_context: CallOriginContext | None = None,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
         logical_call = self._logical_calls[room_id]
-        session_id = logical_call.cascaded_session_id if cascaded else None
+        enable_responder = self._call_config.backend in {"cascaded", "live"}
+        active_model_name = None
+        if self._call_config.backend == "live":
+            active_model_name = cast("LiveCallProfile", self._call_config).agent_model
+        elif self._call_config.backend == "cascaded":
+            active_model_name = self._call_config.model
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
@@ -1024,11 +1354,21 @@ class CallManager:
                 room_id,
                 requester_id,
             ),
-            session_id=session_id,
-            enable_responder=cascaded,
-            voice_instructions=_VOICE_STYLE_ADDENDUM if cascaded else None,
-            active_model_name=self._call_config.model if cascaded else None,
+            session_id=logical_call.agent_session_id,
+            enable_responder=enable_responder,
+            voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
+            active_model_name=active_model_name,
+            reconcile_spoken_response=self._call_config.backend != "live",
+            origin_brief=self._call_context_text(origin_context) if enable_responder else None,
         )
+
+    def _call_context_text(self, origin_context: CallOriginContext | None) -> str:
+        """Return the origin brief plus, when the agent can message, where to start longer work."""
+        parts = [build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET) if origin_context else ""]
+        if matrix_message_available_during_call(self._config, self._agent_name):
+            origin = origin_context.origin if origin_context else None
+            parts.append(build_call_handoff_note(origin, agent_name=self._agent_name))
+        return "\n\n".join(part for part in parts if part)
 
     @asynccontextmanager
     async def _admitted_call_requester_operation(
@@ -1053,10 +1393,8 @@ class CallManager:
 
     def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
         """Create the state shared by every media attempt for one caller presence."""
-        session_id = None
-        if self._call_config.backend == "cascaded":
-            session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
-        logical_call = _LogicalCallState(requester_id=requester_id, cascaded_session_id=session_id)
+        session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
+        logical_call = _LogicalCallState(requester_id=requester_id, agent_session_id=session_id)
         self._logical_calls[room_id] = logical_call
         return logical_call
 
@@ -1077,8 +1415,8 @@ class CallManager:
         warn_if_unavailable: bool = True,
     ) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
-        if self._call_config.backend == "realtime":
-            realtime_config = cast("RealtimeCallProfile", self._call_config)
+        if self._call_config.backend in {"realtime", "live"}:
+            realtime_config = cast("RealtimeCallProfile | LiveCallProfile", self._call_config)
             api_key = get_api_key_for_service(
                 realtime_config.credentials_service,
                 self._runtime_paths,
@@ -1120,6 +1458,7 @@ class CallManager:
         bridge: VoiceBridgeLike,
         backend: _ResolvedVoiceBackend,
         requester_id: str,
+        origin_context: CallOriginContext | None = None,
     ) -> CallVoiceAgentOptions:
         """Build selected-backend options with shared transcript hooks."""
 
@@ -1135,12 +1474,51 @@ class CallManager:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
             return VoiceAgentOptions(
-                instructions=_build_call_instructions(tooling.instructions),
+                instructions=_build_call_instructions(tooling.instructions, self._call_context_text(origin_context)),
                 model=realtime_config.model,
                 api_key=backend.realtime_api_key,
                 voice=realtime_config.voice,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
+                on_conversation_turn=transcript.record,
+                on_tools_executed=transcript.record_tool_use,
+                on_session_terminated=on_session_terminated,
+                on_session_error=on_session_error,
+                record_usage=partial(
+                    record_call_token_usage,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                ),
+            )
+        if self._call_config.backend == "live":
+            live_config = cast("LiveCallProfile", self._call_config)
+            get_system_prompt = tooling.get_system_prompt
+            if backend.realtime_api_key is None or tooling.responder is None or get_system_prompt is None:
+                msg = "Live call agent was not fully materialized"
+                raise RuntimeError(msg)
+
+            async def get_live_instructions() -> str:
+                return _build_live_instructions(
+                    await get_system_prompt(),
+                    agent_display_name=self._config.agents[self._agent_name].display_name,
+                    origin_context=origin_context,
+                )
+
+            return LiveVoiceAgentOptions(
+                get_instructions=get_live_instructions,
+                model=live_config.model,
+                api_key=backend.realtime_api_key,
+                voice=live_config.voice,
+                respond=tooling.responder,
+                record_usage=partial(
+                    record_call_voice_usage,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                ),
+                close_responder=tooling.close,
+                greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 on_conversation_turn=transcript.record,
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,

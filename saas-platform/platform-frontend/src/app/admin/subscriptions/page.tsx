@@ -91,62 +91,75 @@ export default function SubscriptionsPage() {
                 </tr>
               </thead>
               <tbody>
-                {subscriptions?.map((subscription) => (
-                  <tr key={subscription.id} className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
-                    <td className="py-3 px-4">
-                      <div>
-                        <div className="font-medium text-gray-900 dark:text-gray-100">
-                          {subscription.accounts?.email || 'No email'}
+                {subscriptions?.map((subscription) => {
+                  const noPlan = subscription.tier === 'free'
+                  return (
+                    <tr key={subscription.id} className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
+                      <td className="py-3 px-4">
+                        <div>
+                          <div className="font-medium text-gray-900 dark:text-gray-100">
+                            {subscription.accounts?.email || 'No email'}
+                          </div>
+                          <div className="text-sm text-gray-500 dark:text-gray-400">
+                            {subscription.accounts?.full_name || '-'}
+                          </div>
                         </div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400">
-                          {subscription.accounts?.full_name || '-'}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className={`font-medium text-gray-900 dark:text-gray-100 ${noPlan ? '' : 'capitalize'}`}>
+                          {noPlan ? 'No plan' : subscription.price_tier || subscription.tier || 'Unknown'}
                         </div>
-                      </div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="font-medium capitalize text-gray-900 dark:text-gray-100">
-                        {subscription.price_tier || subscription.tier || 'Unknown'}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        subscription.status === 'active' ? 'bg-green-100 dark:bg-green-900/20 text-green-800 dark:text-green-400' :
-                        subscription.status === 'canceled' ? 'bg-red-100 dark:bg-red-900/20 text-red-800 dark:text-red-400' :
-                        subscription.status === 'past_due' ? 'bg-yellow-100 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-400' :
-                        'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400'
-                      }`}>
-                        {subscription.status}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className="text-gray-900 dark:text-gray-100">
-                        {formatPrice(subscription.price || 0)}
-                      </span>
-                      <span className="text-gray-500 dark:text-gray-400 text-sm">
-                        /{subscription.billing_period || 'month'}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
-                      {new Date(subscription.created_at).toLocaleDateString()}
-                    </td>
-                    <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
-                      {subscription.current_period_end
-                        ? new Date(subscription.current_period_end).toLocaleDateString()
-                        : '-'
-                      }
-                    </td>
-                    <td className="py-3 px-4">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
-                        onClick={() => alert(`Managing subscription ${subscription.id}`)}
-                      >
-                        Manage
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="py-3 px-4">
+                        {noPlan ? (
+                          <span className="text-gray-500 dark:text-gray-400">—</span>
+                        ) : (
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                            subscription.status === 'active' ? 'bg-green-100 dark:bg-green-900/20 text-green-800 dark:text-green-400' :
+                            subscription.status === 'cancelled' ? 'bg-red-100 dark:bg-red-900/20 text-red-800 dark:text-red-400' :
+                            subscription.status === 'past_due' ? 'bg-yellow-100 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-400' :
+                            'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400'
+                          }`}>
+                            {subscription.status}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        {noPlan ? (
+                          <span className="text-gray-500 dark:text-gray-400">—</span>
+                        ) : (
+                          <>
+                            <span className="text-gray-900 dark:text-gray-100">
+                              {formatPrice(subscription.price || 0)}
+                            </span>
+                            <span className="text-gray-500 dark:text-gray-400 text-sm">
+                              /{subscription.billing_period || 'month'}
+                            </span>
+                          </>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
+                        {new Date(subscription.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
+                        {subscription.current_period_end
+                          ? new Date(subscription.current_period_end).toLocaleDateString()
+                          : '-'
+                        }
+                      </td>
+                      <td className="py-3 px-4">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+                          onClick={() => alert(`Managing subscription ${subscription.id}`)}
+                        >
+                          Manage
+                        </Button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
 

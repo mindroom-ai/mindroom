@@ -21,6 +21,7 @@ class _PluginCheckResult:
     name: str
     tool_names: tuple[str, ...]
     hook_names: tuple[str, ...]
+    automation_names: tuple[str, ...]
     skill_directories: tuple[str, ...]
 
 
@@ -47,7 +48,10 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 runtime_paths,
                 skip_broken_plugins=False,
             ) as loaded_plugins:
-                HookRegistry.from_plugins(loaded_plugins)
+                automations = HookRegistry.from_plugins(loaded_plugins).automations
+                if automations.collisions:
+                    msg = f"Automation names already taken: {', '.join(automations.collisions)}"
+                    raise ValueError(msg)
                 load_oauth_providers(
                     config,
                     runtime_paths,
@@ -69,6 +73,7 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     name=plugin.name,
                     tool_names=tuple(sorted(set(TOOL_METADATA) - original_tool_names)),
                     hook_names=hook_names,
+                    automation_names=tuple(sorted(automations.plugin_definitions)),
                     skill_directories=tuple(
                         sorted(str(skill_directory.relative_to(plugin.root)) for skill_directory in plugin.skill_dirs),
                     ),

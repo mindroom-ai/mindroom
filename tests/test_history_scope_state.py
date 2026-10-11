@@ -6,6 +6,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,31 +20,27 @@ from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 from agno.tools.function import Function
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.agent_storage import create_session_storage, create_state_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
 )
-from mindroom.history.compaction import scope_visible_runs
+from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
-    invalidate_compacted_replay,
-    prune_reintroduced_runs,
     read_scope_seen_event_ids,
     read_scope_state,
-    record_compaction_chunk,
-    seen_event_ids_for_runs,
     set_force_compaction_state,
     update_scope_seen_event_ids,
-    write_scope_state,
 )
 from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
 )
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _agent,
@@ -53,82 +50,71 @@ from tests.history_helpers import (  # noqa: F401
     _session,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
-def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
+    from agno.db.base import BaseDb
+
+
+@pytest.fixture
+def storage(tmp_path: Path) -> Iterator[BaseDb]:
+    """Conversation storage for reading seen ids, which include the compaction archive's."""
+    db = create_state_storage("test_agent", tmp_path / "seen", subdir="sessions", session_table="test_agent_sessions")
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _shared_session(*, is_team: bool) -> AgentSession | TeamSession:
+    if is_team:
+        return TeamSession(
+            session_id="session-1",
+            team_id="test_agent",
+            user_id="@history-owner:localhost",
+            runs=[],
+            created_at=1,
+            updated_at=1,
+        )
+    return AgentSession(
+        session_id="session-1",
+        agent_id="test_agent",
+        user_id="@history-owner:localhost",
+        runs=[],
+        created_at=1,
+        updated_at=1,
+    )
+
+
+def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path, storage: BaseDb) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="team", scope_id="team-123")
     session = _session("session-1")
 
     assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
 
-    assert read_scope_seen_event_ids(session, scope) == {"event-1"}
-
-
-def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    other_scope = HistoryScope(kind="team", scope_id="other-team")
-    session = _session("session-1")
-    session.summary = SessionSummary(summary="contains redacted history")
-    update_scope_seen_event_ids(session, scope, ["redacted-event", "old-event"])
-    update_scope_seen_event_ids(session, other_scope, ["other-event"])
-    write_scope_state(
-        session,
-        scope,
-        HistoryScopeState(
-            last_summary_model="summary-model",
-            compacted_run_ids=("run-1",),
-            force_compact_before_next_run=True,
-        ),
-    )
-    write_scope_state(session, other_scope, HistoryScopeState(last_summary_model="other-model"))
-
-    assert invalidate_compacted_replay(session, scope) is True
-
-    assert session.summary is None
-    assert read_scope_seen_event_ids(session, scope) == set()
-    assert read_scope_seen_event_ids(session, other_scope) == {"other-event"}
-    assert read_scope_state(session, scope) == HistoryScopeState(
-        compacted_run_ids=("run-1",),
-        force_compact_before_next_run=True,
-    )
-    assert read_scope_state(session, other_scope) == HistoryScopeState(last_summary_model="other-model")
-
-    session.runs = [_completed_run("run-1")]
-    assert prune_reintroduced_runs(session, read_scope_state(session, scope)) is True
-    assert session.runs == []
+    assert read_scope_seen_event_ids(storage, session, scope) == {"event-1"}
 
 
 def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session = _session("session-1")
-    state = HistoryScopeState(
-        last_summary_model="summary-model",
-        last_compacted_run_count=3,
-    )
 
-    forced_state = set_force_compaction_state(session, scope, state, force=True)
+    forced_state = set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
 
-    assert forced_state == HistoryScopeState(
-        last_summary_model="summary-model",
-        last_compacted_run_count=3,
-        force_compact_before_next_run=True,
-    )
+    assert forced_state == HistoryScopeState(force_compact_before_next_run=True)
     assert read_scope_state(session, scope) == forced_state
 
     cleared_state = set_force_compaction_state(session, scope, forced_state, force=False)
 
-    assert cleared_state == HistoryScopeState(
-        last_summary_model="summary-model",
-        last_compacted_run_count=3,
-        force_compact_before_next_run=False,
-    )
+    assert cleared_state == HistoryScopeState()
     assert read_scope_state(session, scope) == cleared_state
+    assert session.metadata == {}
 
 
-def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path) -> None:
+def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path, storage: BaseDb) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     run = _completed_run("run-1")
@@ -138,11 +124,11 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
     }
     session = _session("session-1", runs=[run])
 
-    assert read_scope_seen_event_ids(session, scope) == {"question-1", "answer-1"}
+    assert read_scope_seen_event_ids(storage, session, scope) == {"question-1", "answer-1"}
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
-def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
+def test_seen_event_ids_match_model_history_visibility(storage: BaseDb, *, is_team: bool) -> None:
     entity_id = "team-123" if is_team else "test_agent"
     scope = HistoryScope(kind="team" if is_team else "agent", scope_id=entity_id)
 
@@ -179,18 +165,17 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
         session = AgentSession(session_id="session-1", agent_id=entity_id, runs=runs, created_at=1, updated_at=1)
     update_scope_seen_event_ids(session, scope, ["preserved-event"])
 
-    assert read_scope_seen_event_ids(session, scope) == {"completed-event", "preserved-event", "running-event"}
-    assert seen_event_ids_for_runs(runs) == {"completed-event", "running-event"}
+    assert read_scope_seen_event_ids(storage, session, scope) == {"completed-event", "preserved-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
 @pytest.mark.asyncio
-async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
+async def test_shared_session_paused_run_preserves_prompt_roles_until_continuation_completes(
     tmp_path: Path,
     is_team: bool,
 ) -> None:
-    """A fresh Agno runtime must see the persisted system prompt only while continuing a pause."""
+    """A fresh runtime must resume a paused run in a session shared by multiple requesters."""
     config, runtime_paths = _make_config(tmp_path)
     executed: list[list[str]] = []
 
@@ -224,11 +209,13 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
         return entity, model
 
     first_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(first_storage, _shared_session(is_team=is_team))
+
     first, _first_model = runtime(first_storage)
     paused = await first.arun(
         "exercise the tool",
         session_id="session-1",
-        user_id="@user:localhost",
+        user_id="@requester:localhost",
         stream=False,
     )
     assert paused.status is RunStatus.paused
@@ -240,11 +227,14 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
     try:
         session = await resumed.aget_session(
             session_id="session-1",
-            user_id="@user:localhost",
+            user_id="@requester:localhost",
         )
+        assert session is not None
+        assert session.user_id == "@history-owner:localhost"
         persisted = session.get_run(paused.run_id)
         assert persisted is not None
         assert persisted.status == RunStatus.paused
+        assert persisted.user_id == "@requester:localhost"
         assert [message.role for message in persisted.messages or ()][:2] == ["system", "user"]
         requirements = deepcopy(persisted.requirements or [])
         assert len(requirements) == 1
@@ -256,7 +246,7 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
                     run_response=persisted,
                     requirements=requirements,
                     session_id="session-1",
-                    user_id="@user:localhost",
+                    user_id="@requester:localhost",
                     stream=False,
                 )
             else:
@@ -264,7 +254,7 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
                     run_id=paused.run_id,
                     requirements=requirements,
                     session_id="session-1",
-                    user_id="@user:localhost",
+                    user_id="@requester:localhost",
                     stream=False,
                 )
 
@@ -276,10 +266,13 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
 
         completed_session = await resumed.aget_session(
             session_id="session-1",
-            user_id="@user:localhost",
+            user_id="@requester:localhost",
         )
+        assert completed_session is not None
+        assert completed_session.user_id == "@history-owner:localhost"
         completed_run = completed_session.get_run(paused.run_id)
         assert completed_run is not None
+        assert completed_run.user_id == "@requester:localhost"
         assert all(message.role not in {"system", "developer"} for message in completed_run.messages or ())
     finally:
         resumed_storage.close()
@@ -291,13 +284,10 @@ def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     team_scope = HistoryScope(kind="team", scope_id="team-123")
     session = _session("session-1")
 
-    write_scope_state(session, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
-    write_scope_state(session, team_scope, HistoryScopeState(last_summary_model="summary-model"))
+    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
 
     assert read_scope_state(session, agent_scope).force_compact_before_next_run is True
-    assert read_scope_state(session, agent_scope).last_summary_model is None
     assert read_scope_state(session, team_scope).force_compact_before_next_run is False
-    assert read_scope_state(session, team_scope).last_summary_model == "summary-model"
 
 
 def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
@@ -315,7 +305,7 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
 
     assert read_scope_state(session, agent_scope).force_compact_before_next_run is False
 
-    write_scope_state(session, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
 
     assert session.metadata == {
         MINDROOM_COMPACTION_METADATA_KEY: {
@@ -329,7 +319,7 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
     }
 
 
-def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path, storage: BaseDb) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
     team_scope = HistoryScope(kind="team", scope_id="team-123")
@@ -352,32 +342,8 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
     )
     update_scope_seen_event_ids(session, team_scope, ["preserved-team-event"])
 
-    assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
-    assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
-
-
-def test_compaction_progress_preserves_newer_seen_event_ids(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    persisted_session = _session("session-1")
-    working_session = _session("session-1")
-    latest_session = _session("session-1")
-    update_scope_seen_event_ids(working_session, scope, ["compacted-event"])
-    update_scope_seen_event_ids(latest_session, scope, ["newer-event"])
-    storage.upsert_session(latest_session)
-
-    record_compaction_chunk(
-        storage=storage,
-        persisted_session=persisted_session,
-        working_session=working_session,
-        scope=scope,
-        compacted_run_ids=(),
-    )
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert read_scope_seen_event_ids(persisted, scope) == {"compacted-event", "newer-event"}
+    assert read_scope_seen_event_ids(storage, session, agent_scope) == {"agent-event"}
+    assert read_scope_seen_event_ids(storage, session, team_scope) == {"team-event", "preserved-team-event"}
 
 
 @pytest.mark.asyncio
@@ -430,12 +396,12 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    seed_session(storage, session)
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -459,7 +425,8 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    assert read_scope_seen_event_ids(persisted, scope) == {
+    assert persisted.runs == []
+    assert read_scope_seen_event_ids(storage, persisted, scope) == {
         "event-1",
         "event-2",
         "event-3",

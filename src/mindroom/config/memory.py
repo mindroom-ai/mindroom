@@ -6,7 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from mindroom.config.models import EmbedderConfig
+from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.path_globs import validate_safe_relative_pattern
 
 MemoryBackend = Literal["mem0", "file", "none"]
@@ -72,8 +73,18 @@ class _MemoryEmbedderConfig(BaseModel):
 class _MemoryLLMConfig(BaseModel):
     """Memory LLM configuration."""
 
-    provider: str = Field(default="ollama", description="LLM provider (ollama, openai, anthropic)")
-    config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
+    provider: str = Field(default="ollama", description="LLM provider (ollama, openai, openrouter, anthropic)")
+    config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Provider-specific LLM config; may include credentials",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
+
+    @field_validator("config")
+    @classmethod
+    def _normalize_api_key(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Trim ``api_key`` like model keys so a blank one counts as unset."""
+        return normalize_api_key_setting(value, "memory.llm.config.api_key")
 
 
 class _MemoryFileConfig(BaseModel):
@@ -91,6 +102,11 @@ class _MemoryFileConfig(BaseModel):
         default=200,
         ge=1,
         description="Maximum number of lines to preload from MEMORY.md",
+    )
+    max_entrypoint_tokens: int = Field(
+        default=50000,
+        ge=1,
+        description="Maximum estimated tokens (characters / 4) of whole lines to preload from MEMORY.md",
     )
 
 

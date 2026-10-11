@@ -69,6 +69,25 @@ const oauthProviderDisplayName = (
   providerTool?.display_name.replace(/\s+Tool$/, "") ??
   titleFromProviderId(providerId);
 
+// Several tools can share one provider connection, so no single tool's settings can stand for its card.
+const providersSharedByTools = (tools: ToolInfo[]) => {
+  const toolNames = new Set(tools.map((tool) => tool.name));
+  const toolCounts = new Map<string, number>();
+  for (const tool of tools) {
+    if (tool.auth_provider) {
+      toolCounts.set(
+        tool.auth_provider,
+        (toolCounts.get(tool.auth_provider) ?? 0) + 1,
+      );
+    }
+  }
+  return new Set(
+    [...toolCounts]
+      .filter(([providerId, count]) => count > 1 && !toolNames.has(providerId))
+      .map(([providerId]) => providerId),
+  );
+};
+
 const oauthRedirectPlaceholderOrigin = () =>
   new URL(API_BASE_URL || window.location.origin, window.location.origin)
     .origin;
@@ -240,15 +259,18 @@ export function Integrations() {
       const backendToolsByName = new Map<string, ToolInfo>(
         backendTools.map((tool) => [tool.name, tool]),
       );
+      const sharedProviderIds = providersSharedByTools(backendTools);
+      const findProviderTool = (providerId: string) =>
+        sharedProviderIds.has(providerId)
+          ? undefined
+          : backendTools.find((tool) => tool.auth_provider === providerId);
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
         const config = provider.getConfig(scope);
         const providerTool =
           backendToolsByName.get(config.integration.id) ??
-          backendTools.find(
-            (tool) => tool.auth_provider === config.integration.id,
-          );
+          findProviderTool(config.integration.id);
         if (
           hidesSharedOnlyIntegrations &&
           SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)
@@ -283,11 +305,14 @@ export function Integrations() {
             : (status.status ?? config.integration.status),
           connected: fallbackConfigured || status.connected === true,
           status_error: fallbackConfigured ? undefined : status.status_error,
-          helper_text: fallbackConfigured
-            ? providerTool?.helper_text
-            : (status.helper_text ??
-              providerTool?.helper_text ??
-              config.integration.helper_text),
+          helper_text:
+            status.oauth_reset_required === true
+              ? (status.helper_text ?? providerTool?.helper_text)
+              : fallbackConfigured
+                ? providerTool?.helper_text
+                : (status.helper_text ??
+                  providerTool?.helper_text ??
+                  config.integration.helper_text),
           config_service:
             providerTool?.name ??
             status.config_service ??
@@ -306,9 +331,7 @@ export function Integrations() {
           ),
       );
       for (const providerId of dynamicOAuthProviderIds) {
-        const providerTool = backendTools.find(
-          (tool) => tool.auth_provider === providerId,
-        );
+        const providerTool = findProviderTool(providerId);
         const providerDisplayName = oauthProviderDisplayName(
           providerId,
           providerTool,
@@ -354,9 +377,12 @@ export function Integrations() {
             : (status?.status ?? integration.status),
           connected: fallbackConfigured || status?.connected === true,
           status_error: fallbackConfigured ? undefined : status?.status_error,
-          helper_text: fallbackConfigured
-            ? providerTool?.helper_text
-            : (status?.helper_text ?? integration.helper_text),
+          helper_text:
+            status?.oauth_reset_required === true
+              ? (status.helper_text ?? providerTool?.helper_text)
+              : fallbackConfigured
+                ? providerTool?.helper_text
+                : (status?.helper_text ?? integration.helper_text),
           config_service:
             providerTool?.name ??
             status?.config_service ??
@@ -371,7 +397,11 @@ export function Integrations() {
         .filter(
           (tool) =>
             !providerIds.has(tool.name) &&
-            !(tool.auth_provider && providerIds.has(tool.auth_provider)),
+            !(
+              tool.auth_provider &&
+              providerIds.has(tool.auth_provider) &&
+              !sharedProviderIds.has(tool.auth_provider)
+            ),
         )
         .filter(
           (tool) =>
@@ -597,7 +627,11 @@ export function Integrations() {
     }
   };
 
-  const handleDisconnect = async (integration: Integration) => {
+  const runDisconnectOperation = async (
+    integration: Integration,
+    disconnect: () => void | Promise<void>,
+    success?: { title: string; description: string },
+  ) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
         title: "Shared-only dashboard configuration",
@@ -608,44 +642,17 @@ export function Integrations() {
       return;
     }
 
-    const provider = oauthProviderForIntegration(integration);
-    const scope = {
-      agentName: effectiveScopeAgentName,
-      executionScope: selectedExecutionScope,
-    };
-
     setLoading(true);
     try {
-      if (
-        integration.manual_auth_configured !== true &&
-        provider?.getConfig(scope).onDisconnect
-      ) {
-        // Use provider's disconnect method if available
-        await provider.getConfig(scope).onDisconnect!(integration.id);
-      } else {
-        // For generic tools, delete credentials via API
-        const response = await fetch(
-          withAgentExecutionScope(
-            `${API_BASE_URL}/api/credentials/${integration.config_service ?? integration.id}`,
-            effectiveScopeAgentName,
-            selectedExecutionScope,
-          ),
-          {
-            method: "DELETE",
-          },
-        );
-
-        if (!response.ok) {
-          throw new Error("Failed to disconnect");
-        }
-      }
+      await disconnect();
 
       // Refetch tools to update status
       await refetchTools();
 
       toast({
-        title: "Disconnected",
-        description: `${integration.name} has been disconnected.`,
+        title: success?.title ?? "Disconnected",
+        description:
+          success?.description ?? `${integration.name} has been disconnected.`,
       });
     } catch (error) {
       toast({
@@ -658,6 +665,39 @@ export function Integrations() {
       setLoading(false);
     }
   };
+
+  const handleProviderDisconnect = (
+    integration: Integration,
+    disconnect: NonNullable<IntegrationConfig["onDisconnect"]>,
+  ) =>
+    runDisconnectOperation(
+      integration,
+      () => disconnect(integration.id),
+      integration.oauth_reset_required === true
+        ? {
+            title: "Connection reset",
+            description: `${integration.name} OAuth has been reset.`,
+          }
+        : undefined,
+    );
+
+  const handleStoredCredentialDelete = (integration: Integration) =>
+    runDisconnectOperation(integration, async () => {
+      const response = await fetch(
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/credentials/${integration.config_service ?? integration.id}`,
+          effectiveScopeAgentName,
+          selectedExecutionScope,
+        ),
+        {
+          method: "DELETE",
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("Failed to disconnect");
+      }
+    });
 
   const getActionButton = (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
@@ -685,6 +725,10 @@ export function Integrations() {
         />
       );
     }
+    const providerDisconnect = config?.onDisconnect;
+    const disconnectProvider = providerDisconnect
+      ? () => handleProviderDisconnect(integration, providerDisconnect)
+      : undefined;
 
     const canConfigureOAuthClient =
       integration.setup_type === "oauth" &&
@@ -719,6 +763,49 @@ export function Integrations() {
           Use {manualFallbackActionLabel}
         </Button>
       ) : null;
+    const configuredFallbackControls =
+      manualFallbackAvailable &&
+      integration.environment_auth_configured === true &&
+      integration.manual_auth_configured !== true ? (
+        <>
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <Key className="h-3 w-3 mr-1" />
+            Environment {manualFallbackLabel}
+          </Badge>
+          <Button
+            onClick={() => openToolConfigDialog(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Configure
+          </Button>
+        </>
+      ) : manualFallbackAvailable &&
+        integration.manual_auth_configured === true ? (
+        <>
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <Key className="h-3 w-3 mr-1" />
+            {manualFallbackLabel}
+          </Badge>
+          <Button
+            onClick={() => openToolConfigDialog(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Edit {manualFallbackActionLabel}
+          </Button>
+          <Button
+            onClick={() => handleStoredCredentialDelete(integration)}
+            disabled={loading}
+            variant="destructive"
+            size="sm"
+          >
+            Remove {manualFallbackActionLabel}
+          </Button>
+        </>
+      ) : null;
 
     // Handle tools with delegated authentication
     const tool = integration;
@@ -730,7 +817,8 @@ export function Integrations() {
 
       if (
         integration.status === "connected" ||
-        integration.status === "available"
+        integration.status === "available" ||
+        authProvider?.status === "connected"
       ) {
         // Auth provider is connected
         if (tool.config_fields && tool.config_fields.length > 0) {
@@ -811,7 +899,7 @@ export function Integrations() {
                 Settings
               </Button>
               <Button
-                onClick={() => handleDisconnect(integration)}
+                onClick={() => handleStoredCredentialDelete(integration)}
                 disabled={loading}
                 variant="ghost"
                 size="sm"
@@ -852,56 +940,31 @@ export function Integrations() {
     }
 
     if (
-      manualFallbackAvailable &&
-      integration.environment_auth_configured === true &&
-      integration.manual_auth_configured !== true
+      integration.setup_type === "oauth" &&
+      integration.oauth_reset_required === true
     ) {
       return (
         <div className="flex gap-2 items-center">
-          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-            <Key className="h-3 w-3 mr-1" />
-            Environment {manualFallbackLabel}
-          </Badge>
           <Button
-            onClick={() => openToolConfigDialog(integration)}
-            disabled={loading}
-            variant="outline"
+            onClick={disconnectProvider}
+            disabled={loading || !disconnectProvider}
+            variant="destructive"
             size="sm"
           >
-            Configure
+            {loading && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
+            Reset connection
           </Button>
           {oauthClientConfigButton}
+          {configuredFallbackControls ?? manualFallbackButton}
         </div>
       );
     }
 
-    if (
-      manualFallbackAvailable &&
-      integration.manual_auth_configured === true
-    ) {
+    if (configuredFallbackControls) {
       return (
         <div className="flex gap-2 items-center">
-          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-            <Key className="h-3 w-3 mr-1" />
-            {manualFallbackLabel}
-          </Badge>
-          <Button
-            onClick={() => openToolConfigDialog(integration)}
-            disabled={loading}
-            variant="outline"
-            size="sm"
-          >
-            Edit {manualFallbackActionLabel}
-          </Button>
+          {configuredFallbackControls}
           {oauthClientConfigButton}
-          <Button
-            onClick={() => handleDisconnect(integration)}
-            disabled={loading}
-            variant="destructive"
-            size="sm"
-          >
-            Remove {manualFallbackActionLabel}
-          </Button>
         </div>
       );
     }
@@ -980,8 +1043,8 @@ export function Integrations() {
           {manualFallbackButton}
           {oauthClientConfigButton}
           <Button
-            onClick={() => handleDisconnect(integration)}
-            disabled={loading}
+            onClick={disconnectProvider}
+            disabled={loading || !disconnectProvider}
             variant="destructive"
             size="sm"
           >
@@ -1005,7 +1068,10 @@ export function Integrations() {
           </Button>
           {oauthClientConfigButton}
           <Button
-            onClick={() => handleDisconnect(integration)}
+            onClick={
+              disconnectProvider ??
+              (() => handleStoredCredentialDelete(integration))
+            }
             disabled={loading}
             variant="destructive"
             size="sm"

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -18,11 +19,13 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="config_manager",
+    file_access=ToolFileAccess.NONE,
     display_name="Config Manager",
     description="Inspect and control the full MindRoom configuration, including agents, plugins, and authorization",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
     icon="Settings",
     icon_color="text-purple-500",
     config_fields=[],

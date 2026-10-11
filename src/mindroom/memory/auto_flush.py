@@ -8,14 +8,17 @@ import re
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, TypedDict, cast
+from uuid import uuid4
 
 from agno.agent import Agent
 
-from mindroom import model_loading
-from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.agent_storage import create_session_storage, load_agent_session
+from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.providers import model_loading
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import (
     SerializedToolExecutionIdentity,
@@ -109,6 +112,11 @@ def _resolve_flush_scope(
     )
 
 
+# LEGACY_COMPAT: File-memory flush state retaining room and thread locations.
+# Legacy format: File-memory auto-flush session entries persisted room_id and thread_id location fields.
+# Last legacy release: v2026.3.93; replacement: v2026.3.94 stopped writing both fields.
+# Handling: Drop only the retired locations when reading state; the next public mutation rewrites it durably.
+# Coverage: tests/test_memory_auto_flush.py::test_reprioritize_rewrites_legacy_location_fields_only.
 def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
     if not isinstance(raw_entry, dict):
         return None
@@ -279,26 +287,6 @@ def reprioritize_auto_flush_sessions(
         _write_state_unlocked(storage_path, state)
 
     _notify_workers()
-
-
-def _load_agent_session(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    session_id: str,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> AgentSession | None:
-    storage = create_session_storage(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    )
-    try:
-        return get_agent_session(storage, session_id)
-    finally:
-        storage.close()
 
 
 def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
@@ -472,7 +460,28 @@ async def _extract_memory_summary(
         model=model,
         telemetry=False,
     )
-    response = await extractor_agent.arun(prompt, session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}")
+    invocation_id = uuid4().hex
+    response = await extractor_agent.arun(
+        prompt,
+        run_id=invocation_id,
+        session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}",
+    )
+    await record_helper_usage(
+        response,
+        owner=HelperUsageOwner(
+            storage_factory=partial(
+                create_session_storage,
+                agent_name,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+            ),
+            session_id=session_id,
+        ),
+        invocation_id=invocation_id,
+        kind="memory_auto_flush",
+        requester_id=execution_identity.requester_id if execution_identity is not None else None,
+    )
     content = response.content
     raw_output = content if isinstance(content, str) else str(content or "")
     return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
@@ -586,10 +595,10 @@ class MemoryAutoFlushWorker:
             )
 
             session = await asyncio.to_thread(
-                _load_agent_session,
+                load_agent_session,
+                agent_name,
                 config,
                 self.runtime_paths,
-                agent_name,
                 session_id,
                 execution_identity=entry_execution_identity,
             )
@@ -695,10 +704,10 @@ class MemoryAutoFlushWorker:
 
         latest_session_updated_at: int | None = None
         latest_session = await asyncio.to_thread(
-            _load_agent_session,
+            load_agent_session,
+            agent_name,
             config,
             self.runtime_paths,
-            agent_name,
             session_id,
             execution_identity=entry_execution_identity,
         )
@@ -753,10 +762,10 @@ class MemoryAutoFlushWorker:
     ) -> bool:
         effective_storage_path = self.storage_path
         session = await asyncio.to_thread(
-            _load_agent_session,
+            load_agent_session,
+            agent_name,
             config,
             self.runtime_paths,
-            agent_name,
             session_id,
             execution_identity=execution_identity,
         )

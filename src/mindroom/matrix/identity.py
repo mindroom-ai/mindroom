@@ -21,9 +21,12 @@ __all__ = [
     "MatrixID",
     "managed_account_key",
     "managed_account_user_id",
+    "matrix_user_id_from_email",
     "parse_current_matrix_user_id",
     "parse_historical_matrix_user_id",
     "try_parse_historical_matrix_user_id",
+    "valid_matrix_server_name",
+    "validate_email_to_matrix_mapping",
 ]
 
 
@@ -134,11 +137,40 @@ def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
         return None
 
 
+def validate_email_to_matrix_mapping(template: str, email_domain: str | None) -> None:
+    """Require an explicit email domain and an unambiguous Matrix identity template."""
+    if (
+        template.count("{localpart}") != 1
+        or "{" in template.replace("{localpart}", "")
+        or "}" in template.replace("{localpart}", "")
+        or try_parse_historical_matrix_user_id(template.replace("{localpart}", "example")) is None
+        or email_domain is None
+        or re.fullmatch(r"[A-Za-z0-9.-]+", email_domain) is None
+    ):
+        msg = "Email mapping requires a valid Matrix template and explicit email domain"
+        raise ValueError(msg)
+
+
+def matrix_user_id_from_email(email: str, template: str, email_domain: str | None) -> str:
+    """Map an email from the configured domain to its canonical Matrix identity."""
+    localpart, separator, domain = email.partition("@")
+    if (
+        not separator
+        or not localpart
+        or any(char.isspace() for char in email)
+        or email_domain is None
+        or domain.lower() != email_domain.lower()
+    ):
+        msg = "Email does not match the configured identity domain"
+        raise ValueError(msg)
+    return parse_historical_matrix_user_id(template.replace("{localpart}", localpart))
+
+
 def _validate_matrix_user_id_common(parsed: MatrixID, matrix_id: str) -> None:
     if _contains_surrogate(parsed.username):
         msg = f"Invalid Matrix ID localpart: {matrix_id}"
         raise ValueError(msg)
-    if not _valid_current_server_name(parsed.domain):
+    if not valid_matrix_server_name(parsed.domain):
         msg = f"Invalid Matrix ID server name: {matrix_id}"
         raise ValueError(msg)
     try:
@@ -155,7 +187,7 @@ def _contains_surrogate(value: str) -> bool:
     return any(0xD800 <= ord(char) <= 0xDFFF for char in value)
 
 
-def _valid_current_server_name(server_name: str) -> bool:
+def valid_matrix_server_name(server_name: str) -> bool:
     """Return whether a value matches the Matrix server_name grammar."""
     if not server_name:
         return False

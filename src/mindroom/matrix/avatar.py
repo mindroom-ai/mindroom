@@ -1,6 +1,7 @@
 """Matrix avatar management helpers."""
 
 import mimetypes
+from collections.abc import Callable
 from pathlib import Path
 
 import nio
@@ -79,7 +80,7 @@ async def _upload_avatar_file(
     return mxc_uri
 
 
-async def _set_avatar_from_file(
+async def set_user_avatar_from_file(
     client: nio.AsyncClient,
     avatar_path: Path,
 ) -> bool:
@@ -107,39 +108,21 @@ async def _set_avatar_from_file(
     return False
 
 
-async def check_and_set_avatar(
-    client: nio.AsyncClient,
-    avatar_path: Path,
-    room_id: str | None = None,
-) -> bool:
-    """Check if user or room has an avatar and set it if they don't.
-
-    Args:
-        client: Authenticated Matrix client
-        avatar_path: Path to the avatar image file
-        room_id: Optional room ID for setting room avatar (if None, sets user avatar)
-
-    Returns:
-        True if avatar was already set or successfully set, False otherwise
-
-    """
-    if room_id:
-        if await room_has_avatar(client, room_id):
-            return True
-        return await set_room_avatar_from_file(client, room_id, avatar_path)
-    # Check user avatar
+async def user_has_avatar(client: nio.AsyncClient) -> bool:
+    """Return whether the client's own Matrix profile already has an avatar URL."""
     response = await client.get_profile(client.user_id)
     if isinstance(response, nio.ProfileGetResponse) and response.avatar_url:
         logger.debug("user_avatar_already_set", user_id=client.user_id)
         return True
-    # Set user avatar
-    return await _set_avatar_from_file(client, avatar_path)
+    return False
 
 
 async def set_room_avatar_from_file(
     client: nio.AsyncClient,
     room_id: str,
     avatar_path: Path,
+    *,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> bool:
     """Set or replace the avatar for a Matrix room from a file.
 
@@ -147,6 +130,7 @@ async def set_room_avatar_from_file(
         client: Authenticated Matrix client
         room_id: The room ID to set the avatar for
         avatar_path: Path to the avatar image file
+        write_allowed: Live authorization check before updating room state
 
     Returns:
         True if avatar was successfully set, False otherwise
@@ -154,6 +138,8 @@ async def set_room_avatar_from_file(
     """
     avatar_url = await _upload_avatar_file(client, avatar_path)
     if not avatar_url:
+        return False
+    if write_allowed is not None and not write_allowed():
         return False
 
     # Set room avatar using room state

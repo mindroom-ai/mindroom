@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,15 +13,18 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="external_trigger_manager",
+    file_access=ToolFileAccess.NONE,
     display_name="External Trigger Manager",
     description="Create and manage signed external trigger endpoints",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
+    requires_room_context=True,
     icon="Webhook",
     icon_color="text-emerald-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/external-triggers/",
     function_names=(
         "create_trigger",
         "list_triggers",

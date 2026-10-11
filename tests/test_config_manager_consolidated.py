@@ -17,11 +17,11 @@ from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config_or_user_error
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
-from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.credentials.policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
@@ -46,7 +46,7 @@ from tests.identity_helpers import persist_entity_accounts
 def _minimal_config_path(tmp_path: Path) -> Path:
     """Write a minimal valid config file for ConfigManager tool tests."""
     config_path = tmp_path / "config.yaml"
-    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-4o"}}), config_path)
+    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}}), config_path)
     return config_path
 
 
@@ -102,7 +102,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
     write_config_yaml(
         Config(
             agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
             plugins=["./plugins/bad-name"],
         ),
         config_path,
@@ -120,7 +120,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -128,6 +128,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
         "\n"
         "@register_tool_with_metadata(\n"
         f"    name='{tool_name}',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Plugin Tool',\n"
         "    description='Plugin-defined tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -140,7 +141,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
     write_config_yaml(
         Config(
             agents={},
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
             plugins=["./plugins/demo"],
         ),
         config_path,
@@ -148,8 +149,335 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
     return config_path
 
 
+@pytest.mark.parametrize("requester_id", ["@member:example.org", "@manager:example.org"])
+def test_membership_config_mutations_require_platform_administrator(
+    tmp_path: Path,
+    requester_id: str,
+) -> None:
+    """Conversation or credential authority must not grant full configuration control."""
+    config_path = tmp_path / "config.yaml"
+    config = Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "agents": {
+                "talent": {
+                    "display_name": "Talent",
+                    "role": "Original",
+                    "access": {"users": ["@member:example.org"]},
+                    "credential_managers": ["@manager:example.org"],
+                },
+            },
+        },
+    )
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+    original = config_path.read_text(encoding="utf-8")
+
+    with tool_runtime_context(_caller_context(config_manager, config, agent_name="talent", requester_id=requester_id)):
+        results = (
+            config_manager.manage_config(
+                operation="patch",
+                changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
+            ),
+            config_manager.manage_agent(operation="update", agent_name="talent", role="Changed"),
+            config_manager.manage_team(
+                team_name="reviewers",
+                display_name="Reviewers",
+                role="Review",
+                agents=["talent"],
+            ),
+        )
+
+    assert all("platform administrator" in result for result in results)
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path) -> None:
+    """The top-level administrator list must authorize every config-manager write surface."""
+    config_path = tmp_path / "config.yaml"
+    config = Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "agents": {
+                "talent": {
+                    "display_name": "Talent",
+                    "role": "Original",
+                },
+            },
+        },
+    )
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        patch_result = config_manager.manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Patched"}],
+        )
+        agent_result = config_manager.manage_agent(
+            operation="update",
+            agent_name="talent",
+            role="Updated",
+        )
+        team_result = config_manager.manage_team(
+            team_name="reviewers",
+            display_name="Reviewers",
+            role="Review",
+            agents=["talent"],
+        )
+
+    assert "patch updated" in patch_result
+    assert "Successfully updated agent" in agent_result
+    assert "Successfully created team" in team_result
+
+
+def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) -> None:
+    """Direct tool execution without a requester must never inherit administrative authority."""
+    config_path = tmp_path / "config.yaml"
+    write_config_yaml(
+        Config.model_validate(
+            {
+                "administrators": ["@admin:example.org"],
+                "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
+            },
+        ),
+        config_path,
+    )
+
+    result = _config_manager(config_path).manage_config(
+        operation="patch",
+        changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
+    )
+
+    assert "active platform administrator requester" in result
+
+
+def _config_with_schema_secrets(tmp_path: Path) -> Config:
+    """Return one config holding sentinel credentials under key names the name heuristics miss."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    return Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "agents": {
+                "talent": {
+                    "display_name": "Talent",
+                    "role": "Original",
+                    "instructions": ["private-instruction-marker"],
+                    "access": {"users": ["@member:example.org"]},
+                    "credential_managers": ["@manager:example.org"],
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-6-astra",
+                    "extra_kwargs": {"default_headers": {"X-Auth": "model-header-sentinel"}},
+                },
+            },
+            "mcp_servers": {
+                "home": {
+                    "transport": "stdio",
+                    "command": "mcp-home",
+                    "env": {"HOMEASSISTANT_TOKEN": "mcp-env-sentinel"},
+                },
+                "remote": {
+                    "transport": "streamable-http",
+                    "url": "https://mcp.example.org/mcp",
+                    "headers": {"X-Custom-Auth": "mcp-header-sentinel"},
+                },
+            },
+            "plugins": [{"path": "./plugins/demo", "settings": {"private_key": "plugin-setting-sentinel"}}],
+        },
+    )
+
+
+@pytest.mark.parametrize("requester_id", ["@member:example.org", "@manager:example.org"])
+def test_membership_config_reads_require_platform_administrator(tmp_path: Path, requester_id: str) -> None:
+    """Conversation or credential authority must not expose the authored configuration."""
+    config_path = tmp_path / "config.yaml"
+    config = _config_with_schema_secrets(tmp_path)
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(_caller_context(config_manager, config, agent_name="talent", requester_id=requester_id)):
+        results = (
+            config_manager.manage_config(operation="inspect"),
+            config_manager.manage_config(operation="inspect", path="/agents/talent"),
+            config_manager.get_info(info_type="agent_config", name="talent"),
+        )
+
+    for result in results:
+        assert "active platform administrator requester" in result
+        assert "sentinel" not in result
+        assert "private-instruction-marker" not in result
+
+
+def test_config_read_without_requester_context_fails_closed(tmp_path: Path) -> None:
+    """Direct tool execution without a requester must never read the authored configuration."""
+    config_path = tmp_path / "config.yaml"
+    write_config_yaml(_config_with_schema_secrets(tmp_path), config_path)
+    config_manager = _config_manager(config_path)
+
+    results = (
+        config_manager.manage_config(operation="inspect"),
+        config_manager.get_info(info_type="agent_config", name="talent"),
+    )
+
+    for result in results:
+        assert "active platform administrator requester" in result
+        assert "sentinel" not in result
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "/mcp_servers",
+        "/mcp_servers/home/env",
+        "/mcp_servers/home/env/HOMEASSISTANT_TOKEN",
+        "/mcp_servers/remote/headers",
+        "/plugins/0/settings",
+        "/models/default/extra_kwargs",
+    ],
+)
+def test_config_inspection_masks_schema_secret_fields_at_every_pointer(tmp_path: Path, path: str) -> None:
+    """Fields the schema marks secret stay masked whatever their key names are."""
+    config_path = tmp_path / "config.yaml"
+    config = _config_with_schema_secrets(tmp_path)
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        result = config_manager.manage_config(operation="inspect", path=path)
+
+    assert "Authored MindRoom configuration" in result
+    assert "sentinel" not in result
+    assert "***redacted***" in result
+
+
+def test_platform_administrator_reads_redacted_agent_config(tmp_path: Path) -> None:
+    """Administrators still read one agent's authored YAML through the shared redaction."""
+    config_path = tmp_path / "config.yaml"
+    config = _config_with_schema_secrets(tmp_path)
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        result = config_manager.get_info(info_type="agent_config", name="talent")
+        missing = config_manager.get_info(info_type="agent_config", name="absent")
+
+    assert "## Configuration for 'talent':" in result
+    assert "display_name: Talent" in result
+    assert "private-instruction-marker" in result
+    assert missing == "Error: Agent 'absent' not found."
+
+
+@pytest.mark.parametrize(
+    ("change", "pointer"),
+    [
+        ({"op": "replace", "path": "/mcp_servers/home/env/HOMEASSISTANT_TOKEN", "value": "***redacted***"}, ""),
+        (
+            {"op": "replace", "path": "/models/default/extra_kwargs", "value": {"default_headers": "***redacted***"}},
+            "/default_headers",
+        ),
+        ({"op": "add", "path": "/models/default/host", "value": "https://ops:***@ollama.example.org"}, ""),
+        ({"op": "add", "path": "/models/default/host", "value": "https://me@corp.com:***@ollama.example.org"}, ""),
+        ({"op": "replace", "path": "/mcp_servers/remote/url", "value": "https://***@mcp.example.org/mcp"}, ""),
+    ],
+)
+def test_config_patch_rejects_copied_redaction_markers(tmp_path: Path, change: dict[str, Any], pointer: str) -> None:
+    """Patching inspected output back must never replace hidden real values with the redaction marker."""
+    config_path = tmp_path / "config.yaml"
+    config = _config_with_schema_secrets(tmp_path)
+    write_config_yaml(config, config_path)
+    original = config_path.read_text(encoding="utf-8")
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        result = config_manager.manage_config(operation="patch", changes=[change])
+
+    assert f"'{change['path']}{pointer}' contains the redaction marker" in result
+    assert "real value" in result
+    assert "Changes were NOT applied." in result
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_agent_update_refuses_instructions_copied_from_redacted_read(tmp_path: Path) -> None:
+    """Appending to instructions read back redacted must not replace the real instructions with the marker."""
+    config_path = tmp_path / "config.yaml"
+    instructions = ["Never share the API key with anyone", "Log in with password: hunter2"]
+    config = Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "agents": {"talent": {"display_name": "Talent", "role": "Original", "instructions": instructions}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        },
+    )
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        shown = config_manager.get_info(info_type="agent_config", name="talent")
+        shown_instructions = yaml.safe_load(shown.split("```yaml\n", 1)[1].removesuffix("```"))["instructions"]
+        result = config_manager.manage_agent(
+            operation="update",
+            agent_name="talent",
+            instructions=[*shown_instructions, "Be concise"],
+        )
+
+    assert "'instructions' holds the redaction marker" in result
+    assert "omit it to keep the stored value" in result
+    assert "Changes were NOT applied." in result
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["agents"]["talent"]["instructions"] == instructions
+
+
+def test_available_models_masks_host_credentials(tmp_path: Path) -> None:
+    """Any requester may list models, so credentials embedded in a model host stay masked."""
+    config_path = tmp_path / "config.yaml"
+    write_config_yaml(
+        Config(
+            models={
+                "local": {
+                    "provider": "ollama",
+                    "id": "qwen3.8:27b",
+                    "host": "https://ollama:host-password-sentinel@models.example.org:11434/?api_key=host-query-sentinel",
+                },
+            },
+        ),
+        config_path,
+    )
+
+    result = _config_manager(config_path).get_info(info_type="available_models")
+
+    assert "models.example.org:11434" in result
+    assert "sentinel" not in result
+
+
 class TestConsolidatedConfigManager:
     """Test the consolidated ConfigManager with four tools."""
+
+    @pytest.fixture(autouse=True)
+    def _permit_access_for_non_authorization_tests(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep behavior tests focused; dedicated tests above exercise the real admin gate."""
+        monkeypatch.setattr(
+            "mindroom.custom_tools.config_manager.platform_administrator_error",
+            lambda _config, _message: None,
+        )
 
     def test_init(self, tmp_path: Path) -> None:
         """Test ConfigManagerTools initialization."""
@@ -170,7 +498,7 @@ class TestConsolidatedConfigManager:
                 models={
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-4o",
+                        "id": "gpt-5.6-terra",
                         "api_key": "sk-test-secret",
                     },
                 },
@@ -183,7 +511,7 @@ class TestConsolidatedConfigManager:
         assert "Authored MindRoom configuration" in result
         assert "authored values only" in result
         assert "api_key: '***redacted***'" in result
-        assert "id: gpt-4o" in result
+        assert "id: gpt-5.6-terra" in result
         assert "sk-test-secret" not in result
         assert str(config_path.resolve()) in result
 
@@ -195,7 +523,7 @@ class TestConsolidatedConfigManager:
                 models={
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-4o",
+                        "id": "gpt-5.6-terra",
                         # A secret that no token-shape regex matches, so only
                         # key-context redaction can catch it.
                         "api_key": "plain-local-secret",
@@ -231,13 +559,13 @@ class TestConsolidatedConfigManager:
         result = cm.manage_config(
             operation="patch",
             changes=[
-                {"op": "add", "path": "/authorization", "value": {"room_permissions": {}}},
+                {"op": "add", "path": "/rooms", "value": {}},
                 {
                     "op": "add",
-                    "path": "/authorization/room_permissions/room~1a~0b",
-                    "value": ["@user:example.org"],
+                    "path": "/rooms/room~1a~0b",
+                    "value": {"invite_users": ["@user:example.org"]},
                 },
-                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"},
                 {"op": "add", "path": "/tool_approval", "value": {"default": "require_approval"}},
             ],
         )
@@ -246,8 +574,8 @@ class TestConsolidatedConfigManager:
         assert "Persisted: yes" in result
         assert "/tool_approval" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["models"]["default"]["id"] == "gpt-5"
-        assert saved["authorization"]["room_permissions"]["room/a~b"] == ["@user:example.org"]
+        assert saved["models"]["default"]["id"] == "gpt-5.6-sol"
+        assert saved["rooms"]["room/a~b"]["invite_users"] == ["@user:example.org"]
         assert saved["tool_approval"]["default"] == "require_approval"
 
     def test_manage_config_appends_and_preserves_explicit_null(self, tmp_path: Path) -> None:
@@ -255,7 +583,7 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 agents={"writer": AgentConfig(display_name="Writer", role="Writes", instructions=["first"])},
             ),
             config_path,
@@ -281,7 +609,7 @@ class TestConsolidatedConfigManager:
 
         result = _config_manager(config_path).manage_config(
             operation="patch",
-            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
             dry_run=True,
         )
 
@@ -297,7 +625,7 @@ class TestConsolidatedConfigManager:
         result = _config_manager(config_path).manage_config(
             operation="patch",
             changes=[
-                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"},
                 {"op": "remove", "path": "/models/missing"},
             ],
         )
@@ -377,7 +705,7 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 agents={"writer": AgentConfig(display_name="Writer", role="Writes")},
             ),
             config_path,
@@ -398,7 +726,7 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 defaults=DefaultsConfig(
                     tools=[{"shell": {"enable_run_shell_command": True}}],
                 ),
@@ -426,20 +754,20 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         models_path = tmp_path / "models.yaml"
         config_path.write_text("models: !include models.yaml\n", encoding="utf-8")
-        models_path.write_text("default:\n  provider: openai\n  id: gpt-4o\n", encoding="utf-8")
+        models_path.write_text("default:\n  provider: openai\n  id: gpt-5.6-terra\n", encoding="utf-8")
         cm = _config_manager(config_path)
 
         inspected = cm.manage_config(operation="inspect", path="/models/default")
         rejected = cm.manage_config(
             operation="patch",
-            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
         )
 
         assert "composed from multiple files" in inspected
         assert "structured patching is unavailable" in inspected
         assert "composed from multiple files" in rejected
         assert "Changes were NOT applied" in rejected
-        assert "gpt-4o" in models_path.read_text(encoding="utf-8")
+        assert "gpt-5.6-terra" in models_path.read_text(encoding="utf-8")
 
     def test_init_uses_explicit_config_path(self) -> None:
         """Initialization should preserve the explicitly provided config path."""
@@ -484,13 +812,26 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_get_info_agents_defaults_to_sender_visible_configured_room_candidates(self, tmp_path: Path) -> None:
         """Current-room agent listing should use configured-room responder candidates."""
         room_id = "!room:localhost"
         config = Config(
             agents={
-                "present": AgentConfig(display_name="Present Agent", role="Here", model="default", rooms=[room_id]),
-                "blocked": AgentConfig(display_name="Blocked Agent", role="Blocked", model="default", rooms=[room_id]),
+                "present": AgentConfig(
+                    display_name="Present Agent",
+                    role="Here",
+                    model="default",
+                    rooms=[room_id],
+                    access={"users": ["@user:localhost"]},
+                ),
+                "blocked": AgentConfig(
+                    display_name="Blocked Agent",
+                    role="Blocked",
+                    model="default",
+                    rooms=[room_id],
+                    access={"users": ["@other:localhost"]},
+                ),
                 "unconfigured_present": AgentConfig(
                     display_name="Unconfigured Present",
                     role="Present but not configured",
@@ -498,13 +839,7 @@ class TestConsolidatedConfigManager:
                 ),
                 "elsewhere": AgentConfig(display_name="Elsewhere Agent", role="Not here", model="default"),
             },
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "blocked": ["@other:localhost"],
-                },
-            },
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -682,6 +1017,41 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_configuration_mutations_load_one_authoritative_snapshot(self, tmp_path: Path) -> None:
+        """Authorization and mutation must use the same single loaded configuration."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                agents={"agent1": AgentConfig(display_name="Agent 1", role="Original")},
+            ),
+            config_path,
+        )
+        config_manager = _config_manager(config_path)
+
+        with patch(
+            "mindroom.custom_tools.config_manager.load_config_or_user_error",
+            wraps=load_config_or_user_error,
+        ) as load_config:
+            agent_result = config_manager.manage_agent(
+                operation="update",
+                agent_name="agent1",
+                role="Updated",
+            )
+
+            assert "Successfully updated agent" in agent_result
+            assert load_config.call_count == 1
+
+            load_config.reset_mock()
+            team_result = config_manager.manage_team(
+                team_name="reviewers",
+                display_name="Reviewers",
+                role="Review",
+                agents=["agent1"],
+            )
+
+            assert "Successfully created team" in team_result
+            assert load_config.call_count == 1
+
     @pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
     def test_manage_agent_create_returns_updated_agent_oauth_target(
         self,
@@ -690,9 +1060,10 @@ class TestConsolidatedConfigManager:
     ) -> None:
         """Create links should use the new agent and requester's effective execution scope."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[], worker_scope=worker_scope),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -738,10 +1109,10 @@ class TestConsolidatedConfigManager:
             resolved_thread_id="$thread",
             session_id="!room:example.org:$thread",
         )
-        assert connect_target.agent_name == "research"
+        assert connect_target.binding.requested_agent_name == "research"
         assert connect_target.requester_id == "@alice:example.org"
-        assert connect_target.worker_scope == worker_scope
-        assert connect_target.worker_key == resolve_worker_key(
+        assert connect_target.binding.worker_scope == worker_scope
+        assert connect_target.binding.worker_key == resolve_worker_key(
             worker_scope,
             expected_identity,
             agent_name="research",
@@ -755,6 +1126,7 @@ class TestConsolidatedConfigManager:
     ) -> None:
         """Updating another private agent should mint only that agent's requester-bound link."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
                 "research": AgentConfig(
@@ -765,7 +1137,7 @@ class TestConsolidatedConfigManager:
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -787,9 +1159,9 @@ class TestConsolidatedConfigManager:
             cm.runtime_paths,
             query["connect_token"][0],
         )
-        assert connect_target.agent_name == "research"
+        assert connect_target.binding.requested_agent_name == "research"
         assert connect_target.requester_id == "@alice:example.org"
-        assert connect_target.worker_scope == private_scope
+        assert connect_target.binding.worker_scope == private_scope
 
     def test_manage_agent_update_does_not_mint_caller_link_when_requester_cannot_manage_target(
         self,
@@ -799,11 +1171,14 @@ class TestConsolidatedConfigManager:
         config = Config(
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
-                "research": AgentConfig(display_name="Research", role="Research"),
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research",
+                    credential_managers=["@bob:example.org"],
+                ),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
-            authorization={"agent_reply_permissions": {"research": ["@bob:example.org"]}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -827,9 +1202,10 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_self_update_does_not_promise_same_run_tool_use(self, tmp_path: Path) -> None:
         """Self-update should return the scoped link without claiming the new schema is callable now."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"research": AgentConfig(display_name="Research", role="Research", worker_scope="user_agent")},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -849,6 +1225,7 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_oauth_guidance_respects_inherited_default_tools(self, tmp_path: Path) -> None:
         """Effective default-tool changes should produce links only for agents that inherit them."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
                 "research": AgentConfig(
@@ -858,7 +1235,7 @@ class TestConsolidatedConfigManager:
                 ),
             },
             defaults=DefaultsConfig(tools=["google_drive"], worker_scope="user_agent"),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -895,9 +1272,10 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_excludes_setup_type_oauth_without_auth_provider(self, tmp_path: Path) -> None:
         """SetupType.OAUTH alone should not claim the structured generic-provider contract."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -916,8 +1294,8 @@ class TestConsolidatedConfigManager:
         assert "connect_url" not in result
         assert "MindRoom-managed OAuth" not in result
 
-    def test_manage_agent_returns_target_link_for_oauth_mcp_tool(self, tmp_path: Path) -> None:
-        """Generic OAuth MCP metadata should use the same updated-agent target flow."""
+    def test_manage_agent_returns_agent_scope_link_for_oauth_mcp_tool(self, tmp_path: Path) -> None:
+        """MCP OAuth links must target the created agent's effective credential scope."""
         mcp_server = MCPServerConfig(
             transport="streamable-http",
             url="https://mcp.example.test/mcp",
@@ -930,9 +1308,10 @@ class TestConsolidatedConfigManager:
             },
         )
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[], worker_scope="user_agent"),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
             mcp_servers={"demo": mcp_server},
         )
         config_path = tmp_path / "config.yaml"
@@ -956,12 +1335,13 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_oauth_link_failure_does_not_mask_saved_update(self, tmp_path: Path) -> None:
         """Optional link generation must not report a persisted config change as failed."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
                 "research": AgentConfig(display_name="Research", role="Research"),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -1119,7 +1499,7 @@ class TestConsolidatedConfigManager:
                 Config(
                     agents={},
                     mindroom_user=MindRoomUserConfig(username="mindroom_assistant"),
-                    models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                    models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 ),
                 config_path,
             )
@@ -1294,6 +1674,43 @@ class TestConsolidatedConfigManager:
             {"match": "run_shell_command", "action": "require_approval"},
         ]
 
+    @pytest.mark.parametrize(
+        ("authored_defaults", "enabled", "expected_tools"),
+        [
+            (None, False, ["scheduler"]),
+            (None, True, ["scheduler", "approved_egress"]),
+            ({}, True, ["scheduler", "approved_egress"]),
+            ({"tools": []}, False, []),
+            ({"tools": []}, True, ["approved_egress"]),
+            ({"tools": ["scheduler"]}, False, ["scheduler"]),
+            ({"tools": ["scheduler"]}, True, ["scheduler", "approved_egress"]),
+        ],
+    )
+    def test_runtime_approved_egress_preserves_effective_default_tools(
+        self,
+        authored_defaults: dict[str, object] | None,
+        enabled: bool,
+        expected_tools: list[str],
+    ) -> None:
+        """The runtime overlay adds egress without changing default-tool inheritance."""
+        data: dict[str, object] = {
+            "agents": {
+                "assistant": {"display_name": "Assistant"},
+                "standalone": {"display_name": "Standalone", "include_default_tools": False},
+            },
+        }
+        if authored_defaults is not None:
+            data["defaults"] = authored_defaults
+        runtime_paths = resolve_runtime_paths(
+            config_path=Path("config.yaml"),
+            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": str(enabled).lower()},
+        )
+
+        config = Config.validate_with_runtime(data, runtime_paths)
+
+        assert config.resolve_entity("assistant").available_tools == expected_tools
+        assert config.resolve_entity("standalone").available_tools == []
+
     def test_runtime_approved_egress_flag_keeps_authored_dump_unmodified(self) -> None:
         """Runtime-managed approved egress should not become persisted authored config."""
         runtime_paths = resolve_runtime_paths(
@@ -1312,7 +1729,7 @@ class TestConsolidatedConfigManager:
         assert config.defaults.tool_names == ["scheduler", "approved_egress"]
         assert config.authored_model_dump()["defaults"]["tools"] == ["scheduler"]
         assert "tool_approval" not in config.authored_model_dump()
-        assert empty_config.defaults.tool_names == ["approved_egress"]
+        assert empty_config.defaults.tool_names == ["scheduler", "approved_egress"]
         assert empty_config.authored_model_dump() == {}
 
     def test_runtime_approved_egress_flag_forces_approval_ahead_of_script_rules(self) -> None:
@@ -1349,12 +1766,21 @@ class TestConsolidatedConfigManager:
         with pytest.raises(ValidationError, match="tool_output_auto_save_threshold_bytes"):
             DefaultsConfig(tool_output_auto_save_threshold_bytes=0)
 
+    def test_large_message_strategy_defaults_to_sidecar(self) -> None:
+        """Oversized responses keep the sidecar behavior unless split is configured."""
+        assert Config.model_validate({}).defaults.large_message_strategy == "sidecar"
+
+        config = Config.model_validate({"defaults": {"large_message_strategy": "split"}})
+        assert config.defaults.large_message_strategy == "split"
+
+        with pytest.raises(ValidationError, match="large_message_strategy"):
+            DefaultsConfig(large_message_strategy="chunks")
+
     def test_matrix_sync_null_section_uses_default_config(self) -> None:
         """An uncommented blank matrix_sync section should behave like an empty mapping."""
         config = Config.model_validate({"matrix_sync": None})
 
         assert config.matrix_sync.mode == "classic"
-        assert config.matrix_sync.sliding_timeline_limit == 100
 
     def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
         """Duplicate tool names should be rejected even across mixed string and mapping syntax."""
@@ -1790,11 +2216,11 @@ class TestConsolidatedConfigManager:
                 models={
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-4",
+                        "id": "gpt-6-astra",
                     },
                     "fast": {
                         "provider": "anthropic",
-                        "id": "claude-3-haiku",
+                        "id": "claude-haiku-4-5",
                     },
                 },
             )
@@ -1806,7 +2232,7 @@ class TestConsolidatedConfigManager:
             assert "Available Models" in result
             assert "default" in result
             assert "openai" in result
-            assert "gpt-4" in result
+            assert "gpt-6-astra" in result
             assert "fast" in result
             assert "anthropic" in result
         finally:
@@ -1851,7 +2277,7 @@ class TestWorkerGrantableCredentials:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 defaults=DefaultsConfig(worker_grantable_credentials=["openai", "github_private"]),
             ),
             config_path,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="zendesk",
+    file_access=ToolFileAccess.NONE,
     display_name="Zendesk",
     description="Customer support platform for searching help center articles",
     category=ToolCategory.DEVELOPMENT,  # From others/ category
@@ -55,6 +56,13 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=False,
+        ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
         ),
     ],
     dependencies=["requests"],

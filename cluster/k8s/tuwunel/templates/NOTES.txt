@@ -11,4 +11,9 @@ Point the mindroom-runtime chart at this homeserver:
   matrix:
     homeserverUrl: http://{{ include "mindroom-tuwunel.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
 
-For production use, provide tuwunel.serverName, a registration token Secret shared with the runtime chart, and ingress plus apex well-known delegation outside this chart.
+For production use, provide tuwunel.serverName and configure ingress and TLS outside this chart.
+Tuwunel serves /.well-known/matrix/client and /.well-known/matrix/server from its rendered configuration.
+If requests for those paths at https://<serverName> do not route to Tuwunel, serve the delegation documents at that apex separately.
+For password-based managed accounts with token-gated registration, configure the same token value in tuwunel.registrationToken and the runtime chart's matrix.registrationToken.
+Both releases can reference the same Secret and key when they share a namespace; otherwise, copy the token value into a Secret in the runtime release's namespace and reference that Secret and key.
+For appservice accounts, provide the registration YAML through tuwunel.appserviceRegistration and the runtime token through matrix.appserviceToken, select matrix.managedAccountAuth=appservice, and leave the runtime's matrix.registrationToken unset.

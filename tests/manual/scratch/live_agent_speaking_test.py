@@ -61,15 +61,15 @@ sys.path.insert(0, SRC)
 from livekit import rtc  # noqa: E402
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: E402
+from mindroom.config.access import ResponderAccessConfig  # noqa: E402
 from mindroom.config.agent import AgentConfig  # noqa: E402
-from mindroom.config.auth import AuthorizationConfig  # noqa: E402
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile  # noqa: E402
 from mindroom.config.main import Config  # noqa: E402
 from mindroom.config.memory import MemoryConfig  # noqa: E402
 from mindroom.config.models import ModelConfig  # noqa: E402
 from mindroom.config.voice import SpeechServiceConfig  # noqa: E402
 from mindroom.constants import resolve_runtime_paths  # noqa: E402
-from mindroom.credentials_sync import sync_env_to_credentials  # noqa: E402
+from mindroom.credentials.sync import sync_env_to_credentials  # noqa: E402
 from mindroom.matrix.state import MatrixState  # noqa: E402
 from mindroom.matrix_rtc import call_manager as cm  # noqa: E402
 from mindroom.matrix_rtc.events import (  # noqa: E402
@@ -155,7 +155,7 @@ def call_config(openai_key: str) -> CallsConfig:
                 backend="cascaded",
                 stt=SpeechServiceConfig(
                     provider="openai",
-                    model="gpt-4o-transcribe",
+                    model="gpt-transcribe",
                     api_key=openai_key,
                 ),
                 tts=SpeechServiceConfig(
@@ -530,17 +530,17 @@ async def main() -> int:  # noqa: C901, PLR0915
             state.save(paths)
 
             config = Config(
-                authorization=AuthorizationConfig(room_permissions={room_id: [caller.user_id]}),
                 agents={
                     AGENT: AgentConfig(
                         display_name="Assistant",
                         role="Helpful voice assistant",
                         tools=["calculator"],
                         rooms=[room_id],
+                        access=ResponderAccessConfig(users=[caller.user_id]),
                         memory_backend="file",
                     ),
                 },
-                models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+                models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
                 memory=MemoryConfig(backend="none"),
                 calls=call_config(openai_key),
             )
@@ -626,8 +626,10 @@ async def main() -> int:  # noqa: C901, PLR0915
                 {"event_id": "$evt", "sender": caller.user_id, "origin_server_ts": 1},
                 CALL_MEMBER_EVENT_TYPE,
             )
-            await asyncio.wait_for(manager.on_room_event(room_obj, event), timeout=120)
-            log("  [bot] call join path completed (agent session started)")
+            await manager.on_room_event(room_obj, event)
+            # The manager joins in a background reconcile, so wait for the session it starts.
+            if await wait_for(lambda: room_id in manager._sessions, 120, "agent call session"):
+                log("  [bot] call join path completed (agent session started)")
 
             log("== leg 1: greeting audio from the agent ==")
             results["greeting_audio"] = await wait_for(lambda: meter.voiced >= 20, 45, "greeting audio")

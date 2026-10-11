@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from enum import Enum
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -25,10 +27,12 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.orchestration.runtime import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
@@ -36,6 +40,7 @@ from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
+    current_task_is_process_shutdown,
     log_cancelled_response,
 )
 from mindroom.streaming_warmup import RenderedWarmupLine, WorkerWarmupState
@@ -44,11 +49,14 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
     complete_pending_tool_block,
+    is_visible_tool_marker_line,
+    remap_visible_tool_marker_indices,
+    tool_markers_match_trace,
 )
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     import nio
 
@@ -63,46 +71,77 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
+    "CANCELLED_RESPONSE_NOTE",
     "INTERRUPTED_RESPONSE_NOTE",
     "PROGRESS_PLACEHOLDER",
     "RESTART_INTERRUPTED_RESPONSE_NOTE",
     "SYNC_RESTART_CANCEL_MSG",
+    "TEAM_PROGRESS_PLACEHOLDER",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "FinalTextTransform",
+    "ProgressPermission",
+    "ProgressPublisher",
+    "ProgressState",
+    "ProgressWriteAhead",
     "ReplacementStreamingResponse",
     "StreamInputChunk",
     "StreamingDeliveryError",
     "StreamingLifecycleSuspensionError",
+    "StreamingPresentation",
     "StreamingResponse",
     "TerminalEdit",
     "TerminalSend",
+    "UnfinishedStreamedReply",
     "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
     "cancel_source_from_failure_reason",
     "clean_partial_reply_text",
+    "current_task_is_process_shutdown",
+    "format_stream_error_note",
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
     "send_streaming_response",
+    "stream_progress_edits",
+    "strip_matching_visible_tool_markers",
     "strip_visible_tool_markers",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
+TEAM_PROGRESS_PLACEHOLDER = "🤝 Team Response: Thinking..."
+_IN_PROGRESS_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
+
+
+@dataclass(frozen=True, slots=True)
+class StreamingPresentation:
+    """Ordered response state known to have reached Matrix before suspension."""
+
+    response_text: str
+    rendered_response_text: str | None = None
+    tool_trace: tuple[ToolTraceEntry, ...] = ()
+    state: dict[str, object] | None = None
 
 
 class StreamingLifecycleSuspensionError(Exception):
     """A response-stream exit that must reach the lifecycle owner unchanged."""
 
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        self.presentation: StreamingPresentation | None = None
+
+    def capture_presentation(self, presentation: StreamingPresentation) -> None:
+        """Attach the last transport-committed presentation before handoff."""
+        self.presentation = presentation
+
 
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
-_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 StreamInputChunk = (
@@ -127,14 +166,14 @@ class _StreamDeliveryShutdownTimeoutError(TimeoutError):
 def strip_visible_tool_markers(text: str) -> str:
     """Remove display-only tool marker lines before text re-enters model context."""
     lines = text.splitlines()
-    if not any(_VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) for line in lines):
+    if not any(is_visible_tool_marker_line(line) for line in lines):
         return text
 
     filtered_lines: list[str] = []
     index = 0
     while index < len(lines):
         line = lines[index]
-        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
+        if not is_visible_tool_marker_line(line):
             filtered_lines.append(line)
             index += 1
             continue
@@ -157,6 +196,13 @@ def strip_visible_tool_markers(text: str) -> str:
 
         filtered_lines.extend(spacer_lines)
     return "\n".join(filtered_lines).rstrip()
+
+
+def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTraceEntry]) -> str:
+    """Strip display-only markers only when they exactly represent the structured trace."""
+    if not tool_markers_match_trace(text, tool_trace):
+        return text
+    return strip_visible_tool_markers(text)
 
 
 class StreamingDeliveryError(Exception):
@@ -222,7 +268,7 @@ def _complete_capture_completions(capture_completions: tuple[asyncio.Future[None
             capture_completion.set_result(None)
 
 
-def _format_stream_error_note(error: Exception) -> str:
+def format_stream_error_note(error: Exception | str) -> str:
     """Return a concise user-facing note for stream-time exceptions."""
     normalized_error = " ".join(str(error).split())
     if not normalized_error:
@@ -237,25 +283,25 @@ def is_interrupted_partial_reply(text: object) -> bool:
     if not isinstance(text, str):
         return False
     trimmed_text = text.rstrip()
-    return trimmed_text.endswith(
-        (
-            _CANCELLED_RESPONSE_NOTE,
-            _INTERRUPTED_RESPONSE_NOTE,
-            RESTART_INTERRUPTED_RESPONSE_NOTE,
-            " [cancelled]",
-            " [error]",
-        ),
-    ) or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
+    return (
+        has_legacy_terminal_suffix(trimmed_text)
+        or trimmed_text.endswith(
+            (
+                CANCELLED_RESPONSE_NOTE,
+                _INTERRUPTED_RESPONSE_NOTE,
+                RESTART_INTERRUPTED_RESPONSE_NOTE,
+            ),
+        )
+        or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
+    )
 
 
 def clean_partial_reply_text(text: str) -> str:
     """Strip partial-reply status notes from persisted text."""
-    cleaned = text.rstrip()
+    cleaned = strip_legacy_terminal_suffixes(text.rstrip())
 
     for marker in (
-        " [cancelled]",
-        " [error]",
-        _CANCELLED_RESPONSE_NOTE,
+        CANCELLED_RESPONSE_NOTE,
         _INTERRUPTED_RESPONSE_NOTE,
         RESTART_INTERRUPTED_RESPONSE_NOTE,
     ):
@@ -265,7 +311,7 @@ def clean_partial_reply_text(text: str) -> str:
     if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
         cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
 
-    if cleaned == _PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
+    if cleaned in {_PROGRESS_PLACEHOLDER, TEAM_PROGRESS_PLACEHOLDER} or not any(char.isalnum() for char in cleaned):
         return ""
     return cleaned
 
@@ -279,21 +325,66 @@ def build_restart_interrupted_body(text: str) -> str:
 
 
 @dataclass(frozen=True)
+class UnfinishedStreamedReply:
+    """What one reply showed when the process streaming it stopped before finishing it."""
+
+    # The visible text as the user saw it, tool markers included.
+    visible_text: str
+    tool_trace: tuple[ToolTraceEntry, ...]
+
+    @property
+    def partial_text(self) -> str:
+        """Return the prose alone, without the display-only tool markers."""
+        return strip_visible_tool_markers(self.visible_text).strip()
+
+    @property
+    def resumed_text(self) -> str:
+        """Return the text a continuation streams below: what was shown, then the restart note."""
+        return f"{build_restart_interrupted_body(self.visible_text)}\n\n"
+
+
+@dataclass(frozen=True)
 class _CommittedDeliveryState:
     """One frozen stream state that definitely reached Matrix."""
 
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
+    presentation_state: dict[str, object] | None
     placeholder_progress_sent: bool
     rendered_body: str
     visible_body_state: Literal["placeholder_only", "visible_body"]
     interactive_metadata: interactive.InteractiveMetadata | None
     stream_status: str
+    # The text before the final transform reshaped it, when it did.
+    untransformed_text: str | None = None
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
     """Normalize whitespace-only placeholder buffers to the committed empty state."""
     return text if text.strip() else ""
+
+
+def _tool_trace_identity(entry: ToolTraceEntry) -> tuple[object, ...]:
+    """Return every field that determines one trace entry's durable identity."""
+    return (
+        entry.type,
+        entry.tool_name,
+        entry.args_preview,
+        entry.result_preview,
+        entry.truncated,
+        entry.tool_call_id,
+        entry.scope_key,
+        entry.parent_bash_call_id,
+        entry.toolkit_name,
+    )
+
+
+def _tool_traces_match(
+    left: list[ToolTraceEntry] | tuple[ToolTraceEntry, ...],
+    right: list[ToolTraceEntry] | tuple[ToolTraceEntry, ...],
+) -> bool:
+    """Compare trace presentation and continuation identity together."""
+    return tuple(map(_tool_trace_identity, left)) == tuple(map(_tool_trace_identity, right))
 
 
 def build_cancelled_response_update(
@@ -305,7 +396,7 @@ def build_cancelled_response_update(
     if cancel_source == "sync_restart":
         return build_restart_interrupted_body(text), STREAM_STATUS_ERROR
 
-    note = _CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else _INTERRUPTED_RESPONSE_NOTE
+    note = CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else _INTERRUPTED_RESPONSE_NOTE
     # Generic interruptions keep their distinct visible note, but reuse an
     # existing terminal wire status so older clients do not misclassify them.
     stream_status = STREAM_STATUS_CANCELLED if cancel_source == "user_stop" else STREAM_STATUS_ERROR
@@ -366,11 +457,24 @@ class _StreamingDeliverySnapshot:
     room_mode: bool
     show_tool_calls: bool
     tool_trace: tuple[ToolTraceEntry, ...]
-    extra_content: dict[str, Any] | None
+    presentation_state: dict[str, object] | None
+    extra_content: Mapping[str, Any] | None
     warmup_suffix_lines: tuple[RenderedWarmupLine, ...]
     stream_status: str
     interactive_creator_agent: str | None
     interactive_source_event_id: str | None
+    markdown_renderer: Callable[[str], str]
+    untransformed_text: str | None = None
+
+
+def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
+    return ProgressState(
+        text=committed.accumulated_text,
+        tool_trace=tuple(committed.tool_trace),
+        presentation_state=deepcopy(committed.presentation_state),
+        placeholder_only=committed.visible_body_state == "placeholder_only",
+        untransformed_text=committed.untransformed_text,
+    )
 
 
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
@@ -379,6 +483,9 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
 
     response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
     display_text = response.formatted_text
+    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+        # An interactive block still arriving is raw JSON; its question renders once the block closes.
+        display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
 
     latest_for_message = (
         snapshot.latest_thread_event_id if snapshot.event_id is None and not snapshot.room_mode else None
@@ -409,8 +516,9 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         latest_thread_event_id=latest_for_message,
         tool_trace=tool_trace if snapshot.show_tool_calls else None,
         extra_content=extra_content,
+        markdown_renderer=snapshot.markdown_renderer,
     )
-    if snapshot.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
         # Matrix suppresses m.notice before evaluating mention rules. Streaming
         # updates may already contain mentions, so using m.text here would make
         # every progressive edit eligible for a push notification.
@@ -431,6 +539,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         committed_state=_CommittedDeliveryState(
             accumulated_text=_normalize_stream_accumulated_text(snapshot.accumulated_text),
             tool_trace=tool_trace,
+            presentation_state=deepcopy(snapshot.presentation_state),
             placeholder_progress_sent=not snapshot.accumulated_text.strip(),
             rendered_body=canonical_visible_body,
             visible_body_state=(
@@ -438,17 +547,42 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             ),
             interactive_metadata=response.interactive_metadata,
             stream_status=snapshot.stream_status,
+            untransformed_text=snapshot.untransformed_text,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ProgressState:
+    """What one direct progress edit of a durable reply shows."""
+
+    text: str
+    tool_trace: tuple[ToolTraceEntry, ...]
+    presentation_state: dict[str, object] | None
+    placeholder_only: bool
+    # The whole reply before the final transform reshaped it into ``text``, when it did.
+    untransformed_text: str | None = None
+
+
+class ProgressPermission(Enum):
+    """What a reply's records allow for one direct progress edit."""
+
+    SEND = "send"
+    # An earlier durable write of the reply is unresolved; a later edit shows this progress.
+    DEFER = "defer"
+    REFUSE = "refuse"
+
+
+type ProgressWriteAhead = Callable[[ProgressState], Awaitable[ProgressPermission]]
 type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 # The same contract for a stream whose answer is its first visible event: no
 # placeholder was sent, so the terminal update is a send rather than an edit.
 type TerminalSend = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 # The answer text once the stream has ended, in and transformed out.
 type FinalTextTransform = Callable[[str], Awaitable[str]]
+# One complete presentation of a response whose terminal delivery has another owner.
+type ProgressPublisher = Callable[[StructuredStreamChunk], Awaitable[None]]
 
 
 @dataclass
@@ -476,7 +610,8 @@ class StreamingResponse:
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
-    extra_content: dict[str, Any] | None = None
+    presentation_state: dict[str, object] | None = None
+    extra_content: Mapping[str, Any] | None = None
     interactive_creator_agent: str | None = None
     interactive_source_event_id: str | None = None
     stream_started_at: float | None = None
@@ -486,6 +621,7 @@ class StreamingResponse:
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     # How the terminal edit reaches Matrix, when the caller wants it durable.
     # A streamed answer becomes visible through edits, so the last one is the
@@ -494,6 +630,18 @@ class StreamingResponse:
     # every earlier edit is transport and goes out directly.
     terminal_edit: TerminalEdit | None = None
     terminal_send: TerminalSend | None = None
+    # Set when the stream writes a durable reply: the first visible create and
+    # every terminal update (an answer, a cancellation, or an error) are
+    # durable rows, and each direct progress edit is recorded before it is
+    # sent. ``progress_write_ahead`` defers an edit the reply's records hold
+    # back, and refuses one they reject, which fails the stream like a
+    # refused edit.
+    initial_send: TerminalSend | None = None
+    progress_write_ahead: ProgressWriteAhead | None = None
+    progress_delivered: Callable[[ProgressState, str], None] | None = None
+    # A caller may still be deciding whether this turn should become visible.
+    # Terminal cleanup can finish an owned event, but must not invent a reply.
+    allow_new_terminal_message: Callable[[], bool] | None = None
     # Applied to the answer text once, before the terminal payload is built.
     # Run afterwards it would need a second edit, outside the outbox and after
     # the durable row was acknowledged, leaving the row holding one body while
@@ -509,9 +657,21 @@ class StreamingResponse:
     # answer and stranding one the homeserver may already hold.
     transport_is_current: Callable[[], Awaitable[bool]] | None = None
     canonical_final_body_candidate: str | None = None
+    # What a stopped attempt at this reply showed, which stays above the
+    # continuation: its text ends in the restart note, and its tool calls keep
+    # the first trace slots so the continuation's markers number after them.
+    resumed_text: str = ""
+    resumed_tool_trace: tuple[ToolTraceEntry, ...] = ()
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
+    # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
+    _render_markdown: Callable[[str], str] = field(
+        default_factory=lambda: lru_cache(maxsize=1)(markdown_to_html),
+        init=False,
+        repr=False,
+    )
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
+    _last_delivered_presentation_state: dict[str, object] | None = field(default=None, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
     _last_committed_rendered_body: str | None = field(default=None, init=False, repr=False)
     _last_committed_interactive_metadata: interactive.InteractiveMetadata | None = field(
@@ -533,10 +693,31 @@ class StreamingResponse:
         self.thread_id = self.target.resolved_thread_id
         self.reply_to_event_id = self.target.reply_to_event_id
         self.room_mode = self.target.is_room_mode
+        if self.resumed_text or self.resumed_tool_trace:
+            # The stopped attempt's part is already visible in Matrix, so a failed
+            # edit rolls back to it, and no terminal path treats it as a placeholder.
+            self.accumulated_text = self._last_delivered_text = self.resumed_text
+            self.tool_trace = list(self.resumed_tool_trace)
+            self._last_delivered_tool_trace = list(self.resumed_tool_trace)
+            self._last_committed_rendered_body = self.resumed_text.rstrip()
+            self._last_committed_visible_body_state = "visible_body"
+
+    @property
+    def durable_reply(self) -> bool:
+        """Return whether this stream writes a durable reply record."""
+        return self.progress_write_ahead is not None
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
         self._append_incremental_text(new_chunk)
+
+    def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
+        """Merge one trace snapshot after the stopped attempt's calls, which keep the first slots."""
+        resumed_count = len(self.resumed_tool_trace)
+        self.tool_trace = [
+            *self.tool_trace[:resumed_count],
+            *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
+        ]
 
     def uses_replacement_updates(self) -> bool:
         """Return whether text chunks replace the current visible body."""
@@ -602,7 +783,8 @@ class StreamingResponse:
             self.stream_started_at = now
         delivery_matches_live_state = (
             _normalize_stream_accumulated_text(self.accumulated_text) == committed_state.accumulated_text
-            and self.tool_trace == committed_state.tool_trace
+            and _tool_traces_match(self.tool_trace, committed_state.tool_trace)
+            and self.presentation_state == committed_state.presentation_state
         )
         if delivery_matches_live_state:
             self.last_update = now
@@ -624,7 +806,8 @@ class StreamingResponse:
         if (
             _normalize_stream_accumulated_text(self.accumulated_text)
             == self._inflight_nonterminal_capture_state.accumulated_text
-            and self.tool_trace == self._inflight_nonterminal_capture_state.tool_trace
+            and _tool_traces_match(self.tool_trace, self._inflight_nonterminal_capture_state.tool_trace)
+            and self.presentation_state == self._inflight_nonterminal_capture_state.presentation_state
         ):
             return self._inflight_nonterminal_capture
         return None
@@ -667,47 +850,46 @@ class StreamingResponse:
                 capture_completions=capture_completions,
             )
 
-    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
-        """Add new content and potentially update the message."""
-        self._warmup_state.clear_terminal_failures()
-        previous_last_delta_at = self.last_delta_at
-        self._update(new_chunk)
-        await self._throttled_send(client, prior_delta_at=previous_last_delta_at)
-
     def _prepare_terminal_text_and_status(
         self,
         *,
-        cancelled: bool,
-        restart_interrupted: bool,
         cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None,
         error: Exception | None,
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
-        resolved_cancel_source = cancel_source
-        if resolved_cancel_source is None:
-            if restart_interrupted:
-                resolved_cancel_source = "sync_restart"
-            elif cancelled:
-                resolved_cancel_source = "user_stop"
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
-            error_note = _format_stream_error_note(error)
+            error_note = format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
             return STREAM_STATUS_ERROR
-        if resolved_cancel_source is not None:
+        if cancel_source is not None:
             self.accumulated_text, stream_status = build_cancelled_response_update(
                 self.accumulated_text,
-                cancel_source=resolved_cancel_source,
+                cancel_source=cancel_source,
             )
             return stream_status
         return STREAM_STATUS_COMPLETED
+
+    def _place_final_only_continuation(
+        self,
+        canonical_final_body_candidate: str | None,
+        *,
+        final_stream_status: str,
+    ) -> None:
+        """Put a completed continuation that arrived only as its final event below the stopped attempt it resumes."""
+        if (
+            final_stream_status == STREAM_STATUS_COMPLETED
+            and canonical_final_body_candidate is not None
+            and self.resumed_text
+            and not self.accumulated_text.removeprefix(self.resumed_text).strip()
+        ):
+            self.accumulated_text = self.resumed_text + canonical_final_body_candidate
 
     async def finalize(  # noqa: C901, PLR0911, PLR0912
         self,
         client: nio.AsyncClient,
         *,
         cancelled: bool = False,
-        restart_interrupted: bool = False,
         cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None,
         error: Exception | None = None,
     ) -> StreamTransportOutcome:
@@ -717,16 +899,42 @@ class StreamingResponse:
         if canonical_final_body_candidate is None and self.accumulated_text.strip():
             canonical_final_body_candidate = self.accumulated_text
         resolved_cancel_source = cancel_source
-        if resolved_cancel_source is None:
-            if restart_interrupted:
-                resolved_cancel_source = "sync_restart"
-            elif cancelled:
-                resolved_cancel_source = "user_stop"
+        if resolved_cancel_source is None and cancelled:
+            resolved_cancel_source = "user_stop"
+        if (
+            self.event_id is None
+            and self.allow_new_terminal_message is not None
+            and not self.allow_new_terminal_message()
+        ):
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=None,
+                terminal_status="cancelled"
+                if resolved_cancel_source is not None
+                else "error"
+                if error
+                else "completed",
+                rendered_body=None,
+                visible_body_state="none",
+                failure_reason=cancel_failure_reason(resolved_cancel_source)
+                if resolved_cancel_source is not None
+                else str(error)
+                if error
+                else None,
+            )
+        if resolved_cancel_source is not None and current_task_is_process_shutdown():
+            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_status="cancelled",
+                rendered_body=committed_rendered_body,
+                visible_body_state=committed_visible_body_state,
+                canonical_final_body_candidate=canonical_final_body_candidate,
+                failure_reason=cancel_failure_reason(resolved_cancel_source),
+                interactive_metadata=self._last_committed_interactive_metadata,
+            )
         had_body_before_terminal = bool(self.accumulated_text.strip())
         final_stream_status = self._prepare_terminal_text_and_status(
-            cancelled=cancelled,
-            restart_interrupted=restart_interrupted,
-            cancel_source=cancel_source,
+            cancel_source=resolved_cancel_source,
             error=error,
         )
         terminal_status = "cancelled" if resolved_cancel_source is not None else final_stream_status
@@ -737,6 +945,10 @@ class StreamingResponse:
         # still edit the message to finalize the stream status.
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
+        )
+        self._place_final_only_continuation(
+            self.canonical_final_body_candidate,
+            final_stream_status=final_stream_status,
         )
         text_to_send = self.accumulated_text
         if (
@@ -807,9 +1019,7 @@ class StreamingResponse:
         try:
             retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
             retry_terminal_update_immediately = (
-                final_stream_status != STREAM_STATUS_COMPLETED
-                and not restart_interrupted
-                and cancel_source != "sync_restart"
+                final_stream_status != STREAM_STATUS_COMPLETED and resolved_cancel_source != "sync_restart"
             )
             send_succeeded = await self._send_or_edit_message(
                 client,
@@ -826,7 +1036,7 @@ class StreamingResponse:
                 event_id=self.event_id,
                 room_id=self.room_id,
                 stream_status=final_stream_status,
-                exc_info=True,
+                exc_info=not current_task_is_process_shutdown(),
             )
             (
                 committed_rendered_body,
@@ -904,6 +1114,7 @@ class StreamingResponse:
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
         boundary_refresh: bool = False,
+        force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send new message or edit existing one."""
@@ -915,13 +1126,14 @@ class StreamingResponse:
         if prepared_delivery is None:
             return True
 
-        durable_terminal = is_final and stream_status == STREAM_STATUS_COMPLETED
+        durable_terminal = is_final and (stream_status == STREAM_STATUS_COMPLETED or self.durable_reply)
         return await self._send_prepared_delivery(
             client,
             prepared_delivery=prepared_delivery,
             is_final=is_final,
             durable_terminal=durable_terminal,
             boundary_refresh=boundary_refresh,
+            force_nonterminal_delivery=force_nonterminal_delivery,
             capture_completions=capture_completions,
             retry_on_failure=retry_on_failure and is_final,
             retry_without_backoff=retry_without_backoff and is_final,
@@ -935,13 +1147,19 @@ class StreamingResponse:
         is_final: bool,
         durable_terminal: bool = False,
         boundary_refresh: bool = False,
+        force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
-        if not is_final and not is_initial_send and not self._should_send_prepared_nonterminal_edit(prepared_delivery):
+        if (
+            not is_final
+            and not is_initial_send
+            and not force_nonterminal_delivery
+            and not self._should_send_prepared_nonterminal_edit(prepared_delivery)
+        ):
             _complete_capture_completions(capture_completions)
             return True
         if not durable_terminal and not await self._direct_transport_allowed():
@@ -953,6 +1171,15 @@ class StreamingResponse:
             # outbox, which can tell refusing an answer apart from stranding
             # one the homeserver may already hold.
             _complete_capture_completions(capture_completions)
+            return True
+        if (
+            not is_final
+            and not is_initial_send
+            and not await self._progress_permitted(
+                prepared_delivery,
+                capture_completions,
+            )
+        ):
             return True
         capture = None
         if not is_final:
@@ -970,6 +1197,7 @@ class StreamingResponse:
                 retry_without_backoff=retry_without_backoff,
                 retry_sync_recovery=not is_final or retry_on_failure,
                 is_final=durable_terminal,
+                progress=_progress_state(prepared_delivery.committed_state) if self.durable_reply else None,
             )
         finally:
             if self._inflight_nonterminal_capture is capture:
@@ -984,6 +1212,8 @@ class StreamingResponse:
 
         self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
         if not is_final:
+            if not is_initial_send and self.progress_delivered is not None and self.event_id is not None:
+                self.progress_delivered(_progress_state(prepared_delivery.committed_state), self.event_id)
             self._warmup_state.note_nonterminal_delivery(
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
@@ -995,6 +1225,23 @@ class StreamingResponse:
         else:
             self.placeholder_progress_sent = False
         return True
+
+    async def _progress_permitted(
+        self,
+        prepared_delivery: _PreparedStreamingDelivery,
+        capture_completions: tuple[asyncio.Future[None], ...],
+    ) -> bool:
+        """Ask the reply's records about one progress edit: ``False`` defers it, and a refusal fails the stream."""
+        if self.progress_write_ahead is None:
+            return True
+        permission = await self.progress_write_ahead(_progress_state(prepared_delivery.committed_state))
+        if permission is ProgressPermission.SEND:
+            return True
+        _complete_capture_completions(capture_completions)
+        if permission is ProgressPermission.REFUSE:
+            msg = "The reply's records refused this progress edit"
+            raise RuntimeError(msg)
+        return False
 
     def _should_send_prepared_nonterminal_edit(
         self,
@@ -1037,11 +1284,13 @@ class StreamingResponse:
             room_mode=self.room_mode,
             show_tool_calls=self.show_tool_calls,
             tool_trace=tuple(deepcopy(self.tool_trace)),
+            presentation_state=deepcopy(self.presentation_state),
             extra_content=deepcopy(self.extra_content) if self.extra_content is not None else None,
             warmup_suffix_lines=tuple(warmup_suffix_lines),
             stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
             interactive_creator_agent=self.interactive_creator_agent,
             interactive_source_event_id=self.interactive_source_event_id,
+            markdown_renderer=self._render_markdown,
         )
 
     async def _prepare_delivery_async(
@@ -1073,18 +1322,25 @@ class StreamingResponse:
                 logger.exception("final_response_transform_failed_preserving_streamed_text")
             else:
                 if transformed.strip() and transformed != snapshot.accumulated_text:
-                    snapshot = replace(snapshot, accumulated_text=transformed)
+                    snapshot = replace(
+                        snapshot,
+                        accumulated_text=transformed,
+                        untransformed_text=snapshot.accumulated_text,
+                    )
         return await asyncio.to_thread(_prepare_delivery_from_snapshot, snapshot)
 
     def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:
         """Snapshot the last non-terminal text/tool-trace state that actually reached Matrix."""
         self._last_delivered_text = committed_state.accumulated_text
         self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
+        self._last_delivered_presentation_state = deepcopy(committed_state.presentation_state)
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
         self._last_committed_rendered_body = committed_state.rendered_body
         self._last_committed_visible_body_state = committed_state.visible_body_state
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
+        if self.visible_progress_callback is not None:
+            self.visible_progress_callback(committed_state.rendered_body)
 
     def _committed_terminal_snapshot(
         self,
@@ -1103,8 +1359,34 @@ class StreamingResponse:
         """Discard buffered state that never reached Matrix after a delivery failure."""
         self.accumulated_text = self._last_delivered_text
         self.tool_trace = deepcopy(self._last_delivered_tool_trace)
+        self.presentation_state = deepcopy(self._last_delivered_presentation_state)
         self.chars_since_last_update = 0
         self.placeholder_progress_sent = self._last_placeholder_progress_sent
+
+    def has_uncommitted_presentation(self) -> bool:
+        """Return whether buffered ordered presentation state has not reached Matrix."""
+        return (
+            _normalize_stream_accumulated_text(self.accumulated_text)
+            != _normalize_stream_accumulated_text(self._last_delivered_text)
+            or not _tool_traces_match(self.tool_trace, self._last_delivered_tool_trace)
+            or self.presentation_state != self._last_delivered_presentation_state
+        )
+
+    def require_committed_presentation(self) -> None:
+        """Raise unless the current ordered presentation was acknowledged."""
+        if self.has_uncommitted_presentation():
+            msg = "Stream suspension presentation was not acknowledged"
+            raise RuntimeError(msg)
+
+    def committed_presentation(self) -> StreamingPresentation:
+        """Return the text and trace carried by the latest successful update."""
+        response_text = _normalize_stream_accumulated_text(self._last_delivered_text).rstrip()
+        return StreamingPresentation(
+            response_text=response_text,
+            rendered_response_text=self._last_committed_rendered_body if response_text else None,
+            tool_trace=tuple(deepcopy(self._last_delivered_tool_trace)),
+            state=deepcopy(self._last_delivered_presentation_state),
+        )
 
     def _resolve_stream_status(self, *, is_final: bool, stream_status: str | None) -> str:
         """Return the content status for the current send or edit."""
@@ -1133,6 +1415,7 @@ class StreamingResponse:
         display_text: str,
         retry_sync_recovery: bool,
         is_final: bool = False,
+        progress: ProgressState | None = None,
     ) -> bool:
         """Send the initial streaming event.
 
@@ -1141,13 +1424,16 @@ class StreamingResponse:
         stream's first visible event, and it has to become durable here or it
         never does.
         """
-        if is_final and self.terminal_send is not None:
-            delivered = await self.terminal_send(
+        durable_progress = {} if progress is None else {"progress": progress}
+        send = self.terminal_send if is_final else self.initial_send
+        if send is not None:
+            delivered = await send(
                 client,
                 self.room_id,
                 content,
                 display_text,
                 retry_sync_recovery=retry_sync_recovery,
+                **durable_progress,
             )
         else:
             delivered = await send_message_result(
@@ -1172,18 +1458,30 @@ class StreamingResponse:
         display_text: str,
         retry_sync_recovery: bool,
         is_final: bool = False,
+        progress: ProgressState | None = None,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
-        edit = self.terminal_edit if is_final and self.terminal_edit is not None else edit_message_result
-        delivered = await edit(
-            client,
-            self.room_id,
-            self.event_id,
-            content,
-            display_text,
-            retry_sync_recovery=retry_sync_recovery,
-        )
+        if is_final and self.terminal_edit is not None:
+            durable_progress = {} if progress is None else {"progress": progress}
+            delivered = await self.terminal_edit(
+                client,
+                self.room_id,
+                self.event_id,
+                content,
+                display_text,
+                retry_sync_recovery=retry_sync_recovery,
+                **durable_progress,
+            )
+        else:
+            delivered = await edit_message_result(
+                client,
+                self.room_id,
+                self.event_id,
+                content,
+                display_text,
+                retry_sync_recovery=retry_sync_recovery,
+            )
         return delivered is not None
 
     async def _direct_transport_allowed(self) -> bool:
@@ -1209,13 +1507,13 @@ class StreamingResponse:
         retry_without_backoff: bool = False,
         retry_sync_recovery: bool = False,
         is_final: bool = False,
+        progress: ProgressState | None = None,
     ) -> bool:
         """Send a new event or edit the existing one.
 
-        ``is_final`` here means "this edit carries the turn's answer", which is
-        narrower than "this is the last edit". A cancelled or failed stream
-        also ends with a terminal edit, and that edit is a notice rather than
-        an answer, so it must not claim the turn's durable delivery.
+        ``is_final`` selects the terminal delivery callbacks: the turn's answer,
+        and for a durable reply also its cancelled or error notice. A cancelled
+        or failed stream of any other kind ends with a direct edit.
         """
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
         for attempt in range(1, total_attempts + 1):
@@ -1228,6 +1526,7 @@ class StreamingResponse:
                         display_text=display_text,
                         retry_sync_recovery=retry_sync_recovery,
                         is_final=is_final,
+                        progress=progress,
                     ):
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
@@ -1239,6 +1538,7 @@ class StreamingResponse:
                         display_text=display_text,
                         retry_sync_recovery=retry_sync_recovery,
                         is_final=is_final,
+                        progress=progress,
                     ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
@@ -1277,8 +1577,14 @@ class ReplacementStreamingResponse(StreamingResponse):
         return True
 
     def _update(self, new_chunk: str) -> None:
-        """Replace accumulated text with new chunk."""
-        self.accumulated_text = new_chunk
+        """Replace the text below any stopped attempt's text with new chunk, numbering its tools after that attempt's."""
+        resumed_count = len(self.resumed_tool_trace)
+        if resumed_count:
+            new_chunk = remap_visible_tool_marker_indices(
+                new_chunk,
+                {index: index + resumed_count for index in range(1, len(self.tool_trace) - resumed_count + 1)},
+            )
+        self.accumulated_text = self.resumed_text + new_chunk
         self.chars_since_last_update += len(new_chunk)
         self.last_delta_at = time.time()
 
@@ -1468,7 +1774,9 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(chunk, StructuredStreamChunk):
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
-                streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
+                streaming.apply_tool_trace_snapshot(chunk.tool_trace)
+            if chunk.presentation_state is not None:
+                streaming.presentation_state = deepcopy(chunk.presentation_state)
         elif isinstance(chunk, RunContentEvent):
             if chunk.content:
                 text_chunk = str(chunk.content)
@@ -1870,14 +2178,14 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     response_stream: AsyncIterator[StreamInputChunk],
     *,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
-    header: str | None = None,
     existing_event_id: str | None = None,
     adopt_existing_placeholder: bool = False,
     show_tool_calls: bool = True,
-    extra_content: dict[str, Any] | None = None,
+    extra_content: Mapping[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str], None] | None = None,
     latest_thread_event_id: str | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
     terminal_edit: TerminalEdit | None = None,
@@ -1886,8 +2194,17 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
     interactive_creator_agent: str | None = None,
     interactive_source_event_id: str | None = None,
+    allow_new_terminal_message: Callable[[], bool] | None = None,
+    resumed: UnfinishedStreamedReply | None = None,
+    initial_send: TerminalSend | None = None,
+    progress_write_ahead: ProgressWriteAhead | None = None,
+    progress_delivered: Callable[[ProgressState, str], None] | None = None,
 ) -> StreamTransportOutcome:
-    """Stream chunks to a Matrix room and return the canonical transport outcome."""
+    """Stream chunks to a Matrix room and return the canonical transport outcome.
+
+    ``resumed`` is what a stopped attempt at ``existing_event_id`` showed; the
+    stream continues below it instead of replacing it.
+    """
     sc = config.defaults.streaming
     streaming = streaming_cls(
         final_text_transform=final_text_transform,
@@ -1903,12 +2220,19 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         max_idle=sc.max_idle,
         pipeline_timing=pipeline_timing,
         visible_event_id_callback=visible_event_id_callback,
+        visible_progress_callback=visible_progress_callback,
         preserve_existing_visible_on_empty_terminal=preserve_existing_visible_on_empty_terminal,
         terminal_edit=terminal_edit,
         terminal_send=terminal_send,
         transport_is_current=transport_is_current,
         interactive_creator_agent=interactive_creator_agent,
         interactive_source_event_id=interactive_source_event_id,
+        allow_new_terminal_message=allow_new_terminal_message,
+        resumed_text=resumed.resumed_text if resumed is not None else "",
+        resumed_tool_trace=resumed.tool_trace if resumed is not None else (),
+        initial_send=initial_send,
+        progress_write_ahead=progress_write_ahead,
+        progress_delivered=progress_delivered,
     )
 
     # Ensure the first chunk triggers an initial send immediately
@@ -1918,11 +2242,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         streaming.event_id = existing_event_id
         if visible_event_id_callback is not None:
             visible_event_id_callback(existing_event_id)
-        streaming.accumulated_text = ""
         streaming.placeholder_progress_sent = adopt_existing_placeholder
-
-    if header:
-        await streaming.update_content(header, client)
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
@@ -2013,15 +2333,34 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                         "Stream delivery controller raised during suspension cleanup",
                         error=str(delivery_cleanup_error),
                     )
-                    if isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
+                    streaming.restore_last_delivered_state()
+                    raise _build_streaming_delivery_error(
+                        streaming,
+                        delivery_cleanup_error,
+                        failure_reason=str(delivery_cleanup_error),
+                        terminal_status="error",
+                        tool_trace_collector=tool_trace_collector,
+                    ) from delivery_cleanup_error
+                if streaming.has_uncommitted_presentation():
+                    try:
+                        await streaming._send_or_edit_message(
+                            client,
+                            force_nonterminal_delivery=True,
+                        )
+                        streaming.require_committed_presentation()
+                    except Exception as delivery_error:
                         streaming.restore_last_delivered_state()
+                        suspension_error = RuntimeError(
+                            f"Stream suspension presentation delivery failed: {delivery_error}",
+                        )
                         raise _build_streaming_delivery_error(
                             streaming,
-                            delivery_cleanup_error,
-                            failure_reason=str(delivery_cleanup_error),
+                            suspension_error,
+                            failure_reason="suspension_presentation_delivery_failed",
                             terminal_status="error",
                             tool_trace_collector=tool_trace_collector,
-                        ) from delivery_cleanup_error
+                        ) from delivery_error
+                exc.capture_presentation(streaming.committed_presentation())
                 raise
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
             logger.exception("Streaming response failed", error=str(delivery_error))
@@ -2085,3 +2424,157 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
 
     assert transport_outcome is not None
     return transport_outcome
+
+
+async def _await_task_exit(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
+    """Wait until one task has exited, returning a cancellation of the waiter observed meanwhile."""
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as error:
+            cancelled = error
+            task.cancel()
+    return cancelled
+
+
+async def _stop_progress_tasks(
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_task: asyncio.Task[None],
+    progress_task: asyncio.Task[None],
+    pump: WorkerProgressPump,
+    *,
+    event_id: str,
+    room_id: str,
+) -> None:
+    """End every progress task before the caller's terminal update, then re-raise a cancellation seen meanwhile.
+
+    An in-flight edit is allowed to finish so it lands before the terminal
+    update. A cancellation, or a drain past its deadline, cancels it instead,
+    and the wait continues until the task has really exited.
+    """
+    pump.shutdown.set()
+    progress_task.cancel()
+    cancelled = await _await_task_exit(progress_task)
+    if cancelled is None and not delivery_task.done():
+        delivery_queue.put_nowait(None)
+        try:
+            await asyncio.wait({delivery_task}, timeout=_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS)
+        except asyncio.CancelledError as error:
+            cancelled = error
+        if cancelled is None and not delivery_task.done():
+            logger.warning(
+                "Progress edits did not drain before terminal delivery; cancelling them",
+                event_id=event_id,
+                room_id=room_id,
+            )
+    delivery_task.cancel()
+    cancelled = await _await_task_exit(delivery_task) or cancelled
+    for task in (progress_task, delivery_task):
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning(
+                "Progress edits stopped before terminal delivery",
+                event_id=event_id,
+                room_id=room_id,
+                error=str(error),
+            )
+    if cancelled is not None:
+        raise cancelled
+
+
+@asynccontextmanager
+async def stream_progress_edits(
+    client: nio.AsyncClient,
+    target: MessageTarget,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    event_id: str,
+    show_tool_calls: bool,
+    extra_content: dict[str, Any] | None = None,
+    visible_progress_callback: Callable[[str], None] | None = None,
+    transport_is_current: Callable[[], Awaitable[bool]] | None = None,
+    progress_write_ahead: ProgressWriteAhead | None = None,
+    progress_delivered: Callable[[ProgressState, str], None] | None = None,
+) -> AsyncIterator[ProgressPublisher]:
+    """Stream progress into one existing reply whose terminal update belongs to the caller.
+
+    Each publication is the caller's complete presentation. Appended text is
+    throttled like ordinary streamed deltas, a visible tool-trace change is a
+    tool boundary delivered like a streamed tool event, and any other change
+    counts as one in-place mutation. The first publication is delivered at
+    once, so the reply leaves whatever state it showed before. Worker warm-up
+    progress is shown as in ordinary streaming. Progress is transport only: a
+    rejected edit stops later progress without failing the caller, whose
+    terminal delivery still owns the reply. Leaving the scope waits until no
+    progress edit is in flight, even across cancellation, so the caller's
+    terminal update can never race one.
+    """
+    stream_config = config.defaults.streaming
+    streaming = StreamingResponse(
+        target=target,
+        config=config,
+        runtime_paths=runtime_paths,
+        event_id=event_id,
+        last_update=float("-inf"),
+        update_interval=stream_config.update_interval,
+        min_update_interval=stream_config.min_update_interval,
+        interval_ramp_seconds=stream_config.interval_ramp_seconds,
+        max_idle=stream_config.max_idle,
+        show_tool_calls=show_tool_calls,
+        extra_content=extra_content,
+        visible_progress_callback=visible_progress_callback,
+        transport_is_current=transport_is_current,
+        progress_write_ahead=progress_write_ahead,
+        progress_delivered=progress_delivered,
+    )
+    published = False
+
+    def apply_presentation(text: str) -> None:
+        if text.startswith(streaming.accumulated_text):
+            streaming._append_incremental_text(text[len(streaming.accumulated_text) :])
+            return
+        streaming.accumulated_text = text
+        streaming._mark_nonadditive_text_mutation()
+
+    worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+    with worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump:
+        delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
+        progress_task = asyncio.create_task(
+            _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
+        )
+
+        async def publish(chunk: StructuredStreamChunk) -> None:
+            nonlocal published
+            if delivery_task.done():
+                return
+            trace_changed = False
+            if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
+                # Callers keep mutating their trace entries; hold the published state.
+                streaming.tool_trace = deepcopy(chunk.tool_trace)
+                trace_changed = True
+            if not published:
+                published = True
+                streaming.accumulated_text = chunk.content
+                _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
+            elif chunk.content != streaming.accumulated_text or (trace_changed and streaming.show_tool_calls):
+                await _apply_visible_text_chunk(
+                    streaming,
+                    delivery_queue,
+                    chunk.content,
+                    apply_chunk=apply_presentation,
+                    boundary_refresh=trace_changed and streaming.show_tool_calls,
+                )
+
+        try:
+            yield publish
+        finally:
+            await _stop_progress_tasks(
+                delivery_queue,
+                delivery_task,
+                progress_task,
+                pump,
+                event_id=event_id,
+                room_id=target.room_id,
+            )

@@ -481,3 +481,44 @@ def test_trigger_send_rejects_data_json_that_is_not_object(tmp_path: Path) -> No
 
     assert result.exit_code == 2
     assert "--data-json must decode to a JSON object" in result.output
+
+
+def test_trigger_send_includes_thread_key_when_given(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The optional thread key rides along in the signed body."""
+    key_path = tmp_path / "trigger.key"
+    _write_private_key(key_path)
+    captured: dict[str, object] = {}
+
+    def fake_post(_url: str, *, content: bytes, **_request_options: object) -> _FakeResponse:
+        captured.update(content=content)
+        return _FakeResponse({"accepted": True})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = runner.invoke(
+        app,
+        [
+            "trigger",
+            "send",
+            "campground",
+            "--key-file",
+            str(key_path),
+            "--kind",
+            "campground.availability",
+            "--message",
+            "site open",
+            "--event-id",
+            "event-1",
+            "--thread-key",
+            "site-42",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(cast("bytes", captured["content"])) == {
+        "kind": "campground.availability",
+        "message": "site open",
+        "event_id": "event-1",
+        "thread_key": "site-42",
+        "data": {},
+    }

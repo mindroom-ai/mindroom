@@ -7,15 +7,22 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.message_target import MessageTarget
-from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.scheduling.tasks import SchedulingRuntime, _extract_mentioned_agents_from_text
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_scheduling_runtime_from_tool_runtime_context,
+    tool_runtime_context,
+)
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -84,6 +91,17 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     function.process_entrypoint()
 
     assert set(function.parameters["required"]) == {"request", "new_thread"}
+    properties = function.parameters["properties"]
+    new_thread_description = properties["new_thread"]["description"].lower()
+    silent_description = properties["silent"]["description"].lower()
+    assert "silent" in new_thread_description
+    assert "room-level root" in new_thread_description
+    assert "hidden" in silent_description
+    assert "whitespace" in silent_description
+    assert SILENT_SCHEDULE_NO_REPLY_TOKEN.lower() in silent_description
+    assert "findings" in silent_description
+    assert "failures" in silent_description
+    assert "infer" in silent_description
 
 
 @pytest.mark.asyncio
@@ -94,6 +112,9 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     matrix_admin = object()
     context = _make_context(config, matrix_admin=matrix_admin)
 
+    current_config = config
+    context = replace(context, config_provider=lambda: current_config)
+
     with (
         patch(
             "mindroom.custom_tools.scheduler.schedule_task",
@@ -102,16 +123,25 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         tool_runtime_context(context),
     ):
         result = await tools.schedule("tomorrow at 3pm check deployment", new_thread=False)
-        new_thread_result = await tools.schedule("tomorrow at 4pm check deployment", new_thread=True)
-        limited_result = await tools.schedule("every 25 minutes poll the queue", new_thread=False, history_limit=0)
+        new_thread_result = await tools.schedule(
+            "tomorrow at 4pm check deployment",
+            new_thread=True,
+            silent=True,
+        )
+        limited_result = await tools.schedule(
+            "every 25 minutes poll the queue",
+            new_thread=False,
+            history_limit=0,
+            model="cheap",
+        )
 
     assert result == "✅ Scheduled"
     assert new_thread_result == "✅ Scheduled"
     assert limited_result == "✅ Scheduled"
     assert mock_schedule.await_count == 3
-    first_call = mock_schedule.await_args_list[0].kwargs
-    second_call = mock_schedule.await_args_list[1].kwargs
-    third_call = mock_schedule.await_args_list[2].kwargs
+    first_call = mock_schedule.await_args_list[0].kwargs.copy()
+    second_call = mock_schedule.await_args_list[1].kwargs.copy()
+    third_call = mock_schedule.await_args_list[2].kwargs.copy()
     expected_runtime = SchedulingRuntime(
         client=context.client,
         config=context.config,
@@ -120,34 +150,80 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         conversation_reader=context.conversation_reader,
         matrix_admin=matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
+        responder_candidates_for_room=context.responder_candidates_for_current_room,
     )
+    config_providers = []
+    for call_kwargs in (first_call, second_call, third_call):
+        runtime = call_kwargs.pop("runtime")
+        assert replace(runtime, config_provider=None) == expected_runtime
+        assert runtime.config_provider is not None
+        assert runtime.config_provider() is config
+        config_providers.append(runtime.config_provider)
+    current_config = config.model_copy(deep=True)
+    assert all(config_provider() is current_config for config_provider in config_providers)
     assert first_call == {
-        "runtime": expected_runtime,
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 3pm check deployment",
         "new_thread": False,
         "history_limit": None,
+        "silent": None,
+        "model": None,
     }
     assert second_call == {
-        "runtime": expected_runtime,
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 4pm check deployment",
         "new_thread": True,
         "history_limit": None,
+        "silent": True,
+        "model": None,
     }
     assert third_call == {
-        "runtime": expected_runtime,
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
         "scheduled_by": context.requester_id,
         "full_text": "every 25 minutes poll the queue",
         "new_thread": False,
         "history_limit": 0,
+        "silent": None,
+        "model": "cheap",
     }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_tool_reuses_failed_turn_membership_snapshot() -> None:
+    """A turn-bound scheduler runtime must not retry its failed membership refresh."""
+    requester_id = "@user:localhost"
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            administrators=[requester_id],
+        ),
+    )
+    general_id = entity_ids(config, runtime_paths_for(config))["general"]
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=general_id.full_id)
+    room.add_member(general_id.full_id, "General Agent", None)
+    room.add_member(requester_id, "User", None)
+    client = AsyncMock()
+    client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    context = replace(
+        _make_context(config),
+        client=client,
+        requester_id=requester_id,
+        room=room,
+        membership_turn_id="$turn",
+    )
+
+    assert not await ensure_room_membership_synced(client, room, sender_id=requester_id)
+
+    runtime = build_scheduling_runtime_from_tool_runtime_context(context)
+    candidates = await runtime.responder_candidates_for_room(room, requester_id)
+
+    assert candidates == [general_id]
+    assert client.joined_members.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -207,6 +283,9 @@ async def test_edit_schedule_tool_calls_backend() -> None:
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
     context = _make_context(config)
 
+    current_config = config
+    context = replace(context, config_provider=lambda: current_config)
+
     with (
         patch(
             "mindroom.custom_tools.scheduler.edit_scheduled_task",
@@ -215,10 +294,17 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         tool_runtime_context(context),
     ):
         result = await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
-        limited_result = await tools.edit_schedule("task123", "keep the same schedule", history_limit=5)
+        limited_result = await tools.edit_schedule(
+            "task123",
+            "keep the same schedule",
+            history_limit=5,
+            silent=True,
+        )
+        visible_result = await tools.edit_schedule("task123", "make it visible", silent=False, model="cheap")
 
     assert "Updated" in result
     assert "Updated" in limited_result
+    assert "Updated" in visible_result
     expected_runtime = SchedulingRuntime(
         client=context.client,
         config=context.config,
@@ -226,25 +312,50 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         room=context.room,
         conversation_reader=context.conversation_reader,
         agent_reply_memberships=context.agent_reply_memberships,
+        responder_candidates_for_room=context.responder_candidates_for_current_room,
     )
-    assert mock_edit.await_count == 2
-    assert mock_edit.await_args_list[0].kwargs == {
-        "runtime": expected_runtime,
+    assert mock_edit.await_count == 3
+    first_call = mock_edit.await_args_list[0].kwargs.copy()
+    second_call = mock_edit.await_args_list[1].kwargs.copy()
+    third_call = mock_edit.await_args_list[2].kwargs.copy()
+    config_providers = []
+    for call_kwargs in (first_call, second_call, third_call):
+        runtime = call_kwargs.pop("runtime")
+        assert replace(runtime, config_provider=None) == expected_runtime
+        assert runtime.config_provider is not None
+        assert runtime.config_provider() is config
+        config_providers.append(runtime.config_provider)
+    current_config = config.model_copy(deep=True)
+    assert all(config_provider() is current_config for config_provider in config_providers)
+    assert first_call == {
         "room_id": context.room_id,
         "task_id": "task123",
         "full_text": "tomorrow at 9am check deployment",
         "scheduled_by": context.requester_id,
         "thread_id": context.resolved_thread_id,
         "history_limit": None,
+        "silent": None,
+        "model": None,
     }
-    assert mock_edit.await_args_list[1].kwargs == {
-        "runtime": expected_runtime,
+    assert second_call == {
         "room_id": context.room_id,
         "task_id": "task123",
         "full_text": "keep the same schedule",
         "scheduled_by": context.requester_id,
         "thread_id": context.resolved_thread_id,
         "history_limit": 5,
+        "silent": True,
+        "model": None,
+    }
+    assert third_call == {
+        "room_id": context.room_id,
+        "task_id": "task123",
+        "full_text": "make it visible",
+        "scheduled_by": context.requester_id,
+        "thread_id": context.resolved_thread_id,
+        "history_limit": None,
+        "silent": False,
+        "model": "cheap",
     }
 
 
@@ -294,6 +405,7 @@ async def test_list_schedules_tool_calls_backend() -> None:
     mock_list.assert_awaited_once_with(
         client=context.client,
         room_id=context.room_id,
+        runtime_paths=context.runtime_paths,
         thread_id=context.resolved_thread_id,
         config=context.config,
     )
@@ -347,6 +459,7 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         client=context.client,
         room_id=context.room_id,
         task_id="task123",
+        runtime_paths=context.runtime_paths,
         matrix_admin=matrix_admin,
     )
 

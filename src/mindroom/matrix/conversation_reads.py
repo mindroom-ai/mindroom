@@ -102,6 +102,10 @@ def projected_thread_history(
         if source_degraded
         else None
     )
+    if page.refresh_pending:
+        # A withheld revision is repairable. Dispatch must resolve it before
+        # counting participants, even when the rest of the source is current.
+        diagnostics = {**(diagnostics or {}), THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True}
     return thread_history_result(
         messages,
         # A page with more behind it is not the whole conversation, however

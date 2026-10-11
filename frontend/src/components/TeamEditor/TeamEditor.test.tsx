@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TeamEditor } from "./TeamEditor";
 import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 import {
   Team,
   Agent,
@@ -12,6 +13,9 @@ import {
 
 // Mock the store
 vi.mock("@/store/configStore");
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
+}));
 
 describe("TeamEditor", () => {
   const mockTeam: Team = {
@@ -78,8 +82,8 @@ describe("TeamEditor", () => {
   const mockConfig: Partial<Config> = {
     models: {
       default: { provider: "ollama", id: "llama2" },
-      gpt4: { provider: "openai", id: "gpt-4" },
-      claude: { provider: "anthropic", id: "claude-3" },
+      gpt4: { provider: "openai", id: "gpt-6-astra" },
+      claude: { provider: "anthropic", id: "claude-sonnet-5" },
     },
     defaults: {
       markdown: true,
@@ -260,7 +264,9 @@ describe("TeamEditor", () => {
     const modeSelect = screen.getByLabelText("Collaboration Mode");
     fireEvent.click(modeSelect);
 
-    const collaborateOption = await screen.findByText(/Collaborate \(Parallel/);
+    const collaborateOption = await screen.findByText(
+      /Collaborate \(All members/,
+    );
     fireEvent.click(collaborateOption);
 
     expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
@@ -1041,5 +1047,42 @@ describe("TeamEditor", () => {
     expect(
       screen.getByText("Team members cannot include private agents."),
     ).toBeInTheDocument();
+  });
+
+  it("edits accept_invites through More settings", () => {
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          TeamConfig: {
+            type: "object",
+            properties: {
+              display_name: { type: "string" },
+              accept_invites: {
+                anyOf: [
+                  { type: "boolean" },
+                  { type: "array", items: { type: "string" } },
+                ],
+                default: true,
+              },
+            },
+          },
+        },
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<TeamEditor />);
+    fireEvent.click(screen.getByRole("button", { name: /More settings/ }));
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Accept invites mode" }),
+      { target: { value: "false" } },
+    );
+
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      accept_invites: false,
+    });
   });
 });

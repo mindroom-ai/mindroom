@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="whatsapp",
+    file_access=ToolFileAccess.NONE,
     display_name="WhatsApp Business",
     description="Send text and template messages via WhatsApp Business API",
     category=ToolCategory.COMMUNICATION,
@@ -127,6 +128,14 @@ if TYPE_CHECKING:
             required=False,
             default=False,
             description="Enable all WhatsApp tools",
+        ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+            description="Per-request HTTP timeout in seconds",
         ),
     ],
     dependencies=["httpx"],

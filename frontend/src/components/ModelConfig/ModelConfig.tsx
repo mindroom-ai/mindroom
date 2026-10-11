@@ -16,6 +16,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useConfigStore } from "@/store/configStore";
+import { SchemaSection } from "@/components/SchemaForm";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -42,12 +43,17 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "./ProviderLogos";
 import { getProviderInfo, getProviderList } from "@/lib/providers";
-import type { ProviderType } from "@/types/config";
+import type {
+  ModelConfig as ModelConfigType,
+  ProviderType,
+} from "@/types/config";
 
 interface RowDraft {
   modelName: string;
   provider: string;
   modelId: string;
+  displayName: string;
+  icon: string;
   baseUrl: string;
   contextWindow: string;
   apiKey: string;
@@ -59,6 +65,9 @@ interface KeyStatus {
   hasKey: boolean;
   source: string | null;
   maskedKey: string | null;
+  // Stored service the key resolved from when it differs from the requested
+  // one, e.g. a provider key saved under its env var name (ANTHROPIC_API_KEY).
+  credentialService: string | null;
 }
 
 interface KeyDisplayInfo {
@@ -67,10 +76,13 @@ interface KeyDisplayInfo {
   maskedKey: string | null;
   keyId: string | null;
   sourceLabel: string;
+  copyable: boolean;
 }
 
 interface ModelRowData {
   modelName: string;
+  displayName: string | null;
+  icon: string | null;
   provider: string;
   providerName: string;
   modelId: string;
@@ -83,6 +95,8 @@ const EMPTY_DRAFT: RowDraft = {
   modelName: "",
   provider: "openrouter",
   modelId: "",
+  displayName: "",
+  icon: "",
   baseUrl: "",
   contextWindow: "",
   apiKey: "",
@@ -127,10 +141,7 @@ function providerToService(provider: string): string {
   return provider === "gemini" ? "google" : provider;
 }
 
-function sourceToLabel(source: string | null, hasKey: boolean): string {
-  if (!hasKey) {
-    return "Not set";
-  }
+function sourceToLabel(source: string | null): string {
   if (source === "env") {
     return ".env";
   }
@@ -141,6 +152,16 @@ function sourceToLabel(source: string | null, hasKey: boolean): string {
     return source;
   }
   return ".env";
+}
+
+function keySourceLabel(key: KeyStatus | null): string {
+  if (!key?.hasKey) {
+    return "Not set";
+  }
+  const label = sourceToLabel(key.source);
+  return key.credentialService
+    ? `${label}, saved as ${key.credentialService}`
+    : label;
 }
 
 function getOpenAIBaseUrl(modelConfig: {
@@ -182,23 +203,36 @@ function parseOptionalPositiveInteger(value: string): number | null {
   return parsed;
 }
 
+const MISSING_KEY_STATUS: KeyStatus = {
+  hasKey: false,
+  source: null,
+  maskedKey: null,
+  credentialService: null,
+};
+
 async function fetchKeyStatus(service: string): Promise<KeyStatus> {
   try {
     const res = await fetch(
       `/api/credentials/${service}/api-key?key_name=api_key`,
     );
     if (!res.ok) {
-      return { hasKey: false, source: null, maskedKey: null };
+      return MISSING_KEY_STATUS;
     }
 
     const data = await res.json();
+    const credentialService =
+      typeof data.credential_service === "string" &&
+      data.credential_service !== service
+        ? data.credential_service
+        : null;
     return {
       hasKey: data.has_key,
       source: data.source || null,
       maskedKey: data.masked_key || null,
+      credentialService,
     };
   } catch {
-    return { hasKey: false, source: null, maskedKey: null };
+    return MISSING_KEY_STATUS;
   }
 }
 
@@ -244,13 +278,42 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   return copied;
 }
 
+/** Whether config.yaml sets the model's own key, which the backend uses before the provider key. */
+function hasConfigApiKey(modelConfig: ModelConfigType | undefined): boolean {
+  const extraApiKey = modelConfig?.extra_kwargs?.api_key;
+  return Boolean(
+    modelConfig?.api_key?.trim() ||
+    (typeof extraApiKey === "string" && extraApiKey.trim()),
+  );
+}
+
+/** Describe the key a model uses when no new key is pasted or reused, in the backend's resolution order. */
+function keyFallbackHint(
+  keepsCustomKey: boolean,
+  usesConfigKey: boolean,
+  providerKey: KeyStatus | undefined,
+): string {
+  if (keepsCustomKey) {
+    return "This model keeps its saved custom key.";
+  }
+  if (usesConfigKey) {
+    return "No custom key provided. This model will use its config.yaml key.";
+  }
+  if (providerKey?.hasKey) {
+    const maskedKey = providerKey.maskedKey ? ` ${providerKey.maskedKey}` : "";
+    return `No custom key provided. This model will use the provider key (${keySourceLabel(providerKey)}${maskedKey}).`;
+  }
+  return "No custom key provided. This model will use the provider key (for example from .env) when available.";
+}
+
 function getKeyStatusDisplay(
   modelName: string,
   provider: string,
+  usesConfigKey: boolean,
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
-  if (provider === "ollama") {
+  if (!getProviderInfo(provider).requiresApiKey) {
     return null;
   }
 
@@ -263,7 +326,19 @@ function getKeyStatusDisplay(
       keyId: modelKey.maskedKey
         ? `key:${modelKey.maskedKey}`
         : `model:${modelName}`,
-      sourceLabel: sourceToLabel(modelKey.source, true),
+      sourceLabel: keySourceLabel(modelKey),
+      copyable: true,
+    };
+  }
+
+  if (usesConfigKey) {
+    return {
+      hasKey: true,
+      label: "Config key",
+      maskedKey: null,
+      keyId: `config:${modelName}`,
+      sourceLabel: "config.yaml",
+      copyable: false,
     };
   }
 
@@ -276,7 +351,8 @@ function getKeyStatusDisplay(
       keyId: providerKey.maskedKey
         ? `key:${providerKey.maskedKey}`
         : `provider:${provider}`,
-      sourceLabel: sourceToLabel(providerKey.source, true),
+      sourceLabel: keySourceLabel(providerKey),
+      copyable: true,
     };
   }
 
@@ -285,7 +361,8 @@ function getKeyStatusDisplay(
     label: "No API key",
     maskedKey: null,
     keyId: null,
-    sourceLabel: sourceToLabel(null, false),
+    sourceLabel: keySourceLabel(null),
+    copyable: false,
   };
 }
 
@@ -318,9 +395,37 @@ function renderTableValue<TContext>(
   return renderer;
 }
 
+/**
+ * ModelConfig keys this page renders by hand; More settings shows the rest.
+ * API keys stay out of config.yaml: the page stores them as credentials.
+ */
+const MODEL_EDITOR_FIELDS = [
+  "provider",
+  "id",
+  "display_name",
+  "icon",
+  "api_key",
+  "context_window",
+] as const;
+
+/** Fields More settings leaves out because saving the row drops them for this provider. */
+function modelEditorFields(provider: string): string[] {
+  return [
+    ...MODEL_EDITOR_FIELDS,
+    ...(provider === "ollama" ? [] : ["host"]),
+    ...(provider === "openai" ? [] : ["api"]),
+  ];
+}
+
 export function ModelConfig() {
-  const { config, updateModel, deleteModel, saveConfig, isLoading } =
-    useConfigStore();
+  const {
+    config,
+    updateConfigValue,
+    deleteModel,
+    saveConfig,
+    isLoading,
+    loadedConfig,
+  } = useConfigStore();
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>(
     {},
@@ -333,6 +438,14 @@ export function ModelConfig() {
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
+  // The model and loaded config as they were when row editing began, so
+  // Cancel can also undo More settings edits and Save only writes a Base URL
+  // the row changed.
+  const [editingStart, setEditingStart] = useState<{
+    config: ModelConfigType;
+    baseUrl: string;
+    loadedConfig: typeof loadedConfig;
+  } | null>(null);
   const [isSavingRow, setIsSavingRow] = useState(false);
 
   const [isAddingRow, setIsAddingRow] = useState(false);
@@ -503,11 +616,36 @@ export function ModelConfig() {
   };
 
   const startEditingRow = (row: ModelRowData) => {
+    if (isAddingRow) {
+      toast({
+        title: "Finish adding first",
+        description:
+          "Save or cancel the new model row before editing another row.",
+      });
+      return;
+    }
+    if (editingRowId != null) {
+      if (editingRowId !== row.modelName) {
+        toast({
+          title: "Finish current edit first",
+          description:
+            "Save or cancel the active row before editing another one.",
+        });
+      }
+      return;
+    }
     setEditingRowId(row.modelName);
+    setEditingStart({
+      config: models[row.modelName],
+      baseUrl: row.openAIBaseUrl || "",
+      loadedConfig,
+    });
     setRowDraft({
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
+      displayName: row.displayName || "",
+      icon: row.icon || "",
       baseUrl: row.openAIBaseUrl || "",
       contextWindow: row.contextWindow != null ? String(row.contextWindow) : "",
       apiKey: "",
@@ -516,9 +654,25 @@ export function ModelConfig() {
     });
   };
 
-  const cancelEditingRow = () => {
+  const finishEditingRow = () => {
     setEditingRowId(null);
     setRowDraft(null);
+    setEditingStart(null);
+  };
+
+  const cancelEditingRow = () => {
+    if (editingRowId != null && editingStart != null) {
+      // A save since editing began committed the More settings edits, so
+      // Cancel restores the committed model rather than the pre-edit one.
+      const restored =
+        loadedConfig === editingStart.loadedConfig
+          ? editingStart.config
+          : (loadedConfig?.models[editingRowId] ?? editingStart.config);
+      if (JSON.stringify(models[editingRowId]) !== JSON.stringify(restored)) {
+        updateConfigValue(["models", editingRowId], restored);
+      }
+    }
+    finishEditingRow();
   };
 
   const startAddingRow = () => {
@@ -638,8 +792,13 @@ export function ModelConfig() {
     const hadCustomKey = Boolean(modelKeys[originalModelName]?.hasKey);
     const hasManualApiKey = Boolean(rowDraft.apiKey.trim());
     const hasKeyReuseSource = Boolean(rowDraft.selectedKeySourceModel);
+    // A saved key belongs to the provider it was saved for.
+    const clearsCustomKey =
+      rowDraft.clearCustomKey ||
+      rowDraft.provider !== originalModelConfig.provider;
 
     let keyOperationOk = true;
+    let deletedOriginalKey = false;
 
     if (rowDraft.provider !== "ollama") {
       if (hasKeyReuseSource) {
@@ -652,8 +811,9 @@ export function ModelConfig() {
           targetModelName,
           rowDraft.apiKey.trim(),
         );
-      } else if (rowDraft.clearCustomKey && hadCustomKey) {
+      } else if (clearsCustomKey && hadCustomKey) {
         keyOperationOk = await deleteModelApiKey(originalModelName);
+        deletedOriginalKey = true;
       } else if (renamed && hadCustomKey) {
         keyOperationOk = await copyModelApiKey(
           targetModelName,
@@ -662,9 +822,11 @@ export function ModelConfig() {
       }
     } else if (hadCustomKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
+      deletedOriginalKey = true;
     }
 
-    if (keyOperationOk && renamed && hadCustomKey && !rowDraft.clearCustomKey) {
+    // A renamed model's saved key must not stay behind under the old name.
+    if (keyOperationOk && renamed && hadCustomKey && !deletedOriginalKey) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
@@ -679,15 +841,38 @@ export function ModelConfig() {
       id: targetModelId,
     };
 
+    const normalizedDisplayName = rowDraft.displayName.trim();
+    const normalizedIcon = rowDraft.icon.trim();
+    if (normalizedDisplayName) {
+      nextModelConfig.display_name = normalizedDisplayName;
+    } else {
+      delete nextModelConfig.display_name;
+    }
+    if (normalizedIcon) {
+      nextModelConfig.icon = normalizedIcon;
+    } else {
+      delete nextModelConfig.icon;
+    }
+
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
     if (rowDraft.provider === "openai") {
-      if (normalizedBaseUrl) {
-        nextExtraKwargs.base_url = normalizedBaseUrl;
-      } else {
-        delete nextExtraKwargs.base_url;
+      // More settings may have edited extra_kwargs; keep its base_url unless
+      // the row's own Base URL input changed.
+      if (rowDraft.baseUrl !== editingStart?.baseUrl) {
+        if (normalizedBaseUrl) {
+          nextExtraKwargs.base_url = normalizedBaseUrl;
+        } else {
+          delete nextExtraKwargs.base_url;
+        }
       }
     } else {
       delete nextExtraKwargs.base_url;
+      delete nextModelConfig.api;
+    }
+    if (rowDraft.provider !== originalModelConfig.provider) {
+      // A config.yaml key belongs to the old provider; never send it to the new one.
+      delete nextModelConfig.api_key;
+      delete nextExtraKwargs.api_key;
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
@@ -704,14 +889,15 @@ export function ModelConfig() {
       delete nextModelConfig.host;
     }
 
-    updateModel(targetModelName, nextModelConfig);
+    // Replace the model so fields the row cleared are removed.
+    updateConfigValue(["models", targetModelName], nextModelConfig);
     if (renamed) {
       deleteModel(originalModelName);
     }
 
     await fetchAllKeyStatuses();
     setIsSavingRow(false);
-    cancelEditingRow();
+    finishEditingRow();
 
     toast({
       title: "Model Updated",
@@ -781,12 +967,22 @@ export function ModelConfig() {
     const nextModelConfig: {
       provider: ProviderType;
       id: string;
+      display_name?: string;
+      icon?: string;
       context_window?: number;
       extra_kwargs?: Record<string, unknown>;
     } = {
       provider: newRowDraft.provider as ProviderType,
       id: modelId,
     };
+    const normalizedDisplayName = newRowDraft.displayName.trim();
+    const normalizedIcon = newRowDraft.icon.trim();
+    if (normalizedDisplayName) {
+      nextModelConfig.display_name = normalizedDisplayName;
+    }
+    if (normalizedIcon) {
+      nextModelConfig.icon = normalizedIcon;
+    }
     if (newRowDraft.provider === "openai" && normalizedBaseUrl) {
       nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
     }
@@ -794,7 +990,7 @@ export function ModelConfig() {
       nextModelConfig.context_window = normalizedContextWindow;
     }
 
-    updateModel(modelName, nextModelConfig);
+    updateConfigValue(["models", modelName], nextModelConfig);
 
     await fetchAllKeyStatuses();
     setIsSavingNewRow(false);
@@ -835,6 +1031,7 @@ export function ModelConfig() {
       const keyDisplay = getKeyStatusDisplay(
         modelName,
         modelConfig.provider,
+        hasConfigApiKey(modelConfig),
         modelKeys,
         providerKeys,
       );
@@ -845,6 +1042,8 @@ export function ModelConfig() {
 
       return {
         modelName,
+        displayName: modelConfig.display_name?.trim() || null,
+        icon: modelConfig.icon?.trim() || null,
         provider: modelConfig.provider,
         providerName: getProviderInfo(modelConfig.provider).name,
         modelId: modelConfig.id,
@@ -883,7 +1082,7 @@ export function ModelConfig() {
               </span>
             )}
           </Badge>
-          {keyDisplay.hasKey && modelName && provider && (
+          {keyDisplay.copyable && modelName && provider && (
             <Button
               size="icon"
               variant="ghost"
@@ -917,10 +1116,10 @@ export function ModelConfig() {
     setDraft: Dispatch<SetStateAction<RowDraft>>,
     currentModelName?: string,
   ) => {
-    if (draft.provider === "ollama") {
+    if (!getProviderInfo(draft.provider).requiresApiKey) {
       return (
         <span className="text-xs text-muted-foreground">
-          No key needed for Ollama
+          No key needed for {getProviderInfo(draft.provider).name}
         </span>
       );
     }
@@ -935,16 +1134,26 @@ export function ModelConfig() {
     );
     const hasManualApiKey = Boolean(draft.apiKey.trim());
     const hasReuseSource = Boolean(draft.selectedKeySourceModel);
+    const currentModelConfig = currentModelName
+      ? models[currentModelName]
+      : undefined;
+    // Saving under another provider drops the saved key and the config.yaml key.
+    const providerChanged =
+      currentModelConfig !== undefined &&
+      currentModelConfig.provider !== draft.provider;
     const isClearingCustomKey =
       hasCustomKey &&
-      draft.clearCustomKey &&
+      (draft.clearCustomKey || providerChanged) &&
       !hasManualApiKey &&
       !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
+    const usesConfigKey =
+      !providerChanged && hasConfigApiKey(currentModelConfig);
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(
           currentModelName,
           draft.provider,
+          usesConfigKey,
           modelKeys,
           providerKeys,
         )
@@ -959,35 +1168,35 @@ export function ModelConfig() {
               currentModelName,
               draft.provider,
             )}
-            {hasCustomKey && (
-              <>
-                <Button
-                  size="sm"
-                  variant={isClearingCustomKey ? "outline" : "ghost"}
-                  className={cn(
-                    "h-7 px-2 text-xs",
-                    isClearingCustomKey
-                      ? "border-amber-500/40 text-amber-700 dark:text-amber-300"
-                      : "text-destructive hover:text-destructive",
-                  )}
-                  onClick={() => {
-                    setDraft((current) => ({
-                      ...current,
-                      clearCustomKey: !isClearingCustomKey,
-                      apiKey: "",
-                      selectedKeySourceModel: "",
-                    }));
-                  }}
-                >
-                  <X className="mr-1 h-3 w-3" />
-                  {isClearingCustomKey ? "Undo clear key" : "Clear custom key"}
-                </Button>
-                {isClearingCustomKey && (
-                  <p className="text-xs text-amber-700 dark:text-amber-300">
-                    Custom key will be removed on save.
-                  </p>
+            {hasCustomKey && !providerChanged && (
+              <Button
+                size="sm"
+                variant={isClearingCustomKey ? "outline" : "ghost"}
+                className={cn(
+                  "h-7 px-2 text-xs",
+                  isClearingCustomKey
+                    ? "border-amber-500/40 text-amber-700 dark:text-amber-300"
+                    : "text-destructive hover:text-destructive",
                 )}
-              </>
+                onClick={() => {
+                  setDraft((current) => ({
+                    ...current,
+                    clearCustomKey: !isClearingCustomKey,
+                    apiKey: "",
+                    selectedKeySourceModel: "",
+                  }));
+                }}
+              >
+                <X className="mr-1 h-3 w-3" />
+                {isClearingCustomKey ? "Undo clear key" : "Clear custom key"}
+              </Button>
+            )}
+            {isClearingCustomKey && (
+              <p className="text-xs text-amber-700 dark:text-amber-300">
+                {providerChanged
+                  ? "Custom key will be removed on save because the provider changed."
+                  : "Custom key will be removed on save."}
+              </p>
             )}
           </div>
         )}
@@ -1060,12 +1269,11 @@ export function ModelConfig() {
 
         {!hasManualApiKey && !hasReuseSource && (
           <p className="text-xs text-muted-foreground">
-            {providerFallbackKey?.hasKey
-              ? `No custom key provided. This model will use the provider key (${sourceToLabel(
-                  providerFallbackKey.source,
-                  true,
-                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
-              : "No custom key provided. This model will use the provider key (for example from .env) when available."}
+            {keyFallbackHint(
+              hasCustomKey && !isClearingCustomKey,
+              usesConfigKey,
+              providerFallbackKey,
+            )}
           </p>
         )}
       </div>
@@ -1128,6 +1336,43 @@ export function ModelConfig() {
     );
   };
 
+  const renderMetadataEditor = (
+    draft: RowDraft,
+    setDraft: Dispatch<SetStateAction<RowDraft>>,
+  ) => {
+    return (
+      <div
+        className="grid gap-2 sm:grid-cols-2"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <label className="space-y-1 text-xs text-muted-foreground">
+          <span>Display name</span>
+          <Input
+            value={draft.displayName}
+            onChange={(event) => {
+              const displayName = event.target.value;
+              setDraft((current) => ({ ...current, displayName }));
+            }}
+            placeholder="Quick helper"
+            className="h-8 text-xs text-foreground"
+          />
+        </label>
+        <label className="space-y-1 text-xs text-muted-foreground">
+          <span>Icon</span>
+          <Input
+            value={draft.icon}
+            onChange={(event) => {
+              const icon = event.target.value;
+              setDraft((current) => ({ ...current, icon }));
+            }}
+            placeholder="icons/helper.png or mxc://server/media"
+            className="h-8 text-xs text-foreground"
+          />
+        </label>
+      </div>
+    );
+  };
+
   const columns: ColumnDef<ModelRowData>[] = [
     {
       accessorKey: "modelName",
@@ -1135,7 +1380,18 @@ export function ModelConfig() {
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
-          return <span className="font-medium">{row.original.modelName}</span>;
+          return (
+            <div className="space-y-1">
+              <span className="font-medium">
+                {row.original.displayName || row.original.modelName}
+              </span>
+              {row.original.displayName && (
+                <code className="block text-xs text-muted-foreground">
+                  {row.original.modelName}
+                </code>
+              )}
+            </div>
+          );
         }
 
         return (
@@ -1187,8 +1443,6 @@ export function ModelConfig() {
                         baseUrl: provider === "openai" ? current.baseUrl : "",
                         apiKey: "",
                         selectedKeySourceModel: "",
-                        clearCustomKey:
-                          provider === "ollama" ? true : current.clearCustomKey,
                       }
                     : current,
                 );
@@ -1262,6 +1516,10 @@ export function ModelConfig() {
               onClick={(event) => event.stopPropagation()}
               className="h-8 text-xs"
             />
+            {renderMetadataEditor(
+              rowDraft,
+              setRowDraft as Dispatch<SetStateAction<RowDraft>>,
+            )}
             {renderOpenAIEndpointEditor(
               rowDraft,
               setRowDraft as Dispatch<SetStateAction<RowDraft>>,
@@ -1380,6 +1638,11 @@ export function ModelConfig() {
       icon={Settings}
       title="Model Configuration"
       isDirty={false}
+      isBusy={Object.entries(models).some(
+        ([name, model]) =>
+          model.provider !== "ollama" &&
+          (!modelKeys[name] || !providerKeys[model.provider]),
+      )}
       onSave={handleSaveAllChanges}
       onDelete={() => {}}
       showActions={false}
@@ -1493,6 +1756,7 @@ export function ModelConfig() {
                           className="h-8 text-xs"
                           placeholder="provider model id"
                         />
+                        {renderMetadataEditor(newRowDraft, setNewRowDraft)}
                         {renderOpenAIEndpointEditor(
                           newRowDraft,
                           setNewRowDraft,
@@ -1542,32 +1806,7 @@ export function ModelConfig() {
                     return (
                       <tr
                         key={row.id}
-                        onClick={() => {
-                          if (isAddingRow) {
-                            toast({
-                              title: "Finish adding first",
-                              description:
-                                "Save or cancel the new model row before editing another row.",
-                            });
-                            return;
-                          }
-
-                          if (
-                            editingRowId &&
-                            editingRowId !== row.original.modelName
-                          ) {
-                            toast({
-                              title: "Finish current edit first",
-                              description:
-                                "Save or cancel the active row before editing another one.",
-                            });
-                            return;
-                          }
-
-                          if (!editingRowId) {
-                            startEditingRow(row.original);
-                          }
-                        }}
+                        onClick={() => startEditingRow(row.original)}
                         className={cn(
                           "border-b transition-colors last:border-b-0",
                           isEditing
@@ -1597,6 +1836,21 @@ export function ModelConfig() {
             </table>
           </div>
         </div>
+
+        {editingRowId != null &&
+          rowDraft != null &&
+          models[editingRowId] != null && (
+            <SchemaSection
+              title={`More settings for ${editingRowId}`}
+              definition="ModelConfig"
+              value={models[editingRowId]}
+              path={["models", editingRowId]}
+              exclude={modelEditorFields(rowDraft.provider)}
+              onFieldChange={(key, next) =>
+                updateConfigValue(["models", editingRowId, key], next)
+              }
+            />
+          )}
 
         <Button
           onClick={() => void handleSaveAllChanges()}

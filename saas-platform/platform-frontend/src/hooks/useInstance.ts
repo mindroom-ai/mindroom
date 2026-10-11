@@ -3,8 +3,8 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
-import { listInstances, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
-import { instanceCache } from '@/lib/cache'
+import { restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
+import { cacheInstance, getCachedInstance, loadInstance } from '@/lib/instance-resource'
 import { logger } from '@/lib/logger'
 
 export type { Instance }
@@ -29,10 +29,12 @@ const DEV_INSTANCE: Instance | null =
     : null
 
 export function useInstance() {
-  const cachedInstance = instanceCache.get('user-instance') as Instance | null
-  const [instance, setInstance] = useState<Instance | null>(cachedInstance)
-  const [loading, setLoading] = useState(!cachedInstance)
   const { user, loading: authLoading } = useAuth()
+  const userId = user?.id ?? null
+  const cachedInstance = getCachedInstance(userId)
+  const [snapshot, setSnapshot] = useState({ userId, instance: cachedInstance })
+  const instance = snapshot.userId === userId ? snapshot.instance : cachedInstance
+  const [loading, setLoading] = useState(!cachedInstance)
   const supabase = createClient()
 
   useEffect(() => {
@@ -42,18 +44,23 @@ export function useInstance() {
       return
     }
 
+    setSnapshot(previous => previous.userId === userId
+      ? previous
+      : { userId, instance: getCachedInstance(userId) })
+
     // Use dev instance if in development mode
     if (DEV_INSTANCE) {
-      setInstance(DEV_INSTANCE)
-      instanceCache.set('user-instance', DEV_INSTANCE)
+      setSnapshot({ userId, instance: DEV_INSTANCE })
+      cacheInstance(user.id, DEV_INSTANCE)
       setLoading(false)
       return
     }
 
+    let active = true
     // Get user's instance through the API endpoint
     const fetchInstance = async (isInitial = false) => {
       // Check for cached data right before deciding to show loading
-      const currentCache = instanceCache.get('user-instance') as Instance | null
+      const currentCache = getCachedInstance(userId)
 
       // Only show loading on initial fetch when there's no cached data
       if (isInitial && !currentCache && !instance) {
@@ -61,16 +68,8 @@ export function useInstance() {
       }
 
       try {
-        const data = await listInstances()
-        if (data.instances && data.instances.length > 0) {
-          const newInstance = data.instances[0]
-          setInstance(newInstance)
-          instanceCache.set('user-instance', newInstance)
-        } else {
-          // No instances found
-          setInstance(null)
-          instanceCache.delete('user-instance')
-        }
+        const loadedInstance = await loadInstance(user.id)
+        if (active) setSnapshot({ userId, instance: loadedInstance })
       } catch (error) {
         logger.error('Error fetching instance:', error)
         // Show more details about the error
@@ -78,7 +77,7 @@ export function useInstance() {
           logger.error('Error details:', error.message)
         }
       } finally {
-        if (isInitial) {
+        if (isInitial && active) {
           setLoading(false)
         }
       }
@@ -98,6 +97,7 @@ export function useInstance() {
     }, 15000)
 
     return () => {
+      active = false
       clearInterval(interval)
     }
   }, [user, authLoading, supabase])
@@ -108,7 +108,9 @@ export function useInstance() {
     try {
       await apiRestartInstance(String(instance.instance_id))
       // Update local state to show restarting
-      setInstance(prev => prev ? { ...prev, status: 'restarting' } : null)
+      setSnapshot(prev => prev.userId === userId && prev.instance
+        ? { ...prev, instance: { ...prev.instance, status: 'restarting' } }
+        : prev)
     } catch (error) {
       logger.error('Error restarting instance:', error)
     }
@@ -116,7 +118,7 @@ export function useInstance() {
 
   return {
     instance,
-    loading,
+    loading: authLoading || (userId !== null && snapshot.userId !== userId && !cachedInstance) || loading,
     restartInstance,
   }
 }

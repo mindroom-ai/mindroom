@@ -11,9 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -59,6 +58,7 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -72,6 +72,7 @@ from tests.conftest import (
     replace_turn_controller_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
+    serve_media_from_download,
     sync_bot_runtime_state,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -108,6 +109,7 @@ def _plugin(name: str, callbacks: list[object]) -> object:
         {
             "name": name,
             "discovered_hooks": tuple(callbacks),
+            "discovered_automations": (),
             "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
             "plugin_order": 0,
         },
@@ -208,7 +210,7 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    config.authorization = AuthorizationConfig(default_room_access=True)
+    with_current_room_member_access(config)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
@@ -619,6 +621,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
             "content": {
                 "msgtype": "m.text",
                 "body": "automation",
+                "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
                 SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
@@ -1178,20 +1181,9 @@ async def test_message_received_hook_waits_for_reload_and_rechecks_reply_authori
     """An ingress hook must not run after a reply-policy reload revokes its sender."""
     sender_id = "@user:localhost"
     bot = _agent_bot(tmp_path)
-    bot.config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={
-            bot.agent_name: AgentReplyPermission(users=[sender_id]),
-        },
-    )
+    bot.config.agents[bot.agent_name].access = ResponderAccessConfig(users=[sender_id])
     denied_config = bot.config.model_copy(deep=True)
-    denied_config.authorization = AuthorizationConfig(
-        default_room_access=False,
-        room_permissions={"!room:localhost": []},
-        agent_reply_permissions={
-            bot.agent_name: AgentReplyPermission(users=[sender_id]),
-        },
-    )
+    denied_config.agents[bot.agent_name].access = ResponderAccessConfig(users=[])
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=bot.matrix_id.full_id)
     event = nio.RoomMessageText.from_dict(
         {
@@ -1291,6 +1283,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     """Inbound dispatch should use the canonical sidecar body everywhere downstream."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(bot.client)
     bot.client.rooms = {}
     bot.client.user_id = bot.matrix_id.full_id
     bot.client.download = AsyncMock(
@@ -2106,7 +2099,10 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
         event,
         "@mindroom_router:localhost",
         event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        handled_turn=TurnRecord.create(
+            [event.event_id],
+            requester_id="@mindroom_router:localhost",
+        ),
     )
 
     # Plain hook messages without mention should still be filtered
@@ -2165,6 +2161,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(tmp_path: Path) -> None:
     """hook_dispatch should enforce room authorization against the preserved requester."""
     bot = _hook_bot(tmp_path)
@@ -2173,6 +2170,12 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     turn_store.record_turn = AsyncMock()
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     room.canonical_alias = None
+    bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    bot.client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@mindroom_router:localhost", None, None)],
+        room_id=room.room_id,
+    )
+    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, bot.client)
     event = nio.RoomMessageText.from_dict(
         {
             "event_id": "$unauthorized-hook-dispatch",
@@ -2188,8 +2191,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         },
     )
 
-    with patch("mindroom.ingress_validation.is_authorized_sender", side_effect=real_is_authorized_sender):
-        prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
+    prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is None
     turn_store.record_turn.assert_called_once_with(

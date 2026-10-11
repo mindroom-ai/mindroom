@@ -1,22 +1,39 @@
 """Tests for the custom Gmail tools wrapper."""
 
+import base64
 import json
+import tempfile
+from collections.abc import Callable
+from email import policy
+from email.parser import BytesParser
+from functools import partial
+from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from agno.tools.function import FunctionCall
 from agno.tools.google.gmail import GmailTools as AgnoGmailTools
+from googleapiclient.errors import HttpError
 
+from mindroom.agents import apply_tool_approval_capability
+from mindroom.config.main import Config
+from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
+from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync
+from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.path_confinement import resolve_path_within_root
+from tests.oauth_test_utils import publish_oauth_credentials
 
 
 @pytest.fixture
-def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
+def mock_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
     """Create a mock credentials manager with test data."""
-    manager = CredentialsManager(base_path=tmp_path / "test_creds")
+    manager = get_runtime_credentials_manager(runtime_paths)
 
     # Save test Gmail OAuth credentials
     test_creds = {
@@ -34,7 +51,12 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
             "https://www.googleapis.com/auth/gmail.compose",
         ],
     }
-    manager.save_credentials("google_gmail_oauth", test_creds)
+    publish_oauth_credentials(
+        google_gmail_oauth_provider(),
+        test_creds,
+        credentials_manager=manager,
+        worker_target=None,
+    )
     return manager
 
 
@@ -71,7 +93,10 @@ class TestGmailTools:
         mock_creds_instance = MagicMock()
         mock_credentials_class.return_value = mock_creds_instance
 
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
             GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
@@ -89,6 +114,7 @@ class TestGmailTools:
                     "https://www.googleapis.com/auth/gmail.modify",
                     "https://www.googleapis.com/auth/gmail.compose",
                 ],
+                quota_project_id=None,
                 expiry=None,
             )
 
@@ -102,11 +128,12 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test initialization when no credentials are stored."""
-        mock_manager = MagicMock()
-        mock_manager.load_credentials.return_value = None
-        mock_manager.shared_manager.return_value = mock_manager
+        mock_manager = CredentialsManager(runtime_paths.storage_root / "empty_credentials")
 
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
             GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_manager)
 
@@ -124,13 +151,15 @@ class TestGmailTools:
             },
         )
 
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(
                 runtime_paths=runtime_paths,
                 credentials_manager=CredentialsManager(tmp_path / "credentials"),
             )
-            gmail_tools.service_account_path = None
 
         assert gmail_tools._should_fallback_to_original_auth() is True
 
@@ -153,6 +182,12 @@ class TestGmailTools:
         assert result["provider"] == "google_gmail"
         assert "/api/oauth/google_gmail/authorize" in result["connect_url"]
 
+        result = json.loads(gmail_tools.send_email_to_self("Status", "Finished"))
+
+        assert result["oauth_connection_required"] is True
+        assert result["provider"] == "google_gmail"
+        assert "/api/oauth/google_gmail/authorize" in result["connect_url"]
+
     @patch("mindroom.custom_tools.gmail.logger")
     @patch("google.oauth2.credentials.Credentials")
     def test_initialization_with_invalid_credentials(
@@ -163,10 +198,18 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test initialization when credentials are invalid."""
-        mock_credentials_manager.save_credentials("google_gmail_oauth", {"invalid": "data"})
+        publish_oauth_credentials(
+            google_gmail_oauth_provider(),
+            {"invalid": "data"},
+            credentials_manager=mock_credentials_manager,
+            worker_target=None,
+        )
         mock_credentials_class.side_effect = TypeError("Missing required fields")
 
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
             GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
@@ -186,16 +229,18 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth method with valid credentials."""
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
 
             gmail_tools.creds = MagicMock()
             gmail_tools.creds.valid = True
             gmail_tools._provided_creds = True
 
-            gmail_tools._auth()
+            gmail_tools._authenticate()
 
     @patch("google.auth.transport.requests.Request")
     @patch("google.oauth2.credentials.Credentials")
@@ -207,10 +252,12 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth refreshes expired credentials."""
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
 
             gmail_tools.creds = None
 
@@ -219,14 +266,21 @@ class TestGmailTools:
             mock_creds.refresh_token = "refresh_token"  # noqa: S105
             mock_creds.token = "new_access_token"  # noqa: S105
             mock_creds.expiry = None
+            refresh = mock_creds.refresh
             mock_credentials_class.return_value = mock_creds
 
             mock_request = MagicMock()
             mock_request_class.return_value = mock_request
 
-            gmail_tools._auth()
-            mock_creds.refresh.assert_called_once_with(mock_request)
-            saved_creds = mock_credentials_manager.load_credentials("google_gmail_oauth")
+            gmail_tools._authenticate()
+            refresh.assert_called_once()
+            bounded_request = refresh.call_args.args[0]
+            assert isinstance(bounded_request, partial)
+            assert bounded_request.func is mock_request
+            assert bounded_request.keywords == {"timeout": 20.0}
+            saved_creds = load_oauth_credentials_snapshot_sync(
+                gmail_tools._oauth_credential_context(),
+            ).credentials
             assert saved_creds is not None
             assert saved_creds["token"] == "new_access_token"  # noqa: S105
 
@@ -237,22 +291,22 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth falls back to original auth when no credentials stored."""
-        mock_manager = MagicMock()
-        mock_manager.load_credentials.return_value = None
-        mock_manager.shared_manager.return_value = mock_manager
+        mock_manager = CredentialsManager(runtime_paths.storage_root / "empty_credentials")
 
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
 
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_manager)
-            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             mock_parent_auth = Mock()
             gmail_tools._original_auth = mock_parent_auth
 
             with pytest.raises(OAuthConnectionRequired):
-                gmail_tools._auth()
+                gmail_tools._authenticate()
 
             # Verify warning was logged
             mock_logger.warning.assert_not_called()
@@ -266,10 +320,12 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth handles errors properly."""
-        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+        with (
+            patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
+            patch.object(GmailTools, "register"),
+        ):
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             # Mock Credentials to raise an exception
@@ -277,14 +333,723 @@ class TestGmailTools:
                 mock_creds.side_effect = Exception("Test error")
 
                 with pytest.raises(OAuthConnectionRequired):
-                    gmail_tools._auth()
+                    gmail_tools._authenticate()
 
     def test_inheritance_from_agno_gmail_tools(self) -> None:
         """Test that GmailTools properly inherits from AgnoGmailTools."""
         # Verify inheritance
         assert issubclass(GmailTools, AgnoGmailTools)
 
-        # Verify DEFAULT_SCOPES is accessible
-        assert hasattr(GmailTools, "DEFAULT_SCOPES")
-        assert isinstance(GmailTools.DEFAULT_SCOPES, list)
-        assert len(GmailTools.DEFAULT_SCOPES) > 0
+        # Verify the upstream default scopes are accessible
+        assert isinstance(GmailTools.default_scopes, list)
+        assert len(GmailTools.default_scopes) > 0
+
+    def test_send_email_to_self_uses_only_connected_account(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+    ) -> None:
+        """The self-send tool must derive its sole recipient from Gmail."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            send_email=False,
+        )
+        service = MagicMock()
+        service.users.return_value.getProfile.return_value.execute.return_value = {
+            "emailAddress": "owner@example.com",
+        }
+        service.users.return_value.messages.return_value.send.return_value.execute.return_value = {"id": "message-1"}
+        gmail_tools.service = service
+
+        function = gmail_tools.functions["send_email_to_self"]
+        result = json.loads(function.entrypoint(subject="Status", body="Finished"))
+
+        assert "send_email" not in gmail_tools.functions
+        assert list(signature(function.entrypoint).parameters) == ["subject", "body"]
+        assert result == {"id": "message-1"}
+        service.users.return_value.getProfile.assert_called_once_with(userId="me")
+        send = service.users.return_value.messages.return_value.send
+        send.assert_called_once()
+        assert send.call_args.kwargs["userId"] == "me"
+        message = BytesParser(policy=policy.default).parsebytes(
+            base64.urlsafe_b64decode(send.call_args.kwargs["body"]["raw"]),
+        )
+        assert message.get_all("To") == ["owner@example.com"]
+        assert message.get_all("Cc") is None
+        assert message.get_all("Bcc") is None
+        assert message["Subject"] == "Status"
+
+    @pytest.mark.parametrize(
+        "scopes",
+        [
+            ["https://mail.google.com/"],
+            ["https://www.googleapis.com/auth/gmail.modify"],
+            ["https://www.googleapis.com/auth/gmail.compose"],
+            [
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.send",
+            ],
+        ],
+    )
+    def test_send_email_to_self_accepts_sufficient_scope(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+        scopes: list[str],
+    ) -> None:
+        """Self-send accepts every scope that authorizes both API operations."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            include_tools=["send_email_to_self"],
+            scopes=scopes,
+        )
+
+        assert set(gmail_tools.functions) == {"send_email_to_self"}
+
+    @pytest.mark.parametrize(
+        "scope",
+        [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+        ],
+    )
+    def test_send_email_to_self_is_omitted_with_insufficient_scope(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+        scope: str,
+    ) -> None:
+        """Self-send is unavailable when scopes authorize only one required operation."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            include_tools=["send_email_to_self"],
+            scopes=[scope],
+        )
+
+        assert gmail_tools.functions == {}
+
+    def test_insufficient_self_send_scope_preserves_compatible_gmail_functions(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+    ) -> None:
+        """A missing self-send scope must not disable compatible Gmail functions."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            include_tools=["get_latest_emails", "send_email_to_self"],
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        )
+
+        assert set(gmail_tools.functions) == {"get_latest_emails"}
+
+    @pytest.mark.parametrize(
+        "tool_filter",
+        [
+            {"include_tools": []},
+            {"include_tools": ["get_latest_emails"]},
+            {"exclude_tools": ["send_email_to_self"]},
+        ],
+        ids=["empty-include", "omitted-from-include", "explicitly-excluded"],
+    )
+    def test_send_email_to_self_respects_tool_filters(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+        tool_filter: dict[str, list[str]],
+    ) -> None:
+        """Agno include and exclude filters apply to the local function."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            **tool_filter,
+        )
+
+        assert "send_email_to_self" not in gmail_tools.functions
+
+    def test_send_email_to_self_rejects_recipient_header_injection(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+    ) -> None:
+        """Subject text must not provide another recipient header."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            send_email=False,
+        )
+        service = MagicMock()
+        service.users.return_value.getProfile.return_value.execute.return_value = {
+            "emailAddress": "owner@example.com",
+        }
+        gmail_tools.service = service
+
+        result = gmail_tools.functions["send_email_to_self"].entrypoint(
+            subject="Status\nBcc: other@example.com",
+            body="Finished",
+        )
+
+        assert result.startswith("Error sending email:")
+        service.users.return_value.messages.return_value.send.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            None,
+            {},
+            {"emailAddress": None},
+            {"emailAddress": ""},
+            {"emailAddress": "first@example.com,second@example.com"},
+            {"emailAddress": " owner@example.com"},
+            {"emailAddress": "owner@example.com\n"},
+        ],
+    )
+    def test_send_email_to_self_rejects_ambiguous_profile_address(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+        profile: object,
+    ) -> None:
+        """Missing, multiple, or padded profile addresses must fail closed."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+            send_email=False,
+        )
+        service = MagicMock()
+        service.users.return_value.getProfile.return_value.execute.return_value = profile
+        gmail_tools.service = service
+
+        with pytest.raises(RuntimeError, match="valid email address"):
+            gmail_tools.functions["send_email_to_self"].entrypoint(subject="Status", body="Finished")
+
+        service.users.return_value.messages.return_value.send.assert_not_called()
+
+    def test_send_email_to_self_follows_configured_approval_policy(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+    ) -> None:
+        """Self-send must not override the operator's approval policy."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=mock_credentials_manager,
+        )
+
+        result = apply_tool_approval_capability(
+            gmail_tools,
+            Config.model_validate({"tool_approval": {"default": "require_approval"}}),
+            supports_native_tool_approval=True,
+            registered_tool_name="gmail",
+        )
+
+        assert result is gmail_tools
+        assert gmail_tools.functions["send_email_to_self"].requires_confirmation is True
+        assert gmail_tools.functions["send_email"].requires_confirmation is True
+
+    def test_gmail_metadata_advertises_send_email_to_self(self) -> None:
+        """The built-in Gmail configuration must expose the self-send function."""
+        from mindroom.tool_system.catalog import TOOL_METADATA  # noqa: PLC0415
+        from mindroom.tools import gmail as _gmail_registration  # noqa: F401, PLC0415
+
+        assert "send_email_to_self" in TOOL_METADATA["gmail"].function_names
+
+    def test_gmail_metadata_requests_workspace_root(self) -> None:
+        """Attachment confinement needs the agent workspace as a managed init argument."""
+        from mindroom.tool_system.catalog import TOOL_METADATA  # noqa: PLC0415
+        from mindroom.tool_system.declarations import ToolManagedInitArg  # noqa: PLC0415
+        from mindroom.tools import gmail as _gmail_registration  # noqa: F401, PLC0415
+
+        metadata = TOOL_METADATA["gmail"]
+        assert ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT in metadata.managed_init_args
+        assert metadata.consumes_workspace_paths is True
+
+
+_ATTACHMENT_CALLS = {
+    "send_email": {"to": "mallory@example.com", "subject": "Files", "body": "Attached."},
+    "create_draft_email": {"to": "mallory@example.com", "subject": "Files", "body": "Attached."},
+    "send_email_reply": {
+        "thread_id": "thread-1",
+        "message_id": "message-1",
+        "to": "mallory@example.com",
+        "subject": "Files",
+        "body": "Attached.",
+    },
+    "update_draft": {"draft_id": "draft-1", "to": "mallory@example.com", "subject": "Files", "body": "Attached."},
+}
+
+
+def _gmail_api_calls(service: MagicMock) -> list[MagicMock]:
+    users = service.users.return_value
+    return [
+        users.messages.return_value.send,
+        users.drafts.return_value.create,
+        users.drafts.return_value.update,
+    ]
+
+
+def _gmail_attachment_tool(
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    workspace_root: Path | None,
+    file_access: FileAccess = "workspace",
+) -> tuple[GmailTools, MagicMock]:
+    gmail_tools = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        tool_output_workspace_root=workspace_root,
+        file_access=file_access,
+    )
+    service = MagicMock()
+    users = service.users.return_value
+    users.messages.return_value.send.return_value.execute.return_value = {"id": "sent-1"}
+    users.drafts.return_value.create.return_value.execute.return_value = {"id": "draft-1"}
+    users.drafts.return_value.update.return_value.execute.return_value = {"id": "draft-1"}
+    gmail_tools.service = service
+    return gmail_tools, service
+
+
+def _sent_attachments(service: MagicMock) -> dict[str, bytes]:
+    called = [call for call in _gmail_api_calls(service) if call.called]
+    assert len(called) == 1
+    body = called[0].call_args.kwargs["body"]
+    raw = body["message"]["raw"] if "message" in body else body["raw"]
+    message = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(raw))
+    return {part.get_filename(): part.get_content() for part in message.iter_attachments()}
+
+
+@pytest.mark.parametrize("function_name", sorted(_ATTACHMENT_CALLS))
+@pytest.mark.parametrize(
+    "attachment",
+    [
+        "/etc/passwd",
+        "~/.env",
+        "{storage_root}/config.yaml",
+        "../config.yaml",
+        "escape-link",
+        "{workspace}/escape-link",
+        ["report.txt", "{storage_root}/config.yaml"],
+        "~mindroom-no-such-user/.env",
+        "{workspace}/loop",
+    ],
+    ids=[
+        "system-file",
+        "home-env",
+        "storage-config",
+        "relative-traversal",
+        "relative-symlink-escape",
+        "absolute-symlink-escape",
+        "one-escape-among-valid",
+        "unknown-home",
+        "symlink-loop",
+    ],
+)
+def test_gmail_attachments_outside_workspace_are_rejected_before_any_gmail_call(
+    function_name: str,
+    attachment: str | list[str],
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-supplied attachment paths must never read primary-process files outside the workspace."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".env").write_text("MINDROOM_API_KEY=secret\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "report.txt").write_text("report", encoding="utf-8")
+    (workspace / "escape-link").symlink_to(runtime_paths.storage_root / "config.yaml")
+    (workspace / "loop").symlink_to(workspace / "loop")
+    placeholders = {"storage_root": str(runtime_paths.storage_root), "workspace": str(workspace)}
+    attachments = (
+        [path.format(**placeholders) for path in attachment]
+        if isinstance(attachment, list)
+        else attachment.format(**placeholders)
+    )
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+
+    result = gmail_tools.functions[function_name].entrypoint(
+        **_ATTACHMENT_CALLS[function_name],
+        attachments=attachments,
+    )
+
+    assert json.loads(result)["error"].startswith("Gmail attachment must be a regular file in the agent workspace:")
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+@pytest.mark.parametrize("file_access", ["workspace", "unrestricted"])
+@pytest.mark.parametrize("has_workspace", [True, False])
+def test_gmail_outside_workspace_attachment_follows_file_access(
+    file_access: FileAccess,
+    has_workspace: bool,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Unrestricted agents stage any readable file; workspace agents keep the rejection."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside" / "report.txt"
+    outside_file.parent.mkdir()
+    outside_file.write_bytes(b"outside report")
+    gmail_tools, service = _gmail_attachment_tool(
+        runtime_paths,
+        mock_credentials_manager,
+        workspace if has_workspace else None,
+        file_access,
+    )
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments=str(outside_file),
+    )
+
+    if file_access == "workspace":
+        expected_error = (
+            "Gmail attachment must be a regular file in the agent workspace:"
+            if has_workspace
+            else "Gmail attachments require an agent workspace"
+        )
+        assert json.loads(result)["error"].startswith(expected_error)
+        for api_call in _gmail_api_calls(service):
+            api_call.assert_not_called()
+        return
+    assert "error" not in json.loads(result)
+    assert _sent_attachments(service) == {"report.txt": b"outside report"}
+
+
+@pytest.mark.parametrize("function_name", sorted(_ATTACHMENT_CALLS))
+def test_gmail_attachments_require_workspace(
+    function_name: str,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Without a workspace root, every path-based attachment must be refused."""
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, None)
+
+    result = gmail_tools.functions[function_name].entrypoint(
+        **_ATTACHMENT_CALLS[function_name],
+        attachments=str(runtime_paths.storage_root / "config.yaml"),
+    )
+
+    assert json.loads(result) == {"error": "Gmail attachments require an agent workspace"}
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+def test_gmail_attachments_require_existing_workspace(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A configured but missing workspace directory must refuse attachments as a tool error."""
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, tmp_path / "missing")
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments="report.txt",
+    )
+
+    assert json.loads(result) == {"error": "Gmail attachments require an existing agent workspace"}
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+@pytest.mark.parametrize("function_name", sorted(_ATTACHMENT_CALLS))
+def test_gmail_attachments_inside_workspace_are_sent(
+    function_name: str,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workspace paths attach their contents, but upstream only ever opens private snapshots."""
+    temporary_root = tmp_path / "tmp"
+    temporary_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temporary_root))
+    workspace = tmp_path / "workspace"
+    (workspace / "reports").mkdir(parents=True)
+    (workspace / "reports" / "plan.txt").write_text("plan", encoding="utf-8")
+    (workspace / "notes.txt").write_text("notes", encoding="utf-8")
+    (workspace / "alias.txt").symlink_to(workspace / "notes.txt")
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+
+    with patch.object(
+        GmailTools,
+        "_create_message",
+        autospec=True,
+        side_effect=AgnoGmailTools._create_message,
+    ) as create_message:
+        result = gmail_tools.functions[function_name].entrypoint(
+            **_ATTACHMENT_CALLS[function_name],
+            attachments=["reports/plan.txt", str(workspace / "alias.txt")],
+        )
+
+    assert "error" not in json.loads(result)
+    assert _sent_attachments(service) == {"plan.txt": b"plan", "notes.txt": b"notes"}
+    opened_paths = [Path(path) for path in create_message.call_args.kwargs["attachments"]]
+    assert all(path.is_relative_to(temporary_root) for path in opened_paths)
+    assert list(temporary_root.iterdir()) == []
+
+
+def test_gmail_attachment_confinement_covers_positional_calls(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Direct positional calls must not bypass attachment confinement."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+
+    result = gmail_tools.send_email(
+        "mallory@example.com",
+        "Files",
+        "Attached.",
+        None,
+        None,
+        str(runtime_paths.storage_root / "config.yaml"),
+    )
+
+    assert json.loads(result)["error"].startswith("Gmail attachment must be a regular file in the agent workspace:")
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "attachments",
+    [{"/etc/passwd": "x"}, [1], 1],
+    ids=["mapping", "non-string-item", "number"],
+)
+def test_gmail_attachments_reject_non_path_values(
+    attachments: object,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Only a path string or a list of path strings may reach upstream Agno."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments=attachments,
+    )
+
+    assert json.loads(result) == {"error": "Gmail attachments must be file paths"}
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+def test_gmail_attachment_wrapper_preserves_model_visible_signature(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """The confinement wrapper must keep upstream's model-facing parameters."""
+    gmail_tools, _service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, tmp_path)
+
+    for function_name, arguments in _ATTACHMENT_CALLS.items():
+        parameters = signature(gmail_tools.functions[function_name].entrypoint).parameters
+        assert {*arguments, "attachments"} <= set(parameters)
+
+
+def test_gmail_attachment_tests_cover_every_upstream_attachment_function(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A new upstream attachment function must be added to the confinement regressions."""
+    gmail_tools, _service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, tmp_path)
+
+    attachment_functions = {
+        name
+        for name, function in gmail_tools.functions.items()
+        if "attachments" in signature(function.entrypoint).parameters
+    }
+
+    assert attachment_functions == set(_ATTACHMENT_CALLS)
+    # The staging wrapper is synchronous; an async attachment function needs its own wrapper.
+    assert not any(
+        "attachments" in signature(function.entrypoint).parameters for function in gmail_tools.async_functions.values()
+    )
+
+
+def test_gmail_attachment_confinement_runs_on_agno_function_call_path(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Confinement must hold when Agno validates and executes the model's tool call."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+    function = gmail_tools.functions["send_email"]
+    function.process_entrypoint(strict=False)
+
+    execution = FunctionCall(
+        function=function,
+        arguments={
+            **_ATTACHMENT_CALLS["send_email"],
+            "attachments": [str(runtime_paths.storage_root / "config.yaml")],
+        },
+    ).execute()
+
+    assert execution.status == "success"
+    assert json.loads(execution.result)["error"].startswith("Gmail attachment must be a regular file")
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+def test_gmail_attachment_swapped_to_symlink_after_validation_is_refused(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent workspace writer cannot redirect a validated path to an outside file."""
+    workspace = tmp_path / "workspace"
+    (workspace / "reports").mkdir(parents=True)
+    (workspace / "reports" / "leak.txt").write_text("decoy", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.txt").write_text("secret", encoding="utf-8")
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> Path:
+        resolved = resolve_path_within_root(*args, **kwargs)
+        (workspace / "reports").rename(workspace / "reports-original")
+        (workspace / "reports").symlink_to(outside, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr("mindroom.file_access.resolve_path_within_root", resolve_then_swap)
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments="reports/leak.txt",
+    )
+
+    assert json.loads(result)["error"].startswith("Gmail attachment must be a regular file")
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+def test_gmail_attachment_refuses_workspace_root_replaced_by_symlink(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A workspace root swapped for a link must not re-anchor confinement elsewhere."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config.yaml").write_text("secret", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.symlink_to(outside, target_is_directory=True)
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments="config.yaml",
+    )
+
+    assert json.loads(result)["error"].startswith("Gmail attachment must be a regular file")
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+def test_gmail_attachments_are_limited_to_the_gmail_message_size(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Attachment bytes read into memory are bounded across the whole message."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name, size in (("first.bin", 20 * 1024 * 1024), ("second.bin", 6 * 1024 * 1024)):
+        with (workspace / name).open("wb") as sparse_file:
+            sparse_file.truncate(size)
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments=["first.bin", "second.bin"],
+    )
+
+    assert json.loads(result) == {"error": "Gmail attachments exceed the 25 MiB limit"}
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
+class _GmailBatch:
+    def __init__(
+        self,
+        callback: Callable[[str, object, Exception | None], None],
+        outcomes: dict[str, int | None],
+    ) -> None:
+        self._callback = callback
+        self._outcomes = outcomes
+        self.request_ids: list[str] = []
+
+    def add(self, _request: object, *, request_id: str) -> None:
+        self.request_ids.append(request_id)
+
+    def execute(self) -> None:
+        for request_id in self.request_ids:
+            status = self._outcomes[request_id]
+            if status is None:
+                self._callback(request_id, {"id": request_id}, None)
+                continue
+            response = SimpleNamespace(status=status, reason="provider error")
+            self._callback(request_id, None, HttpError(response, b'{"error":"provider-controlled"}'))
+
+
+class _GmailBatchService:
+    def __init__(self, outcomes: dict[str, int | None]) -> None:
+        self._outcomes = outcomes
+        self.batches: list[_GmailBatch] = []
+
+    def new_batch_http_request(
+        self,
+        *,
+        callback: Callable[[str, object, Exception | None], None],
+    ) -> _GmailBatch:
+        batch = _GmailBatch(callback, self._outcomes)
+        self.batches.append(batch)
+        return batch
+
+
+def test_gmail_batch_latches_401_across_mixed_chunked_results() -> None:
+    """A per-item 401 must survive later successes and a chunk boundary."""
+    tool = object.__new__(GmailTools)
+    service = _GmailBatchService({"first": 401, "second": None, "third": None})
+    tool.service = service
+    tool.max_batch_size = 2
+
+    results = tool._batch_get(["first", "second", "third"], lambda item_id: item_id)
+
+    assert results == [
+        {"id": "first", "error": "Google request failed"},
+        {"id": "second"},
+        {"id": "third"},
+    ]
+    assert [batch.request_ids for batch in service.batches] == [["first", "second"], ["third"]]
+    assert tool._consume_google_authorization_rejected() is True
+
+
+def test_gmail_batch_non_401_does_not_mark_authorization_rejected() -> None:
+    """A non-auth provider failure must remain a normal tool failure."""
+    tool = object.__new__(GmailTools)
+    tool.service = _GmailBatchService({"first": 403})
+    tool.max_batch_size = 10
+
+    results = tool._batch_get(["first"], lambda item_id: item_id)
+
+    assert results == [{"id": "first", "error": "Google request failed"}]
+    assert tool._consume_google_authorization_rejected() is False

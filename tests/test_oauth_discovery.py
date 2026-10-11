@@ -2,26 +2,39 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+)
 from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
 from mindroom.oauth.discovery import (
     _DISCOVERY_CACHE,
     _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
+    _cross_loop_lock,
     _discover_metadata,
+    _stored_registration,
 )
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.server_fetch_url import ServerFetchUrlError
+from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.credentials.manager import CredentialsManager
 
 
 class _Response:
@@ -76,7 +89,29 @@ class _ResourceOriginDiscoveryClient:
     ) -> _Response:
         del headers
         self.posts.append((url, json))
-        return _Response({"client_id": "registered-public-client"}, 201)
+        return _Response(
+            {
+                "client_id": "registered-public-client",
+                "redirect_uris": ["https://mindroom.example.test/api/oauth/example/callback"],
+            },
+            201,
+        )
+
+
+class _BlockingRegistrationClient(_ResourceOriginDiscoveryClient):
+    registration_started = threading.Event()
+    registration_release = threading.Event()
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> _Response:
+        self.registration_started.set()
+        assert await asyncio.to_thread(self.registration_release.wait, 5)
+        return await super().post(url, json=json, headers=headers)
 
 
 def _install_dns_rebinding(monkeypatch: pytest.MonkeyPatch, *, safe_resolutions: int) -> None:
@@ -109,9 +144,113 @@ def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cross_loop_lock_releases_after_repeated_waiter_cancellation() -> None:
+    """Repeated cancellation must not strand a later-acquired thread lock."""
+    lock = threading.Lock()
+    holder_entered = asyncio.Event()
+    release_holder = asyncio.Event()
+
+    async def hold_lock() -> None:
+        async with _cross_loop_lock(lock):
+            holder_entered.set()
+            await release_holder.wait()
+
+    async def wait_for_lock() -> None:
+        async with _cross_loop_lock(lock):
+            msg = "cancelled waiter entered the critical section"
+            raise AssertionError(msg)
+
+    holder = asyncio.create_task(hold_lock())
+    await holder_entered.wait()
+    waiter = asyncio.create_task(wait_for_lock())
+    await asyncio.sleep(0)
+
+    waiter.cancel()
+    waiter.cancel()
+    release_holder.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(waiter, timeout=2)
+    await asyncio.wait_for(holder, timeout=2)
+
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+@pytest.mark.asyncio
+async def test_cross_loop_lock_waiter_does_not_saturate_default_executor() -> None:
+    """A blocked waiter must leave executor capacity for work needed by the holder."""
+    real_lock = threading.Lock()
+    real_lock.acquire()
+    loop = asyncio.get_running_loop()
+    acquire_attempted = asyncio.Event()
+
+    class ObservedLock:
+        def acquire(self, blocking: bool = True) -> bool:
+            loop.call_soon_threadsafe(acquire_attempted.set)
+            return real_lock.acquire(blocking=blocking)
+
+        def release(self) -> None:
+            real_lock.release()
+
+    lock = cast("threading.Lock", ObservedLock())
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    waiter_entered = asyncio.Event()
+
+    async def wait_for_lock() -> None:
+        async with _cross_loop_lock(lock):
+            waiter_entered.set()
+
+    waiter = asyncio.create_task(wait_for_lock())
+    await acquire_attempted.wait()
+
+    executor_probe = asyncio.create_task(asyncio.to_thread(lambda: True))
+    probe_completed_while_waiting = False
+    try:
+        probe_completed_while_waiting = await asyncio.wait_for(asyncio.shield(executor_probe), timeout=0.2)
+    except TimeoutError:
+        pass
+    finally:
+        real_lock.release()
+        await asyncio.wait_for(waiter, timeout=2)
+        await asyncio.wait_for(executor_probe, timeout=2)
+
+    assert probe_completed_while_waiting
+    assert waiter_entered.is_set()
+
+
+async def _cancel_registration_publication(
+    authorization: asyncio.Task[str],
+    publication_entered: threading.Event,
+    release_publication: threading.Event,
+    provider_id: str,
+) -> None:
+    """Cancel an accepted publication twice and require its registration lock to stay held."""
+    try:
+        assert await asyncio.to_thread(publication_entered.wait, 5)
+        authorization.cancel()
+        await asyncio.sleep(0)
+        authorization.cancel()
+        await asyncio.sleep(0)
+        assert not authorization.done()
+        assert _DYNAMIC_CLIENT_REGISTRATION_LOCKS[provider_id].locked()
+    finally:
+        release_publication.set()
+        with pytest.raises(asyncio.CancelledError):
+            await authorization
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("observed_operation", "cancel_publication"),
+    [("read", False), ("manager", False), ("save", False), ("save", True)],
+    ids=["read", "manager", "save", "cancel-publication"],
+)
 async def test_resource_origin_metadata_registers_public_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    observed_operation: str,
+    cancel_publication: bool,
 ) -> None:
     """App-domain metadata should bootstrap a PKCE public client without a secret."""
     runtime_paths = resolve_runtime_paths(
@@ -146,11 +285,59 @@ async def test_resource_origin_metadata_registers_public_client(
     verifier = provider.issue_pkce_code_verifier()
     assert verifier is not None
 
-    authorization_url = await provider.authorization_uri_async(
-        runtime_paths,
-        state="state-token",
-        code_verifier=verifier,
-    )
+    owner_thread = threading.get_ident()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    original_load = manager.load_credentials
+    original_save = manager.save_credentials
+    storage_operations: set[str] = set()
+    publication_entered = threading.Event()
+    release_publication = threading.Event()
+
+    def observed_load(service: str) -> dict[str, Any] | None:
+        assert threading.get_ident() != owner_thread, "Registration config read blocked the event loop"
+        storage_operations.add("read")
+        return original_load(service)
+
+    def observed_manager(paths: RuntimePaths) -> CredentialsManager:
+        assert threading.get_ident() != owner_thread, "Registration path resolution blocked the event loop"
+        storage_operations.add("manager")
+        return get_runtime_credentials_manager(paths)
+
+    def observed_save(service: str, credentials: dict[str, Any]) -> None:
+        assert threading.get_ident() != owner_thread, "Registration config write blocked the event loop"
+        storage_operations.add("save")
+        if cancel_publication:
+            publication_entered.set()
+            assert release_publication.wait(5), "Registration publication gate was not released"
+        original_save(service, credentials)
+
+    with monkeypatch.context() as storage_patch:
+        if observed_operation == "read":
+            storage_patch.setattr(manager, "load_credentials", observed_load)
+        elif observed_operation == "manager":
+            storage_patch.setattr("mindroom.oauth.discovery.get_runtime_credentials_manager", observed_manager)
+        else:
+            storage_patch.setattr(manager, "save_credentials", observed_save)
+        authorization = asyncio.create_task(
+            oauth_authorization_url(provider, runtime_paths, state="state-token", code_verifier=verifier),
+        )
+        if cancel_publication:
+            await _cancel_registration_publication(
+                authorization,
+                publication_entered,
+                release_publication,
+                provider.id,
+            )
+            authorization_url = await oauth_authorization_url(
+                provider,
+                runtime_paths,
+                state="state-token",
+                code_verifier=verifier,
+            )
+        else:
+            authorization_url = await authorization
+
+    assert storage_operations == {observed_operation}
 
     query = parse_qs(urlparse(authorization_url).query)
     assert query["client_id"] == ["registered-public-client"]
@@ -175,10 +362,106 @@ async def test_resource_origin_metadata_registers_public_client(
     assert get_runtime_credentials_manager(runtime_paths).load_credentials("example_oauth_client") == {
         "client_id": "registered-public-client",
         "redirect_uri": "https://mindroom.example.test/api/oauth/example/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "https://mindroom.example.test/api/oauth/example/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: "https://auth.example.test/token",
         "_source": "oauth_dynamic_client_registration",
         "_oauth_provider": "example",
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
+
+
+@pytest.mark.parametrize(
+    "registered_redirect_uris",
+    [None, [], ["https://other.example.test/api/oauth/example/callback"]],
+)
+def test_dynamic_registration_rejects_unconfirmed_redirect_uri(
+    tmp_path: Path,
+    registered_redirect_uris: list[str] | None,
+) -> None:
+    """Only callback metadata returned by the registration server is confirmed."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    provider = OAuthProvider(
+        id="example",
+        display_name="Example",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",  # noqa: S106
+        scopes=(),
+        allow_empty_scopes=True,
+        credential_service="example_oauth",
+        client_config_services=("example_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+    )
+    registration: dict[str, Any] = {"client_id": "registered-public-client"}
+    if registered_redirect_uris is not None:
+        registration["redirect_uris"] = registered_redirect_uris
+
+    with pytest.raises(OAuthProviderError, match="did not confirm redirect_uri"):
+        _stored_registration(provider, runtime_paths, registration, "https://auth.example.test/token")
+
+
+@pytest.mark.asyncio
+async def test_dynamic_client_registration_singleflights_across_fresh_event_loops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider refresh worker loops must share one loop-neutral DCR lock."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    _BlockingRegistrationClient.gets = []
+    _BlockingRegistrationClient.posts = []
+    _BlockingRegistrationClient.registration_started.clear()
+    _BlockingRegistrationClient.registration_release.clear()
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _BlockingRegistrationClient)
+    provider = OAuthProvider(
+        id="example",
+        display_name="Example",
+        authorization_url="",
+        token_url="",
+        scopes=(),
+        allow_empty_scopes=True,
+        credential_service="example_oauth",
+        client_config_services=("example_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+        pkce_code_challenge_method="S256",
+        runtime_bootstrapper=oauth_runtime_bootstrapper(
+            OAuthDiscoveryConfig(
+                resource="https://resource.example.test",
+                token_endpoint_auth_method="none",  # noqa: S106
+                pkce_code_challenge_method="S256",
+            ),
+        ),
+    )
+
+    def authorize(state: str) -> str:
+        verifier = provider.issue_pkce_code_verifier()
+        assert verifier is not None
+        return asyncio.run(
+            oauth_authorization_url(
+                provider,
+                runtime_paths,
+                state=state,
+                code_verifier=verifier,
+            ),
+        )
+
+    first = asyncio.create_task(asyncio.to_thread(authorize, "first-state"))
+    assert await asyncio.to_thread(_BlockingRegistrationClient.registration_started.wait, 5)
+    second = asyncio.create_task(asyncio.to_thread(authorize, "second-state"))
+    await asyncio.sleep(0.05)
+    _BlockingRegistrationClient.registration_release.set()
+
+    first_url, second_url = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+    assert parse_qs(urlparse(first_url).query)["client_id"] == ["registered-public-client"]
+    assert parse_qs(urlparse(second_url).query)["client_id"] == ["registered-public-client"]
+    assert len(_BlockingRegistrationClient.posts) == 1
 
 
 @pytest.mark.asyncio
@@ -309,6 +592,55 @@ async def test_dynamic_registration_revalidates_dns_when_connecting(
 
     with pytest.raises(OAuthProviderError, match="dynamic client registration failed") as error:
         await provider.runtime_endpoints(runtime_paths)
+
+    assert isinstance(error.value.__cause__, ServerFetchUrlError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["exchange", "refresh"])
+async def test_token_requests_revalidate_dns_when_connecting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Code exchange and refresh must reject a discovered token host that rebinds before the connection."""
+    token_url = "https://auth.example.test/token"  # noqa: S105
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "rebound_token_oauth_client",
+        {"client_id": "public-client"},
+    )
+    provider = OAuthProvider(
+        id="rebound_token",
+        display_name="Rebound Token",
+        authorization_url="",
+        token_url="",
+        scopes=(),
+        allow_empty_scopes=True,
+        credential_service="rebound_token_oauth",
+        client_config_services=("rebound_token_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+        runtime_bootstrapper=oauth_runtime_bootstrapper(
+            OAuthDiscoveryConfig(
+                resource="",
+                discovery="manual",
+                authorization_url="https://auth.example.test/authorize",
+                token_url=token_url,
+                token_endpoint_auth_method="none",  # noqa: S106
+            ),
+        ),
+    )
+    # Manual discovery preflights the authorization and token endpoints before the token request dials.
+    _install_dns_rebinding(monkeypatch, safe_resolutions=2)
+
+    token_request = (
+        provider.exchange_code("authorization-code", runtime_paths, token_url=token_url)
+        if operation == "exchange"
+        else provider.refresh_token_data({"refresh_token": "refresh-token", "token_uri": token_url}, runtime_paths)
+    )
+
+    with pytest.raises(OAuthProviderError, match=f"OAuth token {operation}") as error:
+        await token_request
 
     assert isinstance(error.value.__cause__, ServerFetchUrlError)
 

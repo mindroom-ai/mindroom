@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import nio
 import pytest
+from aiohttp import ClientResponse
 
 from mindroom.matrix.relation_lookup import RelationLookup
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError
 
 pytestmark = pytest.mark.asyncio
 
@@ -195,6 +198,57 @@ class TestEventInfo:
 
         with pytest.raises(RuntimeError, match="Failed to resolve related Matrix event"):
             await lookup(FakeRelations(), client).event_info(ROOM, "$secret")
+
+    async def test_a_refusal_that_holds_for_every_retry_says_so(self) -> None:
+        """A hidden event stays hidden, so its caller must stop rather than retry."""
+        client = FakeClient(error=nio.RoomGetEventError.from_dict({"errcode": "M_FORBIDDEN", "error": "nope"}))
+
+        with pytest.raises(RelatedEventUnavailableError):
+            await lookup(FakeRelations(), client).event_info(ROOM, "$secret")
+
+    @pytest.mark.parametrize(
+        ("http_status", "errcode", "permanent"),
+        [
+            (403, "M_FORBIDDEN", True),
+            (400, None, True),
+            (400, "M_INVALID_PARAM", True),
+            (400, "M_UNRECOGNIZED", False),
+            (403, None, False),
+            (403, "M_CONSENT_NOT_GIVEN", False),
+            (404, "M_UNRECOGNIZED", False),
+            (404, None, False),
+            (405, "M_UNRECOGNIZED", False),
+            (401, "M_UNKNOWN_TOKEN", False),
+            (408, None, False),
+            (414, None, False),
+            (429, "M_LIMIT_EXCEEDED", False),
+            (500, "M_UNKNOWN", False),
+            (502, None, False),
+        ],
+    )
+    async def test_only_a_refusal_about_the_event_is_permanent(
+        self,
+        http_status: int,
+        errcode: str | None,
+        *,
+        permanent: bool,
+    ) -> None:
+        """A hidden or malformed event is refused forever; an account, deployment, or server problem is not."""
+        error = nio.RoomGetEventError("refused", errcode)
+        error.transport_response = MagicMock(spec=ClientResponse, status=http_status)
+        client = FakeClient(error=error)
+
+        with pytest.raises(RuntimeError, match="Failed to resolve related Matrix event") as raised:
+            await lookup(FakeRelations(), client).event_info(ROOM, "$event")
+
+        assert isinstance(raised.value, RelatedEventUnavailableError) is permanent
+
+    async def test_a_missing_event_is_reported_as_missing(self) -> None:
+        """A 404 ``M_NOT_FOUND`` is an answer, not a failure; callers treat it as unavailable."""
+        error = nio.RoomGetEventError("gone", "M_NOT_FOUND")
+        error.transport_response = MagicMock(spec=ClientResponse, status=404)
+
+        assert await lookup(FakeRelations(), FakeClient(error=error)).event_info(ROOM, "$gone") is None
 
     async def test_without_a_client_nothing_can_be_resolved(self) -> None:
         """Without a client nothing can be resolved."""

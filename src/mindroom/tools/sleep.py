@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.sleep import SleepTools
+    from mindroom.custom_tools.sleep import SleepTools
 
 
 @register_tool_with_metadata(
     name="sleep",
+    file_access=ToolFileAccess.NONE,
     display_name="Sleep",
     description="Sleep utility for introducing delays and pauses in execution",
     category=ToolCategory.DEVELOPMENT,  # Local utility tool
@@ -42,6 +43,6 @@ if TYPE_CHECKING:
 )
 def sleep_tools() -> type[SleepTools]:
     """Return sleep tools for introducing delays and pauses in execution."""
-    from agno.tools.sleep import SleepTools
+    from mindroom.custom_tools.sleep import SleepTools
 
     return SleepTools

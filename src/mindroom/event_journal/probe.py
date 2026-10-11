@@ -1,7 +1,7 @@
 """Read a candidate database's journal identity without changing the database.
 
 Asking a database who it is by opening the store answers the question and
-destroys the evidence in the same breath: both backends create or migrate the
+destroys the evidence in the same breath: both backends install the
 whole schema on open, so a database that is then *refused* has already been
 written to. An identity-only database points at nothing and still comes back
 carrying every table this install uses.

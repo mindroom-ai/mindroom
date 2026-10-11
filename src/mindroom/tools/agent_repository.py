@@ -8,6 +8,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -19,11 +20,13 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="agent_repository",
+    file_access=ToolFileAccess.NONE,
     display_name="Agent Repository",
     description="Ensure the one private GitHub repository bound to this agent worker",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     icon="GitBranch",
     icon_color="text-slate-700",
     dependencies=["agno", "httpx"],

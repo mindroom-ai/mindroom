@@ -47,13 +47,14 @@ def _valid_plugin(root: Path) -> Path:
         modules={
             "tools.py": (
                 "from agno.tools import Toolkit\n"
-                "from mindroom.tool_system.declarations import ToolCategory\n"
+                "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
                 "from mindroom.tool_system.registration import register_tool_with_metadata\n"
                 "class DemoTool(Toolkit):\n"
                 "    def __init__(self):\n"
                 "        super().__init__(name='demo', tools=[])\n"
                 "@register_tool_with_metadata(\n"
                 "    name='compat_demo_tool',\n"
+                "    file_access=ToolFileAccess.NONE,\n"
                 "    display_name='Compatibility demo',\n"
                 "    description='Compatibility test tool',\n"
                 "    category=ToolCategory.DEVELOPMENT,\n"
@@ -79,7 +80,7 @@ def _valid_plugin(root: Path) -> Path:
                 "        authorization_url='https://example.com/authorize',\n"
                 "        token_url='https://example.com/token',\n"
                 "        scopes=('read',),\n"
-                "        credential_service='compat_demo_credentials',\n"
+                "        credential_service='compat_demo_oauth',\n"
                 "        tool_config_service='compat_demo_tool',\n"
                 "        client_config_services=('compat_demo_oauth_client',),\n"
                 "    )]\n"
@@ -202,7 +203,8 @@ def test_plugins_check_cli_reports_compatibility(tmp_path: Path) -> None:
     assert "Plugin is compatible: compat-demo" in result.stdout
     assert "compat_demo_tool" in result.stdout
     assert "compat-demo-hook" in result.stdout
-    assert "Skills: skills" in result.stdout
+    assert "Skills:      skills" in result.stdout
+    assert "Automations: none" in result.stdout
 
 
 def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> None:
@@ -231,3 +233,40 @@ def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None
     assert result.exit_code == 2
     assert "does not exist" in result.output
     assert "Traceback (most recent call last)" not in result.output
+
+
+def test_check_plugin_lists_automations(tmp_path: Path) -> None:
+    """A plugin's automations are listed by name, like its hooks."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "digest", "hooks_module": "hooks.py"},
+        modules={
+            "hooks.py": (
+                "from mindroom.automations import automation\n"
+                "@automation('weekly_digest')\n"
+                "def check(ctx):\n"
+                "    return None\n"
+            ),
+        },
+    )
+
+    assert check_plugin(plugin_root).automation_names == ("weekly_digest",)
+
+
+def test_check_plugin_rejects_an_automation_named_like_a_built_in(tmp_path: Path) -> None:
+    """Built-in names are reserved, so a plugin cannot shadow `dreaming`."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "shadow", "hooks_module": "hooks.py"},
+        modules={
+            "hooks.py": (
+                "from mindroom.automations import automation\n"
+                "@automation('dreaming')\n"
+                "def check(ctx):\n"
+                "    return None\n"
+            ),
+        },
+    )
+
+    with pytest.raises(ValueError, match="dreaming"):
+        check_plugin(plugin_root)

@@ -2,10 +2,11 @@
 
 This module decides which files belong to a knowledge base, in three composable layers:
 include patterns derive listing targets that bound where traversal looks, traversal
-yields only candidates whose directory chain is vetted, and per-file rules run cheap
-relative-path checks before filesystem safety checks.
-Every path returned by the listing functions is a regular file, not a symlink, with no
-symlinked ancestors and no ".." traversal, so it always stays inside the knowledge root.
+walks directory descriptors pinned from the knowledge root without following links, and
+per-file rules run cheap relative-path checks before filesystem safety checks.
+Callers pass the canonical root their binding resolved; a root that no longer resolves
+to itself lists nothing. Every listed path is a regular file within the read cap, reached
+without links, and ``open_knowledge_file`` refuses a swap made after listing.
 """
 
 from __future__ import annotations
@@ -13,11 +14,20 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.redaction import redact_credentials_in_text
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import (
+    MAX_READ_BYTES,
+    is_git_metadata_path,
+    open_directory_within_root,
+    open_regular_file_within_root,
+)
 from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
@@ -25,7 +35,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 
-_GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
 _GLOB_CHARS = frozenset("*?[")
 _TEXT_LIKE_EXTENSIONS = {
     ".md",
@@ -83,6 +92,9 @@ _TEXT_LIKE_EXTENSIONS = {
 }
 
 
+logger = get_logger(__name__)
+
+
 @dataclass(frozen=True)
 class _ListingTarget:
     path: Path
@@ -138,7 +150,7 @@ def _is_hidden_relative_path(relative_path: Path) -> bool:
 def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
     """Return whether a relative path is managed by the base path filters."""
     path_obj = Path(relative_path)
-    if path_obj.is_absolute() or ".." in path_obj.parts:
+    if path_obj.is_absolute() or ".." in path_obj.parts or is_git_metadata_path(path_obj):
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
@@ -188,86 +200,95 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
     return include_semantic_knowledge_relative_path(config, base_id, relative_path)
 
 
-@dataclass
-class _DirectoryGuard:
-    """Cached directory-chain vetting for one listing pass."""
-
-    root: Path
-    _symlink_cache: dict[Path, bool] = field(default_factory=dict)
-
-    def is_safe(self, directory: Path) -> bool:
-        """Return whether a directory is inside root and reached without symlinks."""
-        try:
-            relative_path = directory.relative_to(self.root)
-        except ValueError:
-            return False
-        # ``relative_to`` is lexical, so it happily walks back out through "..".
-        if ".." in relative_path.parts:
-            return False
-
-        current = self.root
-        for part in relative_path.parts:
-            current = current / part
-            cached = self._symlink_cache.get(current)
-            if cached is None:
-                cached = current.is_symlink()
-                self._symlink_cache[current] = cached
-            if cached:
-                return False
-        return True
+@contextmanager
+def _pinned_directory(path: Path) -> Iterator[int]:
+    """Pin one canonical absolute directory by a no-follow walk from the filesystem root."""
+    with open_directory_within_root(Path(path.anchor), path.relative_to(path.anchor)) as directory_fd:
+        yield directory_fd
 
 
-def _iter_target_files(target: _ListingTarget, guard: _DirectoryGuard) -> Iterator[Path]:
-    """Yield candidate files for one target, vetting their directory chain via the guard."""
-    if target.mode == "file":
-        if guard.is_safe(target.path.parent):
-            yield target.path
+@contextmanager
+def open_knowledge_file(path: Path) -> Iterator[int]:
+    """Open one listed knowledge file without following a link swapped onto its path after listing.
+
+    Listed paths are canonical, so a no-follow walk of every component from the
+    filesystem root reaches exactly the listed regular file or fails.
+    """
+    with open_regular_file_within_root(Path(path.anchor), path.relative_to(path.anchor)) as file_fd:
+        yield file_fd
+
+
+def _is_regular_file_at(root_fd: int, relative_path: Path) -> bool:
+    try:
+        with open_directory_within_root(root_fd, relative_path.parent) as parent_fd:
+            status = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
+    except (OSError, ValueError):
+        return False
+    if stat.S_ISREG(status.st_mode) and status.st_size > MAX_READ_BYTES:
+        logger.warning("Skipping a knowledge file above the read cap", path=str(relative_path), size=status.st_size)
+        return False
+    return stat.S_ISREG(status.st_mode)
+
+
+def _walk_relative_files(root_fd: int, base: Path) -> list[Path]:
+    """Return files below ``base`` by a descriptor walk that never enters a linked directory."""
+    try:
+        with open_directory_within_root(root_fd, base) as base_fd:
+            files: list[Path] = []
+            for dirpath, dirnames, filenames, _dirfd in os.fwalk(".", dir_fd=base_fd):
+                dirnames[:] = [name for name in dirnames if name.casefold() != ".git"]
+                files.extend(base / dirpath / name for name in filenames)
+            return files
+    except (OSError, ValueError):
+        return []
+
+
+def _iter_target_files(root_fd: int, target: _ListingTarget, root: Path) -> Iterator[Path]:
+    """Yield candidate paths relative to the root for one listing target."""
+    relative_target = target.path.relative_to(root)
+    if ".." in relative_target.parts:
         return
-    if not target.path.is_dir() or not guard.is_safe(target.path):
+    if target.mode == "file":
+        yield relative_target
         return
     if target.mode == "dir":
-        yield from (path for path in target.path.iterdir() if path.is_file())
+        try:
+            with open_directory_within_root(root_fd, relative_target) as directory_fd:
+                names = [entry.name for entry in os.scandir(directory_fd) if entry.is_file(follow_symlinks=False)]
+        except (OSError, ValueError):
+            return
+        yield from (relative_target / name for name in names)
         return
-    for dirpath, dirnames, filenames in os.walk(target.path, followlinks=False):
-        current_dir = Path(dirpath)
-        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
-        for filename in filenames:
-            yield current_dir / filename
+    yield from _walk_relative_files(root_fd, relative_target)
 
 
-def _safe_regular_file(candidate: Path) -> Path | None:
-    """Return a chain-vetted candidate when it is a regular file inside the knowledge root.
-
-    The candidate is returned as given, not canonicalized: ``_DirectoryGuard`` has
-    already vetted every directory component and rejected ".." traversal, so a
-    candidate that is not itself a symlink is already canonical and cannot point
-    outside the root. A single ``lstat`` therefore settles both questions, where
-    ``resolve(strict=True)`` re-walked the whole path for every file — several
-    extra round trips per file on a network filesystem.
-    """
-    try:
-        status = candidate.lstat()
-    except OSError:
-        return None
-    return candidate if stat.S_ISREG(status.st_mode) else None
+def _canonical_root(knowledge_root: Path) -> Path | None:
+    """Return the knowledge root when it still resolves to itself, else ``None``."""
+    root = knowledge_root.expanduser()
+    return root if root.is_absolute() and root.resolve() == root else None
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
     """List managed files without constructing a knowledge manager."""
-    root = knowledge_root.resolve()
-    if not root.is_dir():
+    root = _canonical_root(knowledge_root)
+    if root is None:
+        logger.warning("Knowledge root no longer resolves to itself; listing nothing", base_id=base_id)
         return []
-
-    guard = _DirectoryGuard(root=root)
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     files: set[Path] = set()
-    for target in _listing_targets(root, include_patterns):
-        for candidate in _iter_target_files(target, guard):
-            if not include_knowledge_relative_path(config, base_id, candidate.relative_to(root).as_posix()):
-                continue
-            safe_file = _safe_regular_file(candidate)
-            if safe_file is not None:
-                files.add(safe_file)
+    try:
+        with _pinned_directory(root) as root_fd:
+            for target in _listing_targets(root, include_patterns):
+                for relative_path in _iter_target_files(root_fd, target, root):
+                    if not include_knowledge_relative_path(config, base_id, relative_path.as_posix()):
+                        continue
+                    if _is_regular_file_at(root_fd, relative_path):
+                        files.add(root / relative_path)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot list knowledge files", base_id=base_id, root=str(root), error=str(exc))
+        return []
     return sorted(files)
 
 
@@ -278,55 +299,36 @@ def knowledge_files_from_relative_paths(
     relative_paths: Iterable[str],
 ) -> list[Path]:
     """Resolve claimed relative paths through the same inclusion rules and safety checks."""
-    root = knowledge_root.resolve()
-    guard = _DirectoryGuard(root=root)
+    root = _canonical_root(knowledge_root)
+    if root is None:
+        return []
     files: list[Path] = []
-    for relative_path in sorted(set(relative_paths)):
-        if not include_knowledge_relative_path(config, base_id, relative_path):
-            continue
-        candidate = root / relative_path
-        if not guard.is_safe(candidate.parent):
-            continue
-        safe_file = _safe_regular_file(candidate)
-        if safe_file is not None:
-            files.append(safe_file)
+    try:
+        with _pinned_directory(root) as root_fd:
+            for relative_path in sorted(set(relative_paths)):
+                if not include_knowledge_relative_path(config, base_id, relative_path):
+                    continue
+                if _is_regular_file_at(root_fd, Path(relative_path)):
+                    files.append(root / relative_path)
+    except (OSError, ValueError):
+        return []
     return files
 
 
-def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) -> bool:
-    """Return whether root itself is a Git worktree checkout."""
-    if not root.is_dir():
-        return False
-    effective_timeout_seconds = _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    if effective_timeout_seconds <= 0:
-        effective_timeout: float | None = None
-    else:
-        effective_timeout = effective_timeout_seconds
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if result.returncode != 0:
-        return False
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) < 2 or lines[0] != "true":
-        return False
-    try:
-        return Path(lines[1]).resolve() == root.resolve()
-    except OSError:
-        return False
+def git_checkout_present(root: Path, git_dir: Path) -> bool:
+    """Return whether root is a checkout of the MindRoom-owned Git directory ``git_dir``.
+
+    Nothing inside root is consulted: a ``.git`` there is writable by whoever
+    can write the knowledge files, and Git is never pointed at it.
+    """
+    return root.is_dir() and (git_dir / "HEAD").is_file()
 
 
 def git_tracked_relative_paths_from_checkout(
     config: Config,
     base_id: str,
     knowledge_root: Path,
+    git_dir: Path,
     *,
     timeout_seconds: float | None = None,
 ) -> set[str]:
@@ -339,8 +341,9 @@ def git_tracked_relative_paths_from_checkout(
     )
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z"],
+            hardened_git_command(["ls-files", "-z"]),
             cwd=str(knowledge_root),
+            env=hardened_git_env(git_dir=git_dir, work_tree=knowledge_root),
             check=False,
             capture_output=True,
             text=True,
@@ -369,16 +372,17 @@ def list_git_tracked_knowledge_files(
     config: Config,
     base_id: str,
     knowledge_root: Path,
+    git_dir: Path,
     *,
     timeout_seconds: float | None = None,
 ) -> list[Path]:
     """List Git-tracked files using the active source set for one base."""
-    root = knowledge_root.resolve()
-    if not git_checkout_present(root, timeout_seconds=timeout_seconds):
+    root = _canonical_root(knowledge_root)
+    if root is None or not git_checkout_present(root, git_dir):
         return []
     return knowledge_files_from_relative_paths(
         config,
         base_id,
         root,
-        git_tracked_relative_paths_from_checkout(config, base_id, root, timeout_seconds=timeout_seconds),
+        git_tracked_relative_paths_from_checkout(config, base_id, root, git_dir, timeout_seconds=timeout_seconds),
     )

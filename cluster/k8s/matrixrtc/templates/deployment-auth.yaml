@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mindroom-matrixrtc.authName" . }}
+  labels:
+    {{- include "mindroom-matrixrtc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "auth") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "auth") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "mindroom-matrixrtc.podSpecCommon" . | nindent 6 }}
+      containers:
+        - name: auth
+          image: {{ include "mindroom-matrixrtc.image" (dict "root" $ "image" .Values.auth.image) | quote }}
+          imagePullPolicy: {{ .Values.auth.image.pullPolicy }}
+          env:
+            - name: LIVEKIT_URL
+              value: {{ .Values.auth.livekitUrl | quote }}
+            - name: LIVEKIT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keys.existingSecret | quote }}
+                  key: {{ .Values.keys.apiKeyKey | quote }}
+            - name: LIVEKIT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keys.existingSecret | quote }}
+                  key: {{ .Values.keys.apiSecretKey | quote }}
+            - name: LIVEKIT_FULL_ACCESS_HOMESERVERS
+              value: {{ join "," .Values.auth.fullAccessHomeservers | quote }}
+            - name: LIVEKIT_JWT_BIND
+              value: {{ printf ":%v" .Values.auth.port | quote }}
+            {{- with .Values.auth.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.auth.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.auth.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

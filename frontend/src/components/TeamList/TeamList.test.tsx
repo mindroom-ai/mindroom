@@ -87,13 +87,13 @@ describe("TeamList", () => {
   it("calls selectTeam when a team is clicked", () => {
     render(<TeamList />);
 
-    const devTeamCard = screen.getByText("Dev Team").closest(".rounded-xl");
+    const devTeamCard = screen.getByText("Dev Team").closest('[role="button"]');
     fireEvent.click(devTeamCard!);
 
     expect(mockSelectTeam).toHaveBeenCalledWith("dev_team");
   });
 
-  it("highlights selected team", () => {
+  it("exposes the selected team state", () => {
     (useConfigStore as any).mockReturnValue({
       teams: mockTeams,
       selectedTeamId: "dev_team",
@@ -103,8 +103,8 @@ describe("TeamList", () => {
 
     render(<TeamList />);
 
-    const devTeamCard = screen.getByText("Dev Team").closest(".rounded-xl");
-    expect(devTeamCard).toHaveClass("ring-2", "ring-orange-500");
+    const devTeamCard = screen.getByText("Dev Team").closest('[role="button"]');
+    expect(devTeamCard).toHaveAttribute("aria-pressed", "true");
   });
 
   it("shows create team form when plus button is clicked", () => {

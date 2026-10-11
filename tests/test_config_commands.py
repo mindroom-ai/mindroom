@@ -38,7 +38,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
@@ -47,24 +47,26 @@ from mindroom.tool_system.plugins import PluginReloadResult
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
-from tests.conftest import make_conversation_reader_mock, write_config_yaml
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, write_config_yaml
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
 
 
-def _handler_authorization(
+def _handler_config_fields(
     *,
     config_command_enabled: bool,
-    global_users: list[str] | None = None,
+    administrators: list[str] | None = None,
     aliases: dict[str, list[str]] | None = None,
-) -> AuthorizationConfig:
-    return AuthorizationConfig(
-        config_command_enabled=config_command_enabled,
-        global_users=global_users or [],
-        aliases=aliases or {},
-    )
+) -> dict[str, object]:
+    return {
+        "administrators": administrators or [],
+        "authorization": AuthorizationConfig(
+            config_command_enabled=config_command_enabled,
+            aliases=aliases or {},
+        ),
+    }
 
 
 def _pending_config_change(
@@ -77,7 +79,6 @@ def _pending_config_change(
         room_id=room_id,
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester=requester,
     )
@@ -114,7 +115,7 @@ def test_validate_and_persist_config_payload_validates_and_writes_authored_paylo
     """Runtime config payload persistence should validate before writing."""
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
+    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
     write_config_yaml(config, config_path)
     payload = config.authored_model_dump()
     payload["agents"] = {
@@ -142,7 +143,7 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
     )
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
+    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
     write_config_yaml(config, config_path)
     original_source = config_path.read_text(encoding="utf-8")
     payload = config.authored_model_dump()
@@ -157,7 +158,7 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
 @pytest.mark.asyncio
 async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations() -> None:
     """Config confirmation should add canonical Matrix annotation reactions."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     response = MagicMock(spec=nio.RoomSendResponse)
     client.room_send.return_value = response
     await _add_confirmation_reactions(client, "!room:example.org", "$preview")
@@ -195,7 +196,7 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
     with pytest.raises(RuntimeError, match="Failed to store pending config change"):
         await config_confirmation._store_pending_change_in_matrix(state_client, "$preview", pending_change)
 
-    reaction_client = AsyncMock()
+    reaction_client = make_matrix_client_mock()
     reaction_client.room_send.return_value = nio.RoomSendError.from_dict(
         {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
         "!room:example.org",
@@ -207,7 +208,7 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
 @pytest.mark.asyncio
 async def test_confirmation_setup_adopts_existing_duplicate_reaction() -> None:
     """A replayed setup should accept the homeserver's duplicate-annotation proof."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     client.room_send.side_effect = [
         nio.RoomSendError("already exists", "M_DUPLICATE_ANNOTATION"),
         nio.RoomSendResponse("$cancel-reaction", "!room:example.org"),
@@ -422,10 +423,10 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
     config_path = tmp_path / "custom-config.yaml"
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
@@ -464,10 +465,10 @@ async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None
     """Disabled config commands should reject before loading or previewing config."""
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -507,10 +508,10 @@ async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> N
     """Enabled config commands should still require a global admin."""
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -599,7 +600,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
 
     admin_context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
+        config=Config(administrators=["@admin:example.org"]),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
@@ -621,7 +622,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     assert "demo-plugin" in admin_context.send_response.await_args.args[0]
 
     user_context = make_test_command_handler_context(
-        **{**admin_context.__dict__, "config": SimpleNamespace(authorization=AuthorizationConfig(global_users=[]))},
+        **{**admin_context.__dict__, "config": Config(administrators=[])},
     )
     await handle_command(
         context=user_context,
@@ -650,9 +651,9 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
     )
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
+        config=Config(
+            administrators=["@admin:example.org"],
             authorization=AuthorizationConfig(
-                global_users=["@admin:example.org"],
                 aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
             ),
         ),
@@ -691,7 +692,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
     reload_plugins = AsyncMock(side_effect=RuntimeError("Plugin hooks module not found: /tmp/demo/hooks.py"))
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
+        config=Config(administrators=["@admin:example.org"]),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
@@ -721,10 +722,10 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     """Config preview replies should persist confirmation state and record the preview event ID."""
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
                 aliases={"@alice:example.org": ["@telegram_alice:example.org"]},
             ),
         ),
@@ -749,8 +750,8 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     )
     change_info = {
         "config_path": "defaults.markdown",
-        "old_value": True,
         "new_value": False,
+        "new_value_withheld": False,
     }
     with (
         patch(
@@ -776,8 +777,8 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         room_id="!room:example.org",
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
+        new_value_withheld=False,
         requester="@alice:example.org",
     )
     context.record_handled_turn.assert_called_once_with(
@@ -793,10 +794,10 @@ async def test_handle_command_config_set_stays_retryable_after_post_send_failure
     """Confirmation setup failures should leave the command retryable."""
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -820,8 +821,8 @@ async def test_handle_command_config_set_stays_retryable_after_post_send_failure
     )
     change_info = {
         "config_path": "defaults.markdown",
-        "old_value": True,
         "new_value": False,
+        "new_value_withheld": False,
     }
 
     with (
@@ -853,10 +854,10 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
     target = MessageTarget.resolve("!room:example.org", None, "$preview")
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -905,10 +906,10 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     target = MessageTarget.resolve("!room:example.org", None, "$preview")
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -921,10 +922,8 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
     pending_change = _pending_config_change()
     confirmation_context = _confirmation_context(bot)
-    bot.config.authorization = _handler_authorization(
-        config_command_enabled=True,
-        global_users=["@other-admin:example.org"],
-    )
+    bot.config.administrators = ["@other-admin:example.org"]
+    bot.config.authorization = AuthorizationConfig(config_command_enabled=True)
 
     with (
         patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),
@@ -962,10 +961,10 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
     target = MessageTarget.resolve("!room:example.org", None, "$preview")
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
                 aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
             ),
         ),
@@ -1034,10 +1033,10 @@ async def test_confirmation_reactions_serialize_one_decision(
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1115,10 +1114,10 @@ async def test_checkpointed_confirmation_ignores_changed_authorization(
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=[],
+                administrators=[],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1175,17 +1174,10 @@ async def test_resolve_pending_change_loads_exact_matrix_state_before_room_resto
         room_id=room_id,
         thread_id="$thread",
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester="@admin:example.org",
     )
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content=pending_change.to_dict(),
-        event_type=config_confirmation._PENDING_CONFIG_EVENT_TYPE,
-        state_key=event_id,
-        room_id=room_id,
-    )
+    client = _pending_state_client(pending_change, state_key=event_id, sender="@router:example.org")
     monkeypatch.setattr(config_confirmation, "_pending_changes", {})
 
     resolved = await config_confirmation._resolve_pending_change(client, room_id, event_id)
@@ -1197,6 +1189,56 @@ async def test_resolve_pending_change_loads_exact_matrix_state_before_room_resto
         config_confirmation._PENDING_CONFIG_EVENT_TYPE,
         event_id,
     )
+
+
+def _pending_state_client(
+    pending_change: config_confirmation._PendingConfigChange,
+    *,
+    state_key: str,
+    sender: str,
+) -> AsyncMock:
+    """Return a router client whose room state holds one pending change written by ``sender``."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@router:example.org"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=pending_change.to_dict(),
+        event_type=config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+        state_key=state_key,
+        room_id=pending_change.room_id,
+    )
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        events=[
+            {
+                "type": config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+                "state_key": state_key,
+                "sender": sender,
+                "content": pending_change.to_dict(),
+            },
+        ],
+        room_id=pending_change.room_id,
+    )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_pending_change_state_written_by_another_member_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forged room state must never become a change an admin reaction can apply."""
+    forged_change = replace(
+        _pending_config_change(),
+        config_path="administrators.0",
+        new_value="@attacker:evil.example",
+    )
+    client = _pending_state_client(forged_change, state_key="$attacker-message", sender="@attacker:evil.example")
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {})
+
+    resolved = await config_confirmation._resolve_pending_change(client, forged_change.room_id, "$attacker-message")
+    restored = await config_confirmation.restore_pending_changes(client, forged_change.room_id)
+
+    assert resolved is None
+    assert restored == 0
+    assert config_confirmation._pending_changes == {}
 
 
 @pytest.mark.asyncio
@@ -1212,7 +1254,6 @@ async def test_confirmation_send_failure_keeps_replay_state(
         room_id=room_id,
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester="@admin:example.org",
     )
@@ -1220,10 +1261,10 @@ async def test_confirmation_send_failure_keeps_replay_state(
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1284,7 +1325,7 @@ async def test_ambiguous_config_execution_reports_uncertainty_without_reapplying
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(authorization=_handler_authorization(config_command_enabled=True)),
+        config=Config(**_handler_config_fields(config_command_enabled=True)),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(
@@ -1356,8 +1397,8 @@ async def test_config_preview_recovery_preserves_committed_decision(
             room_id=pending_change.room_id,
             thread_id=None,
             config_path="defaults.markdown",
-            old_value=False,
             new_value=True,
+            new_value_withheld=False,
             requester="@other:example.org",
         )
 
@@ -1378,17 +1419,16 @@ async def test_confirmation_recovery_adopts_untracked_visible_response(
         room_id=room_id,
         thread_id=None,
         config_path="defaults.markdown",
-        old_value=True,
         new_value=False,
         requester="@admin:example.org",
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1432,7 +1472,7 @@ async def test_handle_config_command_uses_explicit_runtime_paths(tmp_path: Path)
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"test_agent": {"display_name": "Runtime Agent", "role": "test"}},
             },
@@ -1460,7 +1500,7 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
@@ -1486,6 +1526,39 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected_reply"),
+    [
+        ("get models.default.id.x", "❌ Configuration path not found: `models.default.id.x`"),
+        ("get agents.writer.tools.x", "❌ Configuration path not found: `agents.writer.tools.x`"),
+        ("set agents.writer.role.x 1", "❌ Configuration path error: `agents.writer.role.x`"),
+        ("set models.default.id.0 1", "❌ Configuration path error: `models.default.id.0`"),
+    ],
+)
+async def test_handle_config_command_reports_paths_through_scalars_and_lists(
+    tmp_path: Path,
+    command: str,
+    expected_reply: str,
+) -> None:
+    """A path that steps into a scalar or uses a name on a list gets the path error reply."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {"writer": {"display_name": "Writer", "role": "Writes", "tools": ["shell"]}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert response.startswith(expected_reply)
+    assert change_info is None
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_show_tolerates_invalid_plugin_manifest(tmp_path: Path) -> None:
     """Show should keep working when runtime plugin loading degrades."""
     plugin_root = tmp_path / "plugins" / "bad-name"
@@ -1498,7 +1571,7 @@ async def test_handle_config_command_show_tolerates_invalid_plugin_manifest(tmp_
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/bad-name"],
@@ -1526,7 +1599,7 @@ async def test_handle_config_command_show_redacts_secrets(tmp_path: Path) -> Non
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.4",
+                        "id": "gpt-6-astra",
                         "api_key": "sk-test-config-secret",
                     },
                 },
@@ -1555,7 +1628,7 @@ async def test_handle_config_command_get_redacts_secret_values(tmp_path: Path) -
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.4",
+                        "id": "gpt-6-astra",
                         "api_key": "sk-test-config-secret",
                     },
                 },
@@ -1578,8 +1651,12 @@ async def test_handle_config_command_get_redacts_secret_values(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path: Path) -> None:
-    """Config set preview should redact old and new sensitive leaf values."""
+@pytest.mark.parametrize(
+    "command",
+    ["show", "get mcp_servers.home.env", "get models.default.extra_kwargs", "set mcp_servers.home.env {}"],
+)
+async def test_handle_config_command_masks_schema_secret_fields(tmp_path: Path, command: str) -> None:
+    """Fields the schema marks secret stay masked even under key names the name heuristics miss."""
     config_path = tmp_path / "runtime-config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -1587,29 +1664,484 @@ async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path:
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.4",
-                        "api_key": "sk-old-config-secret",
+                        "id": "gpt-6-astra",
+                        "extra_kwargs": {"default_headers": {"X-Auth": "model-header-sentinel"}},
                     },
                 },
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "mcp_servers": {
+                    "home": {
+                        "transport": "stdio",
+                        "command": "mcp-home",
+                        "env": {"HOMEASSISTANT_TOKEN": "mcp-env-sentinel"},
+                    },
+                },
             },
         ),
         encoding="utf-8",
     )
 
+    response, _change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert "***redacted***" in response
+    assert "sentinel" not in response
+
+
+def _write_config_with_secrets(tmp_path: Path, **extra_sections: object) -> Path:
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                **extra_sections,
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-6-astra",
+                        "api_key": "sk-old-config-sentinel",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "mcp_servers": {
+                    "home": {
+                        "transport": "stdio",
+                        "command": "mcp-home",
+                        "env": {"HOMEASSISTANT_TOKEN": "mcp-env-sentinel"},
+                    },
+                    "remote": {
+                        "transport": "streamable-http",
+                        "url": "https://mcp.example.test/mcp",
+                        "auth": {
+                            "type": "oauth",
+                            "discovery": "manual",
+                            "authorization_url": "https://auth.example.test/authorize",
+                            "token_url": "https://auth.example.test/token",
+                        },
+                    },
+                },
+                "knowledge_bases": {
+                    "docs": {
+                        "path": str(tmp_path / "docs"),
+                        "git": {"repo_url": "https://github.com/example/docs.git"},
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _empty_pending_state_client() -> AsyncMock:
+    """Return a Matrix client whose room state starts empty and accepts every write."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@router:example.org"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError("not found", "M_NOT_FOUND")
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!room:example.org")
+    return client
+
+
+def _written_pending_states(client: AsyncMock) -> list[dict[str, object]]:
+    return [call.kwargs["content"] for call in client.room_put_state.await_args_list]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "path", "withheld"),
+    [
+        ("set authorization.config_command_enabled false", "authorization.config_command_enabled", False),
+        (
+            'set authorization.aliases \'{"@alice:example.org": ["@telegram_alice:example.org"]}\'',
+            "authorization.aliases",
+            False,
+        ),
+        ("set defaults.worker_grantable_credentials [github]", "defaults.worker_grantable_credentials", False),
+        (
+            "set mcp_servers.remote.auth.authorization_url https://auth.example.test/v2/authorize",
+            "mcp_servers.remote.auth.authorization_url",
+            False,
+        ),
+        (
+            "set mcp_servers.remote.auth.authorization_server https://auth.example.test",
+            "mcp_servers.remote.auth.authorization_server",
+            False,
+        ),
+        (
+            "set models.default.extra_kwargs {base_url: 'http://localhost:9292/v1', temperature: 0.2}",
+            "models.default.extra_kwargs",
+            True,
+        ),
+        (
+            "set knowledge_bases.docs.git.repo_url https://github.com/example/handbook.git",
+            "knowledge_bases.docs.git.repo_url",
+            True,
+        ),
+        (
+            "set mcp_servers.home.env '{HOMEASSISTANT_TOKEN: \"${HOMEASSISTANT_TOKEN}\"}'",
+            "mcp_servers.home.env",
+            False,
+        ),
+        (
+            "set mcp_servers.remote.headers '{Authorization: \"${API_AUTHORIZATION}\"}'",
+            "mcp_servers.remote.headers",
+            False,
+        ),
+        (
+            'set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"',
+            "agents.assistant.role",
+            False,
+        ),
+        ("set defaults.streaming.update_interval 0.5", "defaults.streaming.update_interval", True),
+        ("set defaults.thread_summary_temperature 0.3", "defaults.thread_summary_temperature", True),
+    ],
+)
+async def test_handle_config_command_set_previews_and_applies_ordinary_values(
+    tmp_path: Path,
+    command: str,
+    path: str,
+    withheld: bool,
+) -> None:
+    """Every valid value previews and applies; values redaction masks or room state cannot carry are withheld."""
+    config_path = _write_config_with_secrets(tmp_path)
+    runtime_paths = _runtime_paths_for_config(config_path)
+
+    response, change_info = await handle_config_command(command, runtime_paths)
+
+    assert change_info is not None, response
+    assert "Configuration Change Preview" in response
+    assert "sentinel" not in response
+    assert change_info["new_value_withheld"] is withheld
+    applied = await apply_config_change(path, change_info["new_value"], runtime_paths)
+    assert "Configuration updated successfully" in applied
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    for key in path.split("."):
+        saved = saved[key]
+    assert saved == change_info["new_value"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "set models.default.api_key sk-new-config-sentinel",
+        "set mcp_servers.home.env {HOMEASSISTANT_TOKEN: new-env-sentinel}",
+        "set models.default.extra_kwargs {default_headers: {X-Auth: new-header-sentinel}}",
+    ],
+)
+async def test_config_set_secret_value_never_reaches_room_state(tmp_path: Path, command: str) -> None:
+    """A credential value is shown masked, kept only in memory, and applied from memory on confirmation."""
+    config_path = _write_config_with_secrets(tmp_path)
+    runtime_paths = _runtime_paths_for_config(config_path)
+    response, change_info = await handle_config_command(command, runtime_paths)
+    assert change_info is not None
+    assert change_info["new_value_withheld"] is True
+    assert "sentinel" not in response
+
+    client = _empty_pending_state_client()
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=client,
+        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@admin:example.org"])),
+        runtime_paths=runtime_paths,
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock(return_value=target)),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    with (
+        patch.object(config_confirmation, "_pending_changes", {}),
+        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock),
+    ):
+        await config_confirmation.ensure_pending_change(
+            client,
+            event_id="$preview",
+            room_id="!room:example.org",
+            thread_id=None,
+            config_path=change_info["config_path"],
+            new_value=change_info["new_value"],
+            new_value_withheld=change_info["new_value_withheld"],
+            requester="@admin:example.org",
+        )
+        await handle_confirmation_reaction(
+            _confirmation_context(bot),
+            SimpleNamespace(room_id="!room:example.org"),
+            confirm,
+        )
+
+    written = _written_pending_states(client)
+    assert written[0]["new_value_withheld"] is True
+    assert all("new_value" not in content for content in written)
+    assert "sentinel" not in json.dumps(written)
+    assert "sentinel" in config_path.read_text(encoding="utf-8")
+    response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
+    assert "Configuration updated successfully" in response_text
+
+
+@pytest.mark.asyncio
+async def test_room_rejoin_restore_keeps_withheld_value_in_memory(tmp_path: Path) -> None:
+    """Rejoins and config reloads restore room state again without dropping the process's withheld value."""
+    config_path = _write_config_with_secrets(tmp_path)
+    runtime_paths = _runtime_paths_for_config(config_path)
+    _response, change_info = await handle_config_command(
+        "set models.default.api_key sk-new-config-sentinel",
+        runtime_paths,
+    )
+    assert change_info is not None
+    assert change_info["new_value_withheld"] is True
+
+    client = _empty_pending_state_client()
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=client,
+        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@admin:example.org"])),
+        runtime_paths=runtime_paths,
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock(return_value=target)),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    with (
+        patch.object(config_confirmation, "_pending_changes", {}),
+        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock),
+    ):
+        await config_confirmation.ensure_pending_change(
+            client,
+            event_id="$preview",
+            room_id="!room:example.org",
+            thread_id=None,
+            config_path=change_info["config_path"],
+            new_value=change_info["new_value"],
+            new_value_withheld=True,
+            requester="@admin:example.org",
+        )
+        client.room_get_state.return_value = nio.RoomGetStateResponse(
+            [
+                {
+                    "type": config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+                    "state_key": "$preview",
+                    "sender": client.user_id,
+                    "content": _written_pending_states(client)[-1],
+                },
+            ],
+            "!room:example.org",
+        )
+        assert await config_confirmation.restore_pending_changes(client, "!room:example.org") == 1
+        await handle_confirmation_reaction(
+            _confirmation_context(bot),
+            SimpleNamespace(room_id="!room:example.org"),
+            confirm,
+        )
+
+    response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
+    assert "Configuration updated successfully" in response_text
+    assert "sk-new-config-sentinel" in config_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_expired_in_memory_config_change_is_discarded() -> None:
+    """A pending change held in memory expires after 24 hours like one read from room state."""
+    stale = config_confirmation._PendingConfigChange(
+        room_id="!room:example.org",
+        thread_id=None,
+        config_path="defaults.markdown",
+        new_value=False,
+        requester="@admin:example.org",
+        created_at=datetime.now(UTC) - timedelta(hours=25),
+    )
+    client = _empty_pending_state_client()
+    with patch.object(config_confirmation, "_pending_changes", {"$preview": stale}):
+        resolved = await config_confirmation._resolve_pending_change(client, "!room:example.org", "$preview")
+        assert config_confirmation._get_pending_change("$preview") is None
+
+    assert resolved is None
+    assert _written_pending_states(client) == [{}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "field_path"),
+    [
+        ("set models.default.api_key '***redacted***'", "models.default.api_key"),
+        (
+            "set models.default.extra_kwargs \"{base_url: '***redacted***', temperature: 0.2}\"",
+            "models.default.extra_kwargs.base_url",
+        ),
+        ('set agents.assistant.role "Uses Bearer ***redacted*** tokens"', "agents.assistant.role"),
+        ("set models.default.host https://ops:***@ollama.example.org", "models.default.host"),
+    ],
+)
+async def test_config_set_rejects_copied_redaction_markers(tmp_path: Path, command: str, field_path: str) -> None:
+    """Round-tripping redacted output must never replace the hidden real value with the marker."""
+    config_path = _write_config_with_secrets(tmp_path)
+    original = config_path.read_text(encoding="utf-8")
+
+    response, change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert change_info is None
+    assert f"`{field_path}` contains the redaction marker" in response
+    assert "real value" in response
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_config_get_shows_environment_references_in_secret_fields(tmp_path: Path) -> None:
+    """An environment reference names where a secret lives, so secret fields show it unmasked."""
+    config_path = _write_config_with_secrets(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["mcp_servers"]["home"]["env"]["NOTION_KEY"] = "${NOTION_KEY}"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    response, _ = await handle_config_command("get mcp_servers.home.env", _runtime_paths_for_config(config_path))
+
+    assert "NOTION_KEY: ${NOTION_KEY}" in response
+    assert "HOMEASSISTANT_TOKEN: '***redacted***'" in response
+    assert "sentinel" not in response
+
+
+@pytest.mark.asyncio
+async def test_withheld_config_change_restored_after_restart_asks_to_rerun(tmp_path: Path) -> None:
+    """A restored withheld change has no value to apply, so its confirmation says so and clears the state."""
+    config_path = _write_config_with_secrets(tmp_path)
+    original = config_path.read_text(encoding="utf-8")
+    withheld = config_confirmation._PendingConfigChange(
+        room_id="!room:example.org",
+        thread_id=None,
+        config_path="models.default.api_key",
+        new_value="sk-new-config-sentinel",
+        requester="@admin:example.org",
+        new_value_withheld=True,
+    )
+    restored = config_confirmation._PendingConfigChange.from_dict(withheld.to_dict())
+    assert restored.new_value is None
+    assert restored.new_value_lost is True
+
+    client = _empty_pending_state_client()
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=client,
+        config=Config(**_handler_config_fields(config_command_enabled=True, administrators=["@admin:example.org"])),
+        runtime_paths=_runtime_paths_for_config(config_path),
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock(return_value=target)),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    confirm = SimpleNamespace(event_id="$confirm", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    with (
+        patch.object(config_confirmation, "_pending_changes", {"$preview": restored}),
+        patch.object(config_confirmation, "_pending_change_locks", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as apply_change,
+    ):
+        await handle_confirmation_reaction(
+            _confirmation_context(bot),
+            SimpleNamespace(room_id="!room:example.org"),
+            confirm,
+        )
+        assert config_confirmation._get_pending_change("$preview") is None
+
+    apply_change.assert_not_awaited()
+    response_text = bot._delivery_gateway.send_text.await_args.args[0].response_text
+    assert "lost when MindRoom restarted" in response_text
+    assert "!config set" in response_text
+    assert _written_pending_states(client)[-1] == {}
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_config_set_pending_state_carries_no_current_secret(tmp_path: Path) -> None:
+    """Replacing a secret-bearing field must not publish its current value in the pending room state."""
+    config_path = _write_config_with_secrets(tmp_path)
     response, change_info = await handle_config_command(
-        "set models.default.api_key sk-new-config-secret",
+        "set mcp_servers.home.env {}",
         _runtime_paths_for_config(config_path),
     )
-
     assert change_info is not None
-    assert "Configuration Change Preview" in response
-    assert "***redacted***" in response
-    assert "sk-old-config-secret" not in response
-    assert "sk-new-config-secret" not in response
-    assert change_info["old_value"] == "sk-old-config-secret"
-    assert change_info["new_value"] == "sk-new-config-secret"
+    assert "sentinel" not in response
+
+    client = _empty_pending_state_client()
+    with (
+        patch.object(config_confirmation, "_pending_changes", {}),
+        patch.object(config_confirmation, "_confirmation_response_ids", AsyncMock(return_value=())),
+        patch.object(config_confirmation, "_add_confirmation_reactions", new_callable=AsyncMock),
+    ):
+        await config_confirmation.ensure_pending_change(
+            client,
+            event_id="$preview",
+            room_id="!room:example.org",
+            thread_id=None,
+            config_path=change_info["config_path"],
+            new_value=change_info["new_value"],
+            new_value_withheld=change_info["new_value_withheld"],
+            requester="@admin:example.org",
+        )
+
+    persisted = client.room_put_state.await_args.kwargs["content"]
+    assert persisted["new_value"] == {}
+    assert "old_value" not in persisted
+    assert "sentinel" not in json.dumps(persisted)
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_get_shows_typed_fields_with_credential_like_names(tmp_path: Path) -> None:
+    """Typed fields the schema does not mark secret keep their values, whatever their names suggest."""
+    config_path = _write_config_with_secrets(
+        tmp_path,
+        authorization={"config_command_enabled": True},
+        defaults={"worker_grantable_credentials": ["github"]},
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["mcp_servers"]["remote"]["auth"]["authorization_server"] = "https://issuer.example.test"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    authorization, _ = await handle_config_command("get authorization", runtime_paths)
+    grantable, _ = await handle_config_command("get defaults.worker_grantable_credentials", runtime_paths)
+    oauth, _ = await handle_config_command("get mcp_servers.remote.auth", runtime_paths)
+
+    assert "config_command_enabled: true" in authorization
+    assert "- github" in grantable
+    assert "authorization_url: https://auth.example.test/authorize" in oauth
+    assert "authorization_server: https://issuer.example.test" in oauth
+    assert "***redacted***" not in authorization + grantable + oauth
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_get_shows_prose_as_written_and_masks_credentials(tmp_path: Path) -> None:
+    """Words that log patterns take for tokens stay visible in typed prose, while real credentials stay masked."""
+    prose = [
+        "Never share the API key with anyone",
+        "Explain how bearer authentication works",
+        "Authenticate with a bearer JWT from the vault",
+        "Look up the API key ID in the vault",
+        "Keep the API key server-side",
+        "Use sk-learn for ML",
+    ]
+    generated_key = "sk-Fake0Key1Fake2Key3"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "writer": {
+                        "display_name": "Writer",
+                        "role": "Writes",
+                        "instructions": [*prose, f"Call it with API key: {generated_key}", "Use bearer abc123def456"],
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, _ = await handle_config_command("get agents.writer.instructions", _runtime_paths_for_config(config_path))
+
+    for line in prose:
+        assert f"- {line}\n" in response
+    assert "- 'Call it with API key: ***redacted***'" in response
+    assert "- Use bearer ***redacted***" in response
 
 
 @pytest.mark.asyncio
@@ -1639,7 +2171,7 @@ async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(t
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": [],
@@ -1671,7 +2203,7 @@ async def test_handle_config_command_set_returns_malformed_plugin_manifest_error
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": [],
@@ -1703,7 +2235,7 @@ async def test_apply_config_change_returns_invalid_plugin_manifest_error(tmp_pat
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/bad-name"],
@@ -1784,7 +2316,7 @@ async def test_apply_config_change_saves_a_journal_edit_and_says_it_waits_for_a_
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
         ),
@@ -1814,7 +2346,7 @@ async def test_a_saved_journal_edit_survives_a_later_unrelated_write(tmp_path: P
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
         ),
@@ -1842,7 +2374,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "agents": {"test_agent": {"display_name": "Test Agent", "role": "Testing"}},
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1881,7 +2413,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "agents": {"test_agent": {"display_name": "Old Name", "role": "Testing"}},
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1894,9 +2426,9 @@ class TestConfigCommandHandling:
             assert change_info is not None  # set command should return change info for confirmation
             assert "Configuration Change Preview" in response
             assert "New Name" in response
-            # Verify the change_info contains the correct values
-            assert change_info["old_value"] == "Old Name"
+            # Verify the change_info carries the new value but never the current one
             assert change_info["new_value"] == "New Name"
+            assert "old_value" not in change_info
         finally:
             config_path.unlink()
 
@@ -1929,7 +2461,7 @@ class TestConfigCommandHandling:
                         "tools": ["shell"],
                     },
                 },
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1950,7 +2482,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "defaults": {"markdown": True},
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1984,7 +2516,7 @@ class TestConfigCommandHandling:
     async def test_handle_config_parse_error(self) -> None:
         """Test handling config command with parse error."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"models": {"default": {"provider": "openai", "id": "gpt-4"}}}, f)
+            yaml.dump({"models": {"default": {"provider": "openai", "id": "gpt-6-astra"}}}, f)
             config_path = Path(f.name)
 
         try:
@@ -2011,7 +2543,7 @@ class TestConfigCommandHandling:
                         "tools": [],
                     },
                 },
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -2041,7 +2573,7 @@ class TestConfigCommandHandling:
                         "tools": [],
                     },
                 },
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)

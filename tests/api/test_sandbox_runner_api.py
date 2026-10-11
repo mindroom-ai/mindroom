@@ -3,36 +3,49 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
+import contextlib
+import functools
 import hashlib
 import io
 import json
 import os
+import signal
+import socket
 import subprocess
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
+from typing import TYPE_CHECKING, Any, Self, cast
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.api.sandbox_runner_app as sandbox_runner_app_module
+import mindroom.api.sandbox_runner_scripts as sandbox_runner_scripts_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.registration as registration_module
-from mindroom import __version__, runtime_env_policy
+import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
+from mindroom import __version__, runtime_env_policy, yaml_io
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
     resolve_primary_runtime_paths,
@@ -40,28 +53,44 @@ from mindroom.constants import (
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     CredentialsManager,
     _reset_credentials_manager_cache,
     get_runtime_credentials_manager,
     save_scoped_credentials,
+    sync_shared_credentials_to_worker,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolMetadata, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolMetadata,
+    ToolStatus,
+)
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     get_tool_by_name,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
+from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
+from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    _private_instance_state_root_path,
     agent_workspace_root_path,
+    private_instance_scope_root_path,
+    resolve_unscoped_worker_key,
     resolve_worker_key,
+    resolve_worker_target,
+    visible_workspace_roots,
     worker_dir_name,
+    worker_root_path,
 )
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
@@ -69,9 +98,12 @@ from mindroom.workers.backends.kubernetes_resources import worker_auth_token
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.conftest import requires_linux
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    import httpx
 
     from mindroom.constants import RuntimePaths
 
@@ -81,7 +113,7 @@ LINUX_LOCAL_WORKER_REASON = "local worker venv bootstrap is validated on Linux"
 LINUX_LOCAL_WORKER_TIMEOUT_SECONDS = 180
 
 
-def _fake_local_worker_venv_create(_self: object, venv_dir: Path) -> None:
+def _fake_local_worker_venv_create(venv_dir: Path) -> None:
     """Create the minimal worker venv layout needed for path-validation tests."""
     bin_dir = venv_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +137,7 @@ def runner_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[T
     """Create a test client for the sandbox runner app."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
@@ -130,7 +162,7 @@ def _shell_command_output(result: object, *, cwd: Path) -> str:
     return result.removeprefix(prefix)
 
 
-def _set_worker_tool_validation_snapshot(*tool_names: str) -> None:
+def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
     """Set the upstream-authored validation snapshot visible to one worker runtime."""
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = Config.validate_with_runtime({}, runtime_paths)
@@ -143,10 +175,11 @@ def _set_worker_tool_validation_snapshot(*tool_names: str) -> None:
             "agent_override_fields": [],
             "authored_override_validator": "default",
         }
-    _write_startup_manifest(
+    manifest_path = _write_startup_manifest(
         runtime_paths=runtime_paths,
         tool_validation_snapshot=snapshot,
     )
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
 
 
 def _write_startup_manifest(
@@ -187,7 +220,7 @@ def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch
     manifest_path = _write_startup_manifest(runtime_paths=runtime_paths, tool_validation_snapshot=snapshot)
     _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
 
-    loaded_snapshot = sandbox_runner_module._upstream_tool_validation_snapshot(runtime_paths)
+    _startup_runtime, loaded_snapshot = sandbox_runner_module._startup_runtime_payload_from_env()
 
     assert "agentspace_slack_search" in loaded_snapshot
     assert loaded_snapshot["agentspace_slack_search"].runtime_loadable is True
@@ -202,6 +235,17 @@ def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
     return runtime_paths, config
 
 
+def _initialize_runner_app_from_startup_runtime() -> tuple[RuntimePaths, Config]:
+    runtime_paths, config = sandbox_runner_module.load_config_from_startup_runtime()
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        runtime_paths,
+        config=config,
+        runner_token=SANDBOX_TOKEN,
+    )
+    return runtime_paths, config
+
+
 def _initialize_runner_app_from_env() -> RuntimePaths:
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     sandbox_runner_module.initialize_sandbox_runner_app(
@@ -210,6 +254,31 @@ def _initialize_runner_app_from_env() -> RuntimePaths:
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
     )
     return runtime_paths
+
+
+def _lifespan_app_for_dedicated_worker(
+    tmp_path: Path,
+    *,
+    worker_key: str,
+) -> FastAPI:
+    worker_root = tmp_path / "dedicated-worker"
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=worker_root,
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+        },
+    )
+    app = FastAPI(lifespan=sandbox_runner_app_module._lifespan)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+    return app
 
 
 def _invalid_plugin_config_path(tmp_path: Path) -> Path:
@@ -222,7 +291,7 @@ def _invalid_plugin_config_path(tmp_path: Path) -> Path:
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\nplugins:\n  - ./plugins/bad-name\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\nplugins:\n  - ./plugins/bad-name\n",
         encoding="utf-8",
     )
     return config_path
@@ -235,7 +304,7 @@ def _missing_plugin_path_config_path(tmp_path: Path) -> Path:
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "agents:\n"
         "  mind:\n"
         "    display_name: Mind\n"
@@ -265,7 +334,7 @@ def _missing_plugin_path_with_invalid_tool_config_path(tmp_path: Path) -> Path:
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "agents:\n"
         "  broken:\n"
         "    display_name: Broken\n"
@@ -295,7 +364,7 @@ def _mcp_demo_config_path(tmp_path: Path) -> Path:
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "mcp_servers:\n"
@@ -324,7 +393,7 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     """Startup auth token should stay separate from the committed runtime payload."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     payload_runtime = resolve_primary_runtime_paths(
@@ -336,7 +405,7 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     sandbox_runner_module.initialize_sandbox_runner_app(
         sandbox_runner_app,
         startup_runtime,
@@ -347,6 +416,75 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     assert sandbox_runner_module.app_runner_token(sandbox_runner_app) == "from-env"
 
 
+def _dedicated_worker_manifest_runtime(tmp_path: Path) -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    worker_root = tmp_path / "worker"
+    worker_root.mkdir(exist_ok=True)
+    return resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=worker_root,
+        process_env={
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+        },
+    )
+
+
+def _rewrite_manifest_config(manifest_path: Path, tmp_path: Path) -> None:
+    """Rewrite the manifest with values that would change the runner if it read the file again."""
+    other_config = tmp_path / "other" / "config.yaml"
+    other_config.parent.mkdir(parents=True, exist_ok=True)
+    other_config.write_text("agents: {}\nplugins:\n  - ./missing-plugin\n", encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["runtime_paths"]["config_path"] = str(other_config)
+    manifest["runtime_paths"]["process_env"]["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] = "inprocess"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_startup_manifest_rewritten_after_startup_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only startup reads the manifest, so a later rewrite neither reroutes the runner nor fails its requests.
+
+    A Kubernetes primary rewrites the manifest for a replacement pod before the old pod stops serving.
+    """
+    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime, public_runtime=True)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+    app = FastAPI(lifespan=sandbox_runner_app_module._lifespan)
+    with TestClient(app):
+        startup_config = sandbox_runner_module.app_runtime_config(app)
+
+    _rewrite_manifest_config(manifest_path, tmp_path)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(app)
+    response = asyncio.run(
+        sandbox_runner_module._execute_request_inprocess(
+            sandbox_runner_module.SandboxRunnerExecuteRequest(
+                tool_name="shell",
+                function_name="run_shell_command",
+                args=[["bash", "-lc", "printf ok"]],
+                kwargs={},
+            ),
+            runtime_paths,
+            sandbox_runner_module.app_runtime_config(app),
+            runner_token=SANDBOX_TOKEN,
+        ),
+    )
+
+    assert response.ok is True
+    assert response.result == "ok"
+    assert runtime_paths.config_path == payload_runtime.config_path
+    assert sandbox_exec_module.runner_uses_subprocess(runtime_paths)
+    assert sandbox_runner_module.app_runtime_config(app) is startup_config
+
+
 def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -354,7 +492,7 @@ def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
     """Docker workers should boot from the runtime payload passed by run-sandbox-runner.sh."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     payload_runtime = resolve_primary_runtime_paths(
@@ -369,7 +507,7 @@ def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
     monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_runtime_paths(payload_runtime)))
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
 
     assert startup_runtime.config_path == payload_runtime.config_path
     assert startup_runtime.storage_root == payload_runtime.storage_root
@@ -444,7 +582,7 @@ def test_lifespan_scrubs_runner_token_before_loading_plugins(
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "agents: {}\n"
         "router:\n"
         "  model: default\n"
@@ -473,7 +611,7 @@ def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_confi
     """Existing sandbox-runner state should survive lifespan startup without reparsing config.yaml."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -499,6 +637,119 @@ def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_confi
     assert sandbox_runner_module.app_runtime_config(sandbox_runner_app) == config
 
 
+def test_lifespan_prepares_script_worker_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cold script worker must finish setup before its readiness endpoint is served."""
+    run_id = f"script-{'a' * 32}"
+    worker_key = script_worker_key_for_run(
+        "v1:tenant:user_agent:alice:assistant",
+        run_id,
+    )
+    app = _lifespan_app_for_dedicated_worker(tmp_path, worker_key=worker_key)
+    startup_steps: list[str] = []
+
+    def prepare_worker_state(_paths: object) -> None:
+        startup_steps.append("worker-state")
+
+    def prepare_shell_supervisor() -> str:
+        assert startup_steps == ["worker-state"]
+        startup_steps.append("shell-supervisor")
+        return "unused-test-socket"
+
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "ensure_local_script_worker_state_locked",
+        prepare_worker_state,
+    )
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "ensure_shell_supervisor",
+        prepare_shell_supervisor,
+    )
+
+    with TestClient(app):
+        assert startup_steps == ["worker-state", "shell-supervisor"]
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_lifespan_prepares_script_worker_without_seeding_pip(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run-scoped workers should avoid the expensive pip bootstrap before readiness."""
+    run_id = f"script-{'b' * 32}"
+    worker_key = script_worker_key_for_run(
+        "v1:tenant:user_agent:alice:assistant",
+        run_id,
+    )
+    app = _lifespan_app_for_dedicated_worker(tmp_path, worker_key=worker_key)
+    monkeypatch.setenv("UV_VENV_SEED", "1")
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "ensure_shell_supervisor",
+        lambda: "unused-test-socket",
+    )
+
+    with TestClient(app):
+        pass
+
+    venv_dir = tmp_path / "dedicated-worker" / "venv"
+    assert (venv_dir / "bin" / "python").exists()
+    assert not (venv_dir / "bin" / "pip").exists()
+    assert not (venv_dir / "bin" / "pip3").exists()
+    assert (
+        "include-system-site-packages = true"
+        in (venv_dir / "pyvenv.cfg")
+        .read_text(
+            encoding="utf-8",
+        )
+        .lower()
+    )
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "dedicated-worker")
+    python_executable, environment, cwd = sandbox_exec_module.resolve_subprocess_worker_context(worker_paths)
+    assert python_executable is not None
+    assert environment is not None
+    completed = subprocess.run(
+        [python_executable, "-c", "from mindroom.script_sdk import MindRoomTools; print(MindRoomTools.__name__)"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=environment,
+    )
+    assert completed.stdout.strip() == "MindRoomTools"
+
+
+def test_lifespan_does_not_eagerly_prepare_regular_dedicated_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ordinary tool workers should retain lazy initialization."""
+    app = _lifespan_app_for_dedicated_worker(
+        tmp_path,
+        worker_key="v1:tenant:user_agent:alice:assistant",
+    )
+
+    def unexpected_startup(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("regular dedicated workers must stay lazily initialized")
+
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "ensure_local_worker_state_locked",
+        unexpected_startup,
+    )
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "ensure_shell_supervisor",
+        unexpected_startup,
+    )
+
+    with TestClient(app):
+        pass
+
+
 def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -507,7 +758,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(
@@ -529,7 +780,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     credentials_encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     monkeypatch.setenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, credentials_encryption_key)
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     execution_env = sandbox_exec_module.request_execution_env(
         "shell",
         None,
@@ -541,7 +792,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     assert startup_runtime.env_value("OPENAI_API_KEY") == "dotenv-secret"
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
-    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == credentials_encryption_key
+    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
     assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
@@ -550,12 +801,12 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
 
 
 def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
-    """Linux exposes the original startup env through /proc, so static runners wipe the key entry too."""
+    """Static runners keep no credential key passed to them, and wipe its /proc startup env entry too."""
     if not Path("/proc/self/environ").exists():
         pytest.skip("/proc/self/environ is not available on this platform")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     payload_runtime = resolve_primary_runtime_paths(
@@ -571,7 +822,7 @@ def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(t
     script = (
         "import os\n"
         "from mindroom.api import sandbox_runner as m\n"
-        "runtime_paths = m._startup_runtime_paths_from_env()\n"
+        "runtime_paths, _config = m.load_config_from_startup_runtime()\n"
         "raw_environ = open('/proc/self/environ', 'rb').read()\n"
         f"print(runtime_paths.env_value({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
         f"print({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
@@ -586,7 +837,9 @@ def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(t
         capture_output=True,
     )
 
-    assert result.stdout.splitlines() == [encryption_key, "False", "False"]
+    # Loading the config logs through the unconfigured structlog default, which
+    # prints to stdout ahead of the three values the script prints last.
+    assert result.stdout.splitlines()[-3:] == ["None", "False", "False"]
 
 
 def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
@@ -597,7 +850,7 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(
@@ -622,7 +875,7 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
     effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(startup_runtime, execution_env)
 
@@ -640,11 +893,11 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     assert effective_runtime.env_value("TEST_EXECUTION_ENV") is None
 
 
-def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
+def test_dedicated_worker_startup_runtime_scrubs_credentials_encryption_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Dedicated workers may read the encryption key from process env without exposing it to tools."""
+    """Dedicated workers keep no credential key passed in their env, and expose none to tools."""
     wiped_entries: list[tuple[int, int]] = []
     monkeypatch.setattr(
         sandbox_runner_module,
@@ -658,7 +911,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     payload_runtime = resolve_primary_runtime_paths(
@@ -674,7 +927,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     monkeypatch.setenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     execution_env = sandbox_exec_module.request_execution_env(
         "shell",
         None,
@@ -686,7 +939,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
         {"VIRTUAL_ENV": "/worker-venv"},
     )
 
-    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
     assert wiped_entries == [(123, 45)]
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
@@ -699,12 +952,12 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
 
 
 def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
-    """Linux exposes the original startup env through /proc, so wipe the credential key entry too."""
+    """Dedicated workers keep no credential key passed to them, and wipe its /proc startup env entry too."""
     if not Path("/proc/self/environ").exists():
         pytest.skip("/proc/self/environ is not available on this platform")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     storage_path = tmp_path / "storage"
@@ -721,7 +974,7 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
     script = (
         "import os\n"
         "from mindroom.api import sandbox_runner as m\n"
-        "runtime_paths = m._startup_runtime_paths_from_env()\n"
+        "runtime_paths, _config = m.load_config_from_startup_runtime()\n"
         "raw_environ = open('/proc/self/environ', 'rb').read()\n"
         f"print(runtime_paths.env_value({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
         f"print({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
@@ -736,7 +989,9 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
         capture_output=True,
     )
 
-    assert result.stdout.splitlines() == [encryption_key, "False", "False"]
+    # Loading the config logs through the unconfigured structlog default, which
+    # prints to stdout ahead of the three values the script prints last.
+    assert result.stdout.splitlines()[-3:] == ["None", "False", "False"]
 
 
 @pytest.mark.asyncio
@@ -748,7 +1003,7 @@ async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     payload_runtime = resolve_primary_runtime_paths(
@@ -769,7 +1024,7 @@ async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
     monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     response = await sandbox_runner_module._execute_request_inprocess(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="shell",
@@ -839,7 +1094,7 @@ def test_public_startup_runtime_still_allows_python_execution_env(
         ),
     )
     child_runtime.config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
 
@@ -873,7 +1128,7 @@ async def test_execute_request_inprocess_marks_tool_failures(
     """Ordinary tool exceptions should be labeled as tool failures."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -1010,7 +1265,7 @@ async def test_execute_request_inprocess_ignores_empty_tool_output_path(
     """Null or blank output paths should behave like omitted output paths."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -1062,7 +1317,7 @@ async def test_execute_request_inprocess_preserves_normal_null_arguments(
     """Only the reserved output-path argument treats null as omission."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -1107,7 +1362,7 @@ def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_fai
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -1119,7 +1374,7 @@ def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_fai
     def _timeout(*_args: object, **_kwargs: object) -> object:
         raise subprocess.TimeoutExpired(cmd=["python"], timeout=5.0)
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", _timeout)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", _timeout)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -1147,7 +1402,7 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (config_dir / ".env").write_text(
@@ -1177,7 +1432,7 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -1195,7 +1450,9 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
     assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
-    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    # A runner holding the credential key never forwards it, even to tools that run no code.
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert encryption_key not in json.dumps(captured_payload)
     assert "dotenv-key" not in json.dumps(captured_payload)
 
 
@@ -1207,7 +1464,7 @@ def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
     _set_sandbox_token(monkeypatch)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     encryption_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
@@ -1237,7 +1494,7 @@ def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -1259,8 +1516,8 @@ def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
     assert encryption_key not in json.dumps(captured_payload)
 
 
-def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: Path) -> None:
-    """Trusted non-execution tool runtime paths should keep the key needed to load encrypted credentials."""
+def test_tool_runtime_paths_never_carry_credentials_encryption_key(tmp_path: Path) -> None:
+    """Non-execution tools keep their trusted env, and no tool runtime carries the credential encryption key."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
     encryption_key = base64.urlsafe_b64encode(b"2" * 32).decode("ascii")
@@ -1273,28 +1530,20 @@ def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: P
             "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
         },
     )
-    credentials = {"token": "secret", "_source": "ui"}
-    get_runtime_credentials_manager(runtime_paths).save_credentials("custom_tool", credentials)
 
-    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
-        runtime_paths,
-        {},
-        include_credentials_encryption_key=True,
-    )
+    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(runtime_paths, {})
     python_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_base_execution_env=False,
     )
 
-    assert effective_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert effective_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert effective_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") == "/secrets/google-service-account.json"
     assert effective_runtime.env_value("GOOGLE_DELEGATED_USER") == "workspace-user@example.com"
-    assert get_runtime_credentials_manager(effective_runtime).load_credentials("custom_tool") == credentials
     assert python_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert python_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") is None
     assert python_runtime.env_value("GOOGLE_DELEGATED_USER") is None
-    assert get_runtime_credentials_manager(python_runtime).load_credentials("custom_tool") is None
 
 
 @pytest.mark.asyncio
@@ -1373,7 +1622,7 @@ def test_subprocess_execution_preloads_encrypted_persisted_config_without_runtim
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -1488,6 +1737,48 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
     assert entrypoint is not None
 
 
+@pytest.mark.parametrize(
+    ("routing_agent_name", "restrict_to_base_dir"),
+    [("admin", False), ("boxed", True), ("stranger", True)],
+)
+def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
+    tmp_path: Path,
+    routing_agent_name: str,
+    restrict_to_base_dir: bool,
+) -> None:
+    """Worker-side coding rebuilds follow the routing agent's file_access; unknown agents inherit the default."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models: {}\n"
+            "agents:\n"
+            "  admin:\n"
+            "    display_name: Admin\n"
+            "    file_access: unrestricted\n"
+            "  boxed:\n"
+            "    display_name: Boxed\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        tool_name="coding",
+        function_name="read_file",
+        worker_scope="shared",
+        routing_agent_name=routing_agent_name,
+    )
+
+    assert toolkit.restrict_to_base_dir is restrict_to_base_dir
+    assert entrypoint is not None
+
+
 def test_sandbox_runner_subprocess_python_sees_sandbox_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1499,7 +1790,7 @@ def test_sandbox_runner_subprocess_python_sees_sandbox_runtime_env(
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (config_dir / ".env").write_text("MINDROOM_NAMESPACE=alpha1234\n", encoding="utf-8")
@@ -1541,7 +1832,7 @@ def test_sandbox_runner_subprocess_shell_excludes_dotenv_by_default(
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(
@@ -1578,7 +1869,7 @@ def test_sandbox_runner_subprocess_shell_sees_explicit_execution_env(
     _set_sandbox_token(monkeypatch)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -1612,7 +1903,7 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     """Subprocess workers should execute the prepared request without re-running worker prep."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -1629,7 +1920,9 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     envelope = sandbox_protocol_module.serialize_subprocess_envelope(
         request=prepared_request.model_dump(mode="json"),
         runtime_paths=serialize_runtime_paths(runtime_paths),
+        config_yaml="{}\n",
     )
+    config_path.write_text("models: [\n", encoding="utf-8")
 
     def _forbidden_prepare(*_args: object, **_kwargs: object) -> object:
         msg = "subprocess child should not re-run worker preparation"
@@ -1652,6 +1945,271 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     assert '"result": 3' in str(response.result)
 
 
+@pytest.mark.asyncio
+async def test_inprocess_runner_encodes_browser_media_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Generic in-process browser execution must preserve bounded image bytes."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    expected = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        lambda **_kwargs: (SimpleNamespace(requires_connect=False), lambda: expected),
+    )
+
+    response = await sandbox_runner_module._execute_prepared_request_inprocess(
+        sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+            tool_name="browser",
+            function_name="screenshot",
+        ),
+        runtime_paths,
+        Config(agents={}, models={}),
+    )
+
+    assert response.ok is True
+    decoded = decode_media_result(response.result)
+    assert isinstance(decoded, ToolResult)
+    assert decoded.content == "screen"
+    assert decoded.images is not None
+    assert decoded.images[0].content == b"png"
+
+
+def test_subprocess_worker_encodes_browser_media_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The subprocess protocol must carry the same bounded browser image envelope."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    expected = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        lambda **_kwargs: (SimpleNamespace(requires_connect=False), lambda: expected),
+    )
+    prepared_request = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+        tool_name="browser",
+        function_name="screenshot",
+    )
+    envelope = sandbox_protocol_module.serialize_subprocess_envelope(
+        request=prepared_request.model_dump(mode="json"),
+        runtime_paths=serialize_runtime_paths(runtime_paths),
+        config_yaml="{}\n",
+    )
+
+    exit_code, _tool_output, marked_response = sandbox_runner_module._run_subprocess_worker_payload(envelope)
+
+    assert exit_code == 0
+    response_json = sandbox_protocol_module.extract_response_json(marked_response)
+    assert response_json is not None
+    response = sandbox_runner_module.SandboxRunnerExecuteResponse.model_validate_json(response_json)
+    decoded = decode_media_result(response.result)
+    assert isinstance(decoded, ToolResult)
+    assert decoded.images is not None
+    assert decoded.images[0].content == b"png"
+
+
+def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() -> None:
+    """Built-in tools should receive required effective policy without agents, MCP servers, or plugin settings."""
+    config = Config.model_validate(
+        {
+            "agents": {f"agent_{index}": {"display_name": f"Agent {index}"} for index in range(50)},
+            "defaults": {"worker_grantable_credentials": ["github_private"]},
+            "plugins": [{"path": "./plugins/demo", "settings": {"key": "plugin-setting-secret"}}],
+            "mcp_servers": {
+                "files": {"transport": "stdio", "command": "npx", "env": {"AWS_SECRET_ACCESS_KEY": "mcp-secret"}},
+            },
+        },
+    )
+
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "python"))
+
+    assert payload == {
+        "plugins": [{"path": "./plugins/demo", "enabled": True}],
+        "defaults": {
+            "worker_grantable_credentials": ["github_private"],
+            "tool_output_auto_save_threshold_bytes": 51200,
+        },
+    }
+
+
+@pytest.mark.parametrize("tool_name", ["file", "coding"])
+def test_subprocess_config_projection_keeps_agent_file_access(tool_name: str) -> None:
+    """Worker subprocesses must resolve the routing agent's file_access, not fall back to workspace."""
+    config = Config.model_validate(
+        {
+            "defaults": {"file_access": "unrestricted"},
+            "agents": {
+                "admin": {"display_name": "Admin", "role": "Operate the host", "file_access": "unrestricted"},
+                "boxed": {"display_name": "Boxed", "file_access": "workspace"},
+                "inherits": {"display_name": "Inherits"},
+            },
+        },
+    )
+
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, tool_name))
+    subprocess_config = Config.model_validate(payload)
+
+    assert payload["agents"]["admin"] == {"display_name": "Admin", "file_access": "unrestricted"}
+    assert subprocess_config.resolve_entity("admin").file_access == "unrestricted"
+    assert subprocess_config.resolve_entity("boxed").file_access == "workspace"
+    assert subprocess_config.resolve_entity("inherits").file_access == "unrestricted"
+    worker_target = resolve_worker_target("shared", "admin", execution_identity=None)
+    assert metadata_module._managed_file_access(subprocess_config, worker_target) == "unrestricted"
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Plugin calls should receive full native config values and observe explicit refresh."""
+    plugin_root = tmp_path / "plugins" / "runtime-config"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "runtime_config_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class RuntimeConfigPluginTool(Toolkit):\n"
+        "    def __init__(self, runtime_config) -> None:\n"
+        "        self.runtime_config = runtime_config\n"
+        "        super().__init__(name='runtime_config_plugin', tools=[self.inspect_config])\n"
+        "\n"
+        "    def inspect_config(self):\n"
+        "        settings = self.runtime_config.plugins[0].settings\n"
+        "        return {\n"
+        "            'agent': self.runtime_config.agents['unrelated'].display_name,\n"
+        "            'label': settings['label'],\n"
+        "            'released': settings['released'].isoformat(),\n"
+        "            'payload': settings['payload'].decode('utf-8'),\n"
+        "            'explicit_null': settings['nullable'] is None,\n"
+        "            'defaults_authored': 'defaults' in self.runtime_config.model_fields_set,\n"
+        "        }\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='runtime_config_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Runtime Config Plugin',\n"
+        "    description='Inspect received runtime config',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    function_names=('inspect_config',),\n"
+        "    managed_init_args=(ToolManagedInitArg.RUNTIME_CONFIG,),\n"
+        ")\n"
+        "def runtime_config_plugin_tools():\n"
+        "    return RuntimeConfigPluginTool\n",
+        encoding="utf-8",
+    )
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+
+    def write_config(label: str) -> None:
+        config_path.write_text(
+            "agents:\n"
+            "  unrelated:\n"
+            "    display_name: Unrelated\n"
+            "plugins:\n"
+            "  - path: ./plugins/runtime-config\n"
+            "    settings:\n"
+            f"      label: {label}\n"
+            "      released: 2026-09-14\n"
+            "      payload: !!binary cmF3\n"
+            "      nullable: null\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    write_config("before")
+    _set_sandbox_token(monkeypatch)
+
+    def execute() -> dict[str, object]:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={"tool_name": "runtime_config_plugin", "function_name": "inspect_config"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True, data
+        assert isinstance(data["result"], dict)
+        return data["result"]
+
+    config_path.write_text("models: [\n", encoding="utf-8")
+    assert execute() == {
+        "agent": "Unrelated",
+        "label": "before",
+        "released": "2026-09-14",
+        "payload": "raw",
+        "explicit_null": True,
+        "defaults_authored": False,
+    }
+
+    write_config("after")
+    _refresh_runner_app_from_env()
+
+    assert execute()["label"] == "after"
+
+
+def test_subprocess_serialization_boundary_omits_unrelated_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The actual child envelope should carry the projected built-in tool configuration."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate(
+        {"agents": {f"agent_{index}": {"display_name": f"Agent {index}"} for index in range(50)}},
+    )
+    captured_envelope: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **run_kwargs: object) -> subprocess.CompletedProcess[str]:
+        del cmd
+        captured_envelope.update(json.loads(str(run_kwargs["input"])))
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result='{"result": 3}')
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="calculator",
+            function_name="add",
+            args=[1, 2],
+        ),
+        runtime_paths,
+        config,
+    )
+
+    config_payload = yaml_io.safe_load(str(captured_envelope["config_yaml"]))
+    assert response.ok is True
+    assert "agents" not in config_payload
+    assert config_payload["defaults"]["tool_output_auto_save_threshold_bytes"] == 51200
+
+
 def test_sandbox_execution_env_passes_through_extra_env_passthrough_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1661,7 +2219,7 @@ def test_sandbox_execution_env_passes_through_extra_env_passthrough_only(
     monkeypatch.setenv("MY_SECRET", "secret")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
@@ -1697,7 +2255,7 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(
@@ -1732,6 +2290,52 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     assert "MINDROOM_API_KEY" not in execution_env
 
 
+def test_dedicated_worker_execution_env_keeps_worker_home_over_primary_home(tmp_path: Path) -> None:
+    """A dedicated worker never adopts the primary's HOME, a host path that does not exist in the worker."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:default:shared:coder"},
+    )
+
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        {"HOME": "/home/primary-user", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        runtime_paths,
+    )
+
+    assert "HOME" not in execution_env
+    assert execution_env["PATH"] == "/usr/bin:/bin"
+    assert execution_env["LANG"] == "C.UTF-8"
+
+
+def test_dedicated_worker_tool_runtime_paths_keep_the_workspace_home_contract(tmp_path: Path) -> None:
+    """The workspace HOME applied after ingress filtering survives the per-request runtime-path rebuild."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:default:shared:coder", "HOME": "/app/worker"},
+    )
+    workspace = "/app/worker/agents/coder/workspace"
+
+    tool_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
+        runtime_paths,
+        {"HOME": workspace, "MINDROOM_AGENT_WORKSPACE": workspace},
+    )
+
+    assert tool_runtime.process_env["HOME"] == workspace
+
+
 def test_sandbox_execution_env_excludes_arbitrary_runner_env_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1762,7 +2366,7 @@ def test_sandbox_runner_execution_env_excludes_credential_file_secrets(
     _set_sandbox_token(monkeypatch)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     openai_key_path = tmp_path / "openai.key"
@@ -1806,7 +2410,7 @@ def test_sandbox_runner_execution_env_excludes_relative_file_secret_paths(
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (config_dir / ".env").write_text(
@@ -1835,7 +2439,7 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     openai_key_path = config_dir / "secrets" / "openai.key"
@@ -2095,9 +2699,51 @@ def test_worker_subprocess_env_preserves_parent_path(
     env = sandbox_exec_module.worker_subprocess_env(paths)
 
     assert env["PATH"] == f"{paths.venv_dir}/bin:/usr/local/bin:/usr/bin:/bin"
+    # Temp files go to the worker's disk-backed state mount, not the small /tmp tmpfs.
+    assert Path(env["TMPDIR"]).resolve() == paths.cache_dir / "tmp"
     assert "GOOGLE_CLOUD_PROJECT" not in env
     assert "GOOGLE_CLOUD_LOCATION" not in env
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
+
+
+def test_worker_subprocess_env_tmpdir_holds_unix_sockets_for_a_long_worker_root(tmp_path: Path) -> None:
+    """Chromium binds its SingletonSocket under TMPDIR, which a long worker root would push past 107 bytes."""
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / ("worker" * 20))
+    paths.tmp_dir.mkdir(parents=True)
+
+    tmpdir = Path(sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"])
+    socket_dir = tmpdir / "org.chromium.Chromium.Ab12Cd"
+    socket_dir.mkdir()
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(socket_dir / "SingletonSocket"))
+
+    assert tmpdir.resolve() == paths.tmp_dir
+    assert (paths.tmp_dir / "org.chromium.Chromium.Ab12Cd" / "SingletonSocket").is_socket()
+
+
+@pytest.mark.parametrize("squatter", ["link_elsewhere", "directory", "other_owner"])
+def test_worker_subprocess_env_keeps_the_worker_tmpdir_when_its_link_name_is_not_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    squatter: str,
+) -> None:
+    """A link name that another user owns, or that leads anywhere else, is never handed to subprocesses."""
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
+    paths.tmp_dir.mkdir(parents=True)
+    link = Path(sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"])
+    assert link.is_symlink()
+    if squatter == "other_owner":
+        owner = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    else:
+        link.unlink()
+        if squatter == "directory":
+            link.mkdir()
+        else:
+            (tmp_path / "elsewhere").mkdir()
+            link.symlink_to(tmp_path / "elsewhere")
+
+    assert sandbox_exec_module.worker_subprocess_env(paths)["TMPDIR"] == str(paths.tmp_dir)
 
 
 def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2117,6 +2763,165 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     data = response.json()
     assert data["ok"] is True
     assert '"result": 3' in data["result"]
+
+
+def test_cancel_that_overtakes_its_request_stops_it_on_arrival(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel can reach the runner before its own request; that request then does not run, once."""
+    _set_sandbox_token(monkeypatch)
+    request_id = uuid4().hex
+    request = {
+        "tool_name": "calculator",
+        "function_name": "add",
+        "args": [1, 2],
+        "kwargs": {},
+        "request_id": request_id,
+    }
+
+    cancel = runner_client.post(
+        "/api/sandbox-runner/execute/cancel",
+        headers=SANDBOX_HEADERS,
+        json={"request_id": request_id},
+    )
+    stopped = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+    retried = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+
+    assert cancel.json() == {"cancelled": False}
+    assert stopped.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert retried.json()["ok"] is True
+
+
+@requires_linux()
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess", "forkserver"])
+def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """A cancelled request ends as a cancelled tool call, and its killed process is not a worker failure."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _refresh_runner_app_from_env()
+    failures: list[object] = []
+    monkeypatch.setattr(
+        sandbox_runner_module.sandbox_worker_prep,
+        "record_worker_failure",
+        lambda *args: failures.append(args),
+    )
+    request_id = uuid4().hex
+    pid_file = tmp_path / "command.pid"
+    request = {
+        "tool_name": "shell",
+        "function_name": "run_shell_command",
+        "args": [["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"]],
+        "kwargs": {"timeout": 60},
+        "request_id": request_id,
+    }
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(runner_client.post, "/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+        deadline = time.monotonic() + 30
+        while not pid_file.exists() or not pid_file.read_text().strip():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        pid = int(pid_file.read_text())
+        try:
+            cancel = runner_client.post(
+                "/api/sandbox-runner/execute/cancel",
+                headers=SANDBOX_HEADERS,
+                json={"request_id": request_id},
+            )
+            response = running.result(timeout=30)
+            asyncio.run(assert_linux_pid_not_running(pid))
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+    assert cancel.json() == {"cancelled": True}
+    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert not failures
+
+
+def test_request_cancelled_while_its_worker_is_prepared_never_starts(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel that arrives during worker preparation stops the request before its child process exists."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    _refresh_runner_app_from_env()
+    prepare = sandbox_runner_module._prepare_execute_request
+    request_id = uuid4().hex
+    spawned: list[object] = []
+
+    def prepare_then_cancel(*args: object, **kwargs: object) -> object:
+        prepared = prepare(*args, **kwargs)
+        sandbox_runner_module.sandbox_request_cancellation.cancel_request(request_id)
+        return prepared
+
+    monkeypatch.setattr(sandbox_runner_module, "_prepare_execute_request", prepare_then_cancel)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", lambda *args, **_kwargs: spawned.append(args))
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "kwargs": {},
+            "request_id": request_id,
+        },
+    )
+
+    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert spawned == []
+
+
+@pytest.mark.asyncio
+async def test_runner_shutdown_still_cancels_a_request_the_primary_cancelled() -> None:
+    """A request the primary cancelled still propagates the runner's own cancellation instead of answering."""
+    started = asyncio.Event()
+    request_id = uuid4().hex
+
+    async def execution() -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        started.set()
+        await asyncio.Event().wait()
+        return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True)
+
+    async def handler() -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        with sandbox_runner_module.sandbox_request_cancellation.track_request(request_id):
+            return await sandbox_runner_module._run_cancellable(execution())
+
+    request = asyncio.create_task(handler())
+    await started.wait()
+    sandbox_runner_module.sandbox_request_cancellation.cancel_request(request_id)
+    request.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+
+@requires_linux()
+def test_request_subprocess_timeout_does_not_wait_for_a_grandchild_holding_its_pipes(tmp_path: Path) -> None:
+    """Like subprocess.run, a timed-out request returns at its timeout even while a grandchild keeps the pipes open."""
+    pid_file = tmp_path / "grandchild.pid"
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            sandbox_runner_module._run_request_subprocess(
+                ["bash", "-c", f"sleep 30 & echo $! > {pid_file}; sleep 30"],
+                input="",
+                timeout=0.5,
+                env=None,
+                cwd=None,
+            )
+        assert time.monotonic() - started < 10
+    finally:
+        with contextlib.suppress(FileNotFoundError, ProcessLookupError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(
@@ -2145,16 +2950,16 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
-    _set_sandbox_token(monkeypatch)
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
-    runtime_paths, config = _refresh_runner_app_from_env()
+    runtime_paths, config = _initialize_runner_app_from_startup_runtime()
 
     assert runtime_paths.config_path.exists()
     assert config.plugins == []
 
     with (
-        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create),
+        patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create),
         TestClient(sandbox_runner_app) as client,
     ):
         response = client.post(
@@ -2181,11 +2986,11 @@ def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
     config_path = _missing_plugin_path_config_path(tmp_path)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Configured plugin path does not exist"):
-        _refresh_runner_app_from_env()
+        _initialize_runner_app_from_startup_runtime()
 
 
 def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
@@ -2197,16 +3002,16 @@ def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
-    _set_sandbox_token(monkeypatch)
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
-    runtime_paths, config = _refresh_runner_app_from_env()
+    runtime_paths, config = _initialize_runner_app_from_startup_runtime()
 
     assert runtime_paths.config_path.exists()
     assert config.plugins == []
 
     with (
-        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create),
+        patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create),
         TestClient(sandbox_runner_app) as client,
     ):
         response = client.post(
@@ -2257,11 +3062,14 @@ def test_sandbox_runner_execute_rejects_invalid_mcp_tool_overrides(
     assert "include_tools and exclude_tools overlap" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess", "forkserver"])
 def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_refresh(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
 ) -> None:
     """Execute requests should keep using the runner's committed startup config after later disk drift."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
     _set_sandbox_token(monkeypatch)
     runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
     runtime_paths.config_path.write_text("models: [\n", encoding="utf-8")
@@ -2281,6 +3089,311 @@ def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_ref
     data = response.json()
     assert data["ok"] is True
     assert '"result": 3' in data["result"]
+
+
+def _primary_config_snapshot(*, file_access: str = "workspace") -> dict[str, object]:
+    """Return a live primary config whose `mind` agent the runner's seed config never saw."""
+    return {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "memory_backend": "file",
+                "tools": ["shell", "file"],
+                "file_access": file_access,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_sandbox_runner_runs_agent_known_only_to_primary_config_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
+) -> None:
+    """Agents added after the runner's config was seeded run through the primary's live config snapshot."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    assert "mind" not in sandbox_runner_module.app_runtime_config(sandbox_runner_app).agents
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "mind")
+    workspace.mkdir(parents=True)
+    _write_workspace_env_hook(workspace, "export MIND_HOOK=from-mind-workspace\n")
+    request = {
+        "tool_name": "shell",
+        "function_name": "run_shell_command",
+        "args": [["bash", "-c", 'printf "%s" "$MIND_HOOK"']],
+        "execution_env": {"PATH": os.environ["PATH"]},
+        "routing_agent_name": "mind",
+        "tool_init_overrides": {"base_dir": str(workspace)},
+    }
+
+    with pytest.raises(ValueError, match="Unknown agent: mind"):
+        runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={**request, "config_snapshot": _primary_config_snapshot()},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"], cwd=workspace) == "from-mind-workspace"
+
+
+@pytest.mark.parametrize(("file_access", "readable"), [("workspace", False), ("unrestricted", True)])
+def test_sandbox_runner_enforces_snapshot_agent_file_access_over_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    file_access: str,
+    readable: bool,
+) -> None:
+    """The primary's snapshot decides the agent's settings, so a stale seed cannot widen them."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models: {}\nagents:\n  mind:\n    display_name: Mind\n    file_access: unrestricted\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "mind")
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-workspace-contents", encoding="utf-8")
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "read_file",
+                "kwargs": {"file_name": str(outside)},
+                "routing_agent_name": "mind",
+                "tool_init_overrides": {"base_dir": str(workspace)},
+                "config_snapshot": _primary_config_snapshot(file_access=file_access),
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert ("outside-workspace-contents" in data["result"]) is readable
+
+
+def test_sandbox_runner_rejects_invalid_config_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid primary snapshot is refused instead of falling back to the seed config."""
+    _set_sandbox_token(monkeypatch)
+    snapshot = _primary_config_snapshot(file_access="everything")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "routing_agent_name": "mind",
+            "config_snapshot": snapshot,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Invalid config_snapshot:")
+
+
+def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every request carries the snapshot, so plugins missing from the runner are dropped without a log line per call."""
+    _set_sandbox_token(monkeypatch)
+    snapshot = {**_primary_config_snapshot(), "plugins": ["./plugins/primary-only"]}
+
+    with capture_logs() as logs:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "calculator",
+                "function_name": "add",
+                "args": [1, 2],
+                "routing_agent_name": "mind",
+                "config_snapshot": snapshot,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert [entry for entry in logs if entry["event"] == "sandbox_runner_skipping_unavailable_plugins"] == []
+
+
+def _write_snapshot_only_plugin(tmp_path: Path) -> dict[str, object]:
+    """Write a plugin beside the runner's config path and return a snapshot that enables it."""
+    plugin_root = tmp_path / "plugins" / "snapshot-only"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "snapshot_only_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class SnapshotOnlyTool(Toolkit):\n"
+        "    def __init__(self, greeting: str = 'hello') -> None:\n"
+        "        self.greeting = greeting\n"
+        "        super().__init__(name='snapshot_only_plugin', tools=[self.greet])\n"
+        "\n"
+        "    def greet(self) -> str:\n"
+        "        return self.greeting\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='snapshot_only_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Snapshot Only Plugin',\n"
+        "    description='Greets with the configured greeting',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    config_fields=[ConfigField(name='greeting', label='Greeting', type='text', required=False)],\n"
+        "    function_names=('greet',),\n"
+        ")\n"
+        "def snapshot_only_plugin_tools():\n"
+        "    return SnapshotOnlyTool\n",
+        encoding="utf-8",
+    )
+    return {"plugins": [{"path": "./plugins/snapshot-only", "enabled": True}]}
+
+
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess"])
+def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """A runner started without any config registers plugin tools, and validates their overrides, from the snapshot."""
+    snapshot = _write_snapshot_only_plugin(tmp_path)
+    # The runner gets no config file, as in every chart; the plugin directory is visible beside its config path.
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+    assert sandbox_runner_module.app_runtime_config(sandbox_runner_app).plugins == []
+
+    with TestClient(sandbox_runner_app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "snapshot_only_plugin",
+                "function_name": "greet",
+                "tool_config_overrides": {"greeting": "from the snapshot"},
+                "config_snapshot": snapshot,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "result": "from the snapshot", "error": None, "failure_kind": None}
+
+
+def test_sandbox_runner_reloads_edited_snapshot_plugins_and_logs_only_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every request reloads the snapshot's plugins, so edits take effect, and only a changed load is logged."""
+    snapshot = _write_snapshot_only_plugin(tmp_path)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "inprocess")
+    _set_sandbox_token(monkeypatch)
+    tools_path = tmp_path / "plugins" / "snapshot-only" / "tools.py"
+
+    def greet(config_snapshot: dict[str, object]) -> httpx.Response:
+        return client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={"tool_name": "snapshot_only_plugin", "function_name": "greet", "config_snapshot": config_snapshot},
+        )
+
+    with TestClient(sandbox_runner_app) as client, capture_logs() as logs:
+        results = [greet(snapshot).json()["result"] for _ in range(3)]
+        tools_path.write_text(tools_path.read_text().replace("'hello'", "'edited'"), encoding="utf-8")
+        mtime = tools_path.stat().st_mtime + 10
+        os.utime(tools_path, (mtime, mtime))
+        results.append(greet(snapshot).json()["result"])
+        disabled = greet({"plugins": [{"path": "./plugins/snapshot-only", "enabled": False}]})
+
+    assert results == ["hello", "hello", "hello", "edited"]
+    assert disabled.status_code == 404
+    assert [entry for entry in logs if entry["event"] == "Loaded plugins"] == [
+        {"event": "Loaded plugins", "log_level": "info", "plugins": ["snapshot_only_plugin"]},
+    ] * 2
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_static_runner_relies_on_primary_private_template_from_snapshot(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private template that exists only beside the primary's config does not fail the shared runner's calls."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
+    _set_sandbox_token(monkeypatch)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="mind")
+    assert worker_key is not None
+    private_workspace_relative = f"private_instances/{worker_dir_name(worker_key)}/mind/mind_data"
+    snapshot = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {
+            "mind": {
+                "display_name": "Mind",
+                "tools": ["shell"],
+                "private": {"per": "user", "template_dir": "./primary-only-template"},
+            },
+        },
+    }
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", "printf ok"]],
+            "execution_env": {"PATH": os.environ["PATH"]},
+            "worker_key": worker_key,
+            "worker_scope": "user",
+            "routing_agent_name": "mind",
+            "execution_identity": asdict(identity),
+            "private_agent_names": ["mind"],
+            "tool_init_overrides": {"base_dir": private_workspace_relative},
+            "config_snapshot": snapshot,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert _shell_command_output(data["result"], cwd=runtime_paths.storage_root / private_workspace_relative) == "ok"
 
 
 def test_sandbox_runner_applies_tool_init_overrides(
@@ -2369,7 +3482,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     shared_storage = tmp_path / "shared-storage"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
@@ -2377,6 +3490,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Dummy",
             description="Dummy",
             category=ToolCategory.DEVELOPMENT,
@@ -2440,6 +3554,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Dummy",
             description="Dummy",
             category=ToolCategory.DEVELOPMENT,
@@ -2487,10 +3602,175 @@ def test_resolve_worker_base_dir_does_not_create_directories_during_validation(t
         storage_root,
         "v1:default:shared:general",
         requested_base_dir,
+        (storage_root.resolve() / requested_base_dir,),
     )
 
     assert resolved == (storage_root / requested_base_dir).resolve()
     assert not resolved.exists()
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "agents/general",
+        "agents/general/sessions",
+        "agents/helper/workspace",
+        "private_instances",
+        "private_instances/{scope}",
+        "private_instances/{scope}/writer",
+        "private_instances/{scope}/writer/sessions",
+        "private_instances/{scope}/other/other_data",
+    ],
+)
+def test_resolve_worker_base_dir_rejects_paths_outside_visible_workspaces(tmp_path: Path, requested: str) -> None:
+    """A worker only works inside its workspaces; the state roots and scopes above them stay out of reach."""
+    worker_key = "v1:default:user:~@alice:localhost"
+    storage_root = tmp_path.resolve()
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="General", worker_scope="user"),
+            "writer": AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user", root="writer_data")),
+        },
+    )
+    workspace_roots = visible_workspace_roots(
+        storage_root,
+        worker_key,
+        config.get_agent_policies(),
+        private_agent_names=frozenset(),
+    )
+    paths = local_workers_module.local_worker_state_paths_for_root(storage_root / "workers" / "current")
+    scope = private_instance_scope_root_path(storage_root, worker_key).name
+
+    assert sandbox_worker_prep_module._resolve_worker_base_dir(
+        paths,
+        storage_root,
+        worker_key,
+        f"private_instances/{scope}/writer/writer_data/project",
+        workspace_roots,
+    ) == (storage_root / f"private_instances/{scope}/writer/writer_data/project")
+    assert (
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            storage_root,
+            worker_key,
+            "agents/general/workspace",
+            workspace_roots,
+        )
+        == storage_root / "agents/general/workspace"
+    )
+    with pytest.raises(ValueError, match="visible workspace"):
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            storage_root,
+            worker_key,
+            requested.format(scope=scope),
+            workspace_roots,
+        )
+
+
+def test_resolve_worker_base_dir_keeps_worker_root_paths_independent_of_alias_metadata(tmp_path: Path) -> None:
+    """Paths already allowed by worker-root containment do not consult optional alias metadata."""
+    worker_key = "v1:default:user_agent:~@alice:example.org:writer"
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    canonical.mkdir(parents=True)
+    (canonical / ".mindroom-private-instance.json").write_text("invalid owner")
+    requested = tmp_path / "private_instances" / "scratch"
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path)
+
+    assert (
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            tmp_path,
+            worker_key,
+            str(requested),
+            (),
+        )
+        == requested
+    )
+
+
+@pytest.mark.parametrize("layout", ["symlink", "duplicate_mount"])
+def test_resolve_worker_base_dir_never_translates_the_historical_scope_spelling(tmp_path: Path, layout: str) -> None:
+    """The primary sends the canonical workspace, so the worker never reads identity records to translate aliases.
+
+    On the primary host the verified alias is a link that resolves to the canonical workspace; inside a worker it is a
+    second mount of the same directory, whose spelling is not a visible workspace.
+    """
+    worker_key = "v1:default:user_agent:~@alice:example.org:writer"
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="@alice:example.org")
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    legacy = private_instance_scope_root_path(tmp_path, "v1:default:user_agent:@alice:example.org:writer")
+    (canonical / "writer" / "workspace").mkdir(parents=True)
+    if layout == "symlink":
+        legacy.symlink_to(canonical.name, target_is_directory=True)
+    else:
+        (legacy / "writer" / "workspace").mkdir(parents=True)
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "workers" / "current")
+    workspace_roots = (canonical / "writer" / "workspace",)
+
+    def resolve(requested: Path) -> Path:
+        return sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            tmp_path,
+            worker_key,
+            str(requested),
+            workspace_roots,
+        )
+
+    assert resolve(canonical / "writer/workspace/project") == canonical / "writer/workspace/project"
+    if layout == "symlink":
+        assert resolve(legacy / "writer/workspace/project") == canonical / "writer/workspace/project"
+    else:
+        with pytest.raises(ValueError, match="visible workspace"):
+            resolve(legacy / "writer/workspace/project")
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["missing_owner", "missing_alias", "different_directory", "foreign_alias", "traversal", "symlink_escape"],
+)
+def test_resolve_worker_base_dir_rejects_unverified_historical_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: str,
+) -> None:
+    """Historical spelling grants neither foreign scope access nor an escape from canonical state."""
+    worker_key = "v1:default:user_agent:~@alice:example.org:writer"
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="@alice:example.org")
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    legacy = private_instance_scope_root_path(tmp_path, "v1:default:user_agent:@alice:example.org:writer")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    requested = legacy / "writer/workspace"
+    if invalid in {"different_directory", "missing_owner", "symlink_escape"}:
+        legacy.mkdir()
+    elif invalid == "foreign_alias":
+        legacy.symlink_to(outside, target_is_directory=True)
+    elif invalid != "missing_alias":
+        legacy.symlink_to(canonical.name, target_is_directory=True)
+    if invalid == "missing_owner":
+        (canonical / ".mindroom-private-instance.json").unlink()
+    elif invalid == "traversal":
+        requested = legacy / ".." / "foreign" / "writer/workspace"
+    elif invalid == "symlink_escape":
+        (canonical / "writer").symlink_to(outside, target_is_directory=True)
+    if invalid in {"missing_owner", "symlink_escape"}:
+        original_samefile = Path.samefile
+        monkeypatch.setattr(
+            Path,
+            "samefile",
+            lambda path, other: (path == legacy and other == canonical) or original_samefile(path, other),
+        )
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "workers" / "current")
+
+    with pytest.raises(ValueError, match="visible workspace"):
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            tmp_path,
+            worker_key,
+            str(requested),
+            (canonical / "writer" / "workspace",),
+        )
 
 
 def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
@@ -2538,7 +3818,7 @@ def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
@@ -2621,6 +3901,26 @@ def test_sandbox_runner_rejects_missing_token(runner_client: TestClient, monkeyp
     assert authed_data["ok"] is True
 
 
+def test_sandbox_runner_refuses_requests_without_token_before_reading_their_bodies(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unauthenticated body is never buffered, so it cannot exhaust runner memory."""
+    _set_sandbox_token(monkeypatch)
+    body_read = False
+
+    def body() -> Iterator[bytes]:
+        nonlocal body_read
+        body_read = True
+        yield b'{"tool_name": "calculator", "function_name": "add", "args": [1, 2]}'
+
+    for path in ("/api/sandbox-runner/execute", "/computer/control"):
+        response = runner_client.post(path, content=body(), headers={"content-type": "application/json"})
+        assert response.status_code == 401, path
+    assert not body_read
+    assert runner_client.get("/healthz").status_code == 200
+
+
 def test_sandbox_runner_rejects_when_token_not_configured(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2639,6 +3939,26 @@ def test_sandbox_runner_rejects_when_token_not_configured(
     )
     assert response.status_code == 503
     assert "not configured" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("source", ["env", "reader"])
+def test_sandbox_runner_rejects_every_request_when_token_is_empty(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    """An empty configured token must fail closed instead of matching a missing or empty header."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "")
+    if source == "reader":
+        # Pin the runner-side check even if the token reader stops normalizing empty values.
+        monkeypatch.setattr(sandbox_proxy_module, "_read_proxy_token", lambda _runtime_paths: "")
+    _refresh_runner_app_from_env()
+    request = {"tool_name": "calculator", "function_name": "add", "args": [1, 2], "kwargs": {}}
+
+    for headers in [{}, {"x-mindroom-sandbox-token": ""}]:
+        response = runner_client.post("/api/sandbox-runner/execute", headers=headers, json=request)
+        assert response.status_code == 503, headers
+        assert "not configured" in response.json()["detail"]
 
 
 def test_sandbox_runner_rejects_direct_credential_overrides(
@@ -2817,7 +4137,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginTool(Toolkit):\n"
         "    def __init__(self, label: str | None = None) -> None:\n"
@@ -2826,6 +4146,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin',\n"
         "    description='Demo plugin tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -2840,7 +4161,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "agents: {}\n"
         "router:\n"
         "  model: default\n"
@@ -2881,7 +4202,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginInitTool(Toolkit):\n"
         "    def __init__(self, base_dir: str | None = None) -> None:\n"
@@ -2890,6 +4211,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin_init',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin Init',\n"
         "    description='Demo plugin tool with init overrides',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -2904,7 +4226,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "agents: {}\n"
         "router:\n"
         "  model: default\n"
@@ -2988,7 +4310,7 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     """Worker requests should reject base_dir overrides that escape the worker root."""
     _set_sandbox_token(monkeypatch)
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3006,17 +4328,17 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     assert "worker root" in response.json()["detail"]
 
 
-def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_state_root(
+def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_workspaces(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Scoped workers should reject base_dir overrides outside their visible state roots."""
+    """Scoped workers should reject base_dir overrides outside their visible workspaces."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3031,7 +4353,7 @@ def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_state_roo
         )
 
     assert response.status_code == 400
-    assert "allowed state roots" in response.json()["detail"]
+    assert "visible workspace" in response.json()["detail"]
 
 
 def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_paths(
@@ -3050,7 +4372,7 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3070,23 +4392,38 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
-def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
+def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_workspaces(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
+    """A user worker addresses its user-scope agents' workspaces, never agents on other scopes."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml_io.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "coder": {"display_name": "Coder", "worker_scope": "user"},
+                    "ops": {"display_name": "Ops", "worker_scope": "shared"},
+                },
+                "router": {"model": "default"},
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    def fake_create(_self: object, venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
-        response = runner_client.post(
+    def save_note(agent_name: str) -> object:
+        return runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
             json={
@@ -3095,13 +4432,20 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
                 "args": ["hello", "note.txt"],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:user:@alice:example.org",
-                "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+                "tool_init_overrides": {"base_dir": f"agents/{agent_name}/workspace"},
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
+        allowed = save_note("coder")
+        rejected = save_note("ops")
+
+    assert allowed.status_code == 200
+    assert allowed.json()["ok"] is True
+    assert (storage_root / "agents" / "coder" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert rejected.status_code == 400
+    assert "visible workspace" in rejected.json()["detail"]
+    assert not (storage_root / "agents" / "ops").exists()
 
 
 def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
@@ -3114,7 +4458,7 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3129,7 +4473,7 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
         )
 
     assert response.status_code == 400
-    assert "visible state roots" in response.json()["detail"]
+    assert "visible workspaces" in response.json()["detail"]
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
@@ -3166,7 +4510,7 @@ def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown
     """Worker base_dir validation should run before unknown-tool resolution."""
     _set_sandbox_token(monkeypatch)
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3215,10 +4559,12 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
         runtime_paths: object,
         prepared_worker: object | None = None,
         *,
+        config: Config | None = None,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
+        assert config is not None
         assert prepared_worker is not None
         assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
@@ -3404,6 +4750,7 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Runner Auto Save",
             description="Test-only runner auto-save coverage.",
             category=ToolCategory.DEVELOPMENT,
@@ -3416,7 +4763,7 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "defaults:\n"
         "  tool_output_auto_save_threshold_bytes: 100\n"
         "agents:\n"
@@ -3478,11 +4825,11 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
     _refresh_runner_app_from_env()
 
-    def fake_create(_self: object, venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
         save_response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3545,7 +4892,7 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3586,7 +4933,7 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     _refresh_runner_app_from_env()
 
     canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3626,6 +4973,7 @@ def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
         worker_key=worker_key,
         tool_init_overrides={"base_dir": "agents/general/workspace"},
         runtime_paths=runtime_paths,
+        agent_policies={},
     )
 
     assert prepared.handle is worker_handle
@@ -3665,25 +5013,24 @@ def test_prepare_worker_request_user_agent_private_visibility_comes_from_explici
         worker_key=worker_key,
         tool_init_overrides={
             "base_dir": str(
-                _private_instance_state_root_path(
-                    runtime_paths.storage_root,
-                    worker_key=worker_key,
-                    agent_name="mind",
-                ),
+                private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "mind" / "mind_data",
             ),
         },
         runtime_paths=runtime_paths,
+        agent_policies={},
         private_agent_names=frozenset({"mind"}),
     )
 
     assert prepared.handle is worker_handle
 
 
+@pytest.mark.parametrize("target", [("other_agent",), ("mind",), ("mind", "sessions"), ()])
 def test_prepare_worker_request_rejects_sibling_private_agent_root_for_user_agent_workers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    target: tuple[str, ...],
 ) -> None:
-    """User-agent workers must not accept sibling private agent roots."""
+    """User-agent workers accept only their private workspace, not sibling agents or the state above it."""
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -3711,20 +5058,17 @@ def test_prepare_worker_request_rejects_sibling_private_agent_root_for_user_agen
 
     with pytest.raises(
         sandbox_worker_prep_module.WorkerRequestPreparationError,
-        match="base_dir must stay inside the allowed state roots or worker root",
+        match="base_dir must stay inside a visible workspace or the worker root",
     ):
         sandbox_worker_prep_module.prepare_worker_request(
             worker_key=worker_key,
             tool_init_overrides={
                 "base_dir": str(
-                    _private_instance_state_root_path(
-                        runtime_paths.storage_root,
-                        worker_key=worker_key,
-                        agent_name="other_agent",
-                    ),
+                    private_instance_scope_root_path(runtime_paths.storage_root, worker_key).joinpath(*target),
                 ),
             },
             runtime_paths=runtime_paths,
+            agent_policies={},
             private_agent_names=frozenset({"mind"}),
         )
 
@@ -3759,6 +5103,7 @@ def test_prepare_worker_request_requires_explicit_private_visibility_for_user_ag
             worker_key=worker_key,
             tool_init_overrides={"base_dir": "private_instances/example/mind"},
             runtime_paths=runtime_paths,
+            agent_policies={},
         )
 
 
@@ -3785,10 +5130,12 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
         runtime_paths: object,
         prepared_worker: object | None = None,
         *,
+        config: Config | None = None,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
+        assert config is not None
         assert runner_token == SANDBOX_TOKEN
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root
@@ -3800,7 +5147,7 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3835,7 +5182,7 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "agents:\n"
             "  mind:\n"
             "    display_name: Mind\n"
@@ -3864,9 +5211,7 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
     assert worker_key is not None
     shared_root = tmp_path / "shared-storage"
     worker_root = shared_root / "workers" / worker_dir_name(worker_key)
-    private_base_dir = _private_instance_state_root_path(shared_root, worker_key=worker_key, agent_name="mind") / (
-        "mind_data"
-    )
+    private_base_dir = private_instance_scope_root_path(shared_root, worker_key) / "mind" / "mind_data"
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
@@ -3880,11 +5225,13 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
         runtime_paths: object,
         prepared_worker: object | None = None,
         *,
+        config: Config | None = None,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert request.private_agent_names == ["mind"]
         assert runtime_paths is not None
+        assert config is not None
         assert runner_token == SANDBOX_TOKEN
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root
@@ -3896,7 +5243,7 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -3918,6 +5265,72 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize("route", ["execute", "save-attachment"])
+def test_dedicated_worker_reports_an_agent_workspace_its_pod_does_not_mount(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    route: str,
+) -> None:
+    """A workspace missing from the pod is a request error the primary does not count against the worker."""
+    _set_sandbox_token(monkeypatch)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@alice:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="alpha")
+    assert worker_key is not None
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    # Only the pod's read-only root filesystem lies where the unmounted workspace belongs.
+    unmounted_parent = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha"
+    unmounted_parent.mkdir(parents=True)
+    unmounted_parent.chmod(0o555)
+    (tmp_path / "config.yaml").write_text(
+        "agents:\n  alpha:\n    display_name: Alpha\n    private:\n      per: user_agent\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    _refresh_runner_app_from_env()
+
+    request = {
+        "worker_key": worker_key,
+        "routing_agent_name": "alpha",
+        "execution_identity": asdict(identity),
+        "private_agent_names": ["alpha"],
+    }
+    if route == "execute":
+        request |= {"tool_name": "shell", "function_name": "run_shell_command", "args": [["true"]], "kwargs": {}}
+        request["worker_scope"] = "user_agent"
+    else:
+        request |= {
+            "attachment_id": "att_sample",
+            "mindroom_output_path": "incoming/sample.txt",
+            "sha256": hashlib.sha256(b"payload").hexdigest(),
+            "size_bytes": 7,
+            "bytes_b64": base64.b64encode(b"payload").decode("ascii"),
+        }
+    try:
+        response = runner_client.post(f"/api/sandbox-runner/{route}", headers=SANDBOX_HEADERS, json=request)
+    finally:
+        unmounted_parent.chmod(0o755)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["failure_kind"] == "tool"
+    assert "not mounted" in response.json()["error"]
+
+
 def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3940,7 +5353,7 @@ def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
 
     shared_root = tmp_path / "shared-storage"
     worker_root = shared_root / "workers" / worker_dir_name(worker_key)
-    private_workspace = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha" / "mind_data"
+    private_workspace = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha" / "alpha_data"
     private_workspace.mkdir(parents=True, exist_ok=True)
     (private_workspace / "OWNER.txt").write_text("alice\n", encoding="utf-8")
 
@@ -3974,7 +5387,7 @@ def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
             "execution_identity": asdict(identity),
             "private_agent_names": ["alpha"],
             "tool_init_overrides": {
-                "base_dir": f"private_instances/{worker_dir_name(worker_key)}/alpha/mind_data",
+                "base_dir": f"private_instances/{worker_dir_name(worker_key)}/alpha/alpha_data",
             },
         },
     )
@@ -4025,6 +5438,45 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_work
     canonical_file = agent_workspace_root_path(shared_root, "general") / "note.txt"
     assert canonical_file.read_text(encoding="utf-8") == "hello from nested worker prefix"
     assert not (worker_root / "workspace" / "note.txt").exists()
+
+
+def test_dedicated_worker_shell_receives_the_minimal_cli_environment(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A minimal response's CLI address and grant reach the command in the agent's own dedicated worker."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    worker_root = tmp_path / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path))
+    _refresh_runner_app_from_env()
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", 'printf "%s|%s" "$MINDROOM_AGENT_CLI_URL" "$MINDROOM_AGENT_CLI_TOKEN"']],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "execution_env": {
+                "PATH": os.environ["PATH"],
+                "MINDROOM_AGENT_CLI_URL": "http://host.docker.internal:8765",
+                "MINDROOM_AGENT_CLI_TOKEN": "response-grant",
+            },
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert data["result"].endswith("http://host.docker.internal:8765|response-grant")
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
@@ -4232,7 +5684,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     _refresh_runner_app_from_env()
 
-    def fake_create(_self: object, venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
 
@@ -4240,10 +5692,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
         cmd: list[str],
         **run_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        assert run_kwargs["capture_output"] is True
-        assert run_kwargs["text"] is True
         assert isinstance(run_kwargs["timeout"], float)
-        assert run_kwargs["check"] is False
         request_input = str(run_kwargs["input"])
         env = run_kwargs["env"]
         cwd = run_kwargs["cwd"]
@@ -4271,8 +5720,8 @@ def test_dedicated_worker_mode_uses_mounted_root(
         )
 
     with (
-        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create),
-        patch("mindroom.api.sandbox_runner.subprocess.run", new=fake_run),
+        patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create),
+        patch("mindroom.api.sandbox_runner._run_request_subprocess", new=fake_run),
     ):
         save_response = runner_client.post(
             "/api/sandbox-runner/execute",
@@ -4304,7 +5753,7 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     _refresh_runner_app_from_env()
 
-    def fake_create(_self: object, venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
 
@@ -4329,8 +5778,8 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
         )
 
     with (
-        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create),
-        patch("mindroom.api.sandbox_runner.subprocess.run", new=fake_run),
+        patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create),
+        patch("mindroom.api.sandbox_runner._run_request_subprocess", new=fake_run),
     ):
         save_response = runner_client.post(
             "/api/sandbox-runner/execute",
@@ -4449,7 +5898,7 @@ def test_prepare_worker_uses_explicit_runtime_storage_root_for_local_workers(
         process_env=dict(os.environ),
     )
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         worker = sandbox_worker_prep_module._prepare_worker("worker-a", runtime_paths)
 
     assert worker.debug_metadata["state_root"] == str(
@@ -4529,7 +5978,7 @@ def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Pa
     create_call_count = 0
     exceptions: list[Exception] = []
 
-    def fake_create(_self: object, venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path) -> None:
         nonlocal create_call_count
         with call_count_lock:
             create_call_count += 1
@@ -4551,7 +6000,7 @@ def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Pa
         except Exception as exc:  # pragma: no cover - surfaced by test assertion below
             exceptions.append(exc)
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
         thread_one = threading.Thread(target=ensure_worker)
         thread_two = threading.Thread(target=ensure_worker)
 
@@ -4586,7 +6035,7 @@ def test_local_worker_backend_and_preparer_share_initialization_lock(tmp_path: P
     create_call_count = 0
     exceptions: list[Exception] = []
 
-    def fake_create(_self: object, venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path) -> None:
         nonlocal create_call_count
         with call_count_lock:
             create_call_count += 1
@@ -4611,7 +6060,7 @@ def test_local_worker_backend_and_preparer_share_initialization_lock(tmp_path: P
         except Exception as exc:  # pragma: no cover - surfaced by test assertion below
             exceptions.append(exc)
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
         thread_one = threading.Thread(target=prepare_worker_state)
         thread_two = threading.Thread(target=ensure_worker)
 
@@ -4634,7 +6083,7 @@ def test_sandbox_runner_records_worker_initialization_failures(
     """Worker bootstrap failures should be returned to callers and exposed in worker metadata."""
     _set_sandbox_token(monkeypatch)
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", side_effect=OSError("boom")):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", side_effect=OSError("boom")):
         execute_response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -4682,7 +6131,7 @@ def _write_general_agent_config(config_path: Path) -> None:
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "agents:\n"
             "  general:\n"
             "    display_name: General\n"
@@ -4778,6 +6227,7 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
             "PIP_CACHE_DIR": "/request-pip-cache",
             "UV_CACHE_DIR": "/request-uv-cache",
             "PYTHONPYCACHEPREFIX": "/request-pycache",
+            "TMPDIR": "/request-tmp",
             "VIRTUAL_ENV": "/request-venv",
         },
     )
@@ -4804,6 +6254,8 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
     assert execution_env["PIP_CACHE_DIR"] == str(worker_paths.cache_dir / "pip")
     assert execution_env["UV_CACHE_DIR"] == str(worker_paths.cache_dir / "uv")
     assert execution_env["PYTHONPYCACHEPREFIX"] == str(worker_paths.cache_dir / "pycache")
+    assert execution_env["TMPDIR"] == sandbox_exec_module.worker_subprocess_env(worker_paths)["TMPDIR"]
+    assert Path(execution_env["TMPDIR"]).resolve() == worker_paths.cache_dir / "tmp"
     assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
 
 
@@ -5117,7 +6569,7 @@ def test_worker_routed_python_subprocess_cwd_is_agent_workspace(
             stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_subprocess_run)
 
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(
         tool_name="python",
@@ -5185,7 +6637,7 @@ def test_worker_routed_python_subprocess_creates_missing_workspace_cwd(
             stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_subprocess_run)
 
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(
         tool_name="python",
@@ -5222,7 +6674,7 @@ def test_worker_routed_shell_uses_agent_workspace_as_home(
 
     worker_key = "v1:tenant-123:shared:general"
     worker_root = storage_root / "workers" / worker_dir_name(worker_key)
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5289,7 +6741,7 @@ def test_worker_routed_shell_ignores_dotenv_for_workspace_home_contract(
 
     worker_key = "v1:tenant-123:shared:general"
     worker_root = storage_root / "workers" / worker_dir_name(worker_key)
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5350,7 +6802,7 @@ def test_worker_routed_python_path_home_is_agent_workspace(
 
     worker_key = "v1:tenant-123:shared:general"
     worker_root = storage_root / "workers" / worker_dir_name(worker_key)
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5406,7 +6858,7 @@ def test_worker_attachment_save_can_be_read_through_shell_home(
     worker_key = "v1:tenant-123:shared:general"
     payload_bytes = b"attachment payload"
     sha256 = hashlib.sha256(payload_bytes).hexdigest()
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         save_response = runner_client.post(
             "/api/sandbox-runner/save-attachment",
             headers=SANDBOX_HEADERS,
@@ -5450,7 +6902,7 @@ def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_pat
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
     config = Config.validate_with_runtime(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "agents": {
                 "general": {
                     "display_name": "General",
@@ -5499,7 +6951,7 @@ def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base
     )
     config = Config.validate_with_runtime(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "agents": {},
             "router": {"model": "default"},
         },
@@ -5539,6 +6991,66 @@ def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base
     )
 
     assert workspace == private_workspace
+
+
+def test_python_subprocess_child_ignores_code_planted_in_workspace(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A workspace package or user-site `.pth` file must not run inside the protocol child."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    (workspace / "mindroom").mkdir(parents=True)
+    # Would replace MindRoom itself if the child's cwd led sys.path.
+    (workspace / "mindroom" / "__init__.py").write_text(
+        "from pathlib import Path\nPath.cwd().joinpath('planted-package-ran').touch()\n",
+        encoding="utf-8",
+    )
+    user_site = subprocess.run(
+        [sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+        env={**os.environ, "HOME": str(workspace.resolve())},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(user_site).mkdir(parents=True)
+    # `.pth` import lines run at interpreter startup whenever the user site is enabled.
+    (Path(user_site) / "planted.pth").write_text(
+        "import pathlib; pathlib.Path.cwd().joinpath('planted-pth-ran').touch()\n",
+        encoding="utf-8",
+    )
+    (workspace / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    def _venv_with_real_python(venv_dir: Path) -> None:
+        bin_dir = venv_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "python").symlink_to(Path(sys.executable))
+
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_venv_with_real_python):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "python",
+                "function_name": "run_python_code",
+                "args": ["import helper\nresult = helper.VALUE", "result"],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "helper-value"
+    assert not (workspace / "planted-package-ran").exists()
+    assert not (workspace / "planted-pth-ran").exists()
 
 
 def test_request_preparation_failure_response_marks_request_errors_as_tool_failures() -> None:
@@ -5614,7 +7126,7 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
     """The subprocess child should receive the post-hook env, not the stale original request env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage", process_env={})
@@ -5637,12 +7149,9 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
         cwd = kwargs["cwd"]
         assert cwd is None or isinstance(cwd, str)
         captured_envelope["cwd"] = cwd
-        assert kwargs["capture_output"] is True
-        assert kwargs["text"] is True
         timeout = kwargs["timeout"]
         assert isinstance(timeout, int | float)
         assert timeout >= 1.0
-        assert kwargs["check"] is False
         response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
         return subprocess.CompletedProcess(
             args=_command,
@@ -5651,7 +7160,7 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
             stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_subprocess_run)
 
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(
         tool_name="shell",
@@ -5676,7 +7185,7 @@ def test_workspace_env_hook_shell_side_effects_do_not_reach_command(tmp_path: Pa
     """Hook shell state such as `cd` should not leak into the command process."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage", process_env={})
@@ -5708,7 +7217,7 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
     config = Config.validate_with_runtime(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "agents": {
                 "general": {
                     "display_name": "General",
@@ -5766,7 +7275,7 @@ def test_workspace_env_hook_overlays_shell_execution(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5803,7 +7312,7 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         first = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5864,7 +7373,7 @@ def test_workspace_env_hook_keeps_user_credentials_and_filters_runner_control(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5918,7 +7427,7 @@ def test_workspace_env_hook_failure_returns_tool_failure(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5960,12 +7469,12 @@ def test_workspace_env_hook_overlays_worker_routed_python_default_mode(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    def _venv_with_real_python(_self: object, venv_dir: Path) -> None:
+    def _venv_with_real_python(venv_dir: Path) -> None:
         bin_dir = venv_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         (bin_dir / "python").symlink_to(Path(sys.executable))
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_venv_with_real_python):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_venv_with_real_python):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6008,7 +7517,7 @@ def test_workspace_env_hook_skips_worker_routed_coding_default_mode(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6043,7 +7552,7 @@ def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mo
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6090,12 +7599,12 @@ def test_workspace_env_hook_overlays_python_subprocess(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    def _venv_with_real_python(_self: object, venv_dir: Path) -> None:
+    def _venv_with_real_python(venv_dir: Path) -> None:
         bin_dir = venv_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         (bin_dir / "python").symlink_to(Path(sys.executable))
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_venv_with_real_python):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_venv_with_real_python):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6188,7 +7697,7 @@ def test_workspace_env_hook_rejects_symlink_escape(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6207,3 +7716,183 @@ def test_workspace_env_hook_rejects_symlink_escape(
     assert payload["ok"] is False
     assert payload["failure_kind"] == "tool"
     assert "resolves outside" in payload["error"]
+
+
+@contextmanager
+def _lease_settings_echo_tool() -> Iterator[str]:
+    """Register a test-only tool whose result is its configured greeting."""
+    tool_name = "lease_settings_echo"
+
+    class _EchoToolkit(Toolkit):
+        def __init__(self, greeting: str = "unset") -> None:
+            self.greeting = greeting
+            super().__init__(name=tool_name, tools=[self.echo])
+
+        def echo(self) -> str:
+            return self.greeting
+
+    original_registry = metadata_module.TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
+    registration_module.register_builtin_tool_metadata(
+        ToolMetadata(
+            name=tool_name,
+            file_access=ToolFileAccess.NONE,
+            display_name="Lease Settings Echo",
+            description="Test-only lease coverage.",
+            category=ToolCategory.DEVELOPMENT,
+            config_fields=[ConfigField(name="greeting", label="Greeting")],
+            factory=lambda: _EchoToolkit,
+        ),
+    )
+    try:
+        yield tool_name
+    finally:
+        metadata_module.TOOL_REGISTRY.clear()
+        metadata_module.TOOL_REGISTRY.update(original_registry)
+        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        metadata_module.BUILTIN_TOOL_METADATA.clear()
+        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
+        _refresh_runner_app_from_env()
+
+
+def _forwarding_client_factory(runner_client: TestClient) -> type[Any]:
+    """Return a proxy client class that sends the primary's requests to the in-process runner."""
+
+    class _RunnerClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> object:
+            return runner_client.post(url, json=json, headers=headers)
+
+    return _RunnerClient
+
+
+def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A scoped call leases the primary-owned tool settings, and the runner builds the tool with them."""
+    _set_sandbox_token(monkeypatch)
+    with _lease_settings_echo_tool() as tool_name:
+        primary_paths = resolve_runtime_paths(config_path=tmp_path / "primary.yaml", process_env={})
+        manager = CredentialsManager(tmp_path / "primary-credentials")
+        manager.for_primary_runtime_agent_scope("alpha").save_credentials(tool_name, {"greeting": "primary"})
+        # The runner's own store holds a conflicting value; the lease must win.
+        runner_paths = resolve_runtime_paths(
+            config_path=Path(os.environ["MINDROOM_CONFIG_PATH"]),
+            storage_path=Path(os.environ["MINDROOM_STORAGE_PATH"]),
+        )
+        get_runtime_credentials_manager(runner_paths).save_credentials(tool_name, {"greeting": "worker"})
+
+        result = execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url="http://testserver",
+                proxy_token=SANDBOX_TOKEN,
+                proxy_timeout_seconds=30.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+                lease_tool_credentials=False,
+            ),
+            payload={"tool_name": tool_name, "function_name": "echo", "args": [], "kwargs": {}},
+            credentials_manager=manager,
+            tool_name=tool_name,
+            function_name="echo",
+            worker_target=resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant"),
+            worker_handle=None,
+            worker_manager=MagicMock(),
+            client_factory=_forwarding_client_factory(runner_client),
+            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=primary_paths),
+        )
+
+    assert result == "primary"
+
+
+def test_unscoped_dedicated_worker_receives_encrypted_primary_settings_by_lease(
+    runner_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """A keyless unscoped worker cannot read the encrypted mirror, so the call leases the tool's primary settings.
+
+    The runner serves the worker's own stores in process, because a pinned worker runs each call in a child
+    that would not see this test-only tool.
+    """
+    encryption_key = base64.urlsafe_b64encode(b"3" * 32).decode("ascii")
+    with _lease_settings_echo_tool() as tool_name:
+        primary_root = tmp_path / "primary"
+        primary_paths = resolve_runtime_paths(config_path=tmp_path / "primary.yaml", process_env={})
+        manager = CredentialsManager(primary_root / "credentials", encryption_key=encryption_key)
+        manager.save_credentials(tool_name, {"greeting": "primary", "_source": "ui"})
+        worker_key = resolve_unscoped_worker_key("alpha", tenant_id="test-tenant")
+        # The worker is authorized for the service, but the mirror the primary writes is encrypted with its key.
+        sync_shared_credentials_to_worker(
+            worker_key,
+            allowed_services=frozenset({tool_name}),
+            credentials_manager=manager,
+        )
+        worker_root = worker_root_path(primary_root, worker_key)
+        worker_paths = resolve_primary_runtime_paths(
+            config_path=Path(os.environ["MINDROOM_CONFIG_PATH"]),
+            storage_path=worker_root,
+            process_env={
+                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+                SHARED_CREDENTIALS_PATH_ENV: str(worker_root / ".shared_credentials"),
+            },
+        )
+        assert get_runtime_credentials_manager(worker_paths).shared_manager().list_services() == [tool_name]
+        assert get_runtime_credentials_manager(worker_paths).shared_manager().load_credentials(tool_name) is None
+        sandbox_runner_module.initialize_sandbox_runner_app(
+            sandbox_runner_app,
+            worker_paths,
+            config=sandbox_runner_module._runtime_config_or_empty(worker_paths),
+            runner_token=SANDBOX_TOKEN,
+        )
+
+        result = execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url=None,
+                proxy_token=None,
+                proxy_timeout_seconds=30.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+                lease_tool_credentials=False,
+            ),
+            payload={
+                "tool_name": tool_name,
+                "function_name": "echo",
+                "args": [],
+                "kwargs": {},
+                "routing_agent_name": "alpha",
+            },
+            credentials_manager=manager,
+            tool_name=tool_name,
+            function_name="echo",
+            worker_target=resolve_worker_target(None, "alpha", None, tenant_id="test-tenant"),
+            worker_handle=WorkerHandle(
+                worker_id="worker-1",
+                worker_key=worker_key,
+                endpoint="http://testserver/api/sandbox-runner/execute",
+                auth_token=SANDBOX_TOKEN,
+                status="ready",
+                backend_name="kubernetes",
+                last_used_at=0.0,
+                created_at=0.0,
+            ),
+            worker_manager=MagicMock(),
+            client_factory=_forwarding_client_factory(runner_client),
+            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=primary_paths),
+        )
+
+    assert result == "primary"

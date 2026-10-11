@@ -13,10 +13,10 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -74,16 +74,17 @@ class TestRoutingIntegration:
 
         # Set up bots
         config = bind_runtime_paths(
-            Config(
-                agents={
-                    "research": AgentConfig(display_name="MindRoomResearch", rooms=["!research:localhost"]),
-                    "news": AgentConfig(display_name="MindRoomNews", rooms=["!research:localhost"]),
-                },
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization=AuthorizationConfig(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "research": AgentConfig(display_name="MindRoomResearch", rooms=["!research:localhost"]),
+                        "news": AgentConfig(display_name="MindRoomNews", rooms=["!research:localhost"]),
+                    },
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="ollama", id="test-model")},
+                    router=RouterConfig(model="default"),
+                ),
             ),
             test_runtime_paths(tmp_path),
         )

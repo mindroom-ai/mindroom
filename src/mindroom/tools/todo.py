@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -17,11 +18,13 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="todo",
+    file_access=ToolFileAccess.NONE,
     display_name="Todo",
-    description="Create and manage per-thread work plans with dependencies",
+    description="Track tasks, progress, and dependencies in a conversation thread",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
     icon="ListTodo",
     icon_color="text-blue-500",
     requires_room_context=True,

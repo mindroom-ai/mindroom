@@ -10,6 +10,7 @@ from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING
 
 from mindroom.dynamic_workflows.runner import async_execute_workflow_spec, execute_workflow_spec
+from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 from mindroom.dynamic_workflows.validation import (
     DynamicWorkflowError,
     validate_workflow_input,
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
-    from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
+    from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 
 
 class _SyncWorkflowTimeoutError(TimeoutError):
@@ -59,7 +60,7 @@ class DynamicWorkflowService:
         Synchronous execution uses SIGALRM to enforce permissions.max_runtime_seconds, so callers running in worker
         threads should use arun_workflow instead.
         """
-        run = self._store.start_workflow_run(
+        prepared = self._prepare_run(
             workflow_id=workflow_id,
             scope=scope,
             owner_id=owner_id,
@@ -67,19 +68,10 @@ class DynamicWorkflowService:
             requested_by=requested_by,
             base_url=base_url,
         )
-        try:
-            spec = self._store.load_workflow_revision(
-                workflow_id=workflow_id,
-                scope=scope,
-                owner_id=owner_id,
-                revision=run.revision,
-            )
-            spec = validate_workflow_spec(spec)
-            self._validate_spec_policy(spec)
-            validate_workflow_input(spec, input_data)
-        except Exception as exc:  # Persist validation failures as run records.
-            return self._store.fail_workflow_run(run, error=str(exc))
+        if isinstance(prepared, DynamicWorkflowRun):
+            return prepared
 
+        run, spec = prepared
         return self._execute_and_persist(run, spec, input_data)
 
     async def arun_workflow(
@@ -93,6 +85,31 @@ class DynamicWorkflowService:
         base_url: str | None = None,
     ) -> DynamicWorkflowRun:
         """Start and complete one workflow run on the current event loop."""
+        prepared = self._prepare_run(
+            workflow_id=workflow_id,
+            scope=scope,
+            owner_id=owner_id,
+            input_data=input_data,
+            requested_by=requested_by,
+            base_url=base_url,
+        )
+        if isinstance(prepared, DynamicWorkflowRun):
+            return prepared
+
+        run, spec = prepared
+        return await self._aexecute_and_persist(run, spec, input_data)
+
+    def _prepare_run(
+        self,
+        *,
+        workflow_id: str,
+        scope: str,
+        owner_id: str,
+        input_data: dict[str, object],
+        requested_by: str,
+        base_url: str | None,
+    ) -> tuple[DynamicWorkflowRun, dict[str, object]] | DynamicWorkflowRun:
+        """Admit a run and validate its pinned spec, or persist a preparation failure."""
         run = self._store.start_workflow_run(
             workflow_id=workflow_id,
             scope=scope,
@@ -109,16 +126,12 @@ class DynamicWorkflowService:
                 revision=run.revision,
             )
             spec = validate_workflow_spec(spec)
-            self._validate_spec_policy(spec)
+            if self._spec_validator is not None:
+                self._spec_validator(spec)
             validate_workflow_input(spec, input_data)
-        except Exception as exc:
+        except Exception as exc:  # Persist preparation failures only after the run exists.
             return self._store.fail_workflow_run(run, error=str(exc))
-
-        return await self._aexecute_and_persist(run, spec, input_data)
-
-    def _validate_spec_policy(self, spec: dict[str, object]) -> None:
-        if self._spec_validator is not None:
-            self._spec_validator(spec)
+        return run, spec
 
     def _execute_and_persist(
         self,

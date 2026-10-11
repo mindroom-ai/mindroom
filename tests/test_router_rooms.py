@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path  # noqa: TC003
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -29,6 +30,9 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import persist_entity_accounts
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _router_membership_dependencies() -> tuple[AgentReplyMembershipIndex, AgentReplyMembershipSync]:
@@ -218,7 +222,7 @@ async def test_router_joins_rooms_on_start(
         joined_rooms.append(room_id)
         return RoomJoinOutcome.JOINED
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
     # Mock restore_scheduled_tasks
@@ -228,7 +232,10 @@ async def test_router_joins_rooms_on_start(
         _config: Config,
         _runtime_paths: object,
         _conversation_reader: object,
+        *,
+        config_provider: Callable[[], Config | None] | None = None,
     ) -> int:
+        del config_provider
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -326,7 +333,10 @@ async def test_orchestrator_creates_router_with_all_rooms(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for router room updates
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_router_updates_rooms_on_config_change(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Test that the router updates its room list when config changes."""
     # Initial config with some rooms
     initial_config = Config(
@@ -376,7 +386,8 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    setup_rooms = AsyncMock()
+    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", setup_rooms)
 
     # Create orchestrator with initial config
     # Mock start/sync_forever at class level so newly created bots in update_config don't perform real login/sync
@@ -396,7 +407,14 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
         # Check initial router rooms
         router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        agent1_bot = orchestrator.agent_bots["agent1"]
         assert set(router_bot.rooms) == {"room1"}
+
+        async def reconcile_room_aliases(bots: list[object]) -> None:
+            orchestrator._resolve_bot_room_aliases(bots, orchestrator._require_config())  # type: ignore[arg-type]
+
+        setup_rooms.reset_mock()
+        setup_rooms.side_effect = reconcile_room_aliases
 
         # Mock bot operations using monkeypatch to avoid method assignment errors
         async def mock_stop(*, shutdown_intent: object | None = None) -> None:
@@ -419,10 +437,13 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
         # Update config
         updated = await orchestrator.config_reload._update_config()
-        assert updated  # Should return True since router needs restart
+        assert updated
 
-        # Router should be recreated with new rooms
+        # Existing clients stay alive while their desired room lists change.
         new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        assert new_router_bot is router_bot
+        assert orchestrator.agent_bots["agent1"] is agent1_bot
         assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
+        setup_rooms.assert_awaited_once()
     finally:
         await orchestrator.stop()

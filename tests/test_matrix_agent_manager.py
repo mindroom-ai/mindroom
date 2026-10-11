@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
+import re
 from typing import TYPE_CHECKING, Self
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from uuid import UUID
 
+import aiohttp
 import httpx
 import nio
 import pytest
 import yaml
+from nio.durable import DurableSyncConfig
 
 from mindroom import constants as constants_mod
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.matrix import provisioning
+from mindroom.matrix import _owned_session, provisioning
+from mindroom.matrix import users as matrix_users
+from mindroom.matrix.appservice import ManagedAccountAuth
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE, olm_store_dir
 from mindroom.matrix.state import MatrixState
@@ -35,6 +42,8 @@ from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from aioresponses import aioresponses
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 APPSERVICE_TOKEN = "as-secret"  # noqa: S105
@@ -618,35 +627,43 @@ class TestMatrixRegistration:
         mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio
-    async def test_register_user_uses_provisioning_service_register_agent_when_configured(
+    async def test_register_user_falls_back_to_shared_secret_when_unpaired_hosted_install_has_one(
         self,
         tmp_path: Path,
     ) -> None:
-        """When provisioning client creds are set, use register-agent provisioning flow."""
+        """A shared secret registers agents without pairing even when a provisioning URL is configured."""
         test_pass = "test_pass"  # noqa: S105
-        client_secret = "secret-123"  # noqa: S105
         runtime_paths = _runtime_paths(
             tmp_path,
             MINDROOM_PROVISIONING_URL="https://provisioning.example",
-            MINDROOM_LOCAL_CLIENT_ID="client-123",
-            MINDROOM_LOCAL_CLIENT_SECRET=client_secret,
+            MATRIX_REGISTRATION_SHARED_SECRET="shared-secret-value",  # noqa: S106
+            MATRIX_REGISTRATION_TOKEN="",
+            MINDROOM_LOCAL_CLIENT_ID="",
+            MINDROOM_LOCAL_CLIENT_SECRET="",
         )
+        mock_client = AsyncMock()
+        mock_client.login.return_value = nio.LoginResponse(
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+        captured_requests: list[tuple[str, str, dict[str, object] | None]] = []
 
         with (
             patch(
-                "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
-                new_callable=AsyncMock,
-            ) as mock_register,
-            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
-            patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
-                return_value=None,
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_sequence_client(
+                    captured_requests,
+                    [
+                        httpx.Response(200, json={"nonce": "nonce-123"}),
+                        httpx.Response(200, json={"user_id": "@test_user:localhost"}),
+                    ],
+                ),
             ),
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
         ):
-            mock_register.return_value = MagicMock(
-                status="created",
-                user_id="@test_user:localhost",
-            )
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await _register_user(
                 "http://localhost:8008",
@@ -656,18 +673,208 @@ class TestMatrixRegistration:
                 runtime_paths=runtime_paths,
             )
 
-            assert user_id == "@test_user:localhost"
-            mock_register.assert_called_once_with(
+        assert user_id == "@test_user:localhost"
+        assert [request[0:2] for request in captured_requests] == [
+            ("GET", "http://localhost:8008/_synapse/admin/v1/register"),
+            ("POST", "http://localhost:8008/_synapse/admin/v1/register"),
+        ]
+
+    def test_unpaired_hosted_install_without_another_registration_method_must_pair(self, tmp_path: Path) -> None:
+        """Missing client credentials stay a startup error when pairing is the only way to register."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MATRIX_REGISTRATION_SHARED_SECRET="",
+            MATRIX_REGISTRATION_SHARED_SECRET_FILE="",
+            MATRIX_REGISTRATION_TOKEN="",
+            MINDROOM_LOCAL_CLIENT_ID="",
+            MINDROOM_LOCAL_CLIENT_SECRET="",
+        )
+
+        with pytest.raises(PermanentMatrixStartupError, match="local client credentials are missing"):
+            provisioning.required_local_provisioning_client_credentials_for_registration(
                 provisioning_url="https://provisioning.example",
-                client_id="client-123",
-                client_secret=client_secret,
-                homeserver="http://localhost:8008",
-                username="test_user",
-                password=test_pass,
-                display_name="Test User",
+                registration_token=None,
                 runtime_paths=runtime_paths,
             )
-            mock_matrix_client.assert_not_called()
+
+    @staticmethod
+    def _one_time_password_client(
+        login_result: nio.Response | Exception | None = None,
+        change_result: nio.Response | Exception | None = None,
+    ) -> AsyncMock:
+        """Return a Matrix client double whose login and password change succeed unless overridden."""
+        if change_result is None:
+            change_result = nio.ChangePasswordResponse()
+            change_result.transport_response = MagicMock(spec=aiohttp.ClientResponse, status=200)
+        client = AsyncMock()
+        # A one-item side_effect list returns a response or raises an exception.
+        client.login.side_effect = [
+            login_result
+            or nio.LoginResponse(
+                user_id="@test_user:localhost",
+                device_id="ONE_TIME_DEVICE",
+                access_token=TEST_ACCESS_TOKEN,
+            ),
+        ]
+        client.change_password.side_effect = [change_result]
+        return client
+
+    @staticmethod
+    async def _register_provisioned_account(
+        tmp_path: Path,
+        password: str = "test_pass",  # noqa: S107
+    ) -> str:
+        """Register through a provisioning service that reports a created account with a one-time password."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MINDROOM_LOCAL_CLIENT_ID="client-123",
+            MINDROOM_LOCAL_CLIENT_SECRET="secret-123",  # noqa: S106
+        )
+        with (
+            patch(
+                "mindroom.matrix.users.provisioning.register_user_via_provisioning_service",
+                new_callable=AsyncMock,
+                return_value=provisioning._ProvisioningRegisterResult(
+                    status="created",
+                    user_id="@test_user:localhost",
+                    password="one-time-pass",  # noqa: S106
+                ),
+            ) as mock_register,
+            patch(
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
+                return_value=None,
+            ),
+        ):
+            user_id = await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                password,
+                "Test User",
+                runtime_paths=runtime_paths,
+            )
+        mock_register.assert_called_once_with(
+            provisioning_url="https://provisioning.example",
+            client_id="client-123",
+            client_secret="secret-123",  # noqa: S106
+            homeserver="http://localhost:8008",
+            username="test_user",
+            display_name="Test User",
+        )
+        return user_id
+
+    @pytest.mark.asyncio
+    async def test_register_user_uses_provisioning_service_register_agent_when_configured(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A provisioned account's one-time password is replaced with the install's own password."""
+        http_client = self._one_time_password_client()
+
+        with patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client) as mock_http_client:
+            user_id = await self._register_provisioned_account(tmp_path, password="install-pass")  # noqa: S106
+
+        assert user_id == "@test_user:localhost"
+        mock_http_client.assert_called_once_with("http://localhost:8008", ANY, "@test_user:localhost")
+        http_client.login.assert_awaited_once_with("one-time-pass")
+        http_client.change_password.assert_awaited_once_with(
+            {
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "@test_user:localhost"},
+                "password": "one-time-pass",
+            },
+            "install-pass",
+        )
+        http_client.logout.assert_awaited_once_with()
+        http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_register_user_keeps_replaced_password_when_logout_fails(self, tmp_path: Path) -> None:
+        """Once the password is replaced, a failed logout of the one-time session does not fail registration."""
+        http_client = self._one_time_password_client()
+        http_client.logout.side_effect = aiohttp.ClientPayloadError("connection lost")
+
+        with patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client):
+            user_id = await self._register_provisioned_account(tmp_path)
+
+        assert user_id == "@test_user:localhost"
+        http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_register_user_keeps_replaced_password_when_logout_hangs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A logout that never answers is abandoned after the timeout instead of blocking registration."""
+        monkeypatch.setattr(matrix_users, "_ONE_TIME_SESSION_LOGOUT_TIMEOUT_SECONDS", 0.01)
+        http_client = self._one_time_password_client()
+        http_client.logout.side_effect = asyncio.Event().wait
+
+        with patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client):
+            user_id = await asyncio.wait_for(self._register_provisioned_account(tmp_path), timeout=5)
+
+        assert user_id == "@test_user:localhost"
+        http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("login_result", "change_result"),
+        [
+            pytest.param(nio.LoginError("Invalid password"), None, id="login-error"),
+            pytest.param(aiohttp.ClientPayloadError("connection lost"), None, id="login-raises"),
+            pytest.param(None, nio.ChangePasswordError("Password change is disabled"), id="change-error"),
+            pytest.param(None, aiohttp.ClientPayloadError("connection lost"), id="change-raises"),
+        ],
+    )
+    async def test_register_user_fails_startup_when_one_time_password_is_not_replaced(
+        self,
+        tmp_path: Path,
+        login_result: nio.Response | Exception | None,
+        change_result: nio.Response | Exception | None,
+    ) -> None:
+        """A provisioned account whose one-time password cannot be replaced is a permanent startup error."""
+        http_client = self._one_time_password_client(login_result, change_result)
+
+        with (
+            patch("mindroom.matrix.users.create_matrix_http_client", return_value=http_client),
+            pytest.raises(PermanentMatrixStartupError, match=r"cannot be used again\. Run `mindroom connect --force`"),
+        ):
+            await self._register_provisioned_account(tmp_path)
+
+        if login_result is not None:
+            http_client.change_password.assert_not_awaited()
+        http_client.logout.assert_not_awaited()
+        http_client.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_register_user_rejects_password_change_answered_by_non_json_server_error(
+        self,
+        tmp_path: Path,
+        aioresponse: aioresponses,
+    ) -> None:
+        """Nio reads a non-JSON 502 as an empty successful change body, so the HTTP status must decide."""
+        aioresponse.post(
+            re.compile(r"http://localhost:8008/_matrix/client/v3/login.*"),
+            payload={"user_id": "@test_user:localhost", "device_id": "ONE_TIME_DEVICE", "access_token": "token"},
+        )
+        aioresponse.post(
+            re.compile(r"http://localhost:8008/_matrix/client/v3/account/password.*"),
+            status=502,
+            body="<html>Bad Gateway</html>",
+            content_type="text/html",
+        )
+        aioresponse.post(re.compile(r"http://localhost:8008/_matrix/client/v3/logout.*"), payload={})
+
+        with pytest.raises(
+            PermanentMatrixStartupError,
+            match=r"replacing its one-time password failed \(HTTP 502\)\. Nobody knows",
+        ):
+            await self._register_provisioned_account(tmp_path)
+
+        requested_paths = [url.path for _method, url in aioresponse.requests]
+        assert requested_paths == ["/_matrix/client/v3/login", "/_matrix/client/v3/account/password"]
 
     @pytest.mark.asyncio
     async def test_register_user_provisioning_user_in_use_logs_in_and_syncs_display(
@@ -698,7 +905,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -781,7 +988,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
             patch(
@@ -839,7 +1046,7 @@ class TestMatrixRegistration:
             ) as mock_register,
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
             patch(
-                "mindroom.matrix.users.provisioning.registration_token_from_env",
+                "mindroom.matrix.users.provisioning_env.registration_token_from_env",
                 return_value=None,
             ),
         ):
@@ -866,7 +1073,7 @@ class TestMatrixRegistration:
         """Provisioning URL without local client creds should fail with actionable guidance."""
         runtime_paths = _runtime_paths(tmp_path, MINDROOM_PROVISIONING_URL="https://provisioning.example")
 
-        with pytest.raises(PermanentMatrixStartupError, match="mindroom connect --pair-code"):
+        with pytest.raises(PermanentMatrixStartupError, match="mindroom connect"):
             await _register_user(
                 "http://localhost:8008",
                 "test_user",
@@ -875,12 +1082,47 @@ class TestMatrixRegistration:
                 runtime_paths=runtime_paths,
             )
 
-    @staticmethod
-    async def _register_via_provisioning_with_response(
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_verifies_tls_when_matrix_ssl_verify_is_false(
+        self,
         tmp_path: Path,
-        response: httpx.Response,
     ) -> None:
-        runtime_paths = constants_mod.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+        """MATRIX_SSL_VERIFY covers only the homeserver, so the register-agent call that returns a password verifies TLS."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MATRIX_SSL_VERIFY="false",
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MINDROOM_LOCAL_CLIENT_ID="client-123",
+            MINDROOM_LOCAL_CLIENT_SECRET="secret-123",  # noqa: S106
+        )
+        client_kwargs: list[dict[str, object]] = []
+        fake_client = _recording_httpx_async_client(
+            [],
+            httpx.Response(401, json={"detail": "Invalid local client credentials"}),
+        )
+
+        def _client(**kwargs: object) -> object:
+            client_kwargs.append(kwargs)
+            return fake_client(**kwargs)
+
+        with (
+            patch.object(provisioning.httpx, "AsyncClient", _client),
+            patch("mindroom.matrix.users.provisioning_env.registration_token_from_env", return_value=None),
+            pytest.raises(PermanentMatrixStartupError, match="invalid or revoked"),
+        ):
+            await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                "test_pass",
+                "Test User",
+                runtime_paths=runtime_paths,
+            )
+
+        # httpx verifies certificates unless told otherwise.
+        assert [kwargs.get("verify", True) for kwargs in client_kwargs] == [True]
+
+    @staticmethod
+    async def _register_via_provisioning_with_response(response: httpx.Response) -> None:
         with patch.object(provisioning.httpx, "AsyncClient", _recording_httpx_async_client([], response)):
             await provisioning.register_user_via_provisioning_service(
                 provisioning_url="https://provisioning.example",
@@ -888,9 +1130,7 @@ class TestMatrixRegistration:
                 client_secret="secret-123",  # noqa: S106
                 homeserver="http://localhost:8008",
                 username="mindroom_test_user_otherns",
-                password="test_pass",  # noqa: S106
                 display_name="Test User",
-                runtime_paths=runtime_paths,
             )
 
     @pytest.mark.asyncio
@@ -913,23 +1153,20 @@ class TestMatrixRegistration:
     )
     async def test_register_user_via_provisioning_service_client_auth_failure_is_permanent(
         self,
-        tmp_path: Path,
         response: httpx.Response,
     ) -> None:
         """Any 401, and a revoked-connection 403, should ask the user to re-pair."""
         with pytest.raises(PermanentMatrixStartupError, match="invalid or revoked"):
-            await self._register_via_provisioning_with_response(tmp_path, response)
+            await self._register_via_provisioning_with_response(response)
 
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_namespace_mismatch_surfaces_detail(
         self,
-        tmp_path: Path,
     ) -> None:
         """A namespace-enforcement 403 must surface the server detail, not blame the credentials."""
         detail = "Requested username is outside this local connection namespace"
         with pytest.raises(PermanentMatrixStartupError) as excinfo:
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(403, json={"detail": detail}),
             )
 
@@ -942,12 +1179,10 @@ class TestMatrixRegistration:
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_malformed_error_body_surfaces_text(
         self,
-        tmp_path: Path,
     ) -> None:
         """A 403 with a non-JSON body should surface the raw text instead of the re-pair advice."""
         with pytest.raises(PermanentMatrixStartupError, match="policy says no") as excinfo:
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(403, content=b"policy says no"),
             )
 
@@ -956,7 +1191,6 @@ class TestMatrixRegistration:
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_validation_error_redacts_request_body(
         self,
-        tmp_path: Path,
     ) -> None:
         """FastAPI 422 bodies echo the request under 'input'; the password must never reach the error."""
         body = {
@@ -974,7 +1208,7 @@ class TestMatrixRegistration:
             ],
         }
         with pytest.raises(PermanentMatrixStartupError) as excinfo:
-            await self._register_via_provisioning_with_response(tmp_path, httpx.Response(422, json=body))
+            await self._register_via_provisioning_with_response(httpx.Response(422, json=body))
 
         message = str(excinfo.value)
         assert "test_pass" not in message
@@ -983,33 +1217,39 @@ class TestMatrixRegistration:
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_homeserver_mismatch_is_permanent(
         self,
-        tmp_path: Path,
     ) -> None:
         """A deterministic 400 (homeserver mismatch) must stop startup retries and surface the detail."""
         detail = "Invalid homeserver for this provisioning service. Expected https://a, got https://b."
         with pytest.raises(PermanentMatrixStartupError, match="Expected https://a"):
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(400, json={"detail": detail}),
             )
 
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_redirect_is_permanent(
         self,
-        tmp_path: Path,
     ) -> None:
         """A redirecting provisioning URL is a config error, not something to retry forever."""
         response = httpx.Response(308, headers={"location": "https://mindroom.chat/v1/local-mindroom"})
         with pytest.raises(PermanentMatrixStartupError, match="MINDROOM_PROVISIONING_URL"):
-            await self._register_via_provisioning_with_response(tmp_path, response)
+            await self._register_via_provisioning_with_response(response)
 
     @pytest.mark.asyncio
-    async def test_register_user_via_provisioning_service_invalid_json_is_permanent(self, tmp_path: Path) -> None:
+    async def test_register_user_via_provisioning_service_invalid_json_is_permanent(self) -> None:
         """Invalid provisioning responses should not trigger endless retries."""
         with pytest.raises(PermanentMatrixStartupError, match="invalid JSON"):
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(200, content=b"not json"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_service_created_without_password_is_permanent(
+        self,
+    ) -> None:
+        """A created account is unusable without its one-time password, so a response missing it is a permanent error."""
+        with pytest.raises(PermanentMatrixStartupError, match="missing one-time password"):
+            await self._register_via_provisioning_with_response(
+                httpx.Response(200, json={"status": "created", "user_id": "@mindroom_test_user_otherns:localhost"}),
             )
 
     @pytest.mark.asyncio
@@ -1216,6 +1456,53 @@ class TestAgentUserCreation:
                 runtime_paths,
                 username="new_internal",
             )
+
+    @pytest.mark.asyncio
+    @patch("mindroom.matrix.users._register_user")
+    async def test_create_internal_user_legacy_state_uses_actual_username_as_original_request(
+        self,
+        mock_register: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """An account predating requested_username reuses only its persisted actual username."""
+        runtime_paths = _runtime_paths(tmp_path)
+        state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
+        state_file.parent.mkdir(parents=True)
+        state_file.write_text(
+            """accounts:
+  agent_user:
+    username: legacy_internal
+    password: existing_pass
+    domain: localhost
+    device_id: DEVICE
+    access_token: stored-token
+rooms: {}
+space_room_id: null
+""",
+            encoding="utf-8",
+        )
+
+        reused = await create_agent_user(
+            "http://localhost:8008",
+            INTERNAL_USER_AGENT_NAME,
+            "MindRoomUser",
+            runtime_paths,
+            username="legacy_internal",
+        )
+
+        assert reused.user_id == "@legacy_internal:localhost"
+        assert reused.password == "existing_pass"  # noqa: S105
+        assert reused.device_id == "DEVICE"
+        assert reused.access_token == "stored-token"  # noqa: S105
+        with pytest.raises(PermanentMatrixStartupError, match=r"mindroom_user\.username cannot be changed"):
+            await create_agent_user(
+                "http://localhost:8008",
+                INTERNAL_USER_AGENT_NAME,
+                "MindRoomUser",
+                runtime_paths,
+                username="different_internal",
+            )
+        mock_register.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
@@ -1578,3 +1865,91 @@ class TestAgentLogin:
 
             with pytest.raises(ValueError, match="Failed to login"):
                 await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
+
+    @pytest.mark.asyncio
+    async def test_login_agent_owned_session_gets_credentials_before_factory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Password HTTP closes before the sole owned-client factory begins."""
+        agent_user = AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@mindroom_calculator:localhost",
+            display_name="CalculatorAgent",
+            password=TEST_PASSWORD,
+        )
+        runtime_paths = _runtime_paths(tmp_path)
+        generation = UUID("22222222-2222-4222-8222-222222222222")
+        config = DurableSyncConfig(sync_timeout_ms=30_000)
+        credentials = _owned_session.MatrixCredentials(
+            agent_user.user_id,
+            "AGENTDEVICE",
+            "access-token",
+        )
+        owned_client = MagicMock(
+            user_id=credentials.user_id,
+            device_id=credentials.device_id,
+            access_token=credentials.access_token,
+        )
+        opened = MagicMock(client=owned_client, session=AsyncMock())
+        consumer_store = object()
+        order: list[str] = []
+
+        async def password_credentials(*_args: object, **_kwargs: object) -> object:
+            order.append("credentials_closed")
+            return credentials
+
+        async def open_owned(*_args: object, persist_credentials: object, **_kwargs: object) -> object:
+            assert order == ["credentials_closed"]
+            order.append("owned_opened")
+            persist_credentials(owned_client)
+            return opened
+
+        with (
+            patch(
+                "mindroom.matrix.users.appservice.resolve_managed_account_auth",
+                return_value=ManagedAccountAuth(mode="password"),
+            ),
+            patch(
+                "mindroom.matrix.users.login_password_credentials",
+                side_effect=password_credentials,
+            ) as get_credentials,
+            patch(
+                "mindroom.matrix.users.open_owned_matrix_session",
+                side_effect=open_owned,
+            ) as open_session,
+            patch("mindroom.matrix.users._persist_authenticated_agent_session") as persist,
+            patch(
+                "mindroom.matrix.users.ensure_agent_cross_signing",
+                new=AsyncMock(),
+            ) as cross_signing,
+        ):
+            result = await matrix_users.login_agent_owned_session(
+                "http://localhost:8008",
+                agent_user,
+                runtime_paths,
+                consumer_store=consumer_store,
+                new_consumer_generation=generation,
+                config=config,
+            )
+
+        assert result is opened
+        assert order == ["credentials_closed", "owned_opened"]
+        get_credentials.assert_awaited_once_with(
+            "http://localhost:8008",
+            agent_user.user_id,
+            TEST_PASSWORD,
+            runtime_paths,
+            device_id=None,
+        )
+        open_session.assert_awaited_once_with(
+            "http://localhost:8008",
+            credentials,
+            runtime_paths,
+            consumer_store=consumer_store,
+            new_consumer_generation=generation,
+            config=config,
+            persist_credentials=ANY,
+        )
+        persist.assert_called_once()
+        cross_signing.assert_awaited_once_with(owned_client, agent_user)

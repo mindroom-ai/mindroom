@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -19,10 +20,13 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="attachments",
     display_name="Attachments",
-    description="List and register context-scoped file attachments",
+    description="Find files attached to a conversation and make workspace files available as attachments",
     category=ToolCategory.PRODUCTIVITY,
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
+    requires_room_context=True,
     icon="Paperclip",
     icon_color="text-teal-500",
     config_fields=[],
@@ -32,8 +36,9 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.WORKER_TOOLS_OVERRIDE,
+        ToolManagedInitArg.FILE_ACCESS,
     ),
-    function_names=("get_attachment", "list_attachments", "register_attachment"),
+    function_names=("get_attachment", "list_attachments", "register_attachment", "view_file"),
 )
 def attachments_tools() -> type[AttachmentTools]:
     """Return attachments tools."""

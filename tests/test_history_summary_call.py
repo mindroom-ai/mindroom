@@ -24,15 +24,17 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history.compaction import (
-    _build_summary_input,
-    _compaction_replay_messages,
-)
+from mindroom.history.runtime import _compaction_failure_status
 from mindroom.history.storage import (
     read_scope_state,
-    write_scope_state,
+    set_force_compaction_state,
 )
-from mindroom.history.summary_call import generate_compaction_summary
+from mindroom.history.summary_call import (
+    SummaryRetryPolicy,
+    _CompactionSummaryTimeoutError,
+    generate_compaction_summary,
+)
+from mindroom.history.summary_input import _compaction_replay_messages, build_summary_input
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
@@ -43,6 +45,7 @@ from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -56,13 +59,13 @@ from tests.history_helpers import (  # noqa: F401
 
 
 @pytest.mark.asyncio
-async def test_compaction_call_timeout_raises_runtime_error() -> None:
+async def test_compaction_call_timeout_raises_owned_timeout() -> None:
     class _SlowSummaryModel(FakeModel):
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
             await asyncio.sleep(0.05)
             return ModelResponse(content="merged summary")
 
-    with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
+    with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
             model=_SlowSummaryModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
@@ -111,7 +114,7 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
     model = _SlowToUnwindSummaryModel(model_id="summary-model", provider="fake")
     start = asyncio.get_running_loop().time()
 
-    with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
+    with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
@@ -149,7 +152,7 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
 
     model = _SwallowingCancelSummaryModel(model_id="summary-model", provider="fake")
 
-    with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
+    with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
@@ -333,7 +336,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
 
     with (
         patch("mindroom.history.summary_call._COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01),
-        pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
+        pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"),
     ):
         await generate_compaction_summary(
             model=model,
@@ -379,12 +382,12 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    seed_session(storage, session)
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
         capture_logs() as logs,
@@ -424,7 +427,7 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     )
     small_run = _completed_run("run-small")
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[big_run, small_run],
         max_input_tokens=220,
@@ -451,7 +454,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         "tools_schema": [{"name": f"tool_{index}", "description": "x" * 2000} for index in range(30)],
     }
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=280,
@@ -476,7 +479,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
         "model_params": {"temperature": 0.2},
     }
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=220,
@@ -495,7 +498,7 @@ def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
         "model_params": {"temperature": 0.2},
     }
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=10_000,
@@ -544,7 +547,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     }
     run.metadata = metadata.copy()
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=10_000,
@@ -574,7 +577,7 @@ def test_build_summary_input_preserves_complete_near_cap_summary_without_claimin
     run = _completed_run("run-1")
     previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=previous_summary,
         compacted_runs=[run],
         max_input_tokens=1_001,
@@ -589,7 +592,7 @@ def test_build_summary_input_preserves_complete_near_cap_summary_without_claimin
 
 
 def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() -> None:
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[_completed_run("run-1")],
         max_input_tokens=1,
@@ -603,7 +606,7 @@ def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() 
 def test_build_summary_input_preserves_previous_summary_text() -> None:
     run = _completed_run("run-1")
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary="Useful prior conversation.\n\n## Your Identity\nIDENTITY.md\nCurrent Date and Time",
         compacted_runs=[run],
         max_input_tokens=1_000,
@@ -661,7 +664,7 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
         ],
     )
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
         history_settings=ResolvedHistorySettings(
@@ -701,7 +704,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
         ],
     )
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
         history_settings=ResolvedHistorySettings(
@@ -716,3 +719,10 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "first result" not in summary_input
     assert "call-2" in summary_input
     assert "second result" in summary_input
+
+
+def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
+    """Renaming an engine deadline message cannot change retry or lifecycle decisions."""
+    error = _CompactionSummaryTimeoutError("deadline expired")
+    assert SummaryRetryPolicy().should_shrink(error)
+    assert _compaction_failure_status(error) == "timeout"

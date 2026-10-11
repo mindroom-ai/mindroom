@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+    from agno.run.requirement import RunRequirement
     from agno.tools.function import Function
     from structlog.stdlib import BoundLogger
 
@@ -40,19 +41,58 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.event_journal import PrincipalStore
-    from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks import (
+        HookMatrixAdmin,
+        HookMessageSender,
+        HookRegistryState,
+        HookRoomStatePutter,
+        HookRoomStateQuerier,
+    )
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.message_target import MessageTarget
+    from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
-    from mindroom.scheduling import SchedulingRuntime
+    from mindroom.scheduling.tasks import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
+
+
+@dataclass(frozen=True)
+class DetachedRequesterContext:
+    """Authenticated requester authority for tools without a Matrix conversation."""
+
+    requester_id: str
+    config: Config
+    runtime_paths: RuntimePaths
+    agent_reply_memberships: AgentReplyMembershipIndex
+    config_provider: Callable[[], Config | None]
+
+
+_DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = ContextVar(
+    "detached_requester_context",
+    default=None,
+)
+
+
+def get_detached_requester_context() -> DetachedRequesterContext | None:
+    """Return authority established by the current detached request boundary."""
+    return _DETACHED_REQUESTER_CONTEXT.get()
+
+
+@contextmanager
+def detached_requester_context(context: DetachedRequesterContext | None) -> Iterator[None]:
+    """Bind detached authority for an operation without leaking between requests."""
+    token = _DETACHED_REQUESTER_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _DETACHED_REQUESTER_CONTEXT.reset(token)
 
 
 @contextmanager
@@ -83,6 +123,7 @@ class ToolRuntimeContext:
     runtime_attachment_ids: list[str] = field(default_factory=list)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
+    hook_registry_state: HookRegistryState | None = None
     correlation_id: str | None = None
     hook_message_sender: HookMessageSender | None = None
     matrix_admin: HookMatrixAdmin | None = None
@@ -91,9 +132,12 @@ class ToolRuntimeContext:
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[Function], bool] | None = None
+    # Tools of the authored subagent running this turn; copies it authors stay within them.
+    persona_tools: tuple[str, ...] | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     config_provider: Callable[[], Config] | None = None
+    cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
 
     @property
     def current_config(self) -> Config:
@@ -106,6 +150,45 @@ class ToolRuntimeContext:
             msg = "Tool runtime context requires the managed membership index for membership-aware authorization."
             raise RuntimeError(msg)
         return self.agent_reply_memberships
+
+    async def responder_candidates_for_current_room(
+        self,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+    ) -> list[MatrixID]:
+        """Resolve current-room candidates through this context's membership boundary.
+
+        Inside a turn (``membership_turn_id`` set) the candidates come from the
+        member cache the turn already resolved, even when that turn's refresh
+        failed: a tool call must not see a different room than the routing
+        decision that dispatched it. Detached contexts refresh on demand.
+        """
+        from mindroom.authorization import (  # noqa: PLC0415
+            responder_candidate_entities_from_cached_room,
+            responder_candidate_entities_with_membership_refresh,
+        )
+
+        if room.room_id != self.room_id:
+            msg = "Tool runtime current-room candidate resolution requires the context room"
+            raise ValueError(msg)
+        config = self.current_config
+        membership_index = self.require_agent_reply_memberships()
+        if self.membership_turn_id is not None:
+            return responder_candidate_entities_from_cached_room(
+                room,
+                requester_user_id,
+                config,
+                self.runtime_paths,
+                membership_index,
+            )
+        return await responder_candidate_entities_with_membership_refresh(
+            self.client,
+            room,
+            requester_user_id,
+            config,
+            self.runtime_paths,
+            membership_index,
+        )
 
     @property
     def room_id(self) -> str:
@@ -159,6 +242,15 @@ class ToolRuntimeContext:
             execution_identity=build_execution_identity_from_runtime_context(self),
             runtime_paths=self.runtime_paths,
         )
+
+
+@dataclass(frozen=True)
+class WorkerRuntimeContext:
+    """Explicit worker configuration for dispatch without a live chat context."""
+
+    runtime_paths: RuntimePaths
+    config: Config
+    storage_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -218,8 +310,34 @@ class WorkerProgressPump:
     shutdown: threading.Event
 
 
+class ToolRuntimeModelBinding:
+    """Bind attempt-local model identity into the ambient tool context."""
+
+    async def run_with_model(
+        self,
+        *,
+        active_model_name: str,
+        operation: Callable[[], Awaitable[_ToolContextReturn]],
+    ) -> _ToolContextReturn:
+        """Run one provider attempt with its model visible to tools."""
+        with _tool_runtime_model_context(active_model_name):
+            return await operation()
+
+    def stream_with_model[ChunkT](
+        self,
+        stream: AsyncIterator[ChunkT],
+        *,
+        active_model_name: str,
+    ) -> AsyncIterator[ChunkT]:
+        """Bind one attempt's model while its stream is created, pulled, or closed."""
+        return context_bound_async_stream(
+            context_factory=lambda: _tool_runtime_model_context(active_model_name),
+            stream_factory=lambda: stream,
+        )
+
+
 @dataclass
-class ToolRuntimeSupport:
+class ToolRuntimeSupport(ToolRuntimeModelBinding):
     """Own shared tool-runtime context building and scoped execution helpers."""
 
     runtime: BotRuntimeView
@@ -262,6 +380,7 @@ class ToolRuntimeSupport:
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or ()),
             hook_registry=self.hook_context.registry,
+            hook_registry_state=self.hook_context.hook_registry_state,
             correlation_id=correlation_id,
             hook_message_sender=self.hook_context.message_sender(),
             matrix_admin=self.hook_context.matrix_admin(),
@@ -352,6 +471,7 @@ _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
     "tool_runtime_context",
     default=None,
 )
+_WORKER_RUNTIME_CONTEXT: ContextVar[WorkerRuntimeContext | None] = ContextVar("worker_runtime_context", default=None)
 _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
     "worker_progress_pump",
     default=None,
@@ -361,6 +481,21 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
     """Get the current shared tool runtime context."""
     return _TOOL_RUNTIME_CONTEXT.get()
+
+
+def get_worker_runtime_context() -> WorkerRuntimeContext | None:
+    """Return the explicit worker snapshot bound to this operation."""
+    return _WORKER_RUNTIME_CONTEXT.get()
+
+
+@contextmanager
+def worker_runtime_context(context: WorkerRuntimeContext) -> Iterator[None]:
+    """Keep detached worker configuration scoped across async and thread calls."""
+    token = _WORKER_RUNTIME_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _WORKER_RUNTIME_CONTEXT.reset(token)
 
 
 def get_worker_progress_pump() -> WorkerProgressPump | None:
@@ -442,7 +577,7 @@ def runtime_context_from_dispatch_context(dispatch_context: ToolDispatchContext)
 
 def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeContext) -> SchedulingRuntime:
     """Build the canonical live scheduling runtime for one Matrix tool context."""
-    from mindroom.scheduling import SchedulingRuntime  # noqa: PLC0415
+    from mindroom.scheduling.tasks import SchedulingRuntime  # noqa: PLC0415
 
     if context.room is None:
         msg = "Scheduling runtime requires a cached Matrix room in tool runtime context"
@@ -456,6 +591,10 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.require_agent_reply_memberships(),
+        responder_candidates_for_room=context.responder_candidates_for_current_room,
+        config_provider=lambda: (
+            context.orchestrator.config if context.orchestrator is not None else context.current_config
+        ),
     )
 
 
@@ -574,6 +713,7 @@ async def emit_custom_event(
         thread_id=context.resolved_thread_id,
         sender_id=context.requester_id,
         message_received_depth=bindings.message_received_depth,
+        _hook_registry_state=context.hook_registry_state,
     )
     await emit(context.hook_registry, event_name, hook_context)
 
@@ -586,6 +726,15 @@ def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
         yield
     finally:
         _TOOL_RUNTIME_CONTEXT.reset(token)
+
+
+@contextmanager
+def _tool_runtime_model_context(active_model_name: str) -> Iterator[None]:
+    """Bind the model used by one provider attempt into the ambient tool context."""
+    context = get_tool_runtime_context()
+    resolved_context = replace(context, active_model_name=active_model_name) if context is not None else None
+    with tool_runtime_context(resolved_context):
+        yield
 
 
 @contextmanager

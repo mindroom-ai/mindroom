@@ -9,7 +9,7 @@ from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.conversation_reads import DeliveredResponse
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
@@ -55,7 +55,9 @@ class PostResponseEffectsDeps:
     logger: structlog.stdlib.BoundLogger
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
-    persist_response_event_id: Callable[[str, str], None] | None = None
+    queue_skill_review: Callable[[str], Awaitable[None]] | None = None
+    notify_response_finished: Callable[[], None] | None = None
+    persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
 
@@ -64,7 +66,7 @@ class PostResponseEffectsDeps:
 class PostResponseEffectsSupport:
     """Shared support used to build per-response post-effect deps."""
 
-    runtime: SupportsClientConfig
+    runtime: SupportsClientConfigMemberships
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     conversation_reader: ConversationReader
@@ -119,7 +121,8 @@ class PostResponseEffectsSupport:
             runtime_paths=self.runtime_paths,
             conversation_reader=self.conversation_reader,
             delivered_response=delivered_response,
-            entity_name=entity_name,
+            entity_name=entity_name or self.agent_name,
+            membership_index=self.runtime.agent_reply_memberships,
         )
         create_background_task(
             self._timed_thread_summary(
@@ -135,7 +138,9 @@ class PostResponseEffectsSupport:
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str], None] | None = None,
+        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
+        notify_response_finished: Callable[[], None] | None = None,
+        persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -167,10 +172,22 @@ class PostResponseEffectsSupport:
             logger=self.logger,
             add_interactive_buttons=add_interactive_buttons,
             queue_memory_persistence=queue_memory_persistence,
+            queue_skill_review=queue_skill_review,
+            notify_response_finished=notify_response_finished,
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self._should_queue_thread_summary,
             queue_thread_summary=self._queue_thread_summary,
         )
+
+
+def _notify_response_finished(outcome: ResponseOutcome, deps: PostResponseEffectsDeps) -> None:
+    """Tell automations a response is final, successful or not, so one waiting on it can verify its files."""
+    if deps.notify_response_finished is None:
+        return
+    try:
+        deps.notify_response_finished()
+    except Exception:
+        deps.logger.exception("Failed to notify automations of a finished response", session_id=outcome.session_id)
 
 
 async def apply_post_response_effects(
@@ -180,6 +197,7 @@ async def apply_post_response_effects(
 ) -> None:
     """Apply the shared side effects that happen after response delivery is known."""
     response_event_id = final_delivery_outcome.final_visible_event_id
+    _notify_response_finished(outcome, deps)
     if (
         response_event_id is not None
         and deps.add_interactive_buttons is not None
@@ -214,7 +232,7 @@ async def apply_post_response_effects(
         and deps.persist_response_event_id is not None
     ):
         try:
-            deps.persist_response_event_id(outcome.response_run_id, response_event_id)
+            await deps.persist_response_event_id(outcome.response_run_id, response_event_id)
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",
@@ -232,6 +250,16 @@ async def apply_post_response_effects(
                 session_id=outcome.session_id,
                 room_id=outcome.response_target.room_id if outcome.response_target is not None else None,
                 thread_id=(outcome.response_target.resolved_thread_id if outcome.response_target is not None else None),
+            )
+
+    if outcome.run_succeeded and deps.queue_skill_review is not None and outcome.response_run_id is not None:
+        try:
+            await deps.queue_skill_review(outcome.response_run_id)
+        except Exception:
+            deps.logger.exception(
+                "Failed to queue skill review after response",
+                session_id=outcome.session_id,
+                run_id=outcome.response_run_id,
             )
 
     if (

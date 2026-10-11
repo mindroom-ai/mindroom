@@ -12,7 +12,7 @@ export default function PrivacyPage() {
         <h2 className="text-xl font-semibold">Information We Collect</h2>
         <p>
           We process account profile and status data, subscriptions and payments, hosted instance records,
-          usage metrics, audit events, and consent choices needed to operate the service.
+          audit events, and consent choices needed to operate the service.
         </p>
       </section>
       <section className="space-y-3">
@@ -26,7 +26,7 @@ export default function PrivacyPage() {
         <h2 className="text-xl font-semibold">Retention</h2>
         <p>
           Hosted cleanup schedules soft-deleted application accounts for removal after a seven-day grace
-          period, ordinary audit logs after 90 days, and usage metrics after 365 days. Some security and
+          period, and ordinary audit logs after 90 days. Some security and
           deletion audit events are excluded from ordinary audit cleanup.
         </p>
       </section>

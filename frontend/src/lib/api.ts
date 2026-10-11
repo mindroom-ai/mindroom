@@ -11,6 +11,7 @@ export const API_ENDPOINTS = {
   // Config endpoints
   config: {
     load: `${API_BASE_URL}/api/config/load`,
+    schema: `${API_BASE_URL}/api/config/schema`,
     save: `${API_BASE_URL}/api/config/save`,
     agents: `${API_BASE_URL}/api/config/agents`,
     teams: `${API_BASE_URL}/api/config/teams`,

@@ -13,12 +13,14 @@ import nio
 import pytest
 from agno.media import Audio
 
-from mindroom import voice_handler
+from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from mindroom.voice import handler as voice_handler
+from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
@@ -41,7 +43,7 @@ def _persist_voice_handler_accounts(config: Config) -> None:
     persist_actual_entity_accounts(config, runtime_paths, password=TEST_VOICE_ACCOUNT_PASSWORD)
 
 
-def _recording_stt_client(response_text: str) -> tuple[Callable[[], httpx.AsyncClient], list[httpx.Request]]:
+def _recording_stt_client(response_text: str) -> tuple[Callable[..., httpx.AsyncClient], list[httpx.Request]]:
     """Return an HTTP client factory and its captured STT requests."""
     requests: list[httpx.Request] = []
     async_client_type = httpx.AsyncClient
@@ -52,8 +54,8 @@ def _recording_stt_client(response_text: str) -> tuple[Callable[[], httpx.AsyncC
 
     transport = httpx.MockTransport(handle_request)
 
-    def client_factory() -> httpx.AsyncClient:
-        return async_client_type(transport=transport)
+    def client_factory(*, timeout: httpx.Timeout) -> httpx.AsyncClient:
+        return async_client_type(transport=transport, timeout=timeout)
 
     return client_factory, requests
 
@@ -152,7 +154,7 @@ class TestVoiceHandler:
         """Promoting the shared speech config does not break existing partial voice STT blocks."""
         config = VoiceConfig.model_validate({"stt": {"provider": "openai"}})
 
-        assert config.stt.model == "gpt-4o-transcribe"
+        assert config.stt.model == "gpt-transcribe"
 
     @pytest.mark.parametrize(
         ("matrix_mime_type", "expected_filename", "expected_mime_type"),
@@ -254,8 +256,8 @@ class TestVoiceHandler:
                 return FakeResponse()
 
         with (
-            patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient),
-            patch("mindroom.voice_handler.get_api_key_for_service", return_value="openai-provider-key") as get_key,
+            patch("mindroom.voice.handler.httpx.AsyncClient", FakeAsyncClient),
+            patch("mindroom.voice.handler.get_api_key_for_service", return_value="openai-provider-key") as get_key,
         ):
             transcription = await voice_handler._transcribe_audio(
                 b"audio-bytes",
@@ -294,8 +296,8 @@ class TestVoiceHandler:
         )
         client_factory, requests = _recording_stt_client("local transcript")
         with (
-            patch("mindroom.voice_handler.httpx.AsyncClient", side_effect=client_factory),
-            patch("mindroom.voice_handler.get_api_key_for_service", return_value=None) as get_key,
+            patch("mindroom.voice.handler.httpx.AsyncClient", side_effect=client_factory),
+            patch("mindroom.voice.handler.get_api_key_for_service", return_value=None) as get_key,
         ):
             transcription = await voice_handler._transcribe_audio(
                 b"audio-bytes",
@@ -316,14 +318,14 @@ class TestVoiceHandler:
             Config(
                 voice=VoiceConfig(
                     enabled=True,
-                    stt=VoiceSTTConfig(provider="openai", model="gpt-4o-transcribe"),
+                    stt=VoiceSTTConfig(provider="openai", model="gpt-transcribe"),
                 ),
             ),
         )
 
         with (
-            patch("mindroom.voice_handler.httpx.AsyncClient") as async_client,
-            patch("mindroom.voice_handler.get_api_key_for_service", return_value=None) as get_key,
+            patch("mindroom.voice.handler.httpx.AsyncClient") as async_client,
+            patch("mindroom.voice.handler.get_api_key_for_service", return_value=None) as get_key,
         ):
             transcription = await voice_handler._transcribe_audio(
                 b"audio-bytes",
@@ -353,8 +355,8 @@ class TestVoiceHandler:
         )
         client_factory, requests = _recording_stt_client("custom transcript")
         with (
-            patch("mindroom.voice_handler.httpx.AsyncClient", side_effect=client_factory),
-            patch("mindroom.voice_handler.get_api_key_for_service") as get_key,
+            patch("mindroom.voice.handler.httpx.AsyncClient", side_effect=client_factory),
+            patch("mindroom.voice.handler.get_api_key_for_service") as get_key,
         ):
             transcription = await voice_handler._transcribe_audio(
                 b"audio-bytes",
@@ -426,7 +428,7 @@ class TestVoiceHandler:
         )
 
         # Mock the AI model
-        with patch("mindroom.voice_handler._process_transcription") as mock_process:
+        with patch("mindroom.voice.handler._process_transcription") as mock_process:
             mock_process.return_value = "@research help me with this"
 
             result = await _process_transcription("research help me with this", config)
@@ -463,11 +465,11 @@ class TestVoiceHandler:
 
         with (
             patch(
-                "mindroom.voice_handler._download_audio",
+                "mindroom.voice.handler._download_audio",
                 new=AsyncMock(return_value=Audio(content=b"audio", mime_type="audio/ogg")),
             ),
-            patch("mindroom.voice_handler._transcribe_audio", return_value="help me") as mock_transcribe,
-            patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
+            patch("mindroom.voice.handler._transcribe_audio", return_value="help me") as mock_transcribe,
+            patch("mindroom.voice.handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
             mock_process.return_value = "@openclaw help me"
             result = await _handle_voice_message(client, room, event, config)
@@ -480,6 +482,40 @@ class TestVoiceHandler:
         assert mock_process.await_args.kwargs["available_team_names"] == []
 
     @pytest.mark.asyncio
+    async def test_voice_handler_reuses_failed_boundary_membership_snapshot(self) -> None:
+        """Voice normalization must not retry a failed membership refresh from the same turn."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        client = AsyncMock()
+        client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+        room = _matrix_room(
+            "!voice:localhost",
+            members=("@mindroom_router:localhost", "@alice:example.com"),
+            members_synced=False,
+        )
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$voice"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
+
+        assert not await ensure_room_membership_synced(client, room, sender_id=event.sender)
+
+        with (
+            patch("mindroom.voice.handler._transcribe_audio", return_value="hello"),
+            patch("mindroom.voice.handler._process_transcription", return_value="hello"),
+        ):
+            result = await _handle_voice_message(
+                client,
+                room,
+                event,
+                config,
+                audio=Audio(content=b"audio", mime_type="audio/ogg"),
+            )
+
+        assert result == "🎤 hello"
+        assert client.joined_members.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_download_audio_unencrypted(self) -> None:
         """Test downloading unencrypted audio messages."""
         _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))  # Just to verify it works, not used in test
@@ -490,10 +526,10 @@ class TestVoiceHandler:
 
         with (
             patch(
-                "mindroom.voice_handler.download_media_bytes",
+                "mindroom.voice.handler.download_media_bytes",
                 new=AsyncMock(return_value=b"audio_data"),
             ) as mock_download,
-            patch("mindroom.voice_handler.media_mime_type", return_value="audio/ogg"),
+            patch("mindroom.voice.handler.media_mime_type", return_value="audio/ogg"),
         ):
             result = await voice_handler._download_audio(client, event)
 
@@ -513,10 +549,10 @@ class TestVoiceHandler:
 
         with (
             patch(
-                "mindroom.voice_handler.download_media_bytes",
+                "mindroom.voice.handler.download_media_bytes",
                 new=AsyncMock(return_value=b"decrypted_audio_data"),
             ) as mock_download,
-            patch("mindroom.voice_handler.media_mime_type", return_value="audio/mpeg"),
+            patch("mindroom.voice.handler.media_mime_type", return_value="audio/mpeg"),
         ):
             result = await voice_handler._download_audio(client, event)
 
@@ -531,7 +567,7 @@ class TestVoiceHandler:
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageAudio)
 
-        with patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)) as mock_download:
+        with patch("mindroom.voice.handler.download_media_bytes", new=AsyncMock(return_value=None)) as mock_download:
             result = await voice_handler._download_audio(client, event)
 
         assert result is None
@@ -540,7 +576,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:
         """Failed normalization should not leave stale in-flight task entries behind."""
-        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
+        config = _runtime_bound_config(with_current_room_member_access(Config(authorization={})))
         client = AsyncMock()
         room = _matrix_room("!test:server", members=("@alice:example.com",))
         event = MagicMock(spec=nio.RoomMessageAudio)
@@ -553,7 +589,7 @@ class TestVoiceHandler:
         voice_handler._voice_normalization_tasks.clear()
         cache_key = voice_handler._voice_cache_key(tmp_path, room.room_id, event.event_id, None)
 
-        with patch("mindroom.voice_handler._download_audio", new=AsyncMock(return_value=None)):
+        with patch("mindroom.voice.handler._download_audio", new=AsyncMock(return_value=None)):
             prepared = await _prepare_voice_message(
                 client,
                 tmp_path,
@@ -573,7 +609,7 @@ class TestVoiceHandler:
         tmp_path: Path,
     ) -> None:
         """Canceling one waiter should not cancel the shared normalization task for others."""
-        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
+        config = _runtime_bound_config(with_current_room_member_access(Config(authorization={})))
         client = AsyncMock()
         room = _matrix_room("!test:server", members=("@alice:example.com",))
         event = MagicMock(spec=nio.RoomMessageAudio)
@@ -602,7 +638,7 @@ class TestVoiceHandler:
                 transcribed_message="🎤 hello",
             )
 
-        with patch("mindroom.voice_handler._compute_normalized_voice_message", side_effect=fake_compute):
+        with patch("mindroom.voice.handler._compute_normalized_voice_message", side_effect=fake_compute):
             first_waiter = asyncio.create_task(
                 _prepare_voice_message(
                     client,
@@ -665,8 +701,8 @@ class TestVoiceHandler:
                 await asyncio.Event().wait()
 
         with (
-            patch("mindroom.voice_handler.model_loading.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.voice_handler.Agent", HungAgent),
+            patch("mindroom.voice.handler.model_loading.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.voice.handler.Agent", HungAgent),
         ):
             result = await asyncio.wait_for(
                 _process_transcription("turn on the lights", config),
@@ -675,6 +711,71 @@ class TestVoiceHandler:
 
         assert arun_started.is_set()
         assert result == "turn on the lights"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run", "timeout", "empty"])
+    @pytest.mark.parametrize("unavailable_mention", [False, True])
+    async def test_cleanup_failure_preserves_recognized_transcript(
+        self,
+        failure_stage: str,
+        unavailable_mention: bool,
+    ) -> None:
+        """Cleanup fallback retains recognized speech and room-scoped mention filtering."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "helper": AgentConfig(display_name="Helper", role="Help"),
+                    "private": AgentConfig(display_name="Private", role="Help privately"),
+                },
+                voice=VoiceConfig(enabled=True),
+            ),
+        )
+        transcript = "Please remind me about tomorrow's appointment."
+        if unavailable_mention:
+            transcript = "@helper please ask @private about tomorrow's appointment."
+        expected = transcript.replace("@private", "private")
+
+        class CleanupAgent:
+            def __init__(self, **_kwargs: object) -> None:
+                if failure_stage == "constructor":
+                    message = "cleanup construction failed"
+                    raise RuntimeError(message)
+
+            async def arun(self, *_args: object, **_kwargs: object) -> None:
+                if failure_stage == "empty":
+                    return
+                if failure_stage == "timeout":
+                    raise TimeoutError
+                message = "cleanup provider failed"
+                raise RuntimeError(message)
+
+        with (
+            patch(
+                "mindroom.voice.handler.model_loading.get_model_instance",
+                side_effect=RuntimeError("cleanup model unavailable") if failure_stage == "model" else None,
+            ),
+            patch("mindroom.voice.handler.Agent", CleanupAgent),
+        ):
+            result = await _process_transcription(
+                transcript,
+                config,
+                available_agent_names=["helper"],
+                available_team_names=[],
+            )
+
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_cleanup_cancellation_propagates(self) -> None:
+        """Cancellation remains control flow instead of becoming a transcript fallback."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        with (
+            patch("mindroom.voice.handler.model_loading.get_model_instance"),
+            patch("mindroom.voice.handler.Agent") as agent_class,
+        ):
+            agent_class.return_value.arun = AsyncMock(side_effect=asyncio.CancelledError)
+            with pytest.raises(asyncio.CancelledError):
+                await _process_transcription("recognized speech", config)
 
     @pytest.mark.asyncio
     async def test_normalize_voice_message_fails_when_normalization_hangs(
@@ -700,7 +801,7 @@ class TestVoiceHandler:
             await asyncio.Event().wait()
 
         try:
-            with patch("mindroom.voice_handler._download_audio", side_effect=hung_download):
+            with patch("mindroom.voice.handler._download_audio", side_effect=hung_download):
                 with pytest.raises(TimeoutError):
                     await asyncio.wait_for(
                         voice_handler._normalize_voice_message(
@@ -745,7 +846,7 @@ class TestVoiceHandler:
             download_started.set()
             await asyncio.Event().wait()
 
-        with patch("mindroom.voice_handler._download_audio", side_effect=hung_download):
+        with patch("mindroom.voice.handler._download_audio", side_effect=hung_download):
             prepared = await asyncio.wait_for(
                 voice_handler.prepare_raw_voice_fallback_message(
                     client,

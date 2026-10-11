@@ -1,10 +1,14 @@
+# `pre-commit install` also installs the commit-msg hook; hooks without explicit stages still run only before commits.
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-        exclude: ^skills/mindroom-docs/references/
+        # Next.js uses a metadata image's .alt.txt file verbatim as its alt text, so it must not end in a newline.
+        exclude: ^skills/mindroom-docs/references/|\.alt\.txt$
       - id: check-docstring-first
       - id: check-yaml
         exclude: (cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$|cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$)
@@ -45,11 +49,11 @@ repos:
         files: ^(src/mindroom/commands\.py|README\.md)$
 
       - id: sync-config-models
-        name: Push models from config.yaml to SaaS platform defaults
-        entry: scripts/sync_config.py
+        name: Regenerate the hosted instance seed config from the config init starter
+        entry: uv run python scripts/sync_config.py
         language: system
         pass_filenames: false
-        files: ^(config\.yaml|saas-platform/default-config\.yaml)$
+        files: ^(scripts/sync_config\.py|src/mindroom/cli/config\.py|src/mindroom/model_defaults\.py|cluster/k8s/instance/default-config\.yaml)$
 
       - id: generate-skill-references
         name: Regenerate mindroom-docs skill references
@@ -57,6 +61,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^(docs/.*\.md|zensical\.toml|\.github/scripts/generate_skill_references\.py)$
+
+      - id: generate-config-schema
+        name: Regenerate the dashboard config schema snapshot
+        entry: .venv/bin/python .github/scripts/generate_config_schema.py
+        language: system
+        pass_filenames: false
+        files: ^(src/mindroom/.*\.py|\.github/scripts/generate_config_schema\.py)$
 
       - id: check-tool-extras-sync
         name: Check tool extras stay in sync with pyproject.toml
@@ -77,6 +88,12 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: check-commit-attribution
+        name: Reject AI agent attribution in commit messages
+        entry: .venv/bin/python .github/scripts/check_commit_attribution.py
+        language: system
+        stages: [commit-msg]
+
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.26.0"
     hooks:
@@ -89,7 +106,7 @@ repos:
     hooks:
       - id: prettier
         files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
-        exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|.*\.min\.(js|css))$
+        exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json|.*\.min\.(js|css))$
         args: ["--cache", "--cache-location", ".cache/prettier-precommit.json"]
         require_serial: true
 
@@ -134,4 +151,4 @@ repos:
       - id: pretty-format-json
         args: ['--autofix', '--indent=2']
         files: ^frontend/.*\.json$
-        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/\.eslintrc\.json)$
+        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/\.eslintrc\.json|frontend/src/test/fixtures/config-schema\.json)$

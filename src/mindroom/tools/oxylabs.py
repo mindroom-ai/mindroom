@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="oxylabs",
+    file_access=ToolFileAccess.NONE,
     display_name="Oxylabs",
     description="Powerful web scraping capabilities including SERP, Amazon product data, and universal web scraping",
     category=ToolCategory.RESEARCH,  # web_scrape maps to RESEARCH
@@ -37,6 +38,14 @@ if TYPE_CHECKING:
             required=False,
             placeholder="your_oxylabs_password",
             description="Oxylabs dashboard password",
+        ),
+        ConfigField(
+            name="markdown",
+            label="Markdown",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Return scraped website content as Markdown instead of parsed HTML",
         ),
     ],
     dependencies=["oxylabs"],

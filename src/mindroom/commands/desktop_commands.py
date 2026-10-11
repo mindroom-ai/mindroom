@@ -2,28 +2,32 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     load_desktop_credentials,
     save_desktop_credentials,
 )
-from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_entity
+from mindroom.desktop.identity import DesktopIdentityError
 from mindroom.desktop.pairing import (
     DesktopPairingError,
     complete_desktop_pairing,
     confirm_desktop_pairing,
     create_desktop_pairing,
 )
+from mindroom.desktop.protocol import DesktopSetupDescriptor
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -37,6 +41,7 @@ class DesktopCommandScope:
     runtime_paths: RuntimePaths
     agent_name: str
     requester_id: str
+    controller_identity: Callable[[str], DesktopControllerIdentity]
 
 
 def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
@@ -65,7 +70,7 @@ def _load_desktop_credentials(scope: DesktopCommandScope) -> dict[str, object] |
 
 def _setup_response(scope: DesktopCommandScope) -> str:
     _validate_desktop_scope(scope)
-    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
+    controller = scope.controller_identity(scope.agent_name)
     pairing = create_desktop_pairing(
         scope.runtime_paths,
         requester_id=scope.requester_id,
@@ -83,13 +88,28 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         f"--controller-user-id {shlex.quote(controller.user_id)}",
         f"--controller-device-id {shlex.quote(controller.device_id)}",
         f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
+        f"--allow-agent {shlex.quote(scope.agent_name)}",
     ]
     if cloudflare_access:
         setup_parts.append("--cloudflare-access")
     setup_command = " ".join(setup_parts)
+    descriptor = DesktopSetupDescriptor(
+        homeserver=homeserver,
+        user_id=scope.requester_id,
+        code=pairing.token,
+        controller_user_id=controller.user_id,
+        controller_device_id=controller.device_id,
+        controller_ed25519=controller.ed25519,
+        requester_id=scope.requester_id,
+        agent_name=scope.agent_name,
+        cloudflare_access=cloudflare_access,
+    )
     return (
         "🔐 **Desktop pairing started**\n\n"
-        "On your computer, run this command. It logs in if needed, then claims the pairing:\n\n"
+        "In the MindRoom macOS app, open Computer access > Connect and import this setup data. "
+        "Review the controller, requester, and agent, then select Save and Connect:\n\n"
+        f"```json\n{json.dumps(descriptor.to_content(), indent=2)}\n```\n\n"
+        "For terminal setup, run this command on your computer. It logs in if needed, claims the pairing, and saves setup for both the terminal and app:\n\n"
         f"```bash\n{setup_command}\n```\n\n"
         "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
         "Current Desktop target remains unchanged until confirmation."
@@ -139,7 +159,7 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     state = desktop_configuration_state(credentials)
     if state.status is not DesktopConfigurationStatus.READY:
         raise DesktopPairingError(state.error or "Claimed Desktop device identity is invalid.")
-    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
+    controller = scope.controller_identity(scope.agent_name)
     run_command = _run_command(scope, controller)
     save_desktop_credentials(
         get_runtime_credentials_manager(scope.runtime_paths),
@@ -150,7 +170,10 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     complete_desktop_pairing(scope.runtime_paths, token=token)
     return (
         f"✅ Desktop paired for you and agent `{scope.agent_name}`.\n\n"
-        "Start the local bridge with:\n\n"
+        "If you connected in the macOS app, select I've Confirmed in Chat. "
+        "Choose and save apps in MindRoom > Computer access > Apps, complete Permissions, then select Start Observe Only or run "
+        "`mindroom desktop run`. Both use the same saved setup. Stop one before starting the other.\n\n"
+        "To override app access for one terminal run, use:\n\n"
         f"```bash\n{run_command}\n```\n\n"
         "Replace `APPLICATION_ID` with one exact local application ID and repeat `--allow-app` as needed. "
         "Add `--allow-control` for a short local control lease; otherwise the bridge is observe-only. "

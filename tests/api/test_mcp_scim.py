@@ -1,0 +1,626 @@
+"""SCIM uses dedicated authentication and bounded, atomic User operations."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+import pytest
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
+from structlog.testing import capture_logs
+
+from mindroom.api.mcp_scim import scim_routes
+from mindroom.mcp_gateway.accounts import GatewayAccounts
+from mindroom.mcp_gateway.store import GatewayOAuthStore
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from httpx import Response
+
+BASE = "/mcp/scim/v2"
+USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+ENTERPRISE_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
+PATCH_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error"
+TOKEN = "provisioning-test-credential-" + "x" * 32
+
+
+@pytest.fixture
+def client(tmp_path: Path) -> Iterator[TestClient]:
+    """Serve real SCIM handlers against a durable SQLite account store."""
+    store = GatewayOAuthStore(
+        tmp_path,
+        onboarding_max_bytes=1000000,
+        max_bytes=1000000,
+        user_max_bytes=1000000,
+        clock=lambda: 2_000_000_000.0,
+    )
+    runtime = SimpleNamespace(
+        provider=SimpleNamespace(accounts_required=True),
+        accounts=GatewayAccounts(store),
+        origin="https://example.org",
+        scim_token=TOKEN,
+    )
+    with TestClient(Starlette(routes=scim_routes(lambda _: runtime))) as http:
+        http.app.state.store = store
+        http.headers["Authorization"] = "Bearer " + TOKEN
+        yield http
+
+
+def _create(client: TestClient, **fields: object) -> Response:
+    return client.post(
+        BASE + "/Users",
+        json={"schemas": [USER_SCHEMA], "userName": "alice@example.org", "active": True, **fields},
+    )
+
+
+def test_user_roundtrip_filter_pagination_replace_delete(client: TestClient) -> None:
+    """A connector can create, find, replace and delete its bounded User profile."""
+    response = _create(
+        client,
+        password="never-reflect",  # noqa: S106
+        displayName="Alice",
+        emails=[{"value": "alice@example.org", "primary": True}],
+    )
+    assert response.status_code == 201
+    user = response.json()
+    assert user["schemas"] == [USER_SCHEMA]
+    assert "password" not in user
+    assert "never-reflect" not in response.text
+    assert response.headers["location"].endswith("/Users/" + user["id"])
+    path = BASE + "/Users/" + user["id"]
+    assert client.get(path).json()["displayName"] == "Alice"
+    for attribute in ("userName", "USERNAME", "emails.value", "id"):
+        value = user["id"] if attribute == "id" else "alice@example.org"
+        listing = client.get(BASE + "/Users", params={"filter": f'{attribute} eq "{value}"'}).json()
+        assert listing["totalResults"] == 1
+        assert listing["Resources"][0]["id"] == user["id"]
+    assert client.get(BASE + "/Users", params={"filter": 'userName eq "Alice@example.org"'}).json()["totalResults"] == 0
+    assert client.get(BASE + "/Users", params={"count": 0}).json()["Resources"] == []
+    assert client.get(BASE + "/Users", params={"startIndex": 2}).json()["Resources"] == []
+    assert (
+        client.put(path, json={"schemas": [USER_SCHEMA], "userName": "new@example.org", "active": False}).status_code
+        == 200
+    )
+    assert "displayName" not in client.get(path).json()
+    assert client.delete(path).status_code == 204
+    assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("schemas", [[USER_SCHEMA, ENTERPRISE_SCHEMA], [ENTERPRISE_SCHEMA, USER_SCHEMA]])
+def test_enterprise_declaration_preserves_core_profile_and_discards_extensions(
+    client: TestClient,
+    schemas: list[str],
+) -> None:
+    """Standard enterprise metadata must not prevent core provisioning or become account state."""
+    payload = {
+        "schemas": schemas,
+        "userName": "alice@example.org",
+        "active": True,
+        "displayName": "Alice",
+        ENTERPRISE_SCHEMA: {
+            "employeeNumber": "ignored-enterprise-marker",
+            "department": "Engineering",
+            "userName": "other@example.org",
+            "active": False,
+            "roles": ["admin"],
+        },
+    }
+    with capture_logs() as logs:
+        created = client.post(BASE + "/Users", json=payload)
+        assert created.status_code == 201
+        account = created.json()
+        path = BASE + "/Users/" + account["id"]
+        updated = client.put(path, json={**payload, "displayName": "Updated"})
+        assert updated.status_code == 200
+    assert not [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert updated.json()["displayName"] == "Updated"
+    assert updated.json()["userName"] == "alice@example.org"
+    assert updated.json()["active"] is True
+    assert updated.json()["schemas"] == [USER_SCHEMA]
+    assert client.get(path).json() == updated.json()
+    assert ENTERPRISE_SCHEMA not in updated.json()
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        profile = json.loads(connection.execute("SELECT profile FROM gateway_accounts").fetchone()[0])
+    assert profile == {"userName": "alice@example.org", "active": True, "displayName": "Updated"}
+
+
+def test_enterprise_user_replacement_still_revokes_on_deactivation(client: TestClient) -> None:
+    """Accepting an optional declaration preserves atomic offboarding effects."""
+    account_id = _create(client).json()["id"]
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        connection.execute(
+            "INSERT INTO pending (state_hash, payload, expires_at, account_id) VALUES (?, '{}', ?, ?)",
+            ("bound-consent", 2_100_000_000, account_id),
+        )
+    payload = {"schemas": [USER_SCHEMA, ENTERPRISE_SCHEMA], "userName": "alice@example.org", "active": False}
+    path = BASE + "/Users/" + account_id
+    response = client.put(path, json=payload)
+    assert response.status_code == 200
+    assert client.get(path).json()["active"] is False
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "schemas",
+    [
+        [ENTERPRISE_SCHEMA],
+        [USER_SCHEMA, ENTERPRISE_SCHEMA, ENTERPRISE_SCHEMA],
+        [USER_SCHEMA, ENTERPRISE_SCHEMA, "urn:example:unsupported"],
+        [USER_SCHEMA, {}],
+    ],
+)
+def test_enterprise_compatibility_does_not_allow_invalid_user_schemas(
+    client: TestClient,
+    schemas: list[object],
+) -> None:
+    """Core schema remains required and duplicate, unknown or malformed declarations remain errors."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    assert (
+        client.put(path, json={"schemas": schemas, "userName": "alice@example.org", "active": False}).status_code == 400
+    )
+    assert client.get(path).json() == account
+
+
+def test_enterprise_schema_is_not_accepted_in_patch_envelope(client: TestClient) -> None:
+    """The User extension is not a PATCH message schema."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    response = client.patch(
+        path,
+        json={
+            "schemas": [PATCH_SCHEMA, ENTERPRISE_SCHEMA],
+            "Operations": [{"op": "replace", "path": "active", "value": False}],
+        },
+    )
+    assert response.status_code == 400
+    assert client.get(path).json() == account
+
+
+def test_patch_case_insensitive_attributes_atomic_failure(client: TestClient) -> None:
+    """SCIM attribute casing works and unsupported operations roll back the whole PATCH."""
+    path = BASE + "/Users/" + _create(client).json()["id"]
+    patch = {"schemas": [PATCH_SCHEMA], "Operations": [{"op": "Replace", "path": "Active", "value": False}]}
+    assert client.patch(path, json=patch).json()["active"] is False
+    patch["Operations"] = [{"op": "replace", "value": {"ACTIVE": True, "displayName": "Updated"}}]
+    assert client.patch(path, json=patch).json()["displayName"] == "Updated"
+    patch["Operations"] = [
+        {"op": "replace", "path": "active", "value": False},
+        {"op": "replace", "path": "groups", "value": []},
+    ]
+    assert client.patch(path, json=patch).status_code == 400
+    assert client.get(path).json()["active"] is True
+    patch["Operations"] = [{"op": "remove", "path": "displayName"}]
+    assert "displayName" not in client.patch(path, json=patch).json()
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer oauth-access-token"},
+        {"Cookie": "session=browser"},
+        {"X-Auth-Request-Email": "alice@example.org"},
+        {"Authorization": "Bearer wrong"},
+        {"Authorization": "Bearer \u00e9"},
+    ],
+)
+def test_dedicated_bearer_only(client: TestClient, headers: dict[str, str]) -> None:
+    """Browser identity and unrelated tokens cannot enumerate provisioned users."""
+    client.headers.pop("Authorization")
+    # Send non-ASCII header bytes explicitly, as valid HTTP opaque bytes.
+    raw_headers = [(key.encode(), value.encode("utf-8")) for key, value in headers.items()]
+    response = client.get(BASE + "/Users", headers=raw_headers)
+    assert response.status_code == 401
+    assert response.json()["schemas"] == [ERROR_SCHEMA]
+    assert response.headers["content-type"].startswith("application/scim+json")
+    assert "access-control-allow-origin" not in response.headers
+    assert response.headers["cache-control"] == "private, no-store"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {},
+        {"userName": "alice@example.org", "active": "false"},
+        {"userName": "alice@example.org", "active": 0},
+        {"userName": "x" * 321, "active": True},
+        {"userName": "alice@example.org", "USERNAME": "other@example.org", "active": True},
+    ],
+)
+def test_invalid_user_fields_are_safe_errors(client: TestClient, payload: object) -> None:
+    """Invalid profiles return bounded SCIM errors without reflecting input."""
+    response = client.post(BASE + "/Users", json=payload)
+    assert response.status_code == 400
+    assert response.json()["schemas"] == [ERROR_SCHEMA]
+
+
+@pytest.mark.parametrize(
+    ("method", "changes", "origin"),
+    [
+        ("POST", {"schemas": [USER_SCHEMA, "urn:example:unsupported"]}, "_body"),
+        ("PUT", {"displayName": None}, "_text"),
+        (
+            "PATCH",
+            {"schemas": [PATCH_SCHEMA], "Operations": [{"op": "replace", "path": "displayName", "value": None}]},
+            "_text",
+        ),
+        ("PUT", None, "_body"),
+    ],
+    ids=["schema", "profile", "patch", "malformed-json"],
+)
+def test_validation_failure_logs_only_code_locations(
+    client: TestClient,
+    method: str,
+    changes: dict[str, object] | None,
+    origin: str,
+) -> None:
+    """Rejected writes identify validation code without exposing submitted data or changing the account."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    payload = {
+        "schemas": [USER_SCHEMA],
+        "userName": "private-profile@example.org",
+        "active": True,
+        "password": "private-password-marker",
+        **(changes or {}),
+    }
+    content = json.dumps(payload) if changes is not None else '{"private-json-marker":'
+    with capture_logs() as logs:
+        response = client.request(
+            method,
+            BASE + "/Users" if method == "POST" else path,
+            content=content,
+            headers={"Content-Type": "application/scim+json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "schemas": [ERROR_SCHEMA],
+        "status": "400",
+        "detail": "Invalid or missing supported account attributes.",
+        "scimType": "invalidValue",
+    }
+    assert client.get(path).json() == account
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM account validation failed"]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert set(diagnostic) == {"event", "log_level", "method", "validation_frames"}
+    assert diagnostic["log_level"] == "warning"
+    assert diagnostic["method"] == method
+    frames = diagnostic["validation_frames"]
+    assert frames[-1].split(":")[0] == origin
+    assert all(
+        name.strip("<>").isidentifier() and int(line) > 0 for name, line in (frame.rsplit(":", 1) for frame in frames)
+    )
+    encoded = json.dumps(diagnostic)
+    for private in (TOKEN, account["id"], "private-profile", "private-password-marker", "private-json-marker"):
+        assert private not in encoded
+
+
+def test_success_and_authentication_failure_do_not_log_validation_diagnostics(client: TestClient) -> None:
+    """Only authenticated requests that fail account validation produce diagnostics."""
+    with capture_logs() as logs:
+        assert _create(client).status_code == 201
+        client.headers.pop("Authorization")
+        assert _create(client, displayName=None).status_code == 401
+    assert not [entry for entry in logs if entry["event"] == "SCIM account validation failed"]
+
+
+@pytest.mark.parametrize(
+    ("fields", "value_type", "count", "recognized", "unknown", "non_strings"),
+    [
+        ({}, "missing", None, [], 0, 0),
+        ({"schemas": None}, "NoneType", None, [], 0, 1),
+        ({"schemas": USER_SCHEMA}, "str", None, [USER_SCHEMA], 0, 0),
+        ({"schemas": []}, "list", 0, [], 0, 0),
+        ({"schemas": [USER_SCHEMA, USER_SCHEMA]}, "list", 2, [USER_SCHEMA], 0, 0),
+        ({"schemas": ["urn:scim:schemas:core:1.0"]}, "list", 1, ["urn:scim:schemas:core:1.0"], 0, 0),
+        (
+            {"schemas": [USER_SCHEMA, ENTERPRISE_SCHEMA, "private-schema-marker"]},
+            "list",
+            3,
+            [USER_SCHEMA, ENTERPRISE_SCHEMA],
+            1,
+            0,
+        ),
+        ({"schemas": [PATCH_SCHEMA]}, "list", 1, [PATCH_SCHEMA], 0, 0),
+        ({"schemas": ["private-schema-marker"] * 1000}, "list", 1000, [], 1000, 0),
+        ({"schemas": [{"private-key": "private-value"}, 3, None, True]}, "list", 4, [], 0, 4),
+        ({"schemas": {"private-key": "private-value"}}, "dict", None, [], 0, 1),
+    ],
+)
+def test_schema_diagnostics_identify_shape_without_logging_arbitrary_values(
+    client: TestClient,
+    fields: dict[str, object],
+    value_type: str,
+    count: int | None,
+    recognized: list[str],
+    unknown: int,
+    non_strings: int,
+) -> None:
+    """Schema failures expose bounded standard identifiers, never arbitrary request values."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    with capture_logs() as logs:
+        response = client.put(path, json={"userName": "private-profile@example.org", "active": False, **fields})
+
+    assert response.status_code == 400
+    assert client.get(path).json() == account
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0] == {
+        "event": "SCIM schema validation failed",
+        "log_level": "warning",
+        "method": "PUT",
+        "expected_schema": USER_SCHEMA,
+        "schemas_type": value_type,
+        "schemas_count": count,
+        "recognized_schemas": recognized,
+        "unknown_schema_count": unknown,
+        "non_string_schema_count": non_strings,
+    }
+    encoded = json.dumps(logs) + response.text
+    for private in (TOKEN, account["id"], "private-profile", "private-schema-marker", "private-key", "private-value"):
+        assert private not in encoded
+
+
+def test_schema_diagnostics_require_authentication_and_leave_valid_requests_quiet(client: TestClient) -> None:
+    """Schema metadata is logged only for authenticated schema failures, including PATCH envelopes."""
+    with capture_logs() as logs:
+        account = _create(client).json()
+        path = BASE + "/Users/" + account["id"]
+        assert client.patch(path, json={"schemas": [USER_SCHEMA], "Operations": []}).status_code == 400
+        client.headers.pop("Authorization")
+        assert _create(client, schemas=["private-schema-marker"]).status_code == 401
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["method"] == "PATCH"
+    assert diagnostics[0]["expected_schema"] == PATCH_SCHEMA
+    assert diagnostics[0]["recognized_schemas"] == [USER_SCHEMA]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"filter": "active eq true"},
+        {"filter": 'userName co "alice"'},
+        {"filter": 'userName eq "alice" or active eq true'},
+        {"count": "bad"},
+        {"count": "-1"},
+        {"sortBy": "userName"},
+        {"filter": "x" * 3000},
+    ],
+)
+def test_unsupported_queries_rejected(client: TestClient, query: dict[str, str]) -> None:
+    """Unsupported filters and sorting never silently broaden directory results."""
+    assert client.get(BASE + "/Users", params=query).status_code == 400
+
+
+def test_limits_errors_discovery_and_groups(client: TestClient) -> None:
+    """Discovery reports actual features and rejects unsupported provisioning surfaces."""
+    assert (
+        client.post(BASE + "/Users", content="{" * 70000, headers={"Content-Type": "application/scim+json"}).status_code
+        == 413
+    )
+    assert client.post(BASE + "/Users", content="{", headers={"Content-Type": "application/json"}).status_code == 400
+    assert client.post(BASE + "/Users", content="{}", headers={"Content-Type": "text/plain"}).status_code == 415
+    assert _create(client).status_code == 201
+    assert _create(client).status_code == 409
+    discovery = client.get(BASE + "/ServiceProviderConfig").json()
+    assert discovery["patch"]["supported"] is True
+    assert discovery["bulk"]["supported"] is False
+    assert discovery["changePassword"]["supported"] is False
+    assert client.get(BASE + "/ResourceTypes").json()["Resources"][0]["name"] == "User"
+    assert client.get(BASE + "/Schemas").json()["Resources"][0]["id"] == USER_SCHEMA
+    assert client.get(BASE + "/Groups").status_code == 501
+    assert client.post(BASE + "/Groups", json={}).status_code == 501
+    assert client.options(BASE + "/Users", headers={"Origin": "https://example.org"}).status_code == 405
+
+
+@pytest.mark.parametrize("query", [{"startIndex": str(2**100)}, {"filter": 'userName eq "\\ud800"'}])
+def test_extreme_query_inputs_are_rejected(client: TestClient, query: dict[str, str]) -> None:
+    """Malformed scalar values never reach SQLite bindings."""
+    assert client.get(BASE + "/Users", params=query).status_code == 400
+
+
+def test_unpaired_surrogate_profile_is_rejected(client: TestClient) -> None:
+    """JSON escapes cannot inject invalid Unicode into stored identities."""
+    payload = {"schemas": [USER_SCHEMA], "userName": "\ud800@example.org", "active": True}
+    assert (
+        client.post(
+            BASE + "/Users",
+            content=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        ).status_code
+        == 400
+    )
+
+
+def test_name_subattribute_patch_preserves_other_name_fields(client: TestClient) -> None:
+    """Connector subattribute updates preserve sibling profile values."""
+    path = BASE + "/Users/" + _create(client, name={"givenName": "Alice", "familyName": "Example"}).json()["id"]
+    response = client.patch(
+        path,
+        json={
+            "schemas": [PATCH_SCHEMA],
+            "Operations": [
+                {"op": "replace", "path": "name.givenName", "value": "Alicia"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == {"givenName": "Alicia", "familyName": "Example"}
+
+
+def test_transient_deactivation_in_atomic_patch_still_revokes(client: TestClient) -> None:
+    """A later reactivation in one PATCH cannot preserve pre-disable grants."""
+    account_id = _create(client).json()["id"]
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        connection.execute(
+            "INSERT INTO pending (state_hash, payload, expires_at, account_id) VALUES (?, '{}', ?, ?)",
+            ("bound-consent", 2_100_000_000, account_id),
+        )
+    response = client.patch(
+        BASE + "/Users/" + account_id,
+        json={
+            "schemas": [PATCH_SCHEMA],
+            "Operations": [
+                {"op": "replace", "path": "active", "value": False},
+                {"op": "replace", "path": "active", "value": True},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["active"] is True
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"schemas":["' + USER_SCHEMA + '"],"userName":"alice@example.org","active":true,"unknown":NaN}',
+        '{"schemas":["' + USER_SCHEMA + '"],"userName":"alice@example.org","active":true,"active":false}',
+    ],
+)
+def test_nonstandard_json_and_duplicate_keys_rejected(client: TestClient, body: str) -> None:
+    """Parsing does not accept ambiguous keys or non-JSON numeric values."""
+    response = client.post(BASE + "/Users", content=body, headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+
+
+def test_duplicate_queries_and_unsupported_resource_queries(client: TestClient) -> None:
+    """Query parameters never silently broaden a requested result."""
+    assert client.get(BASE + "/Users?count=1&count=2").status_code == 400
+    account_id = _create(client).json()["id"]
+    assert client.get(BASE + "/Users/" + account_id + "?attributes=password").status_code == 400
+
+
+def test_multiple_primary_emails_rejected(client: TestClient) -> None:
+    """SCIM email lists cannot claim two primary values."""
+    response = _create(
+        client,
+        emails=[{"value": "alice@example.org", "primary": True}, {"value": "other@example.org", "primary": True}],
+    )
+    assert response.status_code == 400
+
+
+def test_failed_patch_restores_revoked_pending_consent(client: TestClient) -> None:
+    """An invalid later PATCH step rolls back earlier revocation and profile writes."""
+    account_id = _create(client).json()["id"]
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        connection.execute(
+            "INSERT INTO pending (state_hash, payload, expires_at, account_id) VALUES (?, '{}', ?, ?)",
+            ("bound-consent", 2_100_000_000, account_id),
+        )
+    response = client.patch(
+        BASE + "/Users/" + account_id,
+        json={
+            "schemas": [PATCH_SCHEMA],
+            "Operations": [
+                {"op": "replace", "path": "active", "value": False},
+                {"op": "replace", "path": "password", "value": "never-store"},
+            ],
+        },
+    )
+    assert response.status_code == 400
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 1
+    assert client.get(BASE + "/Users/" + account_id).json()["active"] is True
+
+
+def test_query_is_bounded_before_parameter_parsing(client: TestClient) -> None:
+    """Empty separators still count toward the raw request query limit."""
+    assert client.get(BASE + "/Users?" + "&" * 5000).status_code == 400
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_email_add_switches_primary_and_retry_is_noop(client: TestClient, existing: bool) -> None:
+    """Adding a primary value demotes the old primary, and retries retain one copy."""
+    emails = [{"value": "first@example.org", "type": "work", "primary": True}]
+    if existing:
+        emails.append({"value": "second@example.org", "type": "home", "primary": False})
+    path = BASE + "/Users/" + _create(client, emails=emails).json()["id"]
+    patch = {
+        "schemas": [PATCH_SCHEMA],
+        "Operations": [
+            {
+                "op": "add",
+                "path": "emails",
+                "value": [
+                    {"VALUE": "second@example.org", "TYPE": "home", "PRIMARY": True},
+                ],
+            },
+        ],
+    }
+    response = client.patch(path, json=patch)
+    assert response.status_code == 200
+    assert response.json()["emails"] == [
+        {"value": "first@example.org", "type": "work", "primary": False},
+        {"value": "second@example.org", "type": "home", "primary": True},
+    ]
+    retried = client.patch(path, json=patch)
+    assert retried.status_code == 200
+    assert retried.json() == response.json()
+
+
+def test_repeated_nonprimary_email_add_preserves_capacity_and_timestamp(client: TestClient) -> None:
+    """A repeated existing value is a no-op even when the stored list is full."""
+    emails = [{"value": f"address{index}@example.org"} for index in range(10)]
+    created = _create(client, emails=emails).json()
+    path = BASE + "/Users/" + created["id"]
+    patch = {
+        "schemas": [PATCH_SCHEMA],
+        "Operations": [
+            {
+                "op": "add",
+                "value": {
+                    "emails": [
+                        {"value": "address0@example.org"},
+                        {"value": "address0@example.org"},
+                    ],
+                },
+            },
+        ],
+    }
+    response = client.patch(path, json=patch)
+    assert response.status_code == 200
+    assert response.json() == created
+
+
+def test_email_primary_switch_rolls_back_with_later_invalid_operation(client: TestClient) -> None:
+    """Primary demotion and other writes remain atomic with later PATCH failure."""
+    created = _create(client, emails=[{"value": "first@example.org", "primary": True}]).json()
+    path = BASE + "/Users/" + created["id"]
+    patch = {
+        "schemas": [PATCH_SCHEMA],
+        "Operations": [
+            {"op": "add", "path": "emails", "value": [{"value": "second@example.org", "primary": True}]},
+            {"op": "replace", "path": "groups", "value": []},
+        ],
+    }
+    response = client.patch(path, json=patch)
+    assert response.status_code == 400
+    assert response.json()["scimType"] == "invalidPath"
+    assert client.get(path).json() == created
+
+
+def test_email_schema_matches_exact_filter_comparison(client: TestClient) -> None:
+    """Discovery accurately tells connectors how mixed-case email values match."""
+    _create(client, emails=[{"value": "Mixed@example.org", "type": "work"}])
+    schema = client.get(BASE + "/Schemas/" + USER_SCHEMA).json()
+    emails = next(attribute for attribute in schema["attributes"] if attribute["name"] == "emails")
+    string_attributes = [attribute for attribute in emails["subAttributes"] if attribute["type"] == "string"]
+    assert all(attribute.get("caseExact") is True for attribute in string_attributes)
+    for value, count in [("Mixed@example.org", 1), ("mixed@example.org", 0)]:
+        response = client.get(BASE + "/Users", params={"filter": f'emails.value eq "{value}"'})
+        assert response.json()["totalResults"] == count

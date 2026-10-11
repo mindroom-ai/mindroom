@@ -40,7 +40,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_team_media_fallback import _make_test_agent, _make_test_team
+from tests.test_team_response import _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -54,9 +54,11 @@ if TYPE_CHECKING:
         DeliveryAcknowledgement,
         MatrixDelivery,
         MatrixDeliveryView,
+        PermanentDeliveryFailure,
         ProjectedEvent,
         TerminalTurnWrite,
     )
+    from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
@@ -95,9 +97,30 @@ class _WatchedOutbox:
         """Return the wrapped delivery principal."""
         return self.inner.principal_id
 
+    @property
+    def replies(self) -> ReplyStore:
+        """Return the wrapped principal's reply records."""
+        return self.inner.replies
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current room membership without timeline noise."""
         return await self.inner.membership_epoch(room_id)
+
+    async def enqueue_reply_row(self, request: ReplyRowRequest, prepared: PreparedReplyRow) -> ReplyRowEnqueue | None:
+        """Record one reply write, noting the stage its rule chose on the timeline."""
+        enqueued = await self.inner.enqueue_reply_row(request, prepared)
+        if enqueued is not None and enqueued.stage is not None:
+            self.timeline.append(f"enqueue:{enqueued.stage.value}")
+        return enqueued
+
+    async def unresolved_reply_rows(
+        self,
+        reply_id: str,
+        *,
+        before_sequence: int | None = None,
+    ) -> tuple[tuple[str, DeliveryStage], ...]:
+        """Return a reply's rows whose Matrix outcome is unknown, in write order."""
+        return await self.inner.unresolved_reply_rows(reply_id, before_sequence=before_sequence)
 
     async def enqueue_matrix_delivery(
         self,
@@ -108,8 +131,10 @@ class _WatchedOutbox:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
         self.timeline.append(f"enqueue:{stage.value}")
@@ -120,8 +145,10 @@ class _WatchedOutbox:
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
+            result=result,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
         )
 
     async def claim_matrix_delivery(
@@ -163,6 +190,20 @@ class _WatchedOutbox:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> PermanentDeliveryFailure:
+        """Stop retrying one definitively refused immutable payload, or report its ACK."""
+        return await self.inner.record_permanent_matrix_delivery_failure(
+            delivery_id=delivery_id,
+            stage=stage,
+            reason=reason,
+        )
 
     async def retire_matrix_delivery(
         self,

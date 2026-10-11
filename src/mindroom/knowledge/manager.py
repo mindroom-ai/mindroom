@@ -6,13 +6,16 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 import time
 import uuid
-from contextlib import suppress
+from contextlib import closing, contextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
 from agno.knowledge.document.base import Document
@@ -20,9 +23,8 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
-from agno.vectordb.chroma import ChromaDb
+from chromadb.errors import InternalError
 
-from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
     DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
     KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV,
@@ -30,12 +32,12 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
 )
-from mindroom.embedding_errors import (
+from mindroom.embeddings.errors import (
     classified_embedder_error,
     embedder_failure_is_transient,
     is_embedder_auth_failure_detail,
 )
-from mindroom.embedding_factory import create_configured_embedder
+from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.knowledge.candidate_checkpoint import (
     CandidateCheckpoint,
     CandidateFailure,
@@ -46,6 +48,8 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
+from mindroom.knowledge.chroma_client import ChromaDb
+from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import (
     SOURCE_DIGEST_KEY,
     SOURCE_MTIME_NS_KEY,
@@ -74,6 +78,7 @@ from mindroom.knowledge.file_listing import (
     git_tracked_relative_paths_from_checkout,
     knowledge_files_from_relative_paths,
     list_knowledge_files,
+    open_knowledge_file,
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource
 from mindroom.knowledge.index_metadata import (
@@ -87,16 +92,17 @@ from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     chroma_collection_exists,
     indexing_settings_key,
+    knowledge_git_dir,
     storage_key_for_base,
 )
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
+from mindroom.knowledge.strict_knowledge import StrictInsertKnowledge as Knowledge
 from mindroom.logging_config import get_logger
-from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
+from mindroom.path_confinement import MAX_READ_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
-    from pathlib import Path
 
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
@@ -217,6 +223,8 @@ class _CandidateRun:
     knowledge: Knowledge
     vector_db: ChromaDb
     embedder: BatchPrefetchEmbedder | None
+    #: Revision the candidate's file signatures describe, when known.
+    baseline_revision: str | None = None
     completed: dict[str, FileSignature] = field(default_factory=dict)
     failed: dict[str, CandidateFailure] = field(default_factory=dict)
     vanished: set[str] = field(default_factory=set)
@@ -391,12 +399,28 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
-def _file_content_digest(file_path: Path) -> str:
+def _file_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
+    """Stat and hash one listed file through one no-follow descriptor, copying it to ``snapshot`` when given."""
     digest = hashlib.sha256()
-    with file_path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
+    with open_knowledge_file(file_path) as descriptor, snapshot.open("xb") if snapshot else nullcontext() as output:
+        status = os.fstat(descriptor)
+        if status.st_size > MAX_READ_BYTES:
+            msg = f"Knowledge file exceeds its size limit: {file_path}"
+            raise ValueError(msg)
+        while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
-    return digest.hexdigest()
+            if output is not None:
+                output.write(chunk)
+    return status.st_mtime_ns, status.st_size, digest.hexdigest()
+
+
+@contextmanager
+def _knowledge_source_snapshot(file_path: Path) -> Iterator[Path]:
+    """Copy one listed file into a primary-private directory, because Agno readers reopen sources by path."""
+    with tempfile.TemporaryDirectory(prefix="mindroom-knowledge-") as snapshot_dir:
+        snapshot = Path(snapshot_dir) / file_path.name
+        _file_signature(file_path, snapshot)
+        yield snapshot
 
 
 def _knowledge_source_signature(
@@ -404,10 +428,11 @@ def _knowledge_source_signature(
     base_id: str,
     knowledge_root: Path,
     *,
+    git_dir: Path,
     tracked_relative_paths: Iterable[str] | None = None,
 ) -> str:
     """Return a robust signature for the currently managed local file corpus."""
-    root = knowledge_root.resolve()
+    root = knowledge_root
     digest = hashlib.sha256()
     base_config = config.get_knowledge_base_config(base_id)
     if base_config.git is None:
@@ -416,21 +441,20 @@ def _knowledge_source_signature(
         tracked_paths = (
             set(tracked_relative_paths)
             if tracked_relative_paths is not None
-            else git_tracked_relative_paths_from_checkout(config, base_id, root)
+            else git_tracked_relative_paths_from_checkout(config, base_id, root, git_dir)
         )
         files = knowledge_files_from_relative_paths(config, base_id, root, tracked_paths)
-    for path in files:
+    files_with_relative_paths = ((path.relative_to(root).as_posix(), path) for path in files)
+    for relative_path, path in sorted(files_with_relative_paths):
         try:
-            stat = path.stat()
-            relative_path = path.relative_to(root).as_posix()
-            source_digest = _file_content_digest(path)
-        except OSError:
+            mtime_ns, size, source_digest = _file_signature(path)
+        except (OSError, ValueError):
             continue
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+        digest.update(str(mtime_ns).encode("ascii"))
         digest.update(b"\0")
-        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(size).encode("ascii"))
         digest.update(b"\0")
         digest.update(source_digest.encode("ascii"))
         digest.update(b"\0")
@@ -509,7 +533,6 @@ class KnowledgeManager:
             msg = f"Knowledge manager '{self.base_id}' requires storage_path and knowledge_path"
             raise ValueError(msg)
         self.storage_path = self.storage_path.resolve()
-        self.knowledge_path = self.knowledge_path.resolve()
         _ensure_knowledge_directory_ready(self.knowledge_path)
         self._set_settings(self.config, self.runtime_paths, self.storage_path, self.knowledge_path)
         self._base_storage_path = (
@@ -522,6 +545,10 @@ class KnowledgeManager:
             config=self.config,
             runtime_paths=self.runtime_paths,
             source_path=self.knowledge_path,
+            # Not ``self.storage_path``: a private base stores its index under a
+            # state root that its worker container mounts read-write, and the
+            # Git directory decides which commands Git runs here.
+            git_dir=knowledge_git_dir(self.runtime_paths.storage_root, self.knowledge_path),
             lfs_hydrated_head_path=self._base_storage_path / "git_lfs_hydrated_head.txt",
         )
         self._collections = CollectionSpace(
@@ -562,7 +589,11 @@ class KnowledgeManager:
         self.config = config
         self.runtime_paths = runtime_paths
         self.storage_path = storage_path
-        self.knowledge_path = knowledge_path.resolve()
+        # The binding resolved this path; resolving it again would follow a link swapped onto it since.
+        if knowledge_path.resolve() != knowledge_path:
+            msg = f"Knowledge path must be canonical and not go through a link: {knowledge_path}"
+            raise ValueError(msg)
+        self.knowledge_path = knowledge_path
         self._indexing_settings = indexing_settings_key(
             config,
             storage_path,
@@ -631,15 +662,12 @@ class KnowledgeManager:
             self.config,
             self.base_id,
             self._knowledge_source_path(),
+            git_dir=self.git_source.git_dir,
             tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
         )
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
-
-    def _file_signature(self, file_path: Path) -> FileSignature:
-        stat = file_path.stat()
-        return stat.st_mtime_ns, stat.st_size, _file_content_digest(file_path)
 
     def _has_vectors_for_source_path(
         self,
@@ -744,13 +772,14 @@ class KnowledgeManager:
         candidate_vector_db: ChromaDb,
         indexed_count: int,
         source_signature: str,
+        published_revision: str | None,
     ) -> bool:
         state = state_for_publication(
             settings=self._indexing_settings,
             collection=candidate_vector_db.collection_name,
             indexed_count=indexed_count,
             source_signature=source_signature,
-            published_revision=self.git_source.last_synced_head,
+            published_revision=published_revision,
         )
         save_task = asyncio.create_task(
             asyncio.to_thread(save_published_index_state, self._indexing_settings_path, state),
@@ -771,12 +800,14 @@ class KnowledgeManager:
         candidate_vector_db: ChromaDb,
         indexed_count: int,
         source_signature: str,
+        published_revision: str | None,
         publish_state: _CandidatePublishState,
     ) -> None:
         publish_cancelled = await self._save_candidate_publish_metadata(
             candidate_vector_db=candidate_vector_db,
             indexed_count=indexed_count,
             source_signature=source_signature,
+            published_revision=published_revision,
         )
         publish_state.index_published = True
         # Adopt the candidate as this manager's live vector database:
@@ -795,9 +826,30 @@ class KnowledgeManager:
         knowledge: Knowledge,
         indexed_signatures: dict[str, FileSignature],
     ) -> bool:
-        """Index one file while the caller owns the operation lock."""
+        """Index one file while the caller owns the operation lock, reading it once into a private snapshot."""
+        snapshot_dir = Path(cast("str", await asyncio.to_thread(tempfile.mkdtemp, prefix="mindroom-knowledge-")))
+        try:
+            return await self._index_snapshot_locked(
+                resolved_path,
+                snapshot_dir / resolved_path.name,
+                upsert=upsert,
+                knowledge=knowledge,
+                indexed_signatures=indexed_signatures,
+            )
+        finally:
+            await asyncio.to_thread(shutil.rmtree, snapshot_dir, ignore_errors=True)
+
+    async def _index_snapshot_locked(
+        self,
+        resolved_path: Path,
+        snapshot: Path,
+        *,
+        upsert: bool,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+    ) -> bool:
         relative_path = self._relative_path(resolved_path)
-        source_mtime_ns, source_size, source_digest = await asyncio.to_thread(self._file_signature, resolved_path)
+        source_mtime_ns, source_size, source_digest = await asyncio.to_thread(_file_signature, resolved_path, snapshot)
         metadata = {
             SOURCE_PATH_KEY: relative_path,
             SOURCE_MTIME_NS_KEY: source_mtime_ns,
@@ -821,16 +873,14 @@ class KnowledgeManager:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
                 await asyncio.to_thread(knowledge.remove_vectors_by_metadata, {SOURCE_PATH_KEY: relative_path})
-            # Knowledge.ainsert is async by name only: it eventually calls into the
-            # vector database's synchronous batch upsert (e.g. ChromaDB's Rust
-            # _upsert) on the running event loop, blocking every other coroutine
-            # for as long as the embed+upsert batch takes. Use the sync insert API
-            # via asyncio.to_thread so embedding + vector database work runs on a
-            # worker thread and the loop stays responsive to Matrix sync, tool
-            # calls, and cache writes.
+            # Knowledge.ainsert still reads and chunks the file synchronously and
+            # embeds chunk by chunk on the running event loop. Use the sync insert
+            # API via asyncio.to_thread so reading, embedding, and the vector
+            # database write all run on a worker thread and the loop stays
+            # responsive to Matrix sync, tool calls, and cache writes.
             await asyncio.to_thread(
                 knowledge.insert,
-                path=str(resolved_path),
+                path=str(snapshot),
                 metadata=metadata,
                 upsert=upsert,
                 reader=selected_reader,
@@ -929,7 +979,8 @@ class KnowledgeManager:
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return ()
         try:
-            documents: Sequence[Document] = reader.read(resolved_path, name=resolved_path.name)
+            with _knowledge_source_snapshot(resolved_path) as snapshot:
+                documents: Sequence[Document] = reader.read(snapshot, name=resolved_path.name)
         except Exception:
             logger.debug(
                 "Skipping embedding prefetch for knowledge file",
@@ -967,8 +1018,9 @@ class KnowledgeManager:
             if remaining <= 0:
                 break
             try:
-                source_size = resolved_path.stat().st_size
-            except OSError:
+                with open_knowledge_file(resolved_path) as descriptor:
+                    source_size = os.fstat(descriptor).st_size
+            except (OSError, ValueError):
                 continue
             if chunking_strategy.max_chunk_text_bytes(source_size) > remaining:
                 skipped += 1
@@ -1105,10 +1157,10 @@ class KnowledgeManager:
                 knowledge=knowledge,
                 indexed_signatures=indexed_signatures,
             )
-        except FileNotFoundError:
-            # Live source folders (e.g. thread exports) delete files while
-            # a refresh runs; a file vanishing between listing and indexing
-            # is not an indexing failure. Record it so the caller can drop
+        except (FileNotFoundError, ValueError):
+            # Live source folders (e.g. thread exports) delete or replace files while
+            # a refresh runs; a file vanishing or turning into a link between listing
+            # and indexing is not an indexing failure. Record it so the caller can drop
             # it from its completeness accounting: the trailing
             # source-signature comparison then decides whether the
             # surviving corpus is publishable or another refresh is needed.
@@ -1345,13 +1397,59 @@ class KnowledgeManager:
         immediately after its rows land, so its pre-existing unclaimed window is
         bounded by the in-flight file rather than the whole copied corpus.
         """
-        if checkpoint.completed:
-            return False
         vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
-        if not vector_db.exists():
-            return False
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        return bool(collection.get(limit=1, include=[])["ids"])
+        with closing(vector_db):
+            if not vector_db.exists():
+                return False
+            collection = vector_db.client.get_collection(name=vector_db.collection_name)
+            has_rows = bool(collection.get(limit=1, include=[])["ids"])
+            return not checkpoint.completed and has_rows
+
+    async def _inspect_candidate_shape(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: Embedder,
+    ) -> tuple[CandidateCheckpoint | None, bool]:
+        """Return candidate shape, retiring an unreadable unpublished index."""
+        try:
+            holds_unclaimed_rows = await asyncio.to_thread(
+                self._candidate_holds_unclaimed_rows,
+                checkpoint,
+                embedder=embedder,
+            )
+        except InternalError as inspection_error:
+            error_detail = str(inspection_error).lower()
+            if not any(
+                marker in error_detail
+                for marker in (
+                    "error constructing hnsw segment reader",
+                    "error deserializing pickle file",
+                    "failed to apply logs to the hnsw segment writer",
+                )
+            ):
+                raise
+            # A candidate is never live until publication, so an unreadable
+            # one may be abandoned without risking the last-good index.
+            # Retire its checkpoint even when provider cleanup fails; the
+            # superseded-collection sweep can retry physical reclamation.
+            logger.warning(
+                "Discarding unreadable knowledge candidate",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+                exc_info=True,
+            )
+            try:
+                await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+            except OSError as cleanup_error:
+                # Do not delete the collection unless its durable resume pointer
+                # was retired first. A read-only storage failure cannot be
+                # recovered safely in process, but both indexes remain intact.
+                message = "Cannot retire unreadable knowledge candidate checkpoint"
+                raise RuntimeError(message) from cleanup_error
+            await delete_collection(self._collections, checkpoint.collection)
+            return None, False
+        return checkpoint, holds_unclaimed_rows
 
     async def _rebuild_candidate_collection(
         self,
@@ -1486,13 +1584,20 @@ class KnowledgeManager:
             checkpoint = None
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
+        candidate_holds_unclaimed_rows = False
+        if checkpoint is not None:
+            checkpoint, candidate_holds_unclaimed_rows = await self._inspect_candidate_shape(
+                checkpoint,
+                embedder=embedder,
+            )
+
         rebuild = checkpoint is None
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
                 collection=candidate_collection_name(self._collections),
                 settings=self._indexing_settings,
             )
-        elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint, embedder=embedder):
+        elif candidate_holds_unclaimed_rows:
             logger.warning(
                 "Rebuilding a knowledge candidate holding vectors it never claimed",
                 base_id=self.base_id,
@@ -1501,13 +1606,22 @@ class KnowledgeManager:
             rebuild = True
 
         if rebuild:
+            reusable_published_collection = (
+                None if force_reindex else self._reusable_published_collection(persisted_state)
+            )
             opened = await self._rebuild_candidate_collection(
                 checkpoint,
                 embedder=embedder,
-                published_collection=None if force_reindex else self._reusable_published_collection(persisted_state),
+                published_collection=reusable_published_collection,
+            )
+            baseline_revision = (
+                persisted_state.published_revision
+                if reusable_published_collection is not None and persisted_state is not None
+                else None
             )
         else:
             opened = await self._resume_candidate_collection(checkpoint, embedder=embedder)
+            baseline_revision = checkpoint.target_revision
         checkpoint = opened.checkpoint
 
         run = _CandidateRun(
@@ -1515,6 +1629,7 @@ class KnowledgeManager:
             knowledge=opened.knowledge,
             vector_db=opened.vector_db,
             embedder=embedder,
+            baseline_revision=baseline_revision,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
             # Rows this process just copied need no vector-existence probe: the
@@ -1592,8 +1707,8 @@ class KnowledgeManager:
             for file_path in batch:
                 relative_path = self._relative_path(file_path)
                 try:
-                    signature = self._file_signature(file_path)
-                except OSError:
+                    signature = _file_signature(file_path)
+                except (OSError, ValueError):
                     continue
                 scanned.append((relative_path, signature, file_path))
             return scanned
@@ -1647,12 +1762,35 @@ class KnowledgeManager:
         self,
         run: _CandidateRun,
         files: Sequence[Path],
+        *,
+        changed_files: frozenset[str] | None = None,
     ) -> _CandidateReconciliation:
         """Align the durable candidate with the current source listing."""
         # ``vanished`` describes files lost during one indexing pass, so it must
         # not outlive the pass and permanently exclude a path that came back.
         run.vanished.clear()
-        signatures = await self._file_signatures_for(files)
+        if changed_files is None:
+            signatures = await self._file_signatures_for(files)
+        else:
+            files_by_relative_path = {self._relative_path(file_path): file_path for file_path in files}
+            files_to_scan = [
+                file_path
+                for relative_path, file_path in files_by_relative_path.items()
+                if relative_path in changed_files or relative_path not in run.completed
+            ]
+            signatures = {
+                relative_path: (run.completed[relative_path], file_path)
+                for relative_path, file_path in files_by_relative_path.items()
+                if relative_path not in changed_files and relative_path in run.completed
+            }
+            signatures.update(await self._file_signatures_for(files_to_scan))
+            logger.info(
+                "Used knowledge Git delta for candidate reconciliation",
+                base_id=self.base_id,
+                changed_count=len(changed_files),
+                scanned_count=len(files_to_scan),
+                managed_count=len(files),
+            )
         present = set(signatures)
 
         # Vectors are dropped for paths that left the corpus and for paths whose
@@ -1740,9 +1878,9 @@ class KnowledgeManager:
                 status="failed" if run.failed else "building",
                 completed=dict(run.completed),
                 failed=dict(run.failed),
-                # The target revision advances only once the reconciled state
-                # it describes is about to be durable.
-                target_revision=self.git_source.last_synced_head,
+                # The baseline advances only after reconciliation returns, so
+                # this revision describes the durable candidate exactly.
+                target_revision=run.baseline_revision,
                 # The corpus this candidate targets, not a high-water mark of
                 # completed files: status subtracts completed from this to
                 # report how much work is still outstanding.
@@ -1863,8 +2001,17 @@ class KnowledgeManager:
         """Reconcile, index and publish until the candidate matches the live source."""
         for _round in range(_MAX_CANDIDATE_RECONCILE_ROUNDS):
             round_revision = await self._source_revision()
+            changed_files = (
+                await self.git_source.changed_files_between(
+                    run.baseline_revision,
+                    round_revision,
+                )
+                if _round == 0 and self.git_source.is_configured()
+                else None
+            )
             files = await asyncio.to_thread(self.list_files)
-            plan = await self._reconcile_candidate(run, files)
+            plan = await self._reconcile_candidate(run, files, changed_files=changed_files)
+            run.baseline_revision = round_revision
             progress.total = len(plan.expected)
             progress.completed = len(run.completed)
             if run.checkpoint.total_files != run.total_files:
@@ -1951,6 +2098,7 @@ class KnowledgeManager:
                 candidate_vector_db=run.vector_db,
                 indexed_count=len(run.completed),
                 source_signature=source_signature,
+                published_revision=run.baseline_revision,
                 publish_state=publish_state,
             )
         finally:

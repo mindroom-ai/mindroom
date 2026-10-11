@@ -4,8 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Literal, cast
+from urllib.parse import urlsplit
+
+from mindroom.desktop.input import DESKTOP_SAFE_KEYS
+from mindroom.matrix.encrypted_file import (
+    ENCRYPTED_FILE_KEY_ALGORITHM,
+    ENCRYPTED_FILE_KEY_TYPE,
+    ENCRYPTED_FILE_VERSION,
+    encrypted_file_content_from_values,
+)
 
 DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
@@ -14,11 +23,18 @@ DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE = "io.mindroom.desktop.pairing_accepted.v1"
 DESKTOP_PROTOCOL_VERSION = 2
 MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
+MAX_SHELL_OUTPUT_BYTES = 10 * 1024 * 1024
+SHELL_OUTPUT_MIME_TYPE = "text/plain"
+# Measured as ASCII-escaped JSON, the form nio encrypts, including the bridge's metrics. Olm framing and
+# base64 then add a third, and maximum-length Matrix IDs add about 1.5 KiB of envelope. The rest covers the
+# request_status receipt that wraps a stored response.
+MAX_INLINE_RESPONSE_BYTES = 40_960
 _MAX_COMMAND_PARAMETERS_BYTES = 16 * 1024
 _PAIRING_VERIFICATION_HEX_CHARS = 16
 
 type DesktopAction = Literal[
     "status",
+    "request_status",
     "list_apps",
     "launch_app",
     "get_app_state",
@@ -28,11 +44,20 @@ type DesktopAction = Literal[
     "scroll_element",
     "perform_action",
     "click",
+    "double_click",
+    "hover",
+    "drag",
     "type_text",
     "scroll",
     "keypress",
     "browser_observe",
     "browser_control",
+    "list_folders",
+    "list_directory",
+    "read_file",
+    "run_shell",
+    "check_shell",
+    "kill_shell",
 ]
 
 DESKTOP_CONTROL_ACTIONS = frozenset(
@@ -43,6 +68,9 @@ DESKTOP_CONTROL_ACTIONS = frozenset(
         "scroll_element",
         "perform_action",
         "click",
+        "double_click",
+        "hover",
+        "drag",
         "type_text",
         "scroll",
         "keypress",
@@ -50,33 +78,107 @@ DESKTOP_CONTROL_ACTIONS = frozenset(
     },
 )
 DESKTOP_BROWSER_ACTIONS = frozenset({"browser_observe", "browser_control"})
+DESKTOP_FILE_ACTIONS = frozenset({"list_folders", "list_directory", "read_file"})
+DESKTOP_SHELL_ACTIONS = frozenset({"run_shell", "check_shell", "kill_shell"})
 DESKTOP_APP_ACTIONS = frozenset(
     {"get_app_state", "screenshot", *(DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS)},
 )
-DESKTOP_SAFE_KEYS = frozenset(
+_DESKTOP_ACTIONS = frozenset(
     {
-        "backspace",
-        "delete",
-        "down",
-        "end",
-        "enter",
-        "esc",
-        "escape",
-        "home",
-        "left",
-        "pagedown",
-        "pageup",
-        "return",
-        "right",
-        "tab",
-        "up",
+        "status",
+        "request_status",
+        "list_apps",
+        *DESKTOP_APP_ACTIONS,
+        *DESKTOP_BROWSER_ACTIONS,
+        *DESKTOP_FILE_ACTIONS,
+        *DESKTOP_SHELL_ACTIONS,
     },
 )
-_DESKTOP_ACTIONS = frozenset({"status", "list_apps", *DESKTOP_APP_ACTIONS, *DESKTOP_BROWSER_ACTIONS})
+
+
+type DesktopObservationMode = Literal["tree", "screenshot", "both"]
+type DesktopMediaKind = Literal["screenshot", "output_attachment"]
+
+_MEDIA_MIME_TYPES: dict[DesktopMediaKind, frozenset[str]] = {
+    "screenshot": frozenset({"image/jpeg", "image/png"}),
+    "output_attachment": frozenset({SHELL_OUTPUT_MIME_TYPE}),
+}
+MEDIA_MAX_BYTES: dict[DesktopMediaKind, int] = {
+    "screenshot": MAX_SCREENSHOT_BYTES,
+    "output_attachment": MAX_SHELL_OUTPUT_BYTES,
+}
+
+
+def desktop_observation_mode(action: str, value: object = "both") -> DesktopObservationMode:
+    """Validate explicit native observation choices before any local operation."""
+    if not isinstance(value, str) or value not in {"tree", "screenshot", "both"}:
+        msg = "Desktop observation must be tree, screenshot, or both."
+        raise DesktopProtocolError(msg)
+    if value != "both" and action not in DESKTOP_APP_ACTIONS:
+        msg = "Desktop observation selection requires an application action."
+        raise DesktopProtocolError(msg)
+    if action == "screenshot" and value == "tree":
+        msg = "The screenshot action requires a screenshot observation."
+        raise DesktopProtocolError(msg)
+    return cast("DesktopObservationMode", value)
 
 
 class DesktopProtocolError(ValueError):
     """One desktop wire payload is malformed or unsupported."""
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopSetupDescriptor:
+    """Copyable setup data requiring local identity confirmation before pairing."""
+
+    homeserver: str
+    user_id: str
+    code: str
+    controller_user_id: str
+    controller_device_id: str
+    controller_ed25519: str
+    requester_id: str
+    agent_name: str
+    cloudflare_access: bool
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize transient setup data, including the short-lived pairing code."""
+        return {"v": 1, "kind": "mindroom_desktop_setup", **asdict(self)}
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopSetupDescriptor:
+        """Validate the exact descriptor shape before showing its identity locally."""
+        content = _object_mapping(raw, "setup")
+        fields = {
+            "homeserver",
+            "user_id",
+            "code",
+            "controller_user_id",
+            "controller_device_id",
+            "controller_ed25519",
+            "requester_id",
+            "agent_name",
+            "cloudflare_access",
+        }
+        if (
+            set(content) != fields | {"v", "kind"}
+            or _required_int(content, "v", "setup") != 1
+            or content.get("kind") != "mindroom_desktop_setup"
+            or not isinstance(content["cloudflare_access"], bool)
+        ):
+            msg = "Desktop setup descriptor has unsupported fields, version, or type."
+            raise DesktopProtocolError(msg)
+        return cls(
+            homeserver=_setup_homeserver(content),
+            user_id=_bounded_str(content, "user_id", "setup", max_length=512),
+            code=_bounded_str(content, "code", "setup", max_length=256),
+            controller_user_id=_bounded_str(content, "controller_user_id", "setup", max_length=512),
+            controller_device_id=_bounded_str(content, "controller_device_id", "setup", max_length=256),
+            controller_ed25519=_bounded_str(content, "controller_ed25519", "setup", max_length=256),
+            requester_id=_bounded_str(content, "requester_id", "setup", max_length=512),
+            agent_name=_bounded_str(content, "agent_name", "setup", max_length=256),
+            cloudflare_access=content["cloudflare_access"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,52 +243,49 @@ class EncryptedDesktopMedia:
 
     def to_content(self) -> dict[str, object]:
         """Serialize using the Matrix encrypted-file shape."""
-        return {
-            "url": self.url,
-            "key": {
-                "alg": "A256CTR",
-                "ext": True,
-                "k": self.key,
-                "key_ops": ["encrypt", "decrypt"],
-                "kty": "oct",
-            },
-            "iv": self.iv,
-            "hashes": {"sha256": self.sha256},
-            "v": "v2",
-            "mimetype": self.mime_type,
-            "size": self.size,
-        }
+        return encrypted_file_content_from_values(
+            url=self.url,
+            key=self.key,
+            iv=self.iv,
+            sha256=self.sha256,
+            mime_type=self.mime_type,
+            size=self.size,
+        )
 
     @classmethod
-    def from_content(cls, raw: object) -> EncryptedDesktopMedia:
-        """Parse one strict encrypted-file payload."""
-        content = _object_mapping(raw, "screenshot")
-        key = _object_mapping(content.get("key"), "screenshot.key")
-        hashes = _object_mapping(content.get("hashes"), "screenshot.hashes")
-        if key.get("alg") != "A256CTR" or key.get("kty") != "oct" or key.get("ext") is not True:
-            msg = "screenshot.key must describe an extractable A256CTR octet key."
+    def from_content(cls, raw: object, *, kind: DesktopMediaKind = "screenshot") -> EncryptedDesktopMedia:
+        """Parse one strict encrypted-file payload of the media kind expected in its response field."""
+        content = _object_mapping(raw, kind)
+        key = _object_mapping(content.get("key"), f"{kind}.key")
+        hashes = _object_mapping(content.get("hashes"), f"{kind}.hashes")
+        if (
+            key.get("alg") != ENCRYPTED_FILE_KEY_ALGORITHM
+            or key.get("kty") != ENCRYPTED_FILE_KEY_TYPE
+            or key.get("ext") is not True
+        ):
+            msg = f"{kind}.key must describe an extractable {ENCRYPTED_FILE_KEY_ALGORITHM} octet key."
             raise DesktopProtocolError(msg)
-        url = _required_str(content, "url", "screenshot")
+        url = _required_str(content, "url", kind)
         if not url.startswith("mxc://"):
-            msg = "screenshot.url must be an mxc:// URI."
+            msg = f"{kind}.url must be an mxc:// URI."
             raise DesktopProtocolError(msg)
-        version = _required_str(content, "v", "screenshot")
-        if version != "v2":
-            msg = "screenshot.v must be v2."
+        version = _required_str(content, "v", kind)
+        if version != ENCRYPTED_FILE_VERSION:
+            msg = f"{kind}.v must be {ENCRYPTED_FILE_VERSION}."
             raise DesktopProtocolError(msg)
-        size = _required_int(content, "size", "screenshot")
-        if size <= 0 or size > MAX_SCREENSHOT_BYTES:
-            msg = f"screenshot.size must be between 1 and {MAX_SCREENSHOT_BYTES}."
+        size = _required_int(content, "size", kind)
+        if size <= 0 or size > MEDIA_MAX_BYTES[kind]:
+            msg = f"{kind}.size must be between 1 and {MEDIA_MAX_BYTES[kind]}."
             raise DesktopProtocolError(msg)
-        mime_type = _required_str(content, "mimetype", "screenshot")
-        if mime_type not in {"image/jpeg", "image/png"}:
-            msg = "screenshot.mimetype must be image/jpeg or image/png."
+        mime_type = _required_str(content, "mimetype", kind)
+        if mime_type not in _MEDIA_MIME_TYPES[kind]:
+            msg = f"{kind}.mimetype must be {' or '.join(sorted(_MEDIA_MIME_TYPES[kind]))}."
             raise DesktopProtocolError(msg)
         return cls(
             url=url,
-            key=_required_str(key, "k", "screenshot.key"),
-            iv=_required_str(content, "iv", "screenshot"),
-            sha256=_required_str(hashes, "sha256", "screenshot.hashes"),
+            key=_required_str(key, "k", f"{kind}.key"),
+            iv=_required_str(content, "iv", kind),
+            sha256=_required_str(hashes, "sha256", f"{kind}.hashes"),
             mime_type=mime_type,
             size=size,
         )
@@ -292,6 +391,10 @@ class DesktopResponse:
             content["screenshot"] = self.screenshot.to_content()
         return content
 
+    def content_bytes(self) -> int:
+        """Return this response's size inside the Olm plaintext, serialized as nio's ``Api.to_json`` does."""
+        return len(json.dumps(self.to_content(), separators=(",", ":")).encode())
+
     @classmethod
     def from_content(cls, raw: object) -> DesktopResponse:
         """Parse one strict response payload."""
@@ -366,6 +469,18 @@ def _bounded_str(content: dict[str, object], key: str, label: str, *, max_length
     return value
 
 
+def _setup_homeserver(content: dict[str, object]) -> str:
+    # The app shows this URL as the sign-in server, so nothing may disguise its real host.
+    # Plain http would send the sign-in over the network unencrypted, so it is only for a homeserver on this computer.
+    value = _bounded_str(content, "homeserver", "setup", max_length=2048)
+    parts = urlsplit(value)
+    local_http = parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"}
+    if not value.isascii() or not (parts.scheme == "https" or local_http) or not parts.hostname or "@" in parts.netloc:
+        msg = "Desktop setup homeserver must be a plain https URL, or http on localhost."
+        raise DesktopProtocolError(msg)
+    return value
+
+
 def _require_protocol_version(content: dict[str, object]) -> None:
     version = _required_int(content, "v", "payload")
     if version != DESKTOP_PROTOCOL_VERSION:
@@ -378,20 +493,30 @@ __all__ = [
     "DESKTOP_BROWSER_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
+    "DESKTOP_FILE_ACTIONS",
     "DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE",
     "DESKTOP_PAIRING_CLAIM_EVENT_TYPE",
     "DESKTOP_PROTOCOL_VERSION",
     "DESKTOP_RESPONSE_EVENT_TYPE",
     "DESKTOP_SAFE_KEYS",
+    "DESKTOP_SHELL_ACTIONS",
     "MAX_COMMAND_TTL_MS",
+    "MAX_INLINE_RESPONSE_BYTES",
     "MAX_SCREENSHOT_BYTES",
+    "MAX_SHELL_OUTPUT_BYTES",
+    "MEDIA_MAX_BYTES",
+    "SHELL_OUTPUT_MIME_TYPE",
     "DesktopAction",
     "DesktopCommand",
+    "DesktopMediaKind",
+    "DesktopObservationMode",
     "DesktopPairingAccepted",
     "DesktopPairingClaim",
     "DesktopProtocolError",
     "DesktopResponse",
+    "DesktopSetupDescriptor",
     "EncryptedDesktopMedia",
+    "desktop_observation_mode",
     "desktop_pairing_verification",
     "event_content",
 ]

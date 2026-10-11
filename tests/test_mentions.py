@@ -13,12 +13,39 @@ from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
+from mindroom.matrix import mentions as mentions_module
+from mindroom.matrix.mentions import (
+    format_message_with_mentions,
+    parse_mentions_in_text,
+    resolve_mentioned_user_ids_from_text,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
+from tests.cpu_budget_helpers import cpu_budget
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
+
+
+def test_bulk_mentions_bound_overlap_and_deduplication_work() -> None:
+    """Bulk mention scanning and ordered deduplication finish within a bounded CPU budget."""
+    distinct_user_ids = [f"@a{index}:b" for index in range(10_000)]
+    for user_ids, expected_user_ids in (
+        (["@a:b"] * 12_000, ["@a:b"]),
+        ([*distinct_user_ids, *distinct_user_ids[:2]], distinct_user_ids),
+    ):
+        text = " ".join(user_ids) + " "
+        with cpu_budget(0.5):
+            tokens = mentions_module._scan_mention_tokens(text)
+        assert [token.explicit_user_id for token in tokens] == user_ids
+
+        replacements = [
+            mentions_module._MentionReplacement(start=0, end=0, plain_text="", markdown_text="", user_id=user_id)
+            for user_id in user_ids
+        ]
+        with cpu_budget(0.5):
+            mentioned_user_ids = mentions_module._mentioned_user_ids_from_replacements(replacements)
+        assert mentioned_user_ids == expected_user_ids
 
 
 def _default_runtime_paths() -> constants_mod.RuntimePaths:
@@ -118,6 +145,52 @@ class TestMentionParsing:
         assert processed == "plain **markdown** text"
         assert markdown == "plain **markdown** text"
         assert mentions == []
+
+    def test_parse_validates_at_most_one_user_id_length_of_an_overlong_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A 64 KiB single-token body validates only prefixes a Matrix user ID could be, not every prefix."""
+        config = _make_config(_default_runtime_paths())
+        validated: list[str] = []
+        original = mentions_module._is_valid_explicit_matrix_user_id
+
+        def counting_validation(candidate: str) -> bool:
+            validated.append(candidate)
+            return original(candidate)
+
+        monkeypatch.setattr(mentions_module, "_is_valid_explicit_matrix_user_id", counting_validation)
+        token = "@calculator:localhost" + "x" * (64 * 1024)
+
+        _parse_mentions_in_text(token, config)
+
+        assert len(validated) <= 255
+        assert max(map(len, validated)) <= 255
+
+    def test_resolving_a_2_mib_sidecar_body_stays_within_a_cpu_budget(self) -> None:
+        """A resolved long-text body full of mention-like tokens costs a bounded scan, and real mentions still resolve."""
+        config = _make_config(_default_runtime_paths())
+        runtime_paths = _runtime_paths_for(config)
+        for token in ("@" + "a" * 100 + ":!" + "b" * 150, "@a"):
+            body = "@calculator please ask @alice:example.org " + " ".join([token] * (2 * 1024 * 1024 // len(token)))
+            with cpu_budget(0.2):
+                user_ids = resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
+            assert user_ids == ["@actual_calculator:localhost", "@alice:example.org"]
+
+    def test_resolving_an_overlong_body_drops_the_token_cut_by_the_scan_limit(self) -> None:
+        """A mention straddling the scan limit is dropped instead of resolving its cut-off prefix."""
+        config = _make_config(_default_runtime_paths())
+        runtime_paths = _runtime_paths_for(config)
+        limit = mentions_module._MAX_INBOUND_MENTION_SCAN_CHARS
+        for mention, kept_length, expected_user_ids in (
+            ("@calculator_notes", len("@calculator"), ["@actual_email:localhost"]),
+            ("@alice:example.org", len("@alice:example.o"), ["@actual_email:localhost"]),
+            ("@calculator ", len("@calculator"), ["@actual_email:localhost", "@actual_calculator:localhost"]),
+        ):
+            filler = "@email " + "x" * (limit - len("@email ") - kept_length - 1) + " "
+            body = filler + mention + " trailing"
+            assert body[:limit] == filler + mention[:kept_length]
+            assert resolve_mentioned_user_ids_from_text(body, config, runtime_paths) == expected_user_ids
 
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""

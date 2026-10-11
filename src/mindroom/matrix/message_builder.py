@@ -117,11 +117,10 @@ _ALLOWED_STYLE_PROPERTIES = frozenset(
     },
 )
 _SAFE_STYLE_VALUE_PATTERN = re.compile(r"[#(),.%\s0-9A-Za-z-]+")
-_UNTERMINATED_HTML_FRAGMENT_PATTERN = re.compile(
-    r"<(?:(?:!--)|(?:\?)|(?:![A-Za-z])|(?:/?[A-Za-z]))[^>\r\n]*(?=$|[\r\n])",
-)
+_HTML_FRAGMENT_OPENER_PATTERN = re.compile(r"<(?:!--|\?|![A-Za-z]|/?[A-Za-z])")
+_HTML_LINE_PATTERN = re.compile(r"[^\r\n]+")
 _RAW_HTML_TAG_LINE_START_PATTERN = re.compile(
-    r"^([ ]{0,3})(</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>)",
+    r"^([ ]{0,3})(</?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*)?/?>)",
 )
 _SUPPORTED_BLOCK_LINE_START_PATTERN = re.compile(
     rf"^[ ]{{0,3}}</?(?:{'|'.join(sorted(_BLOCK_FORMATTED_BODY_TAGS))})\b",
@@ -298,9 +297,19 @@ def _normalize_supported_block_html_boundaries(text: str) -> str:
     return _transform_markdown_outside_fenced_code(text, _normalize_supported_block_html_boundaries_in_text)
 
 
+def _escape_unterminated_html_fragment(line_match: re.Match[str]) -> str:
+    """Escape a line from its first tag opener that no later ``>`` closes."""
+    line = line_match.group(0)
+    # Openers before the line's last ``>`` are closed by it, so search only after it.
+    opener = _HTML_FRAGMENT_OPENER_PATTERN.search(line, line.rfind(">") + 1)
+    if opener is None:
+        return line
+    return line[: opener.start()] + escape(line[opener.start() :])
+
+
 def _escape_unterminated_html_fragments(html_text: str) -> str:
     """Escape malformed tag-like fragments so HTMLParser preserves them as text."""
-    return _UNTERMINATED_HTML_FRAGMENT_PATTERN.sub(lambda match: escape(match.group(0)), html_text)
+    return _HTML_LINE_PATTERN.sub(_escape_unterminated_html_fragment, html_text)
 
 
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
@@ -464,6 +473,16 @@ def markdown_to_html(text: str) -> str:
     normalized_text = _normalize_supported_block_html_boundaries(escaped_text)
     html_text: str = _MARKDOWN_RENDERER.render(normalized_text)
     return _sanitize_formatted_body_html(html_text)
+
+
+def opens_with_markdown_block(text: str) -> bool:
+    """Return whether markdown text opens with a block that only renders at the start of a line.
+
+    Tables, headings, lists, quotes, code fences, and rules qualify; a paragraph does not.
+    Only the first two lines are parsed, which keeps per-chunk streaming renders cheap and still decides a table or one-line setext heading.
+    """
+    tokens = _MARKDOWN_RENDERER.parse("\n".join(text.lstrip().split("\n", 2)[:2]))
+    return bool(tokens) and tokens[0].type != "paragraph_open"
 
 
 def build_thread_relation(

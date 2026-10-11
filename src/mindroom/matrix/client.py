@@ -26,6 +26,7 @@ from mindroom.matrix.client_room_admin import (
     invite_to_room,
     join_room,
     leave_room,
+    room_admin_power_user,
 )
 from mindroom.matrix.client_session import (
     PermanentMatrixStartupError,
@@ -60,6 +61,7 @@ __all__ = [
     "replace_visible_message",
     "resolve_room_encryption_for_delivery",
     "restore_login",
+    "room_admin_power_user",
     "send_file_message",
     "send_message_result",
     "send_room_event_result",

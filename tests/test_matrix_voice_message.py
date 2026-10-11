@@ -333,7 +333,7 @@ async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_p
     # audio was handed the companion instead of reading a projection that
     # cannot have seen it yet.
     assert [call.kwargs for call in context.conversation_reader.latest_thread_event_id.await_args_list] == [
-        {"room_id": "!room:localhost", "thread_id": "$thread-root"},
+        {"room_id": "!room:localhost", "thread_id": "$thread-root", "known_latest_thread_event_id": None},
         {
             "room_id": "!room:localhost",
             "thread_id": "$thread-root",

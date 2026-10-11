@@ -48,6 +48,8 @@ _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
     "src/mindroom/tool_system/worker_routing.py",
 }
 _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
+    # Canonical prepared dispatch installs its explicitly retained runtime identity.
+    "src/mindroom/tool_system/agent_tool_calls.py",
     "src/mindroom/api/openai_compat.py",
     "src/mindroom/api/sandbox_runner.py",
     "src/mindroom/bot.py",
@@ -80,9 +82,9 @@ _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
     ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
     ("src/mindroom/agent_storage.py", "create_session_storage", "execution_identity"),
     ("src/mindroom/agents.py", "create_agent", "execution_identity"),
-    ("src/mindroom/credentials.py", "load_scoped_credentials", "worker_target"),
-    ("src/mindroom/credentials.py", "_resolve_worker_credentials_manager", "worker_target"),
-    ("src/mindroom/credentials.py", "save_scoped_credentials", "worker_target"),
+    ("src/mindroom/credentials/manager.py", "load_scoped_credentials", "worker_target"),
+    ("src/mindroom/credentials/manager.py", "_resolve_worker_credentials_manager", "worker_target"),
+    ("src/mindroom/credentials/manager.py", "save_scoped_credentials", "worker_target"),
     ("src/mindroom/tool_system/metadata.py", "_build_tool_instance", "worker_target"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_execution", "execution_identity"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime", "execution_identity"),
@@ -237,6 +239,17 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
             if not isinstance(node, ast.Call):
                 continue
             call_name = _call_name(node)
+            # These calls use ToolRuntimeContext's bound method, which builds
+            # and passes execution_identity explicitly to the routing helper.
+            # Keep exact expressions: a new free helper call still needs review.
+            bound_target_calls = {
+                ("src/mindroom/approval/execution.py", "runtime_context.resolve_worker_target"),
+                ("src/mindroom/approval/tool_owners.py", "context.resolve_worker_target"),
+                ("src/mindroom/agent_cli/response_owner.py", "runtime.resolve_worker_target"),
+                ("src/mindroom/custom_tools/dynamic_workflow.py", "context.resolve_worker_target"),
+            }
+            if (relative_path, ast.unparse(node.func)) in bound_target_calls:
+                continue
             required_keyword = _EXPLICIT_RUNTIME_SCOPE_KEYWORDS.get(call_name)
             if required_keyword is None:
                 continue
@@ -512,7 +525,7 @@ class TestResolveConfigRelativePath:
         custom_storage = tmp_path / "custom-storage"
         config_path = config_dir / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         (config_dir / ".env").write_text(
@@ -538,7 +551,7 @@ class TestResolveConfigRelativePath:
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         (config_dir / ".env").write_text("MINDROOM_STORAGE_PATH=relative_storage\n", encoding="utf-8")
@@ -560,7 +573,7 @@ class TestResolveConfigRelativePath:
         other_config = other_dir / "config.yaml"
         for path in (active_config, other_config):
             path.write_text(
-                "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+                "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
                 encoding="utf-8",
             )
         (active_dir / ".env").write_text(
@@ -595,7 +608,7 @@ class TestResolveConfigRelativePath:
         other_config = other_dir / "config.yaml"
         for path in (active_config, other_config):
             path.write_text(
-                "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+                "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
                 encoding="utf-8",
             )
 
@@ -617,7 +630,7 @@ class TestResolveConfigRelativePath:
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         (config_dir / ".env").write_text(
@@ -641,7 +654,7 @@ class TestResolveConfigRelativePath:
         config_path = tmp_path / "config.yaml"
         storage_path = tmp_path / "custom-storage"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
@@ -659,7 +672,7 @@ class TestResolveConfigRelativePath:
         """Explicit RuntimePaths should carry non-path env values without ambient fallbacks."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
 
@@ -689,7 +702,7 @@ class TestResolveConfigRelativePath:
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         (config_dir / ".env").write_text(
@@ -715,7 +728,7 @@ class TestResolveConfigRelativePath:
                 "models:\n"
                 "  default:\n"
                 "    provider: openai\n"
-                "    id: gpt-5.4\n"
+                "    id: gpt-6-astra\n"
                 "agents: {}\n"
                 "router:\n"
                 "  model: default\n"
@@ -741,7 +754,7 @@ class TestResolveConfigRelativePath:
                 "models:\n"
                 "  default:\n"
                 "    provider: openai\n"
-                "    id: gpt-5.4\n"
+                "    id: gpt-6-astra\n"
                 "agents:\n"
                 "  general:\n"
                 "    display_name: General\n"
@@ -774,7 +787,7 @@ class TestResolveConfigRelativePath:
                 "models:\n"
                 "  default:\n"
                 "    provider: openai\n"
-                "    id: gpt-5.4\n"
+                "    id: gpt-6-astra\n"
                 "agents:\n"
                 "  general:\n"
                 "    display_name: General\n"
@@ -796,7 +809,7 @@ class TestResolveConfigRelativePath:
         config_path = tmp_path / "config.yaml"
         storage_path = tmp_path / "override-storage"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
 
@@ -814,7 +827,7 @@ class TestResolveConfigRelativePath:
         storage_path = tmp_path / "custom-storage"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
 
@@ -837,7 +850,7 @@ class TestResolveConfigRelativePath:
         storage_path = tmp_path / "override-storage"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
 

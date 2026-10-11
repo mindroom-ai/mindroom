@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
 from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -32,8 +33,9 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.history.agno_compat_message_builder import apply_patch
 from mindroom.history.storage import (
-    write_scope_state,
+    set_force_compaction_state,
 )
 from mindroom.history.types import (
     CompactionLifecycleFailure,
@@ -49,6 +51,7 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.usage.storage import quote_identifier
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -57,6 +60,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    seed_session,
 )
 
 if TYPE_CHECKING:
@@ -294,6 +298,7 @@ def _agent(
     num_history_runs: int | None = None,
     num_history_messages: int | None = None,
 ) -> Agent:
+    apply_patch()
     return Agent(
         id=agent_id,
         name=name,
@@ -338,6 +343,7 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
         discovered_hooks=tuple(callbacks),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
         plugin_order=0,
     )
@@ -357,8 +363,8 @@ def _forced_compaction_context(
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    seed_session(storage, session)
     runtime_context = _hook_runtime_context(
         config=config,
         runtime_paths=runtime_paths,
@@ -366,3 +372,61 @@ def _forced_compaction_context(
         session_id=session.session_id,
     )
     return config, runtime_paths, storage, scope, runtime_context
+
+
+def archived_run_ids(storage: object, session_id: str = "session-1") -> list[str]:
+    """Return one session's archived run ids in archive order."""
+    assert isinstance(storage, SqliteDb)
+    table = quote_identifier(storage.session_table_name + "_compacted_runs")
+    with storage.db_engine.connect() as connection:
+        return [
+            row[0]
+            for row in connection.exec_driver_sql(
+                f"SELECT run_id FROM {table} WHERE session_id = ? ORDER BY id",  # noqa: S608
+                (session_id,),
+            )
+        ]
+
+
+def archived_content(storage: object, session_id: str = "session-1") -> dict[str, bool]:
+    """Return one session's archived run ids mapped to whether their content is still stored."""
+    assert isinstance(storage, SqliteDb)
+    table = quote_identifier(storage.session_table_name + "_compacted_runs")
+    with storage.db_engine.connect() as connection:
+        return {
+            row[0]: bool(row[1])
+            for row in connection.exec_driver_sql(
+                f"SELECT run_id, run_data IS NOT NULL FROM {table} WHERE session_id = ? ORDER BY id",  # noqa: S608
+                (session_id,),
+            )
+        }
+
+
+@dataclass(frozen=True)
+class StoredGeneration:
+    """One compaction generation row as stored."""
+
+    summary: str | None
+    summary_model: str | None
+    legacy: bool
+
+
+def compaction_generations(storage: object, scope_key: str, session_id: str = "session-1") -> list[StoredGeneration]:
+    """Return one scope's compaction generations, oldest first."""
+    assert isinstance(storage, SqliteDb)
+    table = quote_identifier(storage.session_table_name + "_compactions")
+    with storage.db_engine.connect() as connection:
+        return [
+            StoredGeneration(summary=row[0], summary_model=row[1], legacy=bool(row[2]))
+            for row in connection.exec_driver_sql(
+                f"SELECT summary, summary_model, legacy FROM {table} "  # noqa: S608
+                "WHERE session_id = ? AND scope_key = ? ORDER BY id",
+                (session_id, scope_key),
+            )
+        ]
+
+
+def latest_summary_model(storage: object, scope: HistoryScope, session_id: str = "session-1") -> str | None:
+    """Return the model recorded for the scope's latest compaction generation."""
+    generations = compaction_generations(storage, scope.key, session_id)
+    return generations[-1].summary_model if generations else None

@@ -1,0 +1,473 @@
+{
+  "batches": [
+    [
+      {
+        "client": 0,
+        "kind": "stop_mindroom",
+        "operation_id": 57,
+        "target": null,
+        "thread": 0
+      }
+    ],
+    [
+      {
+        "client": 3,
+        "kind": "plain_reply",
+        "operation_id": 0,
+        "target": "response:root:3",
+        "thread": 3
+      },
+      {
+        "client": 1,
+        "kind": "thread_message",
+        "operation_id": 1,
+        "target": "root:2",
+        "thread": 2
+      },
+      {
+        "client": 0,
+        "kind": "thread_message",
+        "operation_id": 2,
+        "target": "root:5",
+        "thread": 5
+      },
+      {
+        "client": 5,
+        "kind": "plain_reply",
+        "operation_id": 3,
+        "target": "response:root:7",
+        "thread": 7
+      },
+      {
+        "client": 1,
+        "kind": "thread_message",
+        "operation_id": 4,
+        "target": "root:6",
+        "thread": 6
+      },
+      {
+        "client": 4,
+        "kind": "thread_message",
+        "operation_id": 5,
+        "target": "root:1",
+        "thread": 1
+      },
+      {
+        "client": 4,
+        "kind": "plain_reply",
+        "operation_id": 6,
+        "target": "response:root:8",
+        "thread": 8
+      },
+      {
+        "client": 5,
+        "kind": "thread_message",
+        "operation_id": 7,
+        "target": "root:11",
+        "thread": 11
+      },
+      {
+        "client": 0,
+        "kind": "thread_message",
+        "operation_id": 8,
+        "target": "root:10",
+        "thread": 10
+      },
+      {
+        "client": 3,
+        "kind": "plain_reply",
+        "operation_id": 9,
+        "target": "response:root:0",
+        "thread": 0
+      },
+      {
+        "client": 2,
+        "kind": "thread_message",
+        "operation_id": 10,
+        "target": "root:9",
+        "thread": 9
+      },
+      {
+        "client": 0,
+        "kind": "thread_message",
+        "operation_id": 11,
+        "target": "root:4",
+        "thread": 4
+      }
+    ],
+    [
+      {
+        "client": 3,
+        "kind": "idempotent_retry",
+        "operation_id": 12,
+        "target": "op:0",
+        "thread": 3
+      },
+      {
+        "client": 0,
+        "kind": "idempotent_retry",
+        "operation_id": 13,
+        "target": "op:11",
+        "thread": 4
+      }
+    ],
+    [
+      {
+        "client": 1,
+        "kind": "plain_reply",
+        "operation_id": 14,
+        "target": "response:root:1",
+        "thread": 1
+      },
+      {
+        "client": 5,
+        "kind": "thread_message",
+        "operation_id": 15,
+        "target": "root:2",
+        "thread": 2
+      },
+      {
+        "client": 1,
+        "kind": "thread_message",
+        "operation_id": 16,
+        "target": "root:11",
+        "thread": 11
+      },
+      {
+        "client": 1,
+        "kind": "plain_reply",
+        "operation_id": 17,
+        "target": "response:root:8",
+        "thread": 8
+      },
+      {
+        "client": 2,
+        "kind": "thread_message",
+        "operation_id": 18,
+        "target": "root:4",
+        "thread": 4
+      },
+      {
+        "client": 1,
+        "kind": "thread_message",
+        "operation_id": 19,
+        "target": "root:0",
+        "thread": 0
+      },
+      {
+        "client": 2,
+        "kind": "plain_reply",
+        "operation_id": 20,
+        "target": "response:root:5",
+        "thread": 5
+      },
+      {
+        "client": 3,
+        "kind": "thread_message",
+        "operation_id": 21,
+        "target": "root:6",
+        "thread": 6
+      },
+      {
+        "client": 2,
+        "kind": "thread_message",
+        "operation_id": 22,
+        "target": "root:3",
+        "thread": 3
+      },
+      {
+        "client": 1,
+        "kind": "plain_reply",
+        "operation_id": 23,
+        "target": "response:root:9",
+        "thread": 9
+      },
+      {
+        "client": 3,
+        "kind": "thread_message",
+        "operation_id": 24,
+        "target": "root:7",
+        "thread": 7
+      },
+      {
+        "client": 1,
+        "kind": "thread_message",
+        "operation_id": 25,
+        "target": "root:10",
+        "thread": 10
+      }
+    ],
+    [
+      {
+        "client": 2,
+        "kind": "idempotent_retry",
+        "operation_id": 26,
+        "target": "op:22",
+        "thread": 3
+      }
+    ],
+    [
+      {
+        "client": 2,
+        "kind": "thread_message",
+        "operation_id": 27,
+        "target": "root:2",
+        "thread": 2
+      },
+      {
+        "client": 2,
+        "kind": "plain_reply",
+        "operation_id": 28,
+        "target": "response:root:7",
+        "thread": 7
+      },
+      {
+        "client": 3,
+        "kind": "thread_message",
+        "operation_id": 29,
+        "target": "root:11",
+        "thread": 11
+      },
+      {
+        "client": 5,
+        "kind": "thread_message",
+        "operation_id": 30,
+        "target": "root:10",
+        "thread": 10
+      },
+      {
+        "client": 4,
+        "kind": "plain_reply",
+        "operation_id": 31,
+        "target": "response:root:5",
+        "thread": 5
+      },
+      {
+        "client": 0,
+        "kind": "thread_message",
+        "operation_id": 32,
+        "target": "root:0",
+        "thread": 0
+      },
+      {
+        "client": 3,
+        "kind": "thread_message",
+        "operation_id": 33,
+        "target": "root:9",
+        "thread": 9
+      },
+      {
+        "client": 5,
+        "kind": "plain_reply",
+        "operation_id": 34,
+        "target": "response:root:1",
+        "thread": 1
+      },
+      {
+        "client": 2,
+        "kind": "thread_message",
+        "operation_id": 35,
+        "target": "root:6",
+        "thread": 6
+      },
+      {
+        "client": 2,
+        "kind": "thread_message",
+        "operation_id": 36,
+        "target": "root:8",
+        "thread": 8
+      },
+      {
+        "client": 5,
+        "kind": "plain_reply",
+        "operation_id": 37,
+        "target": "response:root:4",
+        "thread": 4
+      },
+      {
+        "client": 1,
+        "kind": "thread_message",
+        "operation_id": 38,
+        "target": "root:3",
+        "thread": 3
+      }
+    ],
+    [
+      {
+        "client": 3,
+        "kind": "idempotent_retry",
+        "operation_id": 39,
+        "target": "op:33",
+        "thread": 9
+      }
+    ],
+    [
+      {
+        "client": 2,
+        "kind": "thread_message",
+        "operation_id": 40,
+        "target": "root:11",
+        "thread": 11
+      },
+      {
+        "client": 0,
+        "kind": "thread_message",
+        "operation_id": 41,
+        "target": "root:6",
+        "thread": 6
+      },
+      {
+        "client": 5,
+        "kind": "plain_reply",
+        "operation_id": 42,
+        "target": "response:root:9",
+        "thread": 9
+      },
+      {
+        "client": 4,
+        "kind": "thread_message",
+        "operation_id": 43,
+        "target": "root:3",
+        "thread": 3
+      },
+      {
+        "client": 4,
+        "kind": "thread_message",
+        "operation_id": 44,
+        "target": "root:7",
+        "thread": 7
+      },
+      {
+        "client": 3,
+        "kind": "plain_reply",
+        "operation_id": 45,
+        "target": "response:root:10",
+        "thread": 10
+      },
+      {
+        "client": 5,
+        "kind": "thread_message",
+        "operation_id": 46,
+        "target": "root:8",
+        "thread": 8
+      },
+      {
+        "client": 5,
+        "kind": "thread_message",
+        "operation_id": 47,
+        "target": "root:5",
+        "thread": 5
+      },
+      {
+        "client": 2,
+        "kind": "plain_reply",
+        "operation_id": 48,
+        "target": "response:root:1",
+        "thread": 1
+      },
+      {
+        "client": 5,
+        "kind": "thread_message",
+        "operation_id": 49,
+        "target": "root:0",
+        "thread": 0
+      },
+      {
+        "client": 4,
+        "kind": "thread_message",
+        "operation_id": 50,
+        "target": "root:2",
+        "thread": 2
+      },
+      {
+        "client": 3,
+        "kind": "plain_reply",
+        "operation_id": 51,
+        "target": "response:root:4",
+        "thread": 4
+      }
+    ],
+    [
+      {
+        "client": 4,
+        "kind": "idempotent_retry",
+        "operation_id": 52,
+        "target": "op:44",
+        "thread": 7
+      }
+    ],
+    [
+      {
+        "client": 3,
+        "kind": "plain_reply",
+        "operation_id": 53,
+        "target": "response:root:2",
+        "thread": 2
+      },
+      {
+        "client": 0,
+        "kind": "thread_message",
+        "operation_id": 54,
+        "target": "root:11",
+        "thread": 11
+      },
+      {
+        "client": 0,
+        "kind": "thread_message",
+        "operation_id": 55,
+        "target": "root:9",
+        "thread": 9
+      }
+    ],
+    [
+      {
+        "client": 0,
+        "kind": "idempotent_retry",
+        "operation_id": 56,
+        "target": "op:55",
+        "thread": 9
+      }
+    ],
+    [
+      {
+        "client": 0,
+        "kind": "start_mindroom",
+        "operation_id": 58,
+        "target": null,
+        "thread": 0
+      }
+    ],
+    [
+      {
+        "client": 0,
+        "kind": "checkpoint",
+        "operation_id": 59,
+        "target": null,
+        "thread": 0
+      }
+    ],
+    [
+      {
+        "client": 0,
+        "kind": "restart_mindroom",
+        "operation_id": 60,
+        "target": null,
+        "thread": 0
+      }
+    ],
+    [
+      {
+        "client": 0,
+        "kind": "checkpoint",
+        "operation_id": 61,
+        "target": null,
+        "thread": 0
+      }
+    ]
+  ],
+  "client_count": 6,
+  "profile": "chaos",
+  "room_count": 1,
+  "thread_count": 12,
+  "version": 1
+}

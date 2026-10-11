@@ -2,15 +2,15 @@
 
 import inspect
 from pathlib import Path
-from types import UnionType
+from types import SimpleNamespace, UnionType
 from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
 from agno.tools import Toolkit
-from agno.tools.dalle import DalleTools
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
+from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
@@ -29,34 +29,28 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # not a contract failure. `apify` is here because `pyproject.toml` declares
 # `apify-client` for `platform_machine != 'aarch64'`, which means every arm64
 # host runs this suite without it.
-OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph", "telegram"})
+OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
 IGNORED_AGNO_PARAMS = {
     # AgentRepositoryTools accepts typed broker/preparer seams for trusted control-plane fakes, never authored config.
     "agent_repository": {"broker", "worker_preparer"},
-    # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
-    "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.
+    "firecrawl": {"search_params"},
+    "spider": {"optional_params"},
     "mem0": {"config"},
     "scrapegraph": {"headers"},
+    "tavily": {"search_params"},
     # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
     "slack": {"ssl"},
     "youtube": {"proxies"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
+    # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
+    "newspaper": {"include_summary"},
 }
 IGNORED_EXTRA_CONFIG_FIELDS = {
     # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
     "docker": {"include_tools"},
 }
-
-
-def test_dalle_default_model_is_accepted_by_agno() -> None:
-    """The dashboard default for the DALL-E tool must satisfy Agno's constructor validation."""
-    model_field = next(field for field in TOOL_METADATA["dalle"].config_fields or [] if field.name == "model")
-
-    assert isinstance(model_field.default, str)
-    assert model_field.default
-    DalleTools(model=model_field.default, api_key="sk-test")
 
 
 def test_youtube_languages_accepts_authored_string_list() -> None:
@@ -68,7 +62,14 @@ def test_youtube_languages_accepts_authored_string_list() -> None:
 
 @pytest.mark.parametrize(
     ("tool_name", "mapping_field"),
-    [("youtube", "proxies"), ("mem0", "config"), ("scrapegraph", "headers")],
+    [
+        ("youtube", "proxies"),
+        ("mem0", "config"),
+        ("scrapegraph", "headers"),
+        ("crawl4ai", "proxy_config"),
+        ("firecrawl", "search_params"),
+        ("spider", "optional_params"),
+    ],
 )
 def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_field: str) -> None:
     """Mapping-only upstream inputs should not be exposed as misleading text fields."""
@@ -233,6 +234,34 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
     assert captured["sandbox_labels"] is None
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [({}, True), ({"verify_ssl": None}, True), ({"verify_ssl": True}, True), ({"verify_ssl": False}, False)],
+)
+def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, object],
+    *,
+    expected: bool,
+) -> None:
+    """Only an explicit false may disable certificate checks for Daytona's API key traffic; unset and null verify."""
+    from agno.tools.daytona import DaytonaTools  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def capture_init(_self: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
+    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+
+    tool_class(api_key="dt-test", **overrides)
+
+    assert captured["verify_ssl"] is expected
+    fields = {field.name: field for field in TOOL_METADATA["daytona"].config_fields or []}
+    assert fields["verify_ssl"].default is True
+
+
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
     assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)
@@ -264,6 +293,29 @@ def test_tool_metadata_lists_only_model_callable_functions() -> None:
         "send_message_thread",
         "upload_file",
     )
+
+
+def test_slack_upload_file_sends_model_content_without_opening_local_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack runs in the primary runtime, so a path-like upload argument must never read that file."""
+    secret_path = tmp_path / ".env"
+    secret_path.write_text("MINDROOM_API_KEY=secret\n")
+    tool = cast("Any", TOOL_REGISTRY["slack"]())(token="xoxb-test")  # noqa: S106
+    captured: dict[str, object] = {}
+
+    def files_upload_v2(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(data={"ok": True})
+
+    monkeypatch.setattr(tool.client, "files_upload_v2", files_upload_v2)
+
+    tool.upload_file(channel="C0123", content=str(secret_path), filename=str(secret_path))
+
+    assert "file" not in captured
+    assert captured["content"] == str(secret_path).encode()
+    assert captured["filename"] == ".env"
 
 
 def test_zep_metadata_lists_only_model_callable_functions() -> None:
@@ -337,6 +389,8 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         tool_class.__init__,
         globalns=tool_class.__init__.__globals__
         | {
+            "FileAccess": FileAccess,
+            "Path": Path,
             "ResolvedWorkerTarget": ResolvedWorkerTarget,
             "RuntimePaths": RuntimePaths,
         },
@@ -359,15 +413,19 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
     ignored_param_names = IGNORED_AGNO_PARAMS.get(tool_name, set())
     agno_params = {name: param_info for name, param_info in agno_params.items() if name not in ignored_param_names}
 
-    # Get our ConfigFields for the tool
+    # Get every declared constructor field, including agent-only overrides.
     tool_metadata = TOOL_METADATA[tool_name]
 
-    config_fields = tool_metadata.config_fields or []
+    config_fields = list(tool_metadata.config_fields or [])
+    config_field_names = {field.name for field in config_fields}
+    config_fields.extend(
+        field for field in (tool_metadata.agent_override_fields or []) if field.name not in config_field_names
+    )
     config_field_map = {field.name: field for field in config_fields}
 
     # Check parameter names
     agno_param_names = set(agno_params.keys())
-    config_field_names = set(config_field_map.keys())
+    config_field_names = set(config_field_map)
 
     missing_fields = agno_param_names - config_field_names
     extra_fields = config_field_names - agno_param_names - IGNORED_EXTRA_CONFIG_FIELDS.get(tool_name, set())
@@ -409,6 +467,11 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
                 or "password" in param_name.lower()
                 or "secret" in param_name.lower()
                 or "key" in param_name.lower()
+                or "credential" in param_name.lower()
+                or "headers" in param_name.lower()
+                or "db_url" in param_name.lower()
+                or "env_vars" in param_name.lower()
+                or param_name.lower().endswith("_pat")  # personal access token
             ):
                 expected_type = "password"
             elif (

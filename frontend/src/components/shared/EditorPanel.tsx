@@ -54,6 +54,8 @@ export interface EditorPanelProps {
   title: string;
   /** Whether the panel is in a dirty state (has unsaved changes) */
   isDirty: boolean;
+  /** Whether data needed to present the editor is still loading */
+  isBusy?: boolean;
   /** Function to call when save is clicked */
   onSave: () => void | Promise<unknown>;
   /** Function to call when delete is clicked */
@@ -106,6 +108,7 @@ export function EditorPanel({
   icon: Icon,
   title,
   isDirty,
+  isBusy = false,
   onSave,
   onDelete,
   showActions = true,
@@ -136,7 +139,10 @@ export function EditorPanel({
   };
 
   return (
-    <Card className={`h-full flex flex-col overflow-hidden ${className}`}>
+    <Card
+      aria-busy={isBusy}
+      className={`h-full flex flex-col overflow-hidden ${className}`}
+    >
       <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2">

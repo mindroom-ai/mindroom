@@ -1,37 +1,16 @@
 {{- if and .Values.storage.create (not .Values.storage.existingClaim) }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "mindroom-runtime.storageClaimName" . }}
-  labels:
-    {{- include "mindroom-runtime.labels" . | nindent 4 }}
-spec:
-  accessModes:
-    {{- toYaml .Values.storage.accessModes | nindent 4 }}
-  {{- if .Values.storage.storageClassName }}
-  storageClassName: {{ .Values.storage.storageClassName | quote }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.storage.size | quote }}
+---
+{{ include "mindroom-runtime.persistentVolumeClaim" (list . (include "mindroom-runtime.storageClaimName" .) .Values.storage) }}
 {{- end }}
 {{- if and .Values.stateStorage.enabled .Values.stateStorage.create (not .Values.stateStorage.existingClaim) }}
-{{- if and .Values.storage.create (not .Values.storage.existingClaim) }}
 ---
+{{ include "mindroom-runtime.persistentVolumeClaim" (list . (include "mindroom-runtime.stateStorageClaimName" .) .Values.stateStorage) }}
 {{- end }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "mindroom-runtime.stateStorageClaimName" . }}
-  labels:
-    {{- include "mindroom-runtime.labels" . | nindent 4 }}
-spec:
-  accessModes:
-    {{- toYaml .Values.stateStorage.accessModes | nindent 4 }}
-  {{- if .Values.stateStorage.storageClassName }}
-  storageClassName: {{ .Values.stateStorage.storageClassName | quote }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.stateStorage.size | quote }}
+{{- if and .Values.sessionStorage.enabled (not .Values.sessionStorage.existingClaim) }}
+---
+{{ include "mindroom-runtime.persistentVolumeClaim" (list . (include "mindroom-runtime.sessionStorageClaimName" .) .Values.sessionStorage) }}
+{{- end }}
+{{- if and .Values.knowledgeStorage.enabled (not .Values.knowledgeStorage.existingClaim) }}
+---
+{{ include "mindroom-runtime.persistentVolumeClaim" (list . (include "mindroom-runtime.knowledgeStorageClaimName" .) .Values.knowledgeStorage) }}
 {{- end }}

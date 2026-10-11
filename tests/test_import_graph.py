@@ -9,7 +9,7 @@ Two guards keep import-time regressions from creeping back:
    mcp SDK, which the primary runtime genuinely needs at boot.
 2. A third-party allowlist: each slim entry point may only load the
    third-party packages it loads today. Any new package in the graph fails
-   loudly — either defer the import (see the CLAUDE.md import rule) or extend
+   loudly — either defer the import (see the AGENTS.md import rule) or extend
    the allowlist as a conscious, reviewed decision. The orchestrator uses the
    narrower heavy-optional-dependency ban because its core boot graph is large.
 
@@ -22,8 +22,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _PROVIDER_SDK_ROOTS = (
     "anthropic",
@@ -123,12 +127,15 @@ _CLI_ROOTS = frozenset(
     },
 )
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
+    "mindroom.desktop.protocol": frozenset({"dotenv"}),
+    "mindroom.matrix.runtime_media": frozenset({"dotenv"}),
+    "mindroom.matrix.provisioning_env": frozenset({"dotenv"}),
     "mindroom.cli.main": _CLI_ROOTS,
     # Doctor may use the CLI, config, and HTTP stacks at import time, but no
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
-    "mindroom.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
+    "mindroom.providers.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
@@ -141,18 +148,12 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
         {
             "annotated_doc",
             "authlib",
-            "bcrypt",
-            "chardet",
-            "charset_normalizer",
             "email_validator",
             "fastapi",
-            "joserfc",
             "orjson",
+            "pydantic_extra_types",
             "python_multipart",
-            "requests",
-            "socks",
             "starlette",
-            "urllib3",
         },
     ),
 }
@@ -237,9 +238,103 @@ def test_slim_entry_point_import_contract(module: str) -> None:
     unexpected = sorted(third_party - _ALLOWED_THIRD_PARTY_ROOTS[module])
     assert not unexpected, (
         f"importing {module} now loads third-party packages not in its allowlist: {unexpected}. "
-        "Defer the import to first use (see the CLAUDE.md function-level import rule), "
+        "Defer the import to first use (see the AGENTS.md function-level import rule), "
         "or extend the allowlist here if the dependency is genuinely needed at import time."
     )
+
+
+def test_participation_state_has_no_framework_dependencies() -> None:
+    """Using turn participation state must not load execution or provider integration."""
+    _assert_probe_clean(
+        "mindroom.participation",
+        ("agno", "mindroom.providers.tool_policy", "mindroom.hooks"),
+    )
+
+
+_WINDOWS_DESKTOP_PROBE = """
+import json, sys, types
+
+# The MCP SDK gates its POSIX-only imports on sys.platform, which this probe keeps at the host's value.
+import mcp
+
+for name in ("fcntl", "pwd", "termios"):
+    sys.modules[name] = None
+
+# The lock module picks its implementation from the platform. Everything else keeps this
+# host's platform and has no msvcrt, because the standard library and third-party packages
+# take Windows-only branches when either is present.
+import asyncio, mindroom
+msvcrt = types.ModuleType("msvcrt")
+msvcrt.LK_UNLCK, msvcrt.LK_LOCK, msvcrt.LK_NBLCK = 0, 1, 2
+msvcrt.locking = lambda fd, mode, nbytes: None
+sys.modules["msvcrt"] = msvcrt
+host_platform, sys.platform = sys.platform, "win32"
+import mindroom.file_locks
+sys.platform = host_platform
+del sys.modules["msvcrt"]
+
+from typer.testing import CliRunner
+from mindroom.cli.main import app
+
+help_exit_codes = {{" ".join(command): CliRunner().invoke(app, [*command, "--help"]).exit_code for command in {commands!r}}}
+for module in {modules!r}:
+    __import__(module)
+print(json.dumps({{"help": help_exit_codes, "posix_only": sorted(set({posix_only!r}) & set(sys.modules))}}))
+"""
+
+
+def test_desktop_app_observation_imports_without_posix_only_modules() -> None:
+    """Windows has no fcntl, pwd, or termios; CLI help and every module a screenshot-only Desktop run loads must work."""
+    app_observation_modules = (
+        "mindroom.cli.desktop",
+        "mindroom.cli.config",
+        "mindroom.desktop.native_entry",
+        "mindroom.desktop.native_host",
+        "mindroom.desktop.bridge_components",
+        "mindroom.desktop.session",
+        "mindroom.desktop.transport",
+        "mindroom.desktop.startup_errors",
+        "mindroom.desktop.cloudflare_access",
+        "mindroom.desktop.sso",
+        "mindroom.desktop.pairing_client",
+        "mindroom.matrix.olm_to_device",
+    )
+    commands = ((), ("desktop",), ("desktop", "run"), ("desktop", "access"), ("desktop", "setup"))
+    posix_only = ("mindroom.desktop.login_environment", "mindroom.desktop.shell_prompt")
+    probe = _WINDOWS_DESKTOP_PROBE.format(commands=commands, modules=app_observation_modules, posix_only=posix_only)
+
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False, timeout=120)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["help"] == {" ".join(command): 0 for command in commands}
+    assert payload["posix_only"] == [], "screenshot-only Desktop loaded folder or shell modules"
+
+
+def test_service_status_pairing_check_does_not_load_matrix_or_http_clients(tmp_path: Path) -> None:
+    """The macOS app polls `mindroom service status` every few seconds, so its pairing check must stay env-only."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    service_environment = {"MINDROOM_CONFIG_PATH": str(config_path), "MINDROOM_STORAGE_PATH": str(tmp_path / "data")}
+    probe = (
+        "import json, sys\n"
+        "from mindroom.cli.service import _service_pairing_required\n"
+        "from mindroom.services.manager import get_service_manager\n"
+        "get_service_manager().get_service_environment()\n"
+        f"required = _service_pairing_required({service_environment!r})\n"
+        "loaded = sorted(n for n in sys.modules if n.split('.')[0] in {'nio', 'httpx'})\n"
+        "print(json.dumps({'required': required, 'loaded': loaded}))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    payload = json.loads(result.stdout)
+    assert payload == {"required": True, "loaded": []}
 
 
 def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
@@ -247,10 +342,100 @@ def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
     _assert_probe_clean("mindroom.orchestrator", _HEAVY_OPTIONAL_RUNTIME_ROOTS)
 
 
+def test_api_app_defers_heavy_optional_dependencies() -> None:
+    """The API app import must leave the same engines and the authlib OAuth clients unloaded."""
+    _assert_probe_clean("mindroom.api.main", (*_HEAVY_OPTIONAL_RUNTIME_ROOTS, "authlib.integrations", "joserfc"))
+
+
+def test_worker_retirement_is_a_standard_library_leaf() -> None:
+    """The retirement boundary exposes its descriptor-bound operations without loading another MindRoom module."""
+    probe = """
+import importlib
+import json
+import sys
+
+import mindroom.workers
+
+baseline = set(sys.modules)
+module = importlib.import_module("mindroom.workers.worker_retirement")
+loaded = sorted(name for name in set(sys.modules) - baseline if name.startswith("mindroom"))
+print(json.dumps({"exports": module.__all__, "loaded": loaded}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "exports": ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"],
+        "loaded": ["mindroom.workers.worker_retirement"],
+    }
+
+
+def test_background_approval_transactions_have_a_focused_module_boundary() -> None:
+    """Background rows depend on shared card state without owning its lifecycle."""
+    probe = """
+import importlib
+import json
+
+card_state = importlib.import_module("mindroom.event_journal.approval_card_state")
+background = importlib.import_module("mindroom.event_journal.background_approvals")
+dispatcher = importlib.import_module("mindroom.event_journal.approvals")
+print(json.dumps({
+    "background_exports": background.__all__,
+    "background_resolve_owner": background.resolve.__module__,
+    "card_state_exports": card_state.__all__,
+    "card_reserve_owner": card_state.reserve_delivery.__module__,
+    "dispatcher_owner": dispatcher.resolve_card.__module__,
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "background_exports": [
+            "BackgroundApprovalDecision",
+            "background_identity",
+            "decision",
+            "prune_calls",
+            "reserve_delivery",
+            "reserve_script_delivery",
+            "resolve",
+            "resolve_call",
+            "resolve_pending_calls",
+        ],
+        "background_resolve_owner": "mindroom.event_journal.background_approvals",
+        "card_state_exports": [
+            "TIMEOUT_REASON",
+            "ApprovalCardReservation",
+            "ApprovalDecisionMetadata",
+            "RecordedApprovalDecision",
+            "decode_object_payload",
+            "decode_resolution",
+            "enqueue_resolution",
+            "reserve_delivery",
+            "stored_resolution",
+            "terminal_content",
+        ],
+        "card_reserve_owner": "mindroom.event_journal.approval_card_state",
+        "dispatcher_owner": "mindroom.event_journal.approvals",
+    }
+
+
 def test_openai_wire_models_import_only_the_openai_sdk() -> None:
     """Agno's azure package init pulls the anthropic SDK; only the azure branch should pay that."""
     non_openai_roots = tuple(root for root in _PROVIDER_SDK_ROOTS if root != "openai")
-    _assert_probe_clean("mindroom.openai_models", non_openai_roots)
+    _assert_probe_clean("mindroom.providers.openai_models", non_openai_roots)
 
 
 def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
@@ -261,6 +446,28 @@ def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
     )
 
 
+def test_atlassian_connection_plugins_do_not_load_the_toolkit() -> None:
+    """Declaring extra Atlassian connections in a plugin must not load the HTTP client or its log filter."""
+    _assert_probe_clean(
+        "mindroom.tool_system.atlassian_connections",
+        ("mindroom.custom_tools.atlassian", "mindroom.custom_tools.atlassian_client"),
+    )
+
+
+def test_knowledge_read_worker_does_not_boot_application_services() -> None:
+    """A short-lived read must not pay for refresh scheduling or agent configuration."""
+    _assert_probe_clean(
+        "mindroom.knowledge.read_worker",
+        (
+            "mindroom.knowledge.registry",
+            "mindroom.knowledge.refresh_scheduler",
+            "mindroom.knowledge.utils",
+            "mindroom.config.main",
+            "mindroom.runtime_resolution",
+        ),
+    )
+
+
 def test_tool_auto_install_smoke_entrypoint_imports() -> None:
     """The repository smoke entry point must use the post-split tool-system surfaces."""
     subprocess.run(
@@ -268,3 +475,33 @@ def test_tool_auto_install_smoke_entrypoint_imports() -> None:
         check=True,
         timeout=120,
     )
+
+
+@pytest.mark.parametrize(
+    ("module", "forbidden"),
+    [
+        (
+            "mindroom.delegation.sessions",
+            (
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
+                "mindroom.delegation.lifecycle",
+                "mindroom.custom_tools.delegate",
+            ),
+        ),
+        (
+            "mindroom.delegation.audit",
+            (
+                "mindroom.delegation.sessions",
+                "mindroom.delegation.lifecycle",
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
+            ),
+        ),
+        ("mindroom.delegation.execution", ("mindroom.ai", "mindroom.custom_tools.delegate")),
+        ("mindroom.delegation.state", ("agno", "mindroom.config", "mindroom.knowledge")),
+    ],
+)
+def test_delegation_dependencies_point_toward_state_and_storage(module: str, forbidden: tuple[str, ...]) -> None:
+    """Storage/audit cannot boot execution; the driver cannot construct its response adapter."""
+    _assert_probe_clean(module, forbidden)

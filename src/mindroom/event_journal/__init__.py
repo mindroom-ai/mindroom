@@ -7,53 +7,76 @@ Three facts live here, each with exactly one owner:
 - what MindRoom intends to send and whether it landed (the outbox).
 """
 
-from mindroom.history_recovery import (
+from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
     RoomHistoryRecovery,
 )
 from mindroom.interactive_models import InteractiveSelection
 
+from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
 from .approval_continuations import (
+    INTERRUPTED_FAILURE_REASON,
+    ApprovalAdvance,
     ApprovalCall,
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalMemoryTurn,
+    approval_arguments_digest,
 )
 from .approvals import (
-    ApprovalCardReservation,
-    RecordedApprovalDecision,
     StoredApprovalCard,
     UnreadableApprovalCard,
 )
+from .background_approvals import BackgroundApprovalDecision
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
-from .membership import MembershipFence, MembershipView
+from .journal import validate_ingestion_batch_admission
 from .models import (
     TURN_BACKED_KINDS,
+    AdmissionFacts,
     AdmissionResult,
     ConversationCursor,
     ConversationPage,
     DeliveryAcknowledgement,
     DeliveryProjectionPendingError,
     DeliveryStage,
-    DepartureObservation,
-    DepartureOutcome,
     DepartureSource,
     EventClass,
     EventKind,
     HydrationCoverage,
     HydrationPolicy,
     InboundEvent,
+    IngestionBatchAdmission,
+    IngestionBatchIntegrityError,
+    IngestionBatchSequenceError,
+    IngestionBatchValidationError,
+    IngestionConsumer,
+    IngestionConsumerBindingError,
+    IngestionRecordAdmission,
+    IngestionRecordDisposition,
     JournalEvent,
     MatrixDelivery,
     PendingPage,
+    PermanentDeliveryFailure,
     RefreshRequest,
+    RoomMembershipPosition,
     SemanticConsumer,
     TerminalTurnWrite,
     UnreadableMatrixDelivery,
     VisibleMessage,
 )
+from .outbox import matrix_delivery_payload
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
+from .scheduled_approvals import (
+    SCHEDULED_APPROVAL_WINDOW_NS,
+    ScheduledApprovalArmState,
+    ScheduledCall,
+    ScheduledCallBinding,
+    ScheduledCallClaim,
+    ScheduledCallOutcome,
+    ScheduledCallRefusal,
+    scheduled_call_run_id,
+)
 from .store import EventJournalStore, PrincipalStore, TurnRecordStore
 from .views import (
     AdmissionView,
@@ -69,23 +92,27 @@ from .views import (
 )
 
 __all__ = [
+    "INTERRUPTED_FAILURE_REASON",
+    "SCHEDULED_APPROVAL_WINDOW_NS",
     "TURN_BACKED_KINDS",
+    "AdmissionFacts",
     "AdmissionResult",
     "AdmissionView",
+    "ApprovalAdvance",
     "ApprovalCall",
     "ApprovalCardReservation",
     "ApprovalContinuation",
     "ApprovalDecision",
+    "ApprovalDecisionMetadata",
     "ApprovalDeliveryView",
     "ApprovalMemoryTurn",
+    "BackgroundApprovalDecision",
     "ConversationCursor",
     "ConversationPage",
     "ConversationReadView",
     "DeliveryAcknowledgement",
     "DeliveryProjectionPendingError",
     "DeliveryStage",
-    "DepartureObservation",
-    "DepartureOutcome",
     "DepartureSource",
     "DispatchView",
     "EventClass",
@@ -98,14 +125,21 @@ __all__ = [
     "HydrationPolicy",
     "HydrationView",
     "InboundEvent",
+    "IngestionBatchAdmission",
+    "IngestionBatchIntegrityError",
+    "IngestionBatchSequenceError",
+    "IngestionBatchValidationError",
+    "IngestionConsumer",
+    "IngestionConsumerBindingError",
+    "IngestionRecordAdmission",
+    "IngestionRecordDisposition",
     "InteractiveSelection",
     "JournalEvent",
     "MatrixDelivery",
     "MatrixDeliveryView",
-    "MembershipFence",
-    "MembershipView",
     "PendingPage",
     "PendingTurnView",
+    "PermanentDeliveryFailure",
     "PrincipalStore",
     "ProjectedEvent",
     "RecordedApprovalDecision",
@@ -113,6 +147,13 @@ __all__ = [
     "RelationView",
     "ReplayView",
     "RoomHistoryRecovery",
+    "RoomMembershipPosition",
+    "ScheduledApprovalArmState",
+    "ScheduledCall",
+    "ScheduledCallBinding",
+    "ScheduledCallClaim",
+    "ScheduledCallOutcome",
+    "ScheduledCallRefusal",
     "SemanticConsumer",
     "StoredApprovalCard",
     "TerminalTurnWrite",
@@ -120,10 +161,14 @@ __all__ = [
     "UnreadableApprovalCard",
     "UnreadableMatrixDelivery",
     "VisibleMessage",
+    "approval_arguments_digest",
     "decode_thread_id",
     "delivery_transaction_id",
     "encode_thread_id",
+    "matrix_delivery_payload",
     "replacement_target",
+    "scheduled_call_run_id",
     "thread_root",
+    "validate_ingestion_batch_admission",
     "visible_content",
 ]

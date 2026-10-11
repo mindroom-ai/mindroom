@@ -3,45 +3,49 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import functools
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
-from mindroom import constants
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace_avatar_path
-from mindroom.credentials_sync import get_secret_from_env
+from mindroom.credentials.sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
+from mindroom.managed_avatars import clear_failed_stock_downloads, room_avatar_path, root_space_avatar_path
 from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
-from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.state import MatrixAccount, MatrixState, get_room_id, matrix_state_for_runtime
-from mindroom.matrix.users import AgentMatrixUser, login_agent_user
-from mindroom.matrix_identifiers import extract_server_name_from_homeserver
-from mindroom.model_defaults import GOOGLE_AVATAR_IMAGE, GOOGLE_AVATAR_PROMPT
+from mindroom.matrix.state import MatrixState, get_room_id, matrix_state_for_runtime
+from mindroom.matrix.users import create_agent_http_client
+from mindroom.model_defaults import OPENAI_AVATAR_IMAGE, OPENAI_AVATAR_PROMPT
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     import nio
+    from openai.types.images_response import ImagesResponse
+
+    from mindroom import constants
 
 
 logger = get_logger(__name__)
 
-_PROMPT_MODEL = GOOGLE_AVATAR_PROMPT
-_IMAGE_MODEL = GOOGLE_AVATAR_IMAGE
+_PROMPT_MODEL = OPENAI_AVATAR_PROMPT
+_IMAGE_MODEL = OPENAI_AVATAR_IMAGE
 _ROOT_SPACE_AVATAR_NAME = "root_space"
-# Team prompts include per-member breakdowns; a low cap truncates them
-# mid-sentence and the mangled prompt makes the image model answer with
-# text instead of an image.
-_PROMPT_MAX_OUTPUT_TOKENS = 400
+# Responses counts reasoning and visible text against this budget. Leave room
+# for low-effort reasoning plus team prompts with per-member breakdowns.
+_PROMPT_MAX_OUTPUT_TOKENS = 8192
 # The image model occasionally returns no image for a valid prompt, so retry
 # the complete prompt and image-generation request.
 _MAX_IMAGE_ATTEMPTS = 3
@@ -136,7 +140,7 @@ def _missing_avatar_targets(
 
 
 async def _generate_prompt(
-    client: genai.Client,
+    client: AsyncOpenAI,
     target: _AvatarTarget,
     config: Config,
 ) -> str:
@@ -154,19 +158,22 @@ async def _generate_prompt(
         system_prompt = config.get_prompt("AVATAR_AGENT_SYSTEM_PROMPT")
         user_prompt = f"Agent name: {target.entity_name}\nRole: {target.role}\nType: {target.entity_type}"
 
-    response = await client.aio.models.generate_content(
+    response = await client.responses.create(
         model=_PROMPT_MODEL,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
-        ),
+        input=user_prompt,
+        instructions=system_prompt,
+        max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
+        reasoning={"effort": "low"},
+        store=False,
     )
-    if not response.text:
-        msg = f"Gemini returned no text prompt for {target.entity_type}/{target.entity_name}"
+    if response.status != "completed":
+        msg = f"OpenAI returned an unfinished text prompt for {target.entity_type}/{target.entity_name}: {response.status}"
+        raise ValueError(msg)
+    visual_elements = response.output_text.strip()
+    if not visual_elements:
+        msg = f"OpenAI returned no text prompt for {target.entity_type}/{target.entity_name}"
         raise ValueError(msg)
 
-    visual_elements = response.text.strip()
     base_style = (
         config.get_prompt("AVATAR_ROOM_STYLE")
         if target.entity_type in {"rooms", "spaces"}
@@ -184,26 +191,21 @@ async def _generate_prompt(
     return final_prompt
 
 
-def _no_image_diagnostic(response: types.GenerateContentResponse) -> str:
-    """Summarize a no-image response for logs without dumping the payload."""
-    finish_reasons = [
-        str(candidate.finish_reason) for candidate in response.candidates or [] if candidate.finish_reason
-    ]
-    texts = [text for part in response.parts or [] if isinstance(text := getattr(part, "text", None), str)]
-    snippet = " ".join(texts).strip()[:200]
-    return f"finish_reasons={finish_reasons or None} text={snippet!r}"
-
-
-def _extract_image_bytes(response: types.GenerateContentResponse) -> bytes | None:
-    """Return the first generated image bytes from a Gemini response."""
-    for part in response.parts or []:
-        if part.inline_data and part.inline_data.data:
-            return part.inline_data.data
+def _extract_image_bytes(response: ImagesResponse) -> bytes | None:
+    """Decode the first base64 image in an OpenAI image response."""
+    for image in response.data or []:
+        if not image.b64_json:
+            continue
+        try:
+            return base64.b64decode(image.b64_json, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            msg = "OpenAI returned invalid base64 image data"
+            raise ValueError(msg) from exc
     return None
 
 
 async def _generate_avatar(
-    client: genai.Client,
+    client: AsyncOpenAI,
     target: _AvatarTarget,
     runtime_paths: constants.RuntimePaths,
     config: Config,
@@ -227,16 +229,12 @@ async def _generate_avatar(
     image_bytes: bytes | None = None
     for attempt in range(1, _MAX_IMAGE_ATTEMPTS + 1):
         prompt = await _generate_prompt(client, target, config)
-        response = await client.aio.models.generate_content(
+        response = await client.images.generate(
             model=_IMAGE_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="1:1",
-                    image_size="1K",
-                ),
-            ),
+            prompt=prompt,
+            size="1024x1024",
+            quality="high",
+            output_format="png",
         )
         image_bytes = _extract_image_bytes(response)
         if image_bytes:
@@ -247,7 +245,6 @@ async def _generate_avatar(
             entity_name=target.entity_name,
             attempt=attempt,
             max_attempts=_MAX_IMAGE_ATTEMPTS,
-            response_diagnostic=_no_image_diagnostic(response),
         )
         if attempt < _MAX_IMAGE_ATTEMPTS:
             console.print(
@@ -263,35 +260,22 @@ async def _generate_avatar(
     console.print(f"[green]✓ Generated avatar for {target.entity_type}/{target.entity_name}[/green]")
 
 
-def _build_router_user(
-    router_account: MatrixAccount,
-    runtime_paths: constants.RuntimePaths,
-) -> AgentMatrixUser:
-    """Create the router user object from persisted Matrix state."""
-    server_name = extract_server_name_from_homeserver(
-        constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
-        runtime_paths=runtime_paths,
-    )
-    return AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id=MatrixID.from_username(router_account.username, router_account.domain or server_name).full_id,
-        display_name="Router",
-        password=router_account.password,
-        access_token=None,
-    )
-
-
 async def _sync_avatar_target(
     client: nio.AsyncClient,
     *,
-    avatar_path: Path,
+    resolve_avatar: Callable[[], Awaitable[Path | None]],
     room_id: str,
     label: str,
     force: bool = False,
 ) -> bool | None:
-    """Apply one managed avatar target unless the room already has an avatar."""
+    """Apply one managed avatar target unless the room already has an avatar or none is available."""
     if not force and await room_has_avatar(client, room_id):
         _get_console().print(f"[dim]⊘ Skipped avatar for {label} (already set)[/dim]")
+        return None
+
+    avatar_path = await resolve_avatar()
+    if avatar_path is None:
+        _get_console().print(f"[dim]⊘ Skipped avatar for {label} (no avatar available)[/dim]")
         return None
 
     if await set_room_avatar_from_file(client, room_id, avatar_path):
@@ -313,11 +297,6 @@ async def _sync_configured_room_avatars(
     skip_count = 0
     failed_labels: list[str] = []
     for room_name in sorted(_managed_room_avatar_keys(config)):
-        avatar_path = resolve_avatar_path("rooms", room_name, runtime_paths)
-        if not avatar_path.exists():
-            skip_count += 1
-            continue
-
         room_id = get_room_id(room_name, runtime_paths)
         if not room_id:
             _get_console().print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
@@ -326,7 +305,7 @@ async def _sync_configured_room_avatars(
         label = f"room '{room_name}'"
         success = await _sync_avatar_target(
             client,
-            avatar_path=avatar_path,
+            resolve_avatar=functools.partial(room_avatar_path, room_name, config, runtime_paths),
             room_id=room_id,
             label=label,
             force=force,
@@ -352,17 +331,9 @@ async def _sync_root_space_avatar(
     if not config.matrix_space.enabled or not state.space_room_id:
         return None
 
-    root_space_avatar_path = resolve_avatar_path(
-        "spaces",
-        _ROOT_SPACE_AVATAR_NAME,
-        runtime_paths,
-    )
-    if not root_space_avatar_path.exists():
-        return None
-
     return await _sync_avatar_target(
         client,
-        avatar_path=root_space_avatar_path,
+        resolve_avatar=functools.partial(root_space_avatar_path, runtime_paths),
         room_id=state.space_room_id,
         label="root space",
         force=force,
@@ -375,24 +346,16 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths, *, f
     console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
 
     state = matrix_state_for_runtime(runtime_paths)
-    router_account = state.get_account(f"agent_{ROUTER_AGENT_NAME}")
-    if not router_account:
-        msg = "No router account found in Matrix state. Make sure mindroom has been started at least once."
-        raise AvatarSyncError(msg)
-
-    router_user = _build_router_user(router_account, runtime_paths)
     try:
-        client = await login_agent_user(
-            constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
-            router_user,
-            runtime_paths,
-        )
+        client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     except ValueError as exc:
-        msg = f"Failed to log in as router for avatar sync: {exc}"
+        msg = f"Router account unavailable for avatar sync: {exc}"
         raise AvatarSyncError(msg) from exc
-    console.print("[green]✓ Logged in to Matrix as router[/green]")
+    console.print("[green]✓ Using router account[/green]")
 
     config = _load_validated_config(runtime_paths)
+    # An explicit sync retries stock downloads that failed recently instead of waiting out the retry window.
+    clear_failed_stock_downloads(runtime_paths)
     failed_labels: list[str] = []
     try:
         success_count, skip_count, failed_labels = await _sync_configured_room_avatars(
@@ -529,17 +492,18 @@ async def _generate_missing_avatars(
         console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
         return True
 
-    api_key = get_secret_from_env("GOOGLE_API_KEY", runtime_paths=runtime_paths)
-    if not api_key:
-        console.print("[red]Error: GOOGLE_API_KEY or GOOGLE_API_KEY_FILE environment variable not set[/red]")
+    openai_api_key = get_secret_from_env("OPENAI_API_KEY", runtime_paths=runtime_paths)
+    if not openai_api_key:
+        console.print("[red]Error: OPENAI_API_KEY or OPENAI_API_KEY_FILE environment variable not set[/red]")
         console.print("Please set it in your .env file, secrets mount, or environment")
         return False
 
-    client = genai.Client(api_key=api_key)
     targets = _build_avatar_generation_targets(config, selected_targets)
     _print_avatar_generation_plan(selected_targets)
 
-    try:
+    async with AsyncExitStack() as client_stack:
+        client = AsyncOpenAI(api_key=openai_api_key)
+        client_stack.push_async_callback(client.close)
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -560,8 +524,6 @@ async def _generate_missing_avatars(
                 return_exceptions=True,
             )
             progress.update(task_id, completed=True)
-    finally:
-        await client.aio.aclose()
 
     failed_targets: list[tuple[_AvatarTarget, Exception]] = []
     for target, result in zip(targets, results, strict=True):

@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
+from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
+from mindroom.config.automations import AutomationList  # noqa: TC001
+from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
+from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
 )
-from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import validate_service_name
+from mindroom.credentials.manager import validate_service_name
+from mindroom.credentials.policy import credential_service_policy
+from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
@@ -31,6 +39,8 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
+FileAccess = Literal["workspace", "unrestricted"]
+_LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
@@ -78,8 +88,14 @@ class CoalescingConfig(BaseModel):
 class DebugConfig(BaseModel):
     """Debug and diagnostic settings."""
 
-    log_llm_requests: bool = False
-    llm_request_log_dir: str | None = None
+    log_llm_requests: bool = Field(
+        default=False,
+        description="Write best-effort JSONL records of provider requests for troubleshooting",
+    )
+    llm_request_log_dir: str | None = Field(
+        default=None,
+        description="Directory for LLM request logs; defaults to mindroom_data/logs/llm_requests",
+    )
 
 
 def _normalize_tool_entry_overrides(
@@ -149,10 +165,19 @@ class ToolConfigEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    name: str
-    overrides: dict[str, object] = Field(default_factory=dict)
-    defer: bool = False
-    initial: bool = False
+    name: str = Field(description="Registered tool name")
+    overrides: dict[str, object] = Field(
+        default_factory=dict,
+        description="Values for the tool's override fields; defaults.tools entries apply them to every agent",
+    )
+    defer: bool = Field(
+        default=False,
+        description="Hide the tool schema until the agent loads the tool for the current session",
+    )
+    initial: bool = Field(
+        default=False,
+        description="Load a deferred tool at session start and keep it loaded; requires defer",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -227,11 +252,14 @@ def _validate_compaction_threshold_choice(
 
 
 class CompactionOverrideConfig(BaseModel):
-    """Optional per-scope overrides for destructive compaction."""
+    """Optional per-scope overrides for text compaction.
+
+    An authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.
+    """
 
     enabled: bool | None = Field(
         default=None,
-        description="Whether to allow automatic pre-reply destructive compaction for this history scope",
+        description="Whether to allow automatic pre-reply text compaction for this history scope",
     )
     threshold_tokens: int | None = Field(
         default=None,
@@ -260,6 +288,7 @@ class CompactionOverrideConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     fallback_model: str | None = Field(
         default=None,
@@ -267,6 +296,7 @@ class CompactionOverrideConfig(BaseModel):
             "Optional model config name retried once when the summary model refuses for safeguards; summary input "
             "is rebuilt under the fallback model's context budget when needed"
         ),
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     timeout_seconds: float | None = Field(
         default=None,
@@ -285,11 +315,11 @@ class CompactionOverrideConfig(BaseModel):
 
 
 class CompactionConfig(BaseModel):
-    """Concrete destructive compaction configuration."""
+    """Concrete text compaction configuration."""
 
     enabled: bool = Field(
         default=True,
-        description="Whether to allow automatic pre-reply destructive compaction for this history scope",
+        description="Whether to allow automatic pre-reply text compaction for this history scope",
     )
     threshold_tokens: int | None = Field(
         default=None,
@@ -321,6 +351,7 @@ class CompactionConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     fallback_model: str | None = Field(
         default=None,
@@ -328,6 +359,7 @@ class CompactionConfig(BaseModel):
             "Optional model config name retried once when the summary model refuses for safeguards; summary input "
             "is rebuilt under the fallback model's context budget when needed"
         ),
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     timeout_seconds: float = Field(
         default=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -353,26 +385,38 @@ class DefaultsConfig(BaseModel):
     tools: list[ToolConfigEntry] = Field(
         default_factory=lambda: [ToolConfigEntry(name=name) for name in _DEFAULT_DEFAULT_TOOLS],
         description="Tool entries automatically added to every agent, with optional inline overrides",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     markdown: bool = Field(default=True, description="Default markdown setting")
     enable_streaming: bool = Field(
         default=True,
         description="Enable streaming responses via progressive message edits",
     )
+    large_message_strategy: _LargeMessageStrategy = Field(
+        default="sidecar",
+        description=(
+            "How to deliver oversized text responses: 'sidecar' uploads the full content as an "
+            "attachment behind a preview event; 'split' sends the full text as lossless segmented messages"
+        ),
+    )
     coalescing: CoalescingConfig = Field(
         default_factory=CoalescingConfig,
         description="Live message coalescing settings for rapid same-sender turns",
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
-    auto_resume_after_restart: bool = Field(
-        default=True,
-        description="Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
+    max_consecutive_agent_replies: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Most consecutive agent or team messages in one conversation before mentions in them stop waking "
+            "other agents and teams; a message from a person resets the count"
+        ),
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     compaction: CompactionConfig | None = Field(
         default_factory=CompactionConfig,
-        description="Default destructive compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
+        description="Default text compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
     )
     num_history_runs: int | None = Field(
         default=None,
@@ -396,13 +440,31 @@ class DefaultsConfig(BaseModel):
         ge=0,
         description="Max tool call messages replayed from history (None = no limit)",
     )
+    max_tool_calls_per_turn: int = Field(
+        default=1000,
+        ge=1,
+        description=(
+            "Maximum tool calls one agent or team turn may execute; further calls return a tool error, "
+            "and the turn ends with its text so far after this many plus two model requests"
+        ),
+    )
     show_tool_calls: bool = Field(
         default=True,
         description="Whether to show tool call details inline in responses",
     )
+    file_access: FileAccess = Field(
+        default="workspace",
+        description=(
+            "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) "
+            "may read and write files: workspace confines them to the agent workspace and its attachments, "
+            "unrestricted allows any path their process can reach. Code-execution tools such as shell and python "
+            "are always unrestricted; isolate them with worker_tools"
+        ),
+    )
     worker_tools: list[str] | None = Field(
         default=None,
         description="Tool names to route through scoped workers by default (None = use the built-in default routing policy)",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
@@ -434,6 +496,10 @@ class DefaultsConfig(BaseModel):
         ge=1,
         description="Hard cap for extra role preload context loaded from context_files",
     )
+    automations: AutomationList = Field(
+        default_factory=list,
+        description="Automations, built-in such as prompt_curation or from a plugin, for agents that do not list their own",
+    )
     tool_output_auto_save_threshold_bytes: int = Field(
         default=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
         ge=1,
@@ -449,14 +515,16 @@ class DefaultsConfig(BaseModel):
     thread_summary_model: str | None = Field(
         default=None,
         description="Model config name for generating thread summaries (e.g., 'haiku'). Uses 'default' if not set.",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     thread_summary_temperature: float | None = Field(
         default=0.2,
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, "
-            "Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries."
+            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, "
+            "Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and "
+            "Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(
@@ -474,17 +542,7 @@ class DefaultsConfig(BaseModel):
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
         """Reject removed legacy fields to prevent silent misconfiguration."""
-        if isinstance(data, dict):
-            if "sandbox_tools" in data:
-                msg = "defaults.sandbox_tools was removed. Use defaults.worker_tools instead."
-                raise ValueError(msg)
-            if "allowed_toolkits" in data:
-                msg = "defaults.allowed_toolkits was removed. Use defaults.tools instead."
-                raise ValueError(msg)
-            if "initial_toolkits" in data:
-                msg = "defaults.initial_toolkits was removed. Use defaults.tools instead."
-                raise ValueError(msg)
-        return data
+        return reject_legacy_defaults_fields(data)
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -554,6 +612,7 @@ class EmbedderConfig(BaseModel):
             "Explicit embedder API key. Highest priority, above credentials_service and the legacy "
             "dedicated embedder-to-openai fallback"
         ),
+        json_schema_extra=dashboard_hint(secret=True),
     )
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
     dimensions: int | None = Field(
@@ -568,6 +627,28 @@ class EmbedderConfig(BaseModel):
         """Normalize an optional named credential reference."""
         return None if value is None else validate_service_name(value)
 
+    @field_validator("host")
+    @classmethod
+    def _normalize_blank_host(cls, value: str | None) -> str | None:
+        """Treat a blank host (e.g. a cleared dashboard field) as unset so provider defaults apply."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
+    """Return settings with a trimmed string ``api_key``, dropped when null or blank; reject non-strings."""
+    if "api_key" not in settings:
+        return settings
+    normalized = dict(settings)
+    api_key = normalized.pop("api_key")
+    if api_key is not None and not isinstance(api_key, str):
+        msg = f"{field_name} must be a string"
+        raise ValueError(msg)
+    if api_key and api_key.strip():
+        normalized["api_key"] = api_key.strip()
+    return normalized
+
 
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
@@ -576,11 +657,22 @@ class ModelConfig(BaseModel):
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
+    display_name: str | None = Field(default=None, description="Friendly model name shown in clients")
+    icon: str | None = Field(default=None, description="Config-relative image path or Matrix mxc URI")
+    api: Literal["responses", "chat_completions"] | None = Field(
+        default=None,
+        description="OpenAI API transport; unset keeps automatic model/endpoint selection",
+    )
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
-    api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
+    api_key: str | None = Field(
+        default=None,
+        description="Optional model-specific API key used instead of the provider's shared key",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model",
+        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
         default=None,
@@ -594,10 +686,121 @@ class ModelConfig(BaseModel):
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )
+    stream_idle_timeout_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds a streamed model request may go without a provider event before MindRoom treats it as "
+            "stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their "
+            "built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit"
+        ),
+    )
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_display_name(cls, value: str | None) -> str | None:
+        """Trim an optional display name and treat blank input as unset."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("api_key")
+    @classmethod
+    def _normalize_api_key(cls, value: str | None) -> str | None:
+        """Trim the key and treat blank input as unset so the provider's shared key applies."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
+        return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
+
+    @field_validator("icon")
+    @classmethod
+    def _normalize_icon(cls, value: str | None) -> str | None:
+        """Accept config-relative paths and complete Matrix content URIs."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+
+        try:
+            parsed = urlsplit(normalized)
+            parsed_port = parsed.port
+        except ValueError as exc:
+            msg = "Model icon must be a config-relative path or Matrix mxc URI"
+            raise ValueError(msg) from exc
+
+        if parsed.scheme:
+            valid_mxc = (
+                parsed.scheme.lower() == "mxc"
+                and bool(parsed.netloc)
+                and bool(parsed.hostname)
+                and parsed.username is None
+                and parsed.password is None
+                and not (parsed_port is None and ":" in parsed.netloc.rsplit("]", maxsplit=1)[-1])
+                and valid_matrix_server_name(parsed.netloc)
+                and parsed.path.startswith("/")
+                and parsed.path.count("/") == 1
+                and len(parsed.path) > 1
+                and not parsed.query
+                and not parsed.fragment
+                and not any(character.isspace() for character in normalized)
+            )
+            if not valid_mxc:
+                msg = "Model icon must be a config-relative path or Matrix mxc URI"
+                raise ValueError(msg)
+            return f"mxc{normalized[3:]}"
+
+        windows_path = PureWindowsPath(normalized)
+        if PurePath(normalized).is_absolute() or windows_path.is_absolute() or bool(windows_path.root):
+            msg = "Model icon filesystem path must be relative to the config file"
+            raise ValueError(msg)
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_api_provider(self) -> Self:
+        if self.api is not None and self.provider.strip().lower() != "openai":
+            msg = "Model api is only supported for provider: openai"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_single_api_key(self) -> Self:
+        if self.api_key is not None and "api_key" in (self.extra_kwargs or {}):
+            msg = "Set the model API key in either api_key or extra_kwargs.api_key, not both"
+            raise ValueError(msg)
+        return self
+
+    def configured_api_key(self) -> str | None:
+        """Return the key set through ``api_key`` or ``extra_kwargs.api_key``, if any."""
+        return self.api_key or (self.extra_kwargs or {}).get("api_key")
 
 
 class RouterConfig(BaseModel):
     """Configuration for the router system."""
 
-    model: str = Field(default="default", description="Model to use for routing decisions")
-    accept_invites: bool = Field(default=True, description="Whether the router accepts and persists room invites")
+    model: str = Field(
+        default="default",
+        description="Model to use for routing decisions",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
+    judgment: ProbabilityJudgmentConfig | None = Field(
+        default=None,
+        description="Optional System One or OpenAI Decisions responder selection before the LLM router",
+    )
+    accept_invites: InviteAcceptancePolicy = Field(
+        default=True,
+        description=(
+            "true accepts every room invite to the router, false accepts none, and a list accepts only "
+            "invites from matching inviter Matrix IDs or glob patterns"
+        ),
+    )
+    access: ResponderAccessConfig | None = Field(
+        default=None,
+        description="Optional membership-based conversation access policy",
+    )

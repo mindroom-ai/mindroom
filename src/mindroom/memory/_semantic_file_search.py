@@ -6,14 +6,12 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
-from mindroom.knowledge import (
-    KnowledgeAvailability,
-    KnowledgeRefreshScheduler,
-    list_knowledge_files,
-    resolve_knowledge_base_access,
-)
+from mindroom.embeddings.errors import extract_classified_embedder_detail
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.file_listing import list_knowledge_files
+from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger
 from mindroom.memory._shared import MemoryResult
 from mindroom.timing import emit_elapsed_timing
@@ -108,14 +106,14 @@ def _memory_results_from_documents(
     return results
 
 
-def _search_knowledge_with_timing(
+async def _search_knowledge_with_timing(
     knowledge: Knowledge,
     *,
     query: str,
     limit: int,
 ) -> list[Document]:
     search_start = time.monotonic()
-    documents = knowledge.search(query=query, max_results=limit)
+    documents = await knowledge.asearch(query=query, max_results=limit)
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.knowledge_search",
         search_start,
@@ -157,7 +155,7 @@ async def search_semantic_file_memories(
 
     access_start = time.monotonic()
     resolve_start = time.monotonic()
-    resolution = resolve_knowledge_base_access(
+    resolution = await resolve_knowledge_base_access_async(
         file_memory.base_id,
         file_memory.config,
         runtime_paths,
@@ -198,8 +196,7 @@ async def search_semantic_file_memories(
         )
 
     query_start = time.monotonic()
-    documents = await asyncio.to_thread(
-        _search_knowledge_with_timing,
+    documents = await _search_knowledge_with_timing(
         resolution.knowledge,
         query=query,
         limit=limit,

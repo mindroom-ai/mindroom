@@ -8,6 +8,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -19,11 +20,13 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="google_calendar",
+    file_access=ToolFileAccess.NONE,
     display_name="Google Calendar",
-    description="View and schedule meetings with Google Calendar",
+    description="View calendars and create or update events in Google Calendar",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
     auth_provider="google_calendar",
     icon="SiGooglecalendar",
     icon_color="text-blue-600",  # Google Calendar blue
@@ -50,6 +53,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
     ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/googlecalendar",

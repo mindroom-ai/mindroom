@@ -16,6 +16,7 @@ from urllib.parse import quote
 from dotenv import dotenv_values
 
 from mindroom import runtime_env_policy
+from mindroom.atomic_file import atomic_write_bytes_at
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
@@ -28,6 +29,10 @@ DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
 CLASSIC_SYNC_TIMELINE_LIMIT = 5000
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
+DEFAULT_TOOL_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+# Largest attachment MindRoom retains, received from Matrix or registered by a tool;
+# also the default inline primary-to-worker save cap, so every retained attachment can reach a worker.
+RETAINED_MEDIA_MAX_BYTES = 64 * 1024 * 1024
 KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
 DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
 MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 128
@@ -63,6 +68,7 @@ WORKER_RUNTIME_PATH_ENV_NAMES = frozenset(
         "PIP_CACHE_DIR",
         "UV_CACHE_DIR",
         "PYTHONPYCACHEPREFIX",
+        "TMPDIR",
         "VIRTUAL_ENV",
     },
 )
@@ -437,15 +443,34 @@ def write_startup_manifest(
     """Write one sandbox-runner startup manifest and return its path."""
     manifest_path = sandbox_startup_manifest_path(storage_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
+    _write_manifest_without_following_symlinks(
+        manifest_path,
         _startup_manifest_json(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
         ),
-        encoding="utf-8",
     )
     return manifest_path
+
+
+def _write_manifest_without_following_symlinks(manifest_path: Path, payload: str) -> None:
+    """Atomically replace the manifest without following symlinks planted in the worker's own root.
+
+    The manifest directory sits inside the runtime root a dedicated worker mounts
+    read-write, so a symlink left there would otherwise redirect this write onto
+    any file the primary can reach. Publishing through a rename replaces a planted
+    file symlink instead of following it, and a worker never observes a partial manifest.
+    """
+    try:
+        directory_fd = os.open(manifest_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        msg = f"Sandbox startup manifest directory must be a real directory: {manifest_path.parent}"
+        raise OSError(msg) from exc
+    try:
+        atomic_write_bytes_at(directory_fd, manifest_path.name, payload.encode("utf-8"), file_mode=0o644)
+    finally:
+        os.close(directory_fd)
 
 
 def _is_json_object(value: object) -> TypeGuard[dict[str, object]]:
@@ -664,8 +689,7 @@ def trusted_tool_runtime_env_values(
 
 def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied execution tools."""
-    process_env = runtime_env_policy.execution_tool_runtime_env(runtime_paths.process_env)
-    env_file_values = runtime_env_policy.execution_tool_runtime_env(runtime_paths.env_file_values)
+    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     merged_env = dict(env_file_values)
     merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
@@ -914,6 +938,15 @@ def tracking_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "tracking"
 
 
+def primary_records_dir(state_root: Path, runtime_paths: RuntimePaths) -> Path:
+    """Map a canonical state root to the primary-only directory for the records the primary trusts about it.
+
+    The Kubernetes sandbox runner sidecar mounts `agents` and `private_instances` read-write,
+    so these records keep the state root's storage-relative path below the tracking directory, which no worker mounts.
+    """
+    return tracking_dir(runtime_paths) / state_root.relative_to(runtime_paths.storage_root.expanduser().resolve())
+
+
 def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
     return runtime_paths.storage_root / "encryption_keys"
@@ -1044,10 +1077,15 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
+# The human or configured bot account an entity's reply was written for; entities it mentions act for that requester.
+ACTING_REQUESTER_KEY = "com.mindroom.acting_requester"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
 PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
+SCHEDULED_MODEL_KEY = "com.mindroom.scheduled_model"
+SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
+SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
@@ -1055,25 +1093,23 @@ VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 VOICE_TRANSCRIPT_KEY = "com.mindroom.voice_transcript"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
-MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY = "matrix_turn_schema_version"
 MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
-MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_turn_redacted_source_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
-MATRIX_RESPONSE_OWNER_METADATA_KEY = "matrix_response_owner"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
-MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"
-MATRIX_CONVERSATION_TARGET_METADATA_KEY = "matrix_conversation_target"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
 MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
-MATRIX_SOURCE_EVENT_METADATA_KEY = "matrix_source_event_metadata"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
+SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
+UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
+THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 DURABLE_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
+DURABLE_FINAL_OUTCOME_VERSION = 2
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"
@@ -1084,12 +1120,22 @@ STREAM_STATUS_COMPLETED = "completed"
 STREAM_STATUS_CANCELLED = "cancelled"
 STREAM_STATUS_INTERRUPTED = "interrupted"
 STREAM_STATUS_ERROR = "error"
+# A reply with one of these statuses is still being written or waits for a tool approval.
+UNFINISHED_REPLY_STATUSES = frozenset(
+    {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING},
+)
 
 # Placeholder used in starter config templates. `mindroom connect` can
 # automatically replace this token with the owner Matrix user ID returned
 # by the provisioning service.
 OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
+
+
+def is_silent_schedule_no_report_response(response_text: str) -> bool:
+    """Return whether one silent-schedule final text explicitly reports nothing."""
+    normalized = response_text.strip()
+    return not normalized or normalized.casefold() == SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
 
 
 # Canonical mapping from provider name to the environment variable it requires.

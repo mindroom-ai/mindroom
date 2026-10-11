@@ -5,29 +5,35 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import ClassVar, cast
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from aiohttp import ClientError
 
 import mindroom.tools  # noqa: F401
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client import RoomThreadsPageError
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.access_schema_support import membership_config
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_relation_lookup,
     runtime_paths_for,
+    serve_conversation_reader,
+    serve_media_from_download,
     test_runtime_paths,
 )
 
@@ -118,6 +124,19 @@ def test_matrix_room_tool_registered_and_instantiates() -> None:
     )
 
 
+def test_matrix_room_schema_exposes_supported_actions() -> None:
+    """Agents must receive the allowed actions as a schema enum, not an unrestricted string."""
+    function = MatrixRoomTools().async_functions["matrix_room"]
+    function.process_entrypoint(strict=False)
+    assert function.parameters["properties"]["action"]["enum"] == [
+        "room-info",
+        "members",
+        "agents",
+        "threads",
+        "state",
+    ]
+
+
 # --- Context required ---
 
 
@@ -152,6 +171,7 @@ async def test_matrix_room_rejects_unsupported_action() -> None:
         ({"action": None}, "invalid", "action must be a string"),
         ({"action": "threads", "limit": "3"}, "threads", "limit must be an integer"),
         ({"action": "room-info", "room_id": 123}, "room-info", "room_id must be a string"),
+        ({"action": "threads", "include_summaries": "yes"}, "threads", "include_summaries must be a boolean"),
     ],
 )
 async def test_matrix_room_rejects_malformed_arguments(
@@ -175,6 +195,7 @@ async def test_matrix_room_rejects_malformed_arguments(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_matrix_room_explicit_room_requires_authorization() -> None:
     """Explicit room targeting should enforce authorization checks."""
     tool = MatrixRoomTools()
@@ -483,6 +504,8 @@ async def test_threads_happy_path() -> None:
     assert payload["threads"][0]["reply_count"] == 5
     assert payload["threads"][1]["thread_id"] == "$thread2"
     assert payload["threads"][1]["reply_count"] == 2
+    assert "summary" not in payload["threads"][0]
+    ctx.conversation_reader.read_strict.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -648,6 +671,7 @@ async def test_threads_preview_resolves_large_file_root_through_canonical_visibl
     """Threads should hydrate large streamed m.file roots before building previews."""
     tool = MatrixRoomTools()
     ctx = _make_context()
+    serve_media_from_download(ctx.client)
     ctx.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,
@@ -1064,3 +1088,403 @@ async def test_matrix_room_defaults_to_context_room() -> None:
 def test_matrix_room_implied_by_matrix_message() -> None:
     """matrix_room should be auto-included when matrix_message is in an agent's tools."""
     assert "matrix_room" in Config.IMPLIED_TOOLS.get("matrix_message", ())
+
+
+@pytest.mark.asyncio
+async def test_threads_includes_latest_activity_ts() -> None:
+    """Threads should expose latest activity separately from root creation time."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    thread_root = _thread_event(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        ts=1234,
+        body="Root message body",
+        reply_count=4,
+    )
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {
+                "count": 4,
+                "latest_event": {
+                    "event_id": "$thread-reply",
+                    "origin_server_ts": 5678,
+                },
+            },
+        },
+    }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_room.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_room.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved root message body"),
+        ) as mock_preview,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_room(action="threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"] == [
+        {
+            "thread_id": "$thread-root",
+            "sender": "@alice:localhost",
+            "timestamp": 1234,
+            "latest_activity_ts": 5678,
+            "body_preview": "Resolved root message body",
+            "reply_count": 4,
+        },
+    ]
+    mock_preview.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_threads_resolves_large_bundled_replacement_through_canonical_visible_body() -> None:
+    """Threads should hydrate large bundled latest edits before building previews."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    serve_media_from_download(ctx.client)
+    ctx.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Final bundled edit\n\n⏳ Preparing isolated worker...",
+                    "io.mindroom.visible_body": "Final bundled edit",
+                },
+            ).encode("utf-8"),
+        ),
+    )
+    thread_root = _thread_event(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        ts=1234,
+        body="Original root",
+        reply_count=4,
+    )
+    thread_root.source["unsigned"] = {
+        "m.relations": {
+            "m.thread": {"count": 4},
+            "m.replace": _make_bundled_replacement(
+                event_id="$thread-root",
+                body="Preview latest edit...",
+                msgtype="m.file",
+                sender="@mindroom_general:localhost",
+                long_text={
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                url="mxc://server/thread-root-edit",
+            ),
+        },
+    }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_room.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_room(action="threads", limit=1))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["body_preview"] == "Final bundled edit"
+
+
+@pytest.mark.asyncio
+async def test_threads_skips_malformed_roots() -> None:
+    """Threads should skip malformed roots instead of crashing the whole action."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    thread_root = _thread_event(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        ts=1234,
+        body="Root message body",
+        reply_count=4,
+    )
+
+    class MalformedThreadRoot:
+        event_id: ClassVar[object] = None
+        sender: ClassVar[str] = "@broken:localhost"
+        server_timestamp: ClassVar[int] = 1234
+        source: ClassVar[dict[str, object]] = {
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "broken"},
+        }
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_room.get_room_threads_page",
+            new=AsyncMock(return_value=([MalformedThreadRoot(), thread_root], None)),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_room.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved root message body"),
+        ) as mock_preview,
+        patch("mindroom.custom_tools.matrix_room.logger.warning") as mock_warning,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "ok"
+    assert payload["count"] == 1
+    assert payload["threads"] == [
+        {
+            "thread_id": "$thread-root",
+            "sender": "@alice:localhost",
+            "timestamp": 1234,
+            "body_preview": "Resolved root message body",
+            "reply_count": 4,
+        },
+    ]
+    mock_preview.assert_awaited_once_with(
+        thread_root,
+        client=ctx.client,
+        config=ctx.config,
+        runtime_paths=ctx.runtime_paths,
+        trusted_sender_ids=ANY,
+    )
+    mock_warning.assert_called_once()
+
+
+_AGENT_ID = "@mindroom_general:localhost"
+
+
+def _thread_message(event_id: str, body: str, ts: int) -> ResolvedVisibleMessage:
+    return ResolvedVisibleMessage.synthetic(
+        sender="@alice:localhost",
+        body=body,
+        event_id=event_id,
+        timestamp=ts,
+        thread_id="$thread1",
+    )
+
+
+def _summary_notice(
+    event_id: str,
+    summary: str,
+    ts: int,
+    *,
+    model: str = "summary-model",
+    pinned: bool | None = None,
+    sender: str = _AGENT_ID,
+) -> ResolvedVisibleMessage:
+    metadata: dict[str, object] = {
+        "version": 1,
+        "summary": summary,
+        "message_count": 2,
+        "generated_at": f"2026-01-01T00:00:0{ts // 1000}+00:00",
+        "model": model,
+    }
+    if pinned is not None:
+        metadata["pinned"] = pinned
+    return ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=summary,
+        event_id=event_id,
+        timestamp=ts,
+        content={"msgtype": "m.notice", "body": summary, "io.mindroom.thread_summary": metadata},
+        thread_id="$thread1",
+    )
+
+
+def _edited(message: ResolvedVisibleMessage, edit: ResolvedVisibleMessage) -> ResolvedVisibleMessage:
+    message.apply_edit(body=edit.body, timestamp=edit.timestamp, latest_event_id=edit.event_id, content=edit.content)
+    return message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("summaries", "expected_summary", "expected_pinned"),
+    [
+        pytest.param([], None, False, id="no-summary"),
+        pytest.param([_summary_notice("$auto", "Automatic title", 3000)], "Automatic title", False, id="automatic"),
+        pytest.param(
+            [
+                _summary_notice("$auto", "Automatic title", 3000),
+                _summary_notice("$manual", "Manual title", 4000, model="manual", pinned=True),
+            ],
+            "Manual title",
+            True,
+            id="manual-pinned",
+        ),
+        pytest.param(
+            [
+                _summary_notice("$manual", "Manual title", 3000, model="manual", pinned=True),
+                _summary_notice("$release", "Released title", 4000, model="manual", pinned=False),
+                _summary_notice("$auto", "Newer automatic title", 5000),
+            ],
+            "Newer automatic title",
+            False,
+            id="later-unpinned",
+        ),
+        pytest.param(
+            [
+                _edited(
+                    _summary_notice("$manual", "Manual title", 3000, model="manual", pinned=True),
+                    _summary_notice("$manual-edit", "Edited title", 5000, model="manual", pinned=True),
+                ),
+                _summary_notice("$auto", "Automatic title", 4000),
+            ],
+            "Edited title",
+            True,
+            id="edited-after-later-summary",
+        ),
+    ],
+)
+async def test_threads_show_current_summary_and_pin_state(
+    summaries: list[ResolvedVisibleMessage],
+    expected_summary: str | None,
+    *,
+    expected_pinned: bool,
+) -> None:
+    """Each thread row carries the title the thread shows now and whether automatic summaries keep off it."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    history = [
+        _thread_message("$thread1", "Thread root", 1000),
+        _thread_message("$reply", "A reply", 2000),
+        *summaries,
+    ]
+    serve_conversation_reader(ctx.conversation_reader, history, room_id="!room:localhost", thread_id="$thread1")
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
+
+    assert payload["status"] == "ok"
+    thread = payload["threads"][0]
+    assert thread["summary"] == expected_summary
+    assert thread["summary_pinned"] is expected_pinned
+    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread1",
+        limit=ANY,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["truncated", "read-error"])
+async def test_threads_omit_summary_when_thread_history_is_incomplete(failure: str) -> None:
+    """A thread whose full history is unavailable gets no summary fields rather than a guess from a suffix."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    history = [_summary_notice("$auto", "Automatic title", 3000)]
+    serve_conversation_reader(ctx.conversation_reader, history, room_id="!room:localhost", thread_id="$thread1")
+    if failure == "truncated":
+        ctx.conversation_reader.hydration_was_truncated.return_value = True
+    else:
+        ctx.conversation_reader.read_strict.side_effect = RuntimeError("history unavailable")
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
+
+    assert payload["status"] == "ok"
+    thread = payload["threads"][0]
+    assert thread["thread_id"] == "$thread1"
+    assert "summary" not in thread
+    assert "summary_pinned" not in thread
+
+
+def _human_pin_context(tmp_path: Path, *, sender: str, room_cached: bool) -> ToolRuntimeContext:
+    """Return a context whose thread holds one manual pinned title written by a person."""
+    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    client = make_matrix_client_mock()
+    if not room_cached:
+        client.rooms = {}
+    ctx = make_test_tool_runtime_context(
+        agent_name="talent",
+        target=MessageTarget.resolve(room_id="!room:x", thread_id="$thread1", reply_to_event_id=None),
+        requester_id="@owner:example.com",
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        room=None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+    notice = _summary_notice("$human", "Human title", 3000, model="manual", pinned=True)
+    notice.sender = sender
+    history = [_thread_message("$thread1", "Thread root", 1000), notice]
+    serve_conversation_reader(ctx.conversation_reader, history, room_id="!room:x", thread_id="$thread1")
+    return ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_threads_show_title_pinned_by_a_person(tmp_path: Path) -> None:
+    """A title a person pinned shows up like one the agent pinned."""
+    tool = MatrixRoomTools()
+    ctx = _human_pin_context(tmp_path, sender="@owner:example.com", room_cached=True)
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["summary"] == "Human title"
+    assert payload["threads"][0]["summary_pinned"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_threads_omit_summary_while_pin_authority_is_pending(tmp_path: Path) -> None:
+    """A person's pin that room membership cannot yet authorize leaves the fields out instead of guessing."""
+    tool = MatrixRoomTools()
+    ctx = _human_pin_context(tmp_path, sender="@outsider:example.com", room_cached=False)
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
+        payload = json.loads(await tool.matrix_room(action="threads", include_summaries=True))
+
+    assert payload["status"] == "ok"
+    assert payload["threads"][0]["thread_id"] == "$thread1"
+    assert "summary" not in payload["threads"][0]
+    assert "summary_pinned" not in payload["threads"][0]
+
+
+@pytest.mark.asyncio
+async def test_threads_returns_structured_transport_error() -> None:
+    """Threads should convert transport exceptions into structured tool errors."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_room.get_room_threads_page",
+            new=AsyncMock(
+                side_effect=RoomThreadsPageError(
+                    response="TimeoutError: request timed out",
+                ),
+            ),
+        ),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_room(action="threads"))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "threads"
+    assert payload["room_id"] == ctx.room_id
+    assert payload["response"] == "TimeoutError: request timed out"
+    assert "errcode" not in payload
+    assert "retry_after_ms" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_room", [False, True])
+async def test_room_info_exposes_only_selected_rooms_conversation(*, other_room: bool) -> None:
+    """Current targeting metadata belongs to room discovery and must not leak across rooms."""
+    ctx = _make_context(thread_id="$current-thread")
+    room_id = "!other:localhost" if other_room else ctx.room_id
+    ctx.client.rooms[room_id] = _make_cached_room(room_id)
+    with tool_runtime_context(ctx), patch("mindroom.custom_tools.matrix_room.room_access_allowed", return_value=True):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="room-info", room_id=room_id))
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == (None if other_room else "$current-thread")
+    assert payload["reply_to_event_id"] is None
+    assert payload["requester_id"] == ctx.requester_id
+    assert payload["agent_name"] == ctx.agent_name

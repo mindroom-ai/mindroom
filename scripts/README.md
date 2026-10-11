@@ -10,13 +10,13 @@ This directory contains utility scripts for MindRoom self-hosting.
 - **`testing/fuzz_live_matrix.py`** - Replay concurrent Matrix mutations through disposable Tuwunel and MindRoom stacks
 
 ### 🔧 Utilities
+- **`utilities/repair_nested_sidecars.py`** - Repair an explicitly selected legacy nested-attachment edit through Matrix
 - **`utilities/cleanup_agent_edits.sh`** - Clean up agent-edited files in Matrix database
 - **`utilities/cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker environment
 - **`utilities/cleanup_agent_edits.py`** - Python version of cleanup script with more options
 - **`utilities/forward-ports.sh`** - Forward ports from remote servers for local testing
 - **`utilities/rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
 - **`utilities/rewrite_git_history_apply.py`** - Apply git history rewrites
-- **`utilities/setup_cleanup_cron.sh`** - Setup cron job for periodic cleanup
 
 ## For SaaS Platform Scripts
 
@@ -24,14 +24,38 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 
 ## Usage Examples
 
-### Clean up agent edits
+### Repair a legacy nested attachment
+
+Some older terminal edits were prepared twice, leaving an attachment that points to another attachment.
+The writer was fixed in PR #1827; this utility repairs an existing message at its Matrix source.
+It reuses the existing inner attachment, verifies the corrected edit and full content, then redacts only the selected broken edit.
+The default is read-only and prints event IDs and status, without message text or credentials.
+
+From the repository root, set `MATRIX_ACCESS_TOKEN` to the original author's token through your normal secret-handling workflow, then preview:
+
 ```bash
-# For Docker setup
-./scripts/utilities/cleanup_agent_edits_docker.sh
+uv run python -m scripts.utilities.repair_nested_sidecars --homeserver https://matrix.example.org --room-id '!room:example.org' --event-id '$broken-edit'
+```
+
+Review the selected event IDs, then repeat with `--apply` during a quiet period for that message.
+Applying publishes a replacement and redacts the old edit; it does not change the original message, upload new attachments, or edit a database directly.
+If redaction fails after publication, rerunning with the same target finishes cleanup without another replacement.
+The command refuses a different current edit, encrypted rooms, unreadable attachments, payloads over 2 MiB, chains deeper than two layers, and edit histories exceeding 20 pages of 100 events.
+This targets known broken edits rather than scanning an installation; it does not claim to repair other messages or recover missing data.
+No runtime module imports this utility, and the normal reader remains unchanged.
+Once the affected messages have been repaired and a fresh import has been verified, this utility and its tests can be removed without a runtime or schema migration.
+
+### Clean up agent edits
+
+```bash
+# For the local Matrix Docker stack
+POSTGRES_CONTAINER=mindroom-postgres ./scripts/utilities/cleanup_agent_edits_docker.sh --dry-run
 
 # For direct database access
 ./scripts/utilities/cleanup_agent_edits.py --dry-run
 ```
+
+For another Docker deployment, set `POSTGRES_CONTAINER` to its PostgreSQL container name.
 
 ### Benchmark Matrix performance
 ```bash
@@ -43,14 +67,59 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 --warmup 100
 ```
 
+### Fuzz journal storage and ingestion
+
+```bash
+uv run pytest tests/test_event_journal_fuzz.py tests/test_durable_ingestion_decryption_fuzz.py -n 2 --no-cov --hypothesis-seed=1640 --hypothesis-show-statistics
+```
+
+These property tests run against real SQLite and PostgreSQL journals in the normal test suite.
+Hypothesis generates and shrinks action sequences; failures print the minimal sequence and a reproduction blob.
+Use the same `--hypothesis-seed` to repeat a campaign, or change it to explore another set of sequences.
+Examples use isolated principals; generated reopen actions close and reopen the actual database.
+
+The journal properties preserve the portable coverage from the retired cache fuzzer, while the live harness below checks complete agent turns:
+
+| Behavior | Generated journal checks | Live checks |
+| --- | --- | --- |
+| Edits | Edits before originals, timestamp ties, older late edits, forged authors, edits of edits, and attempted thread relocation | In-flight edits, regeneration, exact current source markers, and final response bodies |
+| Duplicate delivery | Actual repeated admission, concurrent duplicates, conflicting payloads, and replay after settlement or reopen | Repeated Matrix transactions and exact logical response attribution |
+| Redactions | Redaction before target, non-resurrection, tombstones, hidden revision debt, and server-authoritative restoration | Canonical redactions and follow-up probes proving deleted markers leave the complete model request |
+| History and isolation | Exact ordered logical messages, revision/body equality, pagination, pending receipt order, and separation of principals, rooms, and threads | Concurrent clients and threads, canonical Matrix history, and durable response ownership |
+| Restart | Exact observable journal state survives a real close and reopen | Graceful shutdown, crashes with unfinished work, outages, and recovery |
+| Encrypted input | Opaque/clear observations with the same identity, reordered delivery, provenance, and settled replay | The live workload uses unencrypted rooms; real crypto and opaque-reply recovery also have focused runtime tests |
+
+The oracle is checked by deliberately corrupting stored messages, revisions, thread placement, pending work, and tombstones and requiring failures.
+Redacting an edit that arrived before its original retains only bodyless ordering evidence, so the later original requests a refetch instead of losing an earlier surviving edit.
+The properties allow this temporary hidden state, then require complete canonical history after refetch.
+They do not recreate retired cache generations, staleness flags, or snapshot replacement operations.
+
 ### Fuzz live Matrix behavior
 ```bash
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
-uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --reply-timeout 180
-uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --threads 200 --reply-timeout 180
+uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180
+uv run python scripts/testing/fuzz_live_matrix.py --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
+uv run python scripts/testing/fuzz_live_matrix.py --trace tests/fixtures/matrix_fuzz/limited_sync_concurrent_branch_replay.json
 ```
+
+The `chaos` profile adds concurrent clients across multiple rooms, hot-thread traffic, in-flight edits and redactions, MindRoom restarts, Tuwunel restarts, and downtime followed by recovery.
+It settles at generated checkpoints and audits the final Matrix view against exact source events, response bodies, redaction provenance, and durable turn records in the current event journal.
+It uses the installed `mindroom-nio` dependency from `uv.lock`; no separate source checkout is required.
+The harness selects the locked Python environment with `uv`, then starts Python directly so a graceful group interrupt is delivered once, without a wrapper forwarding a second signal during shutdown.
+
+Generated fuzz and chaos traces append explicit follow-up probes for conversations with source redactions.
+The probes wait for durable tombstones and check that redacted source markers are absent from the complete model request.
+Probe operations are additional to `--steps` and appear in the saved trace.
+
+Use `--save-trace scenario.json` to save the logical workload and `--trace scenario.json` to replay it against a fresh disposable server.
+Replay preserves batches and inputs; concurrent scheduling and runtime output can differ.
+`tests/fixtures/matrix_fuzz/limited_sync_concurrent_branch.json` preserves the original captured failure trace from the retired cache recovery harness.
+Its `_replay.json` companion keeps all 57 operations, ten concurrent batches, six clients, and twelve threads, converts the logical root references, and makes the original outage and restart explicit with current chaos lifecycle operations.
+This replays the captured backlog against the event journal; it does not require a limited sync timeline or reproduce the retired cache state machine.
+Failure bundles retain the scenario, realized operation order, logs, runtime provenance, and audit evidence under `--artifact-root`.
+The `saturation` profile retains the original short-stream scenario; use `sustained-stream-capacity` for the long-running capacity gate.
 
 `--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
 The default of 100 buys one interruption in a 200-step run; `5` buys around forty.
@@ -64,8 +133,15 @@ Each interruption is scheduled as the tail of a batch that still owes the agent 
 That is what makes it land inside a turn instead of against an idle runtime, which is all a restart between drained batches could ever do.
 Interruptions alternate between two kinds, because they prove different things:
 
-- `restart_mindroom` sends SIGINT, so MindRoom drains. The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
-- `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery. There is no shutdown verdict to check here; the oracle is that each interrupted turn still produces exactly one reply.
+- `restart_mindroom` sends SIGINT, so MindRoom drains.
+The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
+- `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery.
+  There is no shutdown verdict to check here; each interrupted source must have exact response attribution or independently proven deliberate supersession.
+
+Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response covering its current marker.
+An old visible reply must retain exact durable attribution and terminal restart-interruption metadata; superseded work is counted separately from completed generation and cannot waive delivery, edit, redaction, or source-revision debt.
+No router message ever resumes interrupted work: replay continues an interrupted reply in that same Matrix message, and an agent reply to any event other than a required source fails the reply invariant.
+`ledger_superseded_sources` and `superseded_interrupted_bodies` count superseded outcomes separately, while `completed_final_bodies` counts completed responses and the original generation remains unchanged.
 
 A run whose interruptions all found an idle journal fails instead of reporting the count as coverage.
 `restarts`, `crashes`, and `interruptions_with_work_outstanding` are all in the result JSON, and the third must equal the sum of the first two.
@@ -82,10 +158,9 @@ Its responder emits exactly 4,800 characters in 40-character chunks at 80 charac
 uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180
 ```
 
-This profile measures sustained overlapping streams without pausing MindRoom or injecting a recovery-cliff context gap.
-It does not send SIGSTOP or inject a recovery-cliff context gap, and it does not require a recovery marker.
+This profile measures sustained overlapping streams and does not pause or restart MindRoom.
+It does not send SIGSTOP, does not require legacy recovery markers, and does not require a recovery marker.
 Unlike `short-stream-correctness`, it is a capacity workload with N long-lived overlapping streams rather than a short correctness scenario.
-Unlike `recovery-cliff`, it does not fault-inject a context gap or require recovery-cliff-only delivery-retry, detached-worker, or unacknowledged-FINAL evidence.
 
 PASS requires exactly N configured root source events with unique run/thread markers, the expected sender, and an explicit mention of the configured responder.
 PASS requires exactly one completed canonical terminal reply for every configured root, with unique source and response identities and no missing, duplicate, orphan, malformed, nonterminal, or later-terminal replacement evidence.
@@ -94,13 +169,7 @@ PASS requires healthy sync samples throughout the run and at least one health sa
 PASS requires zero pending journal rows and unacknowledged outbox rows when the durable probe is available, with no recovery-abandonment, watchdog-stall, or durable-drain-failure markers.
 PASS requires the post-load reaction to settle, sync time to advance after the reaction fence, and shutdown to complete cleanly within the same non-extending deadline.
 
-The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for a workload that defaults to 100 roots and can be raised with `--threads`.
-With the current timeline and nio recovery limits, 1,499 roots is the largest valid recoverable trace and 1,500 is refused before the held workload rather than misreported as a runtime capacity failure.
-It pauses the managed runtime at a confirmed process-group boundary, sends a derived 601-event context gap, releases every configured managed root concurrently, and resumes the runtime even if a send fails.
-Its single observer cursor enumerates every positioned sync interval forward through `/messages` before publication, so a limited or compacted `/sync` timeline cannot omit reply or edit evidence.
-One fixed whole-workload `--reply-timeout` covers the fault boundary, root sends, terminal replies, durable debt observation, final drain, and post-load fence without extension.
-PASS requires exact completed replies, sustained overlap of every configured stream, an attempted unacknowledged workload FINAL row, the detached delivery worker marker, the generic delivery-retry marker, complete durable drain, healthy advancing sync, zero watchdog stalls, no recovery abandonment, and clean shutdown.
-Short-stream-correctness results are not recovery-cliff acceptance evidence.
+Short-stream-correctness results are not capacity acceptance evidence.
 
 #### The live gate is manual, and that is a decision rather than an omission
 
@@ -108,8 +177,12 @@ Nothing in `.github/`, the `justfile`, or pre-commit used to run this harness, s
 The gate is now a single named command:
 
 ```bash
+docker pull ghcr.io/mindroom-ai/mindroom-tuwunel:latest
 just test-live-journal-gate
 ```
+
+Refresh the homeserver image before the gate: a cached Tuwunel older than 1.9.1 can omit quiet joined rooms from full-state sync and make the client infer false departures.
+The harness records the actual image digest in its run provenance.
 
 It runs the fuzz profile with restarts turned up and then the restart-recovery profile, and it is the check to run before merging anything that touches those paths.
 `tests/test_live_matrix_fuzz.py` is what CI runs, and it is a unit test of this harness against fakes: it proves the oracle and the invariants behave, and it boots no Docker, no homeserver, and no MindRoom.
@@ -127,11 +200,11 @@ It is not claimed here because it has not been run on a GitHub runner, and shipp
 
 #### Making a red run mean the product is broken
 
-Every event in one Matrix room is handled by a single sequential lane, so a batch that asks forty-five threads for a reply is asking for forty-five agent turns back to back.
-Holding that to the same flat deadline as a single turn made the fuzz profile fail on a busy machine for reasons that had nothing to do with the code under test, so the harness now derives its deadlines from the work and from measured latency.
+A batch can owe many agent turns, including work serialized within a conversation.
+The harness derives its deadlines from the outstanding work and measured latency so healthy progress on a busy machine is not held to a single-turn deadline.
 
 - For fuzz, restart-regression, and short-stream-correctness, `--reply-timeout` is the deadline for a *single* agent turn and the floor under every larger adaptive deadline.
-- For recovery-cliff, `--reply-timeout` is one fixed non-extending deadline for the complete held-load, reply, drain, and fence workflow.
+- For sustained-stream-capacity, `--reply-timeout` is one fixed non-extending deadline for the complete root-release, reply, drain, and fence workflow.
 - A wait for N outstanding replies gets `N x measured-turn-latency x 3`, floored at `--reply-timeout`.
   The turn latency is measured from the warm-up exchange and from every completed wait after it, keeping the slowest observation, so nothing new is hardcoded.
 - Silence, not the deadline, is what identifies a wedge.
@@ -139,6 +212,8 @@ Holding that to the same flat deadline as a single turn made the fuzz profile fa
 - A deadline that arrives while replies are still landing is extended up to three times, and each extension prints a `slow machine:` line to stderr.
   An extension is only granted to a window that actually produced a reply, so a wedged runtime can never extend its way out of failing.
 - A managed MindRoom child that has exited fails the wait on the next poll instead of being waited out.
+- Graceful shutdown has a separate 60-second outer watchdog so the runtime can complete its sequential cleanup phases.
+  Forced kills, unexpected exit status, and missing orderly shutdown evidence still fail the run.
 
 When a wait does fail, the harness reads the run's own `mindroom_data/tracking/event_journal.db` and reports where each missing reply's source event actually stopped: `not_admitted`, `admitted_never_dispatched`, `dispatched_never_sent`, `settled_without_reply`, or `sent_but_unobserved`.
 The report also names the per-room pending depth and the event at the head of the blocked lane.
@@ -154,11 +229,12 @@ The `--threads` and `--max-batch-size` defaults are unchanged.
 
 The `restart-regression` profile is a manual opt-in oracle for config replacement, cold-history suppression, and durable callback recovery across a hard MindRoom restart.
 It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then atomically adds that room and switches only the managed agent to the replacement model used by the in-flight latch.
-The disposable room is world-readable so replacement bots can actually receive and cache events authored before they joined.
-The run waits for config-reload shutdown of both old bots, setup of both replacement bots, configuration-update completion, and durable caching of all four principal/event pairs.
-It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its unsettled durable obligation, a deterministic model request held in flight, and a sync checkpoint strictly later than the fresh event's cache write.
+The disposable room is world-readable so replacement bots can project events authored before they joined.
+The run waits for config-reload shutdown of both old bots, setup of both replacement bots, and configuration-update completion.
+It then sends the fresh request and waits for the exact callback, its pending journal event, a deterministic model request held in flight, and durable producer settlement after projection of the fresh event.
 The harness hard-kills MindRoom, switches to a recovery-only deterministic model while the process is down, boots a new process, and waits for both recovered bots to complete setup.
-The run passes only when the pending obligation becomes succeeded, the exact fresh event reaches semantic ingress once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+The run passes only when the pending journal event becomes settled, the exact fresh event reaches semantic ingress once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+After the recovered answer, the harness explicitly reads the historical room projection; historical hydration is lazy and is not a prerequisite for sending the fresh request.
 Transport callback entry may repeat while Matrix sync and durable recovery race, so the oracle counts the `Received message` boundary after durable dedup instead of the lower-level callback-entry log.
 Neither historical event may start a callback, reach the fresh prompt, or produce output.
 An orderly final shutdown must complete without the production durable-recovery drain-failure marker.
@@ -174,7 +250,7 @@ uv run python scripts/testing/fuzz_live_matrix.py \
   --failure-log restart-regression.log
 ```
 
-`--reply-timeout` bounds lifecycle, cache, durable-obligation, model-latch, response, and final-drain observation.
+`--reply-timeout` bounds lifecycle, projection, durable-producer, journal, model-latch, response, and final-drain observation.
 `--settle-seconds` controls the final Matrix long-poll after the orderly drain.
 `--failure-log` preserves the complete MindRoom log when the oracle fails without printing content-bearing runtime output to the terminal.
 `--seed`, `--steps`, `--threads`, `--max-batch-size`, and `--restart-interval` do not change this fixed profile.
@@ -186,9 +262,12 @@ When you run this from a source checkout, generated files are written under `./a
 In containerized deployments, generated overrides are stored under the persistent MindRoom storage path instead of the image-bundled `/app/avatars`.
 
 ```bash
-GOOGLE_API_KEY=your-google-api-key uv run mindroom avatars generate
+OPENAI_API_KEY_FILE=/path/to/openai_api_key uv run mindroom avatars generate
 uv run mindroom avatars sync
 ```
+
+Avatar prompts use `gpt-6-astra`, while `gpt-image-2.5-sunburst` renders the final 1024x1024 high-quality PNG files.
+The shared credential can instead be supplied directly through `OPENAI_API_KEY`.
 
 ## Requirements
 

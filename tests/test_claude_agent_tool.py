@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from types import SimpleNamespace
@@ -14,14 +16,26 @@ from typing import TYPE_CHECKING, Any, ClassVar, get_type_hints
 import httpx
 import pytest
 from agno.run.base import RunContext
-from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ProcessError, ResultMessage, TextBlock
 
 import mindroom.tools  # noqa: F401
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.custom_tools import claude_agent as claude_agent_module
+from mindroom.helper_usage import helper_usage_context
+from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    build_execution_identity_from_runtime_context,
+    detached_requester_context,
+    tool_runtime_context,
+)
+from mindroom.usage.stats import collect_admin_usage
+from tests.history_helpers import _forced_compaction_context, _session
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterator
+    from collections.abc import AsyncGenerator, Callable, Iterator
+    from pathlib import Path
 
 
 @dataclass
@@ -62,6 +76,68 @@ class _FakeClaudeSDKClient:
 
     async def disconnect(self) -> None:
         self.connected = False
+
+
+def _claude_response(
+    model: str,
+    message_id: str,
+    input_tokens: int,
+    *,
+    cache_reads: int = 0,
+    cache_writes: int = 0,
+    text: str = "Fixed it",
+    parent_tool_use_id: str | None = None,
+) -> AssistantMessage:
+    """Return one Claude Code message; its output count is the placeholder reported when the response starts."""
+    return AssistantMessage(
+        content=[TextBlock(text=text)],
+        model=model,
+        parent_tool_use_id=parent_tool_use_id,
+        usage={
+            "input_tokens": input_tokens,
+            "output_tokens": 1,
+            "cache_read_input_tokens": cache_reads,
+            "cache_creation_input_tokens": cache_writes,
+        },
+        message_id=message_id,
+    )
+
+
+def _claude_result(output_tokens: int, *, input_tokens: int = 0, cache_reads: int = 0) -> ResultMessage:
+    """Return a turn's result, whose usage covers its main conversation and whose model usage is a running total."""
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="claude-session-123",
+        total_cost_usd=0.02,
+        usage={"input_tokens": input_tokens, "output_tokens": output_tokens, "cache_read_input_tokens": cache_reads},
+        model_usage={
+            "claude-sonnet-5-5": {
+                "inputTokens": 99999,
+                "outputTokens": 99999,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "webSearchRequests": 0,
+                "costUSD": 1.0,
+                "contextWindow": 200000,
+                "maxOutputTokens": 64000,
+            },
+        },
+    )
+
+
+@dataclass
+class _ScriptedClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client replaying Claude Code turns; each receive_response call reads one turn through its result."""
+
+    turns: ClassVar[list[list[AssistantMessage | ResultMessage]]] = []
+
+    async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
+        for message in type(self).turns.pop(0):
+            yield message
 
 
 @dataclass
@@ -150,6 +226,86 @@ class _BlockingPromptFakeClaudeSDKClient(_FakeClaudeSDKClient):
 
 
 @dataclass
+class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client that, like the SDK, starts a reader task on connect and stops it on disconnect."""
+
+    instances: ClassVar[list[_ReaderTaskFakeClaudeSDKClient]] = []
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.reader: asyncio.Task[None] | None = None
+        self.connect_task: asyncio.Task[Any] | None = None
+        self.disconnect_task: asyncio.Task[Any] | None = None
+        _ReaderTaskFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        await super().connect()
+        self.connect_task = asyncio.current_task()
+        self.reader = asyncio.create_task(asyncio.Event().wait())
+
+    async def disconnect(self) -> None:
+        self.disconnect_task = asyncio.current_task()
+        assert self.reader is not None
+        self.reader.cancel()
+        await super().disconnect()
+
+
+@dataclass
+class _SlowCleanupFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose connect blocks and, like the SDK, disconnects slowly when that connect is interrupted."""
+
+    instances: ClassVar[list[_SlowCleanupFakeClaudeSDKClient]] = []
+    connect_started: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.disconnect_started = asyncio.Event()
+        self.disconnected = False
+        _SlowCleanupFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        assert type(self).connect_started is not None
+        type(self).connect_started.set()
+        try:
+            await asyncio.Event().wait()
+        except BaseException:
+            await self.disconnect()
+            raise
+
+    async def disconnect(self) -> None:
+        self.disconnect_started.set()
+        await asyncio.sleep(0.05)
+        self.disconnected = True
+
+
+@dataclass
+class _CancelledStartFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose first start is cancelled as its connect succeeds, and whose cleanup then fails or sticks."""
+
+    instances: ClassVar[list[_CancelledStartFakeClaudeSDKClient]] = []
+    on_connected: ClassVar[list[Callable[[], object]]] = []
+    stuck_cleanup: ClassVar[asyncio.Event | None] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _CancelledStartFakeClaudeSDKClient.instances.append(self)
+
+    async def connect(self) -> None:
+        await super().connect()
+        if self is type(self).instances[0]:
+            for callback in type(self).on_connected:
+                callback()
+
+    async def disconnect(self) -> None:
+        if self is type(self).instances[0]:
+            if type(self).stuck_cleanup is None:
+                msg = "disconnect failed"
+                raise RuntimeError(msg)
+            await type(self).stuck_cleanup.wait()
+        await super().disconnect()
+
+
+@dataclass
 class _GatewayProbeClaudeSDKClient:
     """Gateway probe client that sends Anthropic-compatible requests to a local stub server."""
 
@@ -184,7 +340,7 @@ class _GatewayProbeClaudeSDKClient:
             headers["anthropic-beta"] = "tools-2024-04-04"
 
         body = {
-            "model": self.options.model or "claude-sonnet-4-5",
+            "model": self.options.model or "claude-sonnet-5",
             "max_tokens": 256,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -412,12 +568,12 @@ async def test_claude_send_uses_agent_model_when_tool_model_unset(
     """Agent model id should be used when tool-config model is not set."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = RunContext(run_id="run-1", session_id="session-1")
-    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-4-5"))
+    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-5"))
 
     await tools.claude_send("hello", run_context=run_context, agent=agent)
 
     options = _FakeClaudeSDKClient.instances[0].options
-    assert options.model == "claude-sonnet-4-5"
+    assert options.model == "claude-sonnet-5"
 
 
 @pytest.mark.asyncio
@@ -427,7 +583,7 @@ async def test_claude_send_tool_model_overrides_agent_model(
     """Explicit tool-config model should override the calling agent model id."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model="claude-opus-5")
     run_context = RunContext(run_id="run-1", session_id="session-1")
-    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-4-5"))
+    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-5"))
 
     await tools.claude_send("hello", run_context=run_context, agent=agent)
 
@@ -628,6 +784,117 @@ async def test_session_status_interrupt_and_end(fake_manager: claude_agent_modul
     assert "Closed Claude session" in end
 
 
+_TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("test_claude_turn_owner", default=None)
+
+
+@pytest.mark.asyncio
+async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session outlives its turn, whose contextvars hold the turn's Agent and tools."""
+    _ReaderTaskFakeClaudeSDKClient.instances = []
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ReaderTaskFakeClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    token = _TURN_OWNER.set(object())
+    try:
+        await tools.claude_start_session(run_context=run_context, agent=agent)
+    finally:
+        _TURN_OWNER.reset(token)
+
+    client = _ReaderTaskFakeClaudeSDKClient.instances[0]
+    assert client.reader is not None
+    assert _TURN_OWNER not in client.reader.get_context()
+
+    # A later turn ends the session; the task that connected the client still disconnects it.
+    await asyncio.create_task(tools.claude_end_session(run_context=run_context, agent=agent))
+    assert client.disconnect_task is client.connect_task
+    assert client.reader.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_session_start_waits_for_the_sdk_cleanup(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled start-up returns only after the SDK disconnects, even when cancelled again meanwhile."""
+    _SlowCleanupFakeClaudeSDKClient.instances = []
+    _SlowCleanupFakeClaudeSDKClient.connect_started = asyncio.Event()
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _SlowCleanupFakeClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    start = asyncio.create_task(
+        tools.claude_start_session(run_context=RunContext(run_id="run-1", session_id="session-1"), agent=None),
+    )
+    await _SlowCleanupFakeClaudeSDKClient.connect_started.wait()
+    client = _SlowCleanupFakeClaudeSDKClient.instances[0]
+
+    start.cancel()
+    await client.disconnect_started.wait()
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    assert client.disconnected is True
+
+
+@pytest.fixture
+def cancelled_start_client(monkeypatch: pytest.MonkeyPatch) -> type[_CancelledStartFakeClaudeSDKClient]:
+    """Install the cancelled-start fake with fresh class state."""
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "instances", [])
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "on_connected", [])
+    monkeypatch.setattr(_CancelledStartFakeClaudeSDKClient, "stuck_cleanup", None)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _CancelledStartFakeClaudeSDKClient)
+    return _CancelledStartFakeClaudeSDKClient
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_stays_cancelled_when_its_cleanup_fails(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    cancelled_start_client: type[_CancelledStartFakeClaudeSDKClient],
+) -> None:
+    """A disconnect that raises while draining a cancelled start must not replace the cancellation."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    start = asyncio.create_task(
+        tools.claude_start_session(run_context=RunContext(run_id="run-1", session_id="session-1"), agent=None),
+    )
+    cancelled_start_client.on_connected.append(start.cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+
+@pytest.mark.asyncio
+async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    cancelled_start_client: type[_CancelledStartFakeClaudeSDKClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disconnect that never finishes holds a cancelled start, and the manager lock, only until the deadline."""
+    monkeypatch.setattr(claude_agent_module, "_START_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    stuck_cleanup = asyncio.Event()
+    cancelled_start_client.stuck_cleanup = stuck_cleanup
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    start = asyncio.create_task(tools.claude_start_session(session_label="first", run_context=run_context, agent=None))
+    cancelled_start_client.on_connected.append(start.cancel)
+
+    try:
+        done, _pending = await asyncio.wait({start}, timeout=1)
+        assert start in done
+        assert start.cancelled()
+        second = await asyncio.wait_for(
+            tools.claude_start_session(session_label="second", run_context=run_context, agent=None),
+            timeout=1,
+        )
+        assert second.startswith("Started")
+    finally:
+        stuck_cleanup.set()
+        await asyncio.gather(start, return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_expired_session_is_cleaned_and_recreated(
     fake_manager: claude_agent_module._ClaudeSessionManager,
@@ -791,6 +1058,31 @@ async def test_claude_send_error_does_not_deadlock(
 
 
 @pytest.mark.asyncio
+async def test_claude_cli_exit_while_reading_response_closes_session(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI that exits mid-turn raises a typed SDK error from the response stream, which closes the session."""
+
+    class _ExitingClaudeSDKClient(_FakeClaudeSDKClient):
+        async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
+            yield AssistantMessage(content=[TextBlock(text="partial")], model="claude-sonnet")
+            message = "Command failed"
+            raise ProcessError(message, exit_code=-9)
+
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ExitingClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+    agent = SimpleNamespace(name="general")
+
+    result = await asyncio.wait_for(tools.claude_send("hello", run_context=run_context, agent=agent), timeout=1)
+
+    assert "Claude session error: Command failed (exit code: -9)" in result
+    assert "Session context:" in result
+    assert not fake_manager._sessions
+
+
+@pytest.mark.asyncio
 async def test_claude_send_error_includes_runtime_session_hints(
     fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
@@ -866,3 +1158,227 @@ async def test_claude_start_session_error_includes_context(
     assert "- continue_conversation: True" in result
     assert "- resume: resume-xyz" in result
     assert "- fork_session: False" in result
+
+
+async def _send_metered_turns(
+    tmp_path: Path,
+    requesters: list[str],
+    *,
+    api_requests: bool = False,
+    model: str | None = None,
+) -> tuple[list[str], list[tuple[str | None, str, int, int, int, int]]]:
+    """Send one prompt per requester on one session; return the replies and each requester's usage by model."""
+    config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
+    open_scope = partial(
+        open_resolved_scope_session_context,
+        agent_name="test_agent",
+        scope=scope,
+        session_id="session",
+        config=config,
+        runtime_paths=paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+    )
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model=model)
+    replies: list[str] = []
+    try:
+        for requester in requesters:
+            # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
+            requester_context = (
+                detached_requester_context(
+                    DetachedRequesterContext(
+                        requester_id=requester,
+                        config=config,
+                        runtime_paths=paths,
+                        agent_reply_memberships=AgentReplyMembershipIndex(),
+                        config_provider=lambda: config,
+                    ),
+                )
+                if api_requests
+                else tool_runtime_context(replace(context, requester_id=requester))
+            )
+            with open_scope() as scope_context, helper_usage_context(scope_context), requester_context:
+                replies.append(
+                    await tools.claude_send(
+                        "Fix the bug",
+                        run_context=RunContext(run_id="run-1", session_id="session"),
+                        agent=SimpleNamespace(name="test_agent"),
+                    ),
+                )
+        report = collect_admin_usage(config=config, runtime_paths=paths)
+        return replies, sorted(
+            (
+                user.user_id,
+                model.model,
+                model.totals.input_tokens,
+                model.totals.output_tokens,
+                model.totals.cache_read_tokens,
+                model.totals.cache_write_tokens,
+            )
+            for user in report.user_breakdown
+            for model in user.model_breakdown
+        )
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_usage_counts_toward_the_conversation_and_requester(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each response of a turn's main conversation counts once, toward the requester who sent the prompt."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turn = [
+        _claude_response("claude-sonnet-5-5", "msg-1", 1000, cache_reads=5000, cache_writes=300),
+        # Parallel tool uses split one response into messages that share its id and usage.
+        _claude_response("claude-sonnet-5-5", "msg-1", 1000, cache_reads=5000, cache_writes=300, text="Testing"),
+        # A subagent's messages carry the tool use that started it.
+        _claude_response("claude-haiku-5-5", "msg-sub", 700, parent_tool_use_id="tool-1", text="Searched"),
+        _claude_response("claude-sonnet-5-5", "msg-2", 100, cache_reads=6000),
+        _claude_result(200),
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [turn])
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
+
+    assert rows == [("@user:localhost", "claude-sonnet-5-5", 1100, 200, 11000, 300)]
+
+
+@pytest.mark.asyncio
+async def test_each_claude_turn_counts_only_its_own_usage(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code's running totals cover the whole session, so each turn records only its own usage."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turns = [
+        [_claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)],
+        [_claude_response("claude-sonnet-5-5", "msg-2", 500), _claude_result(60)],
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@alice:localhost", "@bob:localhost"])
+
+    assert rows == [
+        ("@alice:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0),
+        ("@bob:localhost", "claude-sonnet-5-5", 500, 60, 0, 0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_that_switches_models_counts_each_model(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn can continue on another model; output, reported only per turn, goes to the model that finished it."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turn = [
+        _claude_response("claude-opus-5-5", "msg-1", 1000, cache_reads=4000),
+        _claude_response("claude-sonnet-5-5", "msg-2", 300),
+        _claude_result(150),
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [turn])
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
+
+    assert rows == [
+        ("@user:localhost", "claude-opus-5-5", 1000, 0, 4000, 0),
+        ("@user:localhost", "claude-sonnet-5-5", 300, 150, 0, 0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_counts_responses_that_sent_no_message(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty response that Claude Code retries sends no message, but the turn's result still counts it."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turn = [
+        _claude_response("claude-sonnet-5-5", "msg-1", 1000, cache_reads=4000),
+        _claude_result(200, input_tokens=1600, cache_reads=9000),
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [turn])
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
+
+    assert rows == [("@user:localhost", "claude-sonnet-5-5", 1600, 200, 9000, 0)]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_without_messages_counts_toward_the_session_model(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn whose responses all sent no message is counted under the model the session was started with."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_claude_result(4, input_tokens=6000, cache_reads=18000)]])
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"], model="claude-sonnet-5-5")
+
+    assert rows == [("@user:localhost", "claude-sonnet-5-5", 6000, 4, 18000, 0)]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_usage_counts_toward_api_requester(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OpenAI-compatible request's Claude Code turn counts toward the API requester."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turns = [[_claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)]]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@api:localhost"], api_requests=True)
+
+    assert rows == [("@api:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0)]
+
+
+@pytest.mark.asyncio
+async def test_claude_reply_survives_a_failed_usage_write(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude has already done the work, so a usage write failure must not hide its reply."""
+
+    async def fail_to_record(*_args: object, **_kwargs: object) -> None:
+        msg = "database is locked"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(claude_agent_module, "record_helper_usage", fail_to_record)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turns = [[_claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)]]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
+
+    replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
+
+    assert replies[0].startswith("Fixed it")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_ending_in_an_api_error_keeps_its_model(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code's placeholder error message names no real model, so the turn keeps the model it ran on."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turn = [
+        _claude_response("claude-sonnet-5-5", "msg-1", 1000),
+        # Claude Code reports a request that failed every retry as a placeholder message.
+        _claude_response("<synthetic>", "msg-2", 0, text="API Error: Overloaded"),
+        _claude_result(200),
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [turn])
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
+
+    assert rows == [("@user:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0)]

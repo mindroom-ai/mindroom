@@ -25,7 +25,7 @@ from mindroom.constants import (
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -35,7 +35,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.session_ids import create_session_id, parse_session_id
+from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -540,22 +540,20 @@ class TestCreateSessionIdWithNoneThread:
         session_id = create_session_id("!room:localhost", "$thread123")
         assert session_id == "!room:localhost:$thread123"
 
-    def test_room_level_session_round_trip_keeps_room_id_with_colons(self) -> None:
-        """Room-level session parsing should preserve room ids containing colons."""
+    def test_room_level_session_keeps_room_id_with_colons(self) -> None:
+        """Room-level sessions should preserve room ids containing colons."""
         room_id = "!room:with:colons:localhost"
         session_id = create_session_id(room_id, None)
 
         assert session_id == room_id
-        assert parse_session_id(session_id) == (room_id, None)
 
-    def test_thread_level_session_round_trip_keeps_event_id_with_dollars(self) -> None:
-        """Thread-level session parsing should preserve Matrix event ids containing dollars."""
+    def test_thread_level_session_keeps_event_id_with_dollars(self) -> None:
+        """Thread-level sessions should preserve Matrix event ids containing dollars."""
         room_id = "!room:with:colons:localhost"
         thread_id = "$thread$with$dollars:localhost"
         session_id = create_session_id(room_id, thread_id)
 
         assert session_id == f"{room_id}:{thread_id}"
-        assert parse_session_id(session_id) == (room_id, thread_id)
 
     def test_message_target_room_mode_reuses_room_level_session_format(self) -> None:
         """Room-mode MessageTarget sessions should match create_session_id(None)."""
@@ -569,7 +567,7 @@ class TestCreateSessionIdWithNoneThread:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
-    def test_message_target_thread_session_round_trips_through_canonical_parser(self) -> None:
+    def test_message_target_thread_session_uses_canonical_format(self) -> None:
         """Thread-mode MessageTarget sessions should use the canonical persisted format."""
         room_id = "!room:with:colons:localhost"
         thread_id = "$thread$with$dollars:localhost"
@@ -581,7 +579,6 @@ class TestCreateSessionIdWithNoneThread:
         )
 
         assert target.session_id == create_session_id(room_id, thread_id)
-        assert parse_session_id(target.session_id) == (room_id, thread_id)
 
     def test_message_target_plain_reply_keeps_room_level_session(self) -> None:
         """Plain reply targets should not derive thread or session identity."""
@@ -1073,13 +1070,15 @@ class TestExtractMessageContextRoomMode:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
+    @pytest.mark.parametrize("source_kind", [SCHEDULED_SOURCE_KIND, HOOK_DISPATCH_SOURCE_KIND])
     def test_build_message_target_scheduled_root_starts_per_fire_thread_in_room_mode(
         self,
         room_mode_config: Config,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
+        source_kind: str,
     ) -> None:
-        """A trusted scheduled fire roots its own per-fire thread and session even in room mode."""
+        """A trusted scheduled fire or automation prompt roots its own thread and session even in room mode."""
         bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
         registry = entity_identity_registry(room_mode_config, runtime_paths_for(room_mode_config))
 
@@ -1091,7 +1090,7 @@ class TestExtractMessageContextRoomMode:
                 "content": {
                     "body": "Kick off the weekly report",
                     "msgtype": "m.text",
-                    SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    SOURCE_KIND_KEY: source_kind,
                     PER_FIRE_THREAD_ROOT_KEY: True,
                 },
                 "event_id": "$scheduled-fire:localhost",
@@ -1104,6 +1103,39 @@ class TestExtractMessageContextRoomMode:
 
         assert target.resolved_thread_id == "$scheduled-fire:localhost"
         assert target.session_id == create_session_id("!room:localhost", "$scheduled-fire:localhost")
+
+    def test_build_message_target_automation_follow_up_stays_in_its_thread_in_room_mode(
+        self,
+        room_mode_config: Config,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An automation's follow-up prompt in its thread keeps that thread's session even in room mode."""
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        registry = entity_identity_registry(room_mode_config, runtime_paths_for(room_mode_config))
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$recheck:localhost",
+            event_source={
+                "content": {
+                    "body": "Re-check your change",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$prompt:localhost"},
+                    SOURCE_KIND_KEY: HOOK_DISPATCH_SOURCE_KIND,
+                    PER_FIRE_THREAD_ROOT_KEY: True,
+                },
+                "event_id": "$recheck:localhost",
+                "sender": registry.current_id("assistant").full_id,
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.resolved_thread_id == "$prompt:localhost"
+        assert target.session_id == create_session_id("!room:localhost", "$prompt:localhost")
 
     def test_build_message_target_untrusted_scheduled_marker_keeps_room_mode(
         self,

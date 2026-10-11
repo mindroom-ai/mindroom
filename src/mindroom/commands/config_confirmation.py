@@ -11,12 +11,14 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.authorization import is_platform_administrator
 from mindroom.constants import CONFIG_CONFIRMATION_REACTION_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -33,6 +35,11 @@ _PENDING_CONFIG_EVENT_TYPE = "com.mindroom.pending.config"
 
 # Maximum age for pending confirmations (24 hours)
 _MAX_PENDING_AGE_HOURS = 24
+
+_WITHHELD_VALUE_LOST_MESSAGE = (
+    "⚠️ This pending change was lost when MindRoom restarted: its new value is kept out of room state, "
+    "so it cannot outlive the process. Run `!config set` again."
+)
 
 
 @dataclass(frozen=True)
@@ -66,9 +73,14 @@ class _PendingConfigChange:
     room_id: str
     thread_id: str | None
     config_path: str
-    old_value: Any
     new_value: Any
     requester: str  # User who requested the change
+    # Room state is readable by every member and never end-to-end encrypted, so a new value
+    # that display redaction would mask is withheld from it and kept only in this process.
+    # So is a value room state cannot carry, since Matrix canonical JSON rejects floats.
+    new_value_withheld: bool = False
+    # A withheld change restored from room state after a restart, whose new value is gone.
+    new_value_lost: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     decision_event_id: str | None = None
     decision_key: str | None = None
@@ -84,12 +96,14 @@ class _PendingConfigChange:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for Matrix state storage."""
+        value_content: dict[str, Any] = (
+            {"new_value_withheld": True} if self.new_value_withheld else {"new_value": self.new_value}
+        )
         return {
             "room_id": self.room_id,
             "thread_id": self.thread_id,
             "config_path": self.config_path,
-            "old_value": self.old_value,
-            "new_value": self.new_value,
+            **value_content,
             "requester": self.requester,
             "created_at": self.created_at.isoformat(),
             "decision_event_id": self.decision_event_id,
@@ -103,14 +117,16 @@ class _PendingConfigChange:
         """Create from dictionary retrieved from Matrix state."""
         # Parse the ISO format datetime
         created_at = datetime.fromisoformat(data["created_at"])
+        withheld = data.get("new_value_withheld") is True
 
         return cls(
             room_id=data["room_id"],
             thread_id=data.get("thread_id"),
             config_path=data["config_path"],
-            old_value=data["old_value"],
-            new_value=data["new_value"],
+            new_value=None if withheld else data["new_value"],
             requester=data["requester"],
+            new_value_withheld=withheld,
+            new_value_lost=withheld,
             created_at=created_at,
             decision_event_id=data.get("decision_event_id"),
             decision_key=data.get("decision_key"),
@@ -247,15 +263,39 @@ async def _remove_pending_change_from_matrix(
     )
 
 
+def _bot_authored_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    state_event: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return pending-config content only when this bot published the state event.
+
+    Any room member with enough power can write this state type, so only the
+    bot's own records describe a change it actually proposed.
+    """
+    content = state_event.get("content")
+    if not isinstance(content, dict) or not content:
+        return None
+    if client.user_id is None or state_event.get("sender") != client.user_id:
+        logger.warning(
+            "Ignoring pending config change not authored by this bot",
+            room_id=room_id,
+            event_id=state_event.get("state_key"),
+            sender=state_event.get("sender"),
+        )
+        return None
+    return content
+
+
 async def _resolve_pending_change(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
 ) -> _PendingConfigChange | None:
-    """Resolve one pending change from memory or its authoritative Matrix state."""
+    """Resolve one pending change from memory or its bot-authored Matrix state."""
     pending_change = _get_pending_change(event_id)
     if pending_change is not None:
-        return pending_change
+        return await _unexpired_pending_change(client, room_id, event_id, pending_change)
 
     response = await client.room_get_state_event(
         room_id,
@@ -269,7 +309,17 @@ async def _resolve_pending_change(
         raise RuntimeError(msg)  # noqa: TRY004
     if not response.content:
         return None
-    return await _restore_pending_change(client, room_id, event_id, response.content)
+
+    # The single-state endpoint omits the sender, so read provenance from full room state.
+    state = await client.room_get_state(room_id)
+    if not isinstance(state, nio.RoomGetStateResponse):
+        msg = f"Failed to resolve pending config change from Matrix state: {state}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    for state_event in state.events:
+        if state_event.get("type") == _PENDING_CONFIG_EVENT_TYPE and state_event.get("state_key") == event_id:
+            content = _bot_authored_content(client, room_id, state_event)
+            return None if content is None else await _restore_pending_change(client, room_id, event_id, content)
+    return None
 
 
 async def resolve_reaction_pending_change(
@@ -285,6 +335,25 @@ async def resolve_reaction_pending_change(
     return await _resolve_pending_change(client, room_id, event.reacts_to)
 
 
+async def _unexpired_pending_change(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    pending_change: _PendingConfigChange,
+) -> _PendingConfigChange | None:
+    """Return one pending change, or discard it from memory and room state once it has expired."""
+    if not pending_change.is_expired():
+        return pending_change
+    logger.info(
+        "Discarding expired pending config change",
+        event_id=event_id,
+        created_at=pending_change.created_at,
+    )
+    await _remove_pending_change_from_matrix(client, room_id, event_id)
+    _remove_pending_change(event_id)
+    return None
+
+
 async def _restore_pending_change(
     client: nio.AsyncClient,
     room_id: str,
@@ -292,14 +361,18 @@ async def _restore_pending_change(
     content: dict[str, Any],
 ) -> _PendingConfigChange | None:
     """Restore one unexpired Matrix-backed pending change into memory."""
-    pending_change = _PendingConfigChange.from_dict(content)
-    if pending_change.is_expired():
-        logger.info(
-            "Skipping expired pending config change",
-            event_id=event_id,
-            created_at=pending_change.created_at,
-        )
-        await _remove_pending_change_from_matrix(client, room_id, event_id)
+    in_memory = _get_pending_change(event_id)
+    if in_memory is not None:
+        # Rejoins and config reloads restore again; this process's own entry is current
+        # and holds any withheld value that the room state copy lacks.
+        return await _unexpired_pending_change(client, room_id, event_id, in_memory)
+    pending_change = await _unexpired_pending_change(
+        client,
+        room_id,
+        event_id,
+        _PendingConfigChange.from_dict(content),
+    )
+    if pending_change is None:
         return None
     _pending_changes[event_id] = pending_change
     logger.info(
@@ -340,10 +413,10 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
                 continue
 
             state_key = event.get("state_key")
-            content = event.get("content", {})
+            content = _bot_authored_content(client, room_id, event)
 
-            # Skip empty content (deleted state events)
-            if not content:
+            # Skip deleted state events and records this bot did not write
+            if content is None:
                 continue
 
             try:
@@ -475,8 +548,8 @@ async def ensure_pending_change(
     room_id: str,
     thread_id: str | None,
     config_path: str,
-    old_value: Any,  # noqa: ANN401
     new_value: Any,  # noqa: ANN401
+    new_value_withheld: bool,
     requester: str,
 ) -> None:
     """Persist one preview exactly once before exposing its reaction buttons."""
@@ -493,9 +566,9 @@ async def ensure_pending_change(
             room_id=room_id,
             thread_id=thread_id,
             config_path=config_path,
-            old_value=old_value,
             new_value=new_value,
             requester=requester,
+            new_value_withheld=new_value_withheld,
         )
         await _commit_checkpoint(client, event_id, pending_change)
         await _add_confirmation_reactions(client, room_id, event_id)
@@ -517,7 +590,11 @@ async def _ensure_decision_checkpoint(
         return pending_change if pending_change.decision_event_id == event.event_id else None
 
     authorization = context.authorization
-    resolved_sender = authorization.resolve_alias(event.sender)
+    resolved_sender = resolve_human_requester_alias(
+        event.sender,
+        context.runtime.config,
+        context.runtime_paths,
+    )
     if resolved_sender != pending_change.requester:
         logger.debug(
             "Ignoring config reaction from non-requester",
@@ -534,7 +611,7 @@ async def _ensure_decision_checkpoint(
         response_text = "❌ Configuration change cancelled."
     elif not authorization.config_command_enabled:
         response_text = "❌ Config command disabled."
-    elif resolved_sender not in authorization.global_users:
+    elif not is_platform_administrator(resolved_sender, context.runtime.config, context.runtime_paths):
         response_text = "❌ Admin only."
 
     checkpoint = replace(
@@ -568,6 +645,13 @@ async def _response_for_checkpointed_decision(
             replace(pending_change, decision_response_text=response_text),
         )
         return checkpoint, response_text
+    if pending_change.new_value_lost:
+        checkpoint = await _commit_checkpoint(
+            context.client,
+            preview_event_id,
+            replace(pending_change, decision_response_text=_WITHHELD_VALUE_LOST_MESSAGE),
+        )
+        return checkpoint, _WITHHELD_VALUE_LOST_MESSAGE
 
     started_checkpoint = await _commit_checkpoint(
         context.client,

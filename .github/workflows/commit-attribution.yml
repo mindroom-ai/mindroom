@@ -1,0 +1,31 @@
+name: commit-attribution
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Full history without file contents, so the base branch and every pull request commit are available to git log.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Reject AI agent attribution in pull request commits
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/check_commit_attribution.py --range "origin/$BASE_REF..$HEAD_SHA"

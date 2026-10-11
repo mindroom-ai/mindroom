@@ -1,0 +1,206 @@
+"""Trusted model context describing one tool-approval continuation."""
+
+from __future__ import annotations
+
+import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from agno.models.message import Message
+
+from mindroom.agno_compat_model_hooks import install_message_projection
+from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import ApprovalDecision as ContinuationDecision
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from agno.models.base import Model
+    from agno.models.fallback import FallbackConfig
+
+_MARKER_KEY = "mindroom_approval_receipt"
+_HOOK_ATTR = "_mindroom_approval_receipt_hook_installed"
+_SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_APPROVAL_RECEIPT_HEADER = (
+    "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
+    "paused tool calls were authorized. Do not infer approval policy from tool success alone."
+)
+
+
+@runtime_checkable
+class _ResponseChainReceiptModel(Protocol):
+    approval_receipt_after_response_id: bool
+
+
+def _receipt_call_label(tool_name: str, call_ordinal: int) -> str:
+    if _SAFE_TOOL_NAME.fullmatch(tool_name) is None:
+        return f"invalid tool name (call #{call_ordinal})"
+    return f"`{tool_name}` (call #{call_ordinal})"
+
+
+def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
+    """Render trusted model context for one exact approval generation."""
+    lines = [_APPROVAL_RECEIPT_HEADER]
+    for call_ordinal, call in enumerate(calls, start=1):
+        if call.decision is None:
+            msg = f"Cannot build trusted receipt for pending approval call #{call_ordinal}"
+            raise ValueError(msg)
+        call_label = _receipt_call_label(call.tool_name, call_ordinal)
+        if call.decision is ContinuationDecision.APPROVED:
+            if call.human_approval_required is True:
+                outcome = (
+                    "human approval was required and granted before execution, "
+                    "directly or through a matching timed approval window."
+                )
+            elif call.human_approval_required is False:
+                outcome = "human approval was not required; policy approved execution."
+            else:
+                outcome = "approval was granted, but its approval provenance is unavailable."
+        elif call.decision is ContinuationDecision.EXPIRED:
+            outcome = "human approval expired; the tool was not executed."
+        else:
+            outcome = "approval was denied; the tool was not executed."
+        lines.append(f"- {call_label}: {outcome}")
+    return "\n".join(lines)
+
+
+@dataclass
+class _ApprovalReceiptContext:
+    receipt_text: str
+    fired_model_ids: set[int] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _ApprovalReceiptProjection:
+    """Transient receipt prompt plus a path for publishing model history mutations."""
+
+    caller_messages: list[Message]
+    outbound_messages: list[Message]
+    receipt_message: Message
+    original_system_message: Message | None
+
+    def publish_model_mutations(self) -> None:
+        """Copy model-added history back while removing the transient receipt."""
+        published: list[Message] = []
+        for message in self.outbound_messages:
+            if message is self.receipt_message:
+                if self.original_system_message is not None:
+                    published.append(self.original_system_message)
+            else:
+                published.append(message)
+        self.caller_messages[:] = published
+
+
+_context: ContextVar[_ApprovalReceiptContext | None] = ContextVar(
+    "approval_receipt_context",
+    default=None,
+)
+
+
+@contextmanager
+def approval_receipt_context(receipt_text: str) -> Generator[None, None, None]:
+    """Bind one trusted approval receipt to the exact resumed model call."""
+    token = _context.set(_ApprovalReceiptContext(receipt_text=receipt_text))
+    try:
+        yield
+    finally:
+        _context.reset(token)
+
+
+def _is_response_chain_boundary(message: Message) -> bool:
+    provider_data = message.provider_data
+    return (
+        message.role == "assistant"
+        and isinstance(provider_data, dict)
+        and isinstance(provider_data.get("response_id"), str)
+    )
+
+
+def _messages_with_approval_receipt(
+    messages: list[Message],
+    *,
+    model_id: int,
+    after_response_id: bool = False,
+) -> _ApprovalReceiptProjection | None:
+    receipt_context = _context.get()
+    if receipt_context is None or model_id in receipt_context.fired_model_ids:
+        return None
+    receipt_context.fired_model_ids.add(model_id)
+    outbound = list(messages)
+    response_chain_index = (
+        next(
+            (index for index in range(len(outbound) - 1, -1, -1) if _is_response_chain_boundary(outbound[index])),
+            None,
+        )
+        if after_response_id
+        else None
+    )
+    system_index = (
+        None
+        if response_chain_index is not None
+        else next(
+            (
+                index
+                for index, message in enumerate(outbound)
+                if message.role in {"system", "developer"} and isinstance(message.content, str)
+            ),
+            None,
+        )
+    )
+    if system_index is None:
+        receipt_message = Message(
+            role="system",
+            content=receipt_context.receipt_text,
+            provider_data={_MARKER_KEY: True},
+            add_to_agent_memory=False,
+        )
+        original_system_message = None
+        outbound.insert(0 if response_chain_index is None else response_chain_index + 1, receipt_message)
+    else:
+        original_system_message = outbound[system_index]
+        receipt_message = deepcopy(original_system_message)
+        receipt_message.content = f"{receipt_message.content}\n\n{receipt_context.receipt_text}"
+        receipt_message.provider_data = {
+            **(receipt_message.provider_data if isinstance(receipt_message.provider_data, dict) else {}),
+            _MARKER_KEY: True,
+        }
+        outbound[system_index] = receipt_message
+    return _ApprovalReceiptProjection(
+        caller_messages=messages,
+        outbound_messages=outbound,
+        receipt_message=receipt_message,
+        original_system_message=original_system_message,
+    )
+
+
+def _install_approval_receipt_hook(model: Model) -> None:
+    """Append a trusted approval receipt immediately before a resumed model call."""
+    model_id = id(model)
+    after_response_id = isinstance(model, _ResponseChainReceiptModel) and model.approval_receipt_after_response_id
+    install_message_projection(
+        model,
+        marker=_HOOK_ATTR,
+        project=lambda messages: _messages_with_approval_receipt(
+            messages,
+            model_id=model_id,
+            after_response_id=after_response_id,
+        ),
+    )
+
+
+def install_approval_receipt_hooks(model: Model, fallback_config: FallbackConfig | None) -> None:
+    """Install the receipt hook on the primary model and every resolved fallback."""
+    _install_approval_receipt_hook(model)
+    if fallback_config is None:
+        return
+    fallbacks = (
+        *fallback_config.on_error,
+        *fallback_config.on_rate_limit,
+        *fallback_config.on_context_overflow,
+    )
+    for fallback in fallbacks:
+        if not isinstance(fallback, str):
+            _install_approval_receipt_hook(fallback)

@@ -45,7 +45,7 @@ def test_apt_install_packages_ignores_flags_and_line_continuations() -> None:
 def test_mindroom_runtime_images_run_under_tini() -> None:
     """MindRoom containers need an init process to reap orphaned subprocesses."""
     for dockerfile in _MINDROOM_DOCKERFILES:
-        text = dockerfile.read_text(encoding="utf-8")
+        text = dockerfile.read_text(encoding="utf-8").split(" AS final", maxsplit=1)[1]
 
         assert "tini" in _apt_install_packages(text)
         assert 'ENTRYPOINT ["tini", "--"]' in text
@@ -73,7 +73,7 @@ def test_mindroom_runtime_images_opt_into_dashboard_asset_build() -> None:
 def test_full_mindroom_runtime_image_bundles_browser_runtime_packages() -> None:
     """The full runtime image should support browser and media-capable worker tools."""
     text = (_REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
-    packages = _apt_install_packages(text)
+    packages = _apt_install_packages(text.split(" AS final", maxsplit=1)[1])
 
     assert {"chromium", "ffmpeg", "fonts-liberation", "nodejs"} <= packages
 
@@ -81,7 +81,7 @@ def test_full_mindroom_runtime_image_bundles_browser_runtime_packages() -> None:
 def test_mindroom_runtime_images_keep_git_ssh_support_when_disabling_recommends() -> None:
     """Git-over-SSH needs an explicit SSH client when apt recommendations are disabled."""
     for dockerfile in _MINDROOM_DOCKERFILES:
-        text = dockerfile.read_text(encoding="utf-8")
+        text = dockerfile.read_text(encoding="utf-8").split(" AS final", maxsplit=1)[1]
         install_args_match = re.search(r"apt-get install -y (?P<args>.*?)\\\s*&&", text, re.DOTALL)
         assert install_args_match is not None
         install_args = install_args_match.group("args").split()

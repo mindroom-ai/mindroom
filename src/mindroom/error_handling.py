@@ -4,19 +4,36 @@ from __future__ import annotations
 
 import ast
 import json
+import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
 from agno.exceptions import ModelProviderError
 
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
+if TYPE_CHECKING:
+    from agno.run.agent import RunErrorEvent
+    from agno.run.team import RunErrorEvent as TeamRunErrorEvent
+
+    from mindroom.constants import RuntimePaths
+
 logger = get_logger(__name__)
 
 # Shared by provider retry policy and final user-message routing. Status 200 is
-# the Claude mid-stream SSE error case: the HTTP response was already committed
-# before the provider emitted an error event.
+# the mid-stream SSE case: the HTTP response was already committed before a
+# Claude error event or an early Responses end without visible output.
 TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
+
+# Errors raised before any provider request when a model has no API key at all.
+_MISSING_PROVIDER_KEY_PATTERN = re.compile(
+    r"_api_key (?:or \w+ )?not set"  # Agno provider models, e.g. "OPENROUTER_API_KEY not set."
+    r"|the api_key client option must be set"  # OpenAI SDK
+    r"|missing credentials\. please pass an `api_key`"  # Newer OpenAI SDK
+    r"|could not resolve authentication method",  # Anthropic SDK
+)
 
 
 class AvatarGenerationError(RuntimeError):
@@ -29,6 +46,63 @@ class AvatarSyncError(RuntimeError):
 
 class ModelSafeguardRefusalError(ModelProviderError):
     """Raised when a provider explicitly stops generation for safeguards."""
+
+
+class IncompleteResponsesStreamError(ModelProviderError):
+    """A Responses stream cannot safely reuse accumulated output in a retry."""
+
+
+class MinimalModeUnavailableError(RuntimeError):
+    """Minimal mode cannot serve a turn; the message already names its recovery command."""
+
+
+def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool) -> str:
+    """Include how to recover from unavailable minimal mode: the mode command, or a standard subagent."""
+    if subagent:
+        return f"{reason.rstrip('.')}. Start a new subagent without minimal."
+    return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
+
+
+def run_error_event_text(event: RunErrorEvent | TeamRunErrorEvent, *, entity_label: str = "Agent") -> str:
+    """Return credential-redacted error text for an Agno streaming error event."""
+    if event.content:
+        return redact_sensitive_text(event.content)
+
+    additional_message = _run_error_additional_message(event.additional_data or {})
+    if additional_message:
+        return redact_sensitive_text(additional_message)
+
+    details = []
+    if event.error_type:
+        details.append(f"type={event.error_type}")
+    if event.error_id:
+        details.append(f"id={event.error_id}")
+    if details:
+        return redact_sensitive_text(f"{entity_label} run failed ({', '.join(details)})")
+
+    return f"{entity_label} run failed without provider error details"
+
+
+def run_error_event_exception(event: RunErrorEvent | TeamRunErrorEvent) -> Exception:
+    """Restore the failure class Agno flattened into a streaming error event."""
+    text = run_error_event_text(event)
+    # Agno reports an untyped exception's class name as its stable error_type.
+    if event.error_type == MinimalModeUnavailableError.__name__:
+        return MinimalModeUnavailableError(text)
+    return Exception(text)
+
+
+def _run_error_additional_message(data: object) -> str | None:
+    if isinstance(data, str):
+        stripped = data.strip()
+        return stripped or None
+    if isinstance(data, Mapping):
+        mapping = cast("Mapping[object, object]", data)
+        for key in ("message", "error", "detail"):
+            message = _run_error_additional_message(mapping.get(key))
+            if message:
+                return message
+    return None
 
 
 def is_model_safeguard_refusal(error: Exception | str) -> bool:
@@ -97,12 +171,27 @@ def _is_transient_provider_error(error: Exception) -> bool:
     )
 
 
-def get_user_friendly_error_message(error: Exception, agent_name: str | None = None) -> str:
+def _missing_provider_key_message(runtime_paths: RuntimePaths | None) -> str:
+    dashboard_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip() if runtime_paths else ""
+    dashboard = f"the MindRoom dashboard ({dashboard_url.rstrip('/')})" if dashboard_url else "the MindRoom dashboard"
+    return (
+        "🔑 No AI provider key is set up yet, so I can't reply. "
+        f"Open {dashboard}, choose **Connect your AI provider**, paste your key, then send your message again."
+    )
+
+
+def get_user_friendly_error_message(  # noqa: PLR0911
+    error: Exception,
+    agent_name: str | None = None,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> str:
     """Return a user-friendly error message.
 
     Args:
         error: The exception that occurred
         agent_name: Optional name of the agent that encountered the error
+        runtime_paths: Runtime context used to point missing-key errors at the dashboard URL
 
     Returns:
         A user-friendly error message
@@ -120,11 +209,17 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         error=repr(error),
     )
 
+    if isinstance(error, MinimalModeUnavailableError):
+        # Keyword classification would mask the standard-mode recovery command.
+        return f"{agent_prefix}⚠️ Error: {safe_error}"
     if is_model_safeguard_refusal(error):
         return (
             f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
             "Choose a different model (`!model list`) or revise the prompt, then try again."
         )
+
+    if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
+        return f"{agent_prefix}{_missing_provider_key_message(runtime_paths)}"
 
     # Only distinguish the most important error types
     if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]):

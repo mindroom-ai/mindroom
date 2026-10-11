@@ -19,9 +19,9 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import nio
-from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
@@ -44,13 +44,21 @@ logger = get_logger(__name__)
 type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.RoomEncryptedMedia
 
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
+_MAX_SIDECAR_HOPS = 8
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
     """Extract canonical content dict from a v2 large-message sidecar JSON payload."""
     try:
         payload = json.loads(payload_json)
-    except json.JSONDecodeError:
+        # A ``\ud800`` escape parses into an unpaired surrogate, which no model request can encode.
+        json.dumps(payload, ensure_ascii=False).encode()
+    except (RecursionError, ValueError):
+        # Whoever posted the message chose these bytes. Besides malformed JSON
+        # (a ``ValueError``), well-formed JSON nested past the recursion limit,
+        # holding an integer over the digit limit, or holding an unpaired
+        # surrogate (a ``UnicodeEncodeError``) raises too, and must leave the
+        # sidecar unresolved rather than fail the read.
         return None
     if not isinstance(payload, dict):
         return None
@@ -112,20 +120,7 @@ async def _resolve_event_content(
     return _with_event_relation(resolved_content, preview_content), True
 
 
-def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
-    if len(payload) <= _MXC_TEXT_MAX_BYTES:
-        return False
-    logger.warning(
-        "mxc_text_payload_exceeds_byte_limit",
-        mxc_url=mxc_url,
-        stage=stage,
-        size_bytes=len(payload),
-        limit_bytes=_MXC_TEXT_MAX_BYTES,
-    )
-    return True
-
-
-async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
+async def _download_mxc_text(
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
@@ -142,49 +137,25 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
 
     """
     try:
-        # Parse MXC URL
-        if not mxc_url.startswith("mxc://"):
-            logger.error("invalid_mxc_url", mxc_url=mxc_url)
-            return None
-
-        # Validate the MXC URL structure before issuing the download.
-        parts = mxc_url[6:].split("/", 1)
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            logger.error("invalid_mxc_url_format", mxc_url=mxc_url)
-            return None
-
-        response = await client.download(mxc=mxc_url)
-
-        if not isinstance(response, nio.DownloadResponse):
-            logger.error("mxc_download_failed", mxc_url=mxc_url, error=str(response))
-            return None
-        if not isinstance(response.body, bytes):
-            logger.error("mxc_download_returned_non_bytes_payload", mxc_url=mxc_url)
-            return None
-        if _mxc_bytes_exceed_limit(mxc_url, response.body, stage="download"):
+        body = await download_mxc_bytes(client, mxc_url, max_bytes=_MXC_TEXT_MAX_BYTES)
+        if body is None:
             return None
 
         # Handle encryption if needed
         if file_info and "key" in file_info:
             # Decrypt the content
             try:
-                decrypted = crypto.attachments.decrypt_attachment(
-                    response.body,
-                    file_info["key"]["k"],
-                    file_info["hashes"]["sha256"],
-                    file_info["iv"],
+                text_bytes = decrypt_media_bytes(
+                    body,
+                    key=file_info["key"]["k"],
+                    sha256=file_info["hashes"]["sha256"],
+                    iv=file_info["iv"],
                 )
-                text_bytes = decrypted
             except Exception:
                 logger.exception("Failed to decrypt attachment")
                 return None
-            if not isinstance(text_bytes, bytes):
-                logger.error("mxc_decrypt_returned_non_bytes_payload", mxc_url=mxc_url)
-                return None
-            if _mxc_bytes_exceed_limit(mxc_url, text_bytes, stage="decrypt"):
-                return None
         else:
-            text_bytes = response.body
+            text_bytes = body
 
         # Decode to text
         try:
@@ -291,26 +262,28 @@ async def _resolve_canonical_content(
     content: dict[str, Any],
     client: nio.AsyncClient | None,
 ) -> dict[str, Any]:
-    """Hydrate canonical event content from a v2 JSON sidecar when available."""
-    sidecar_content = sidecar_content_to_resolve(content)
-    if client is None or sidecar_content is None:
+    """Follow bounded v2 sidecar chains, retaining unresolved content on failure."""
+    if client is None:
         return content
-
-    mxc_url = sidecar_mxc_url(sidecar_content)
-    if mxc_url is None:
-        return content
-
-    full_text = await _download_mxc_text(
-        client,
-        mxc_url,
-        sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
-    )
-    if full_text is None:
-        return content
-
-    resolved_content = _extract_large_message_v2_content(full_text)
-    if resolved_content is None:
-        logger.warning("Invalid large-message v2 payload JSON, returning preview content")
-        return content
-
-    return resolved_content
+    visited: set[str] = set()
+    for _ in range(_MAX_SIDECAR_HOPS):
+        sidecar_content = sidecar_content_to_resolve(content)
+        if sidecar_content is None:
+            break
+        mxc_url = sidecar_mxc_url(sidecar_content)
+        if mxc_url is None or mxc_url in visited:
+            break
+        visited.add(mxc_url)
+        full_text = await _download_mxc_text(
+            client,
+            mxc_url,
+            sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
+        )
+        if full_text is None:
+            break
+        resolved_content = _extract_large_message_v2_content(full_text)
+        if resolved_content is None:
+            logger.warning("Invalid large-message v2 payload JSON, returning preview content")
+            break
+        content = resolved_content
+    return content

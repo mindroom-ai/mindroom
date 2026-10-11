@@ -30,23 +30,25 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
+from mindroom.legacy_delivery_payloads import decode_delivery_result
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership_state import claim_membership_epoch
-from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, UnreadableMatrixDelivery
+from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, ReplyRowFacts, UnreadableMatrixDelivery
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 _OUTBOX_COLUMNS = """
     delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
-    payload_json, edits_event_id, acknowledged_event_id, created_at_ns,
-    attempted, retired, sending_device_id
+    payload_json, result_json, edits_event_id, acknowledged_event_id, created_at_ns,
+    attempted, retired, permanent_failure_reason, sending_device_id,
+    reply_id, span_id, reply_sequence, reply_row_json
 """
 _DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
 
 
-def _delivery_payload(
+def matrix_delivery_payload(
     principal_id: str,
     delivery_id: str,
     stage: DeliveryStage,
@@ -68,7 +70,7 @@ def _delivery_payload(
     return frozen
 
 
-def delivery_payload_json(
+def _delivery_payload_json(
     principal_id: str,
     delivery_id: str,
     stage: DeliveryStage,
@@ -76,11 +78,18 @@ def delivery_payload_json(
 ) -> str:
     """Return the canonical stored Matrix payload, including its identity."""
     return json.dumps(
-        _delivery_payload(principal_id, delivery_id, stage, payload),
+        matrix_delivery_payload(principal_id, delivery_id, stage, payload),
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _delivery_result_json(result: Mapping[str, object] | None) -> str | None:
+    """Return canonical local result JSON without mixing it into wire content."""
+    if result is None:
+        return None
+    return json.dumps(dict(result), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def _delivery_identity(content: Mapping[str, object] | None) -> tuple[str, str, DeliveryStage] | None:
@@ -129,9 +138,18 @@ def enqueue(
     thread_id: str | None,
     payload: Mapping[str, object],
     edits_event_id: str | None,
+    result: Mapping[str, object] | None = None,
     edit_target_pending: bool = False,
+    permanent_failure_reason: str | None = None,
+    reply_id: str | None = None,
+    span_id: str | None = None,
+    reply_sequence: int | None = None,
+    reply_row: ReplyRowFacts | None = None,
 ) -> str | None:
     """Record delivery intent without changing its durable membership owner."""
+    if permanent_failure_reason is not None and not permanent_failure_reason:
+        msg = "A permanent Matrix delivery failure requires a reason"
+        raise ValueError(msg)
     _lock_delivery_stages(transaction, principal_id, delivery_id)
     existing_owner = transaction.fetchone(
         """
@@ -150,31 +168,46 @@ def enqueue(
     if stage is DeliveryStage.FINAL and edit_target_pending:
         initial = transaction.fetchone(
             """
-            SELECT acknowledged_event_id FROM matrix_delivery_outbox
+            SELECT acknowledged_event_id, permanent_failure_reason FROM matrix_delivery_outbox
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
             """,
             (principal_id, delivery_id, DeliveryStage.INITIAL.value),
         )
-        if initial is not None and initial["acknowledged_event_id"] is not None:
+        if reply_id is None and initial is not None and initial["acknowledged_event_id"] is not None:
+            # A reply row takes its edit target from its reply when it is claimed.
             edits_event_id = str(initial["acknowledged_event_id"])
             edit_target_pending = False
+        elif (
+            permanent_failure_reason is None and initial is not None and initial["permanent_failure_reason"] is not None
+        ):
+            permanent_failure_reason = "required edit target was permanently refused: " + str(
+                initial["permanent_failure_reason"],
+            )
     transaction_id = delivery_transaction_id(principal_id, delivery_id, stage.value)
     transaction.execute(
         """
         INSERT INTO matrix_delivery_outbox (
             principal_id, delivery_id, stage, event_type, room_id, membership_epoch,
-            thread_id, transaction_id, payload_json, edits_event_id,
-            edit_target_pending, attempted, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            thread_id, transaction_id, payload_json, result_json, edits_event_id,
+            edit_target_pending, attempted, permanent_failure_reason, created_at_ns,
+            reply_id, span_id, reply_sequence, reply_row_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, delivery_id, stage) DO UPDATE SET
             room_id = excluded.room_id,
             membership_epoch = excluded.membership_epoch,
             thread_id = excluded.thread_id,
             event_type = excluded.event_type,
             payload_json = excluded.payload_json,
+            result_json = excluded.result_json,
             edits_event_id = excluded.edits_event_id,
-            edit_target_pending = excluded.edit_target_pending
+            edit_target_pending = excluded.edit_target_pending,
+            permanent_failure_reason = excluded.permanent_failure_reason,
+            reply_id = excluded.reply_id,
+            span_id = excluded.span_id,
+            reply_sequence = excluded.reply_sequence,
+            reply_row_json = excluded.reply_row_json
         WHERE matrix_delivery_outbox.attempted = 0
+          AND matrix_delivery_outbox.permanent_failure_reason IS NULL
         """,
         (
             principal_id,
@@ -185,10 +218,16 @@ def enqueue(
             membership_epoch,
             encode_thread_id(thread_id),
             transaction_id,
-            delivery_payload_json(principal_id, delivery_id, stage, payload),
+            _delivery_payload_json(principal_id, delivery_id, stage, payload),
+            _delivery_result_json(result),
             edits_event_id,
             int(edit_target_pending),
+            permanent_failure_reason,
             time.time_ns(),
+            reply_id,
+            span_id,
+            reply_sequence,
+            None if reply_row is None else _reply_row_json(reply_row),
         ),
     )
     return transaction_id
@@ -218,7 +257,38 @@ def is_attempted(
     return row is not None
 
 
-def claim(
+def _resolve_reply_edit_target(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    stage: DeliveryStage,
+    reply_id: str,
+) -> str | None:
+    """Point a reply row at the event its reply's create bound, or leave it waiting.
+
+    A reply row written before the reply's create was acknowledged edits
+    whatever event that create bound, which may belong to another span's
+    delivery id.
+    """
+    reply = transaction.fetchone(
+        "SELECT event_id FROM reply_messages WHERE principal_id = ? AND reply_id = ?",
+        (principal_id, reply_id),
+    )
+    if reply is None or reply["event_id"] is None:
+        return None
+    transaction.execute(
+        """
+        UPDATE matrix_delivery_outbox
+        SET edits_event_id = ?, edit_target_pending = 0
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+        """,
+        (reply["event_id"], principal_id, delivery_id, stage.value),
+    )
+    return str(reply["event_id"])
+
+
+def claim(  # noqa: C901, PLR0911
     transaction: Transaction,
     principal_id: str,
     *,
@@ -244,13 +314,25 @@ def claim(
     _lock_delivery_stages(transaction, principal_id, delivery_id)
     current = transaction.fetchone(
         """
-        SELECT attempted, retired, edits_event_id, edit_target_pending FROM matrix_delivery_outbox
+        SELECT attempted, retired, permanent_failure_reason, edits_event_id, edit_target_pending, reply_id
+        FROM matrix_delivery_outbox
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
         """,
         (principal_id, delivery_id, stage.value),
     )
-    if current is None or bool(current["retired"]):
+    if current is None or bool(current["retired"]) or current["permanent_failure_reason"] is not None:
         return None
+    if current["reply_id"] is not None and bool(current["edit_target_pending"]):
+        target = _resolve_reply_edit_target(
+            transaction,
+            principal_id,
+            delivery_id=delivery_id,
+            stage=stage,
+            reply_id=str(current["reply_id"]),
+        )
+        if target is None:
+            return None
+        current = {**current, "edits_event_id": target, "edit_target_pending": 0}
     if stage is DeliveryStage.INITIAL and not bool(current["attempted"]):
         final = transaction.fetchone(
             """
@@ -294,7 +376,7 @@ def claim(
             SELECT 1 AS present FROM matrix_delivery_outbox
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND attempted = 1 AND acknowledged_event_id IS NULL
-              AND retired = 0
+              AND retired = 0 AND permanent_failure_reason IS NULL
             """,
             (principal_id, delivery_id, DeliveryStage.INITIAL.value),
         )
@@ -381,24 +463,109 @@ def acknowledge(
     """
     bound = transaction.fetchone(
         """
-        UPDATE matrix_delivery_outbox SET acknowledged_event_id = ?
+        UPDATE matrix_delivery_outbox
+        SET acknowledged_event_id = ?, permanent_failure_reason = NULL
         WHERE principal_id = ? AND delivery_id = ? AND stage = ? AND acknowledged_event_id IS NULL
         RETURNING delivery_id
         """,
         (event_id, principal_id, delivery_id, stage.value),
     )
     if bound is not None and stage is DeliveryStage.INITIAL:
+        # A reply row takes its edit target from its reply when it is claimed.
         transaction.execute(
             """
             UPDATE matrix_delivery_outbox
-            SET edits_event_id = ?, edit_target_pending = 0
+            SET edits_event_id = ?, edit_target_pending = 0, permanent_failure_reason = NULL
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND attempted = 0
               AND edit_target_pending = 1
+              AND reply_id IS NULL
             """,
             (event_id, principal_id, delivery_id, DeliveryStage.FINAL.value),
         )
     return bound is not None
+
+
+def record_permanent_failure(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    stage: DeliveryStage,
+    reason: str,
+) -> tuple[tuple[tuple[str, DeliveryStage], ...], str | None]:
+    """Stop retrying one refused immutable payload.
+
+    Returns the rows this call failed (the row itself, then the rows waiting
+    on a refused create), and any concurrent ACK.
+    """
+    if not reason:
+        msg = "A permanent Matrix delivery failure requires a reason"
+        raise ValueError(msg)
+    failed = transaction.fetchone(
+        """
+        UPDATE matrix_delivery_outbox SET permanent_failure_reason = ?
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+          AND acknowledged_event_id IS NULL AND retired = 0
+          AND permanent_failure_reason IS NULL
+        RETURNING delivery_id
+        """,
+        (reason, principal_id, delivery_id, stage.value),
+    )
+    failed_rows: list[tuple[str, DeliveryStage]] = []
+    if failed is not None:
+        failed_rows.append((delivery_id, stage))
+    if failed is not None and stage is DeliveryStage.INITIAL:
+        cascaded_final = transaction.fetchall(
+            """
+            UPDATE matrix_delivery_outbox
+            SET permanent_failure_reason = ?
+            WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+              AND acknowledged_event_id IS NULL AND retired = 0
+              AND edit_target_pending = 1 AND permanent_failure_reason IS NULL
+            RETURNING delivery_id
+            """,
+            (
+                f"required edit target was permanently refused: {reason}",
+                principal_id,
+                delivery_id,
+                DeliveryStage.FINAL.value,
+            ),
+        )
+        failed_rows.extend((str(row["delivery_id"]), DeliveryStage.FINAL) for row in cascaded_final)
+        # The reply's non-terminal rows waiting on this create can never land either.
+        cascaded_edits = transaction.fetchall(
+            """
+            UPDATE matrix_delivery_outbox
+            SET permanent_failure_reason = ?
+            WHERE principal_id = ? AND stage = ? AND edit_target_pending = 1
+              AND acknowledged_event_id IS NULL AND retired = 0 AND permanent_failure_reason IS NULL
+              AND reply_id = (
+                SELECT reply_id FROM matrix_delivery_outbox
+                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+              )
+            RETURNING delivery_id
+            """,
+            (
+                f"required edit target was permanently refused: {reason}",
+                principal_id,
+                DeliveryStage.EDIT.value,
+                principal_id,
+                delivery_id,
+                DeliveryStage.INITIAL.value,
+            ),
+        )
+        failed_rows.extend((str(row["delivery_id"]), DeliveryStage.EDIT) for row in cascaded_edits)
+    row = transaction.fetchone(
+        """
+        SELECT acknowledged_event_id FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+        """,
+        (principal_id, delivery_id, stage.value),
+    )
+    if row is None or row["acknowledged_event_id"] is None:
+        return tuple(failed_rows), None
+    return tuple(failed_rows), str(row["acknowledged_event_id"])
 
 
 def delivery_ownership(
@@ -580,7 +747,8 @@ def unacknowledged(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox
         WHERE principal_id = ? AND event_type = ?
-          AND acknowledged_event_id IS NULL AND retired = 0{cursor_clause}
+          AND acknowledged_event_id IS NULL AND retired = 0
+          AND permanent_failure_reason IS NULL{cursor_clause}
         ORDER BY created_at_ns, delivery_id/*bytes*/, stage/*bytes*/
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and a fixed clause, not input
@@ -603,6 +771,7 @@ def has_attempted_unacknowledged_prompt_delivery(
         WHERE principal_id = ? AND room_id = ? AND membership_epoch = ?
           AND event_type = 'm.room.message'
           AND attempted = 1 AND retired = 0 AND acknowledged_event_id IS NULL
+          AND permanent_failure_reason IS NULL
           AND (
               edits_event_id IS NOT NULL
               OR payload_json LIKE ?
@@ -673,6 +842,11 @@ def _delivery(row: Row) -> MatrixDelivery:
     if not isinstance(payload, dict):
         msg = f"Outbox payload for delivery {row['delivery_id']!r} is not an object"
         raise TypeError(msg)
+    result = decode_delivery_result(
+        payload,
+        cast("str | None", row["result_json"]),
+        delivery_id=str(row["delivery_id"]),
+    )
     return MatrixDelivery(
         delivery_id=row["delivery_id"],
         stage=DeliveryStage(row["stage"]),
@@ -685,10 +859,58 @@ def _delivery(row: Row) -> MatrixDelivery:
         edits_event_id=row["edits_event_id"],
         acknowledged_event_id=row["acknowledged_event_id"],
         created_at_ns=int(row["created_at_ns"]),
+        result=result,
         attempted=bool(row["attempted"]),
         retired=bool(row["retired"]),
+        permanent_failure_reason=row["permanent_failure_reason"],
         sending_device_id=row["sending_device_id"],
+        reply_id=row["reply_id"],
+        span_id=row["span_id"],
+        reply_sequence=None if row["reply_sequence"] is None else int(row["reply_sequence"]),
+        reply_row=None if row["reply_row_json"] is None else _reply_row(str(row["reply_row_json"])),
     )
+
+
+def _reply_row_json(facts: ReplyRowFacts) -> str:
+    stored: dict[str, object] = {"placeholder_only": facts.placeholder_only}
+    if facts.new_text is not None:
+        stored["new_text"] = facts.new_text
+    return json.dumps(stored, sort_keys=True, separators=(",", ":"))
+
+
+def _reply_row(stored: str) -> ReplyRowFacts:
+    data = json.loads(stored)
+    new_text = data.get("new_text")
+    return ReplyRowFacts(
+        placeholder_only=data.get("placeholder_only") is True,
+        new_text=new_text if isinstance(new_text, str) else None,
+    )
+
+
+def unresolved_reply_rows(
+    transaction: Transaction,
+    principal_id: str,
+    reply_id: str,
+    *,
+    before_sequence: int | None = None,
+) -> tuple[tuple[str, DeliveryStage], ...]:
+    """Return a reply's rows whose Matrix outcome is unknown, in write order.
+
+    Every durable write of one reply takes the next value of its write
+    sequence, so sending in this order is sending in the order the reply's
+    spans decided them, across all of its delivery ids.
+    """
+    bound = "" if before_sequence is None else " AND reply_sequence < ?"
+    rows = transaction.fetchall(
+        f"""
+        SELECT delivery_id, stage FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND reply_id = ?
+          AND acknowledged_event_id IS NULL AND retired = 0 AND permanent_failure_reason IS NULL{bound}
+        ORDER BY reply_sequence
+        """,  # noqa: S608 - a fixed clause, not input
+        (principal_id, reply_id, *(() if before_sequence is None else (before_sequence,))),
+    )
+    return tuple((str(row["delivery_id"]), DeliveryStage(str(row["stage"]))) for row in rows)
 
 
 def _recovery_delivery(row: Row) -> MatrixDelivery | UnreadableMatrixDelivery:

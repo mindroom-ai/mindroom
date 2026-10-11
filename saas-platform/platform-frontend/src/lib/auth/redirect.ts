@@ -1,21 +1,28 @@
 const DEFAULT_REDIRECT = '/dashboard'
 
+// Tenant instances serve their own content on other subdomains, so only the platform's own hosts are trusted.
 function isAllowedPlatformHost(hostname: string, platformDomain: string): boolean {
   const domain = platformDomain.trim().toLowerCase()
   const host = hostname.toLowerCase()
-  return Boolean(domain && (host === domain || host.endsWith(`.${domain}`)))
+  return Boolean(domain && (host === `app.${domain}` || host === `api.${domain}`))
 }
 
-function isProtocolRelativeRedirect(target: string): boolean {
+function leavesPlatformOrigin(target: string): boolean {
+  // The WHATWG URL parser removes ASCII tab and newline before parsing, so "/\t/evil.example"
+  // resolves to the scheme-relative "//evil.example". Reject every C0 control character instead
+  // of replaying that removal, since no redirect target needs one.
+  if ([...target].some((character) => character < ' ')) {
+    return true
+  }
   return target.replaceAll('\\', '/').startsWith('//')
 }
 
-/** Restrict post-auth redirects to local paths or HTTPS URLs on the platform domain. */
+/** Restrict post-auth redirects to local paths or HTTPS URLs on the platform's app and API hosts. */
 export function sanitizePostAuthRedirect(
   target: string | null | undefined,
   platformDomain = ''
 ): string {
-  if (!target || isProtocolRelativeRedirect(target)) {
+  if (!target || leavesPlatformOrigin(target)) {
     return DEFAULT_REDIRECT
   }
 

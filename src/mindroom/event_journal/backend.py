@@ -41,13 +41,25 @@ class Backend(Protocol):
     """A durable store that can run read and write transactions."""
 
     async def write[T](self, operation: Operation[T]) -> T:
-        """Run one operation in a serialized write transaction and commit it."""
+        """Run one operation atomically through the serialized writer and await its commit."""
         ...
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one operation in a read transaction."""
         ...
 
+    async def recovery_read[T](self, operation: Operation[T]) -> T:
+        """Run one shutdown handoff read independently of ordinary backlog."""
+        ...
+
+    async def hold_exclusively(self, identity: str) -> bool:
+        """Claim the journal named ``identity`` for this runtime until close; ``False`` when another runtime holds it."""
+        ...
+
+    async def still_held(self) -> bool:
+        """Return whether the claim ``hold_exclusively`` took still holds."""
+        ...
+
     async def close(self) -> None:
-        """Release every connection this backend owns."""
+        """Release every connection this backend owns, and the claim."""
         ...

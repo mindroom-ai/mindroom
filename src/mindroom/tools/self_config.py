@@ -9,6 +9,7 @@ requires ``agent_name`` at instantiation and is injected directly in
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -17,6 +18,7 @@ from mindroom.tool_system.registration import register_builtin_tool_metadata
 register_builtin_tool_metadata(
     ToolMetadata(
         name="self_config",
+        file_access=ToolFileAccess.NONE,
         display_name="Self Config",
         description="Allow an agent to read and modify its own configuration",
         category=ToolCategory.DEVELOPMENT,

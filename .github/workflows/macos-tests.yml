@@ -1,0 +1,76 @@
+name: macOS tests
+
+on:
+  pull_request:
+    paths:
+      - "macos/**"
+      - "!macos/appcast.xml"
+      - "src/mindroom/desktop/**"
+      - "src/mindroom/matrix/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/macos-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "macos/**"
+      - "!macos/appcast.xml"
+      - "src/mindroom/desktop/**"
+      - "src/mindroom/matrix/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/macos-tests.yml"
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes older runs obsolete; other events never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  swift-tests:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Build and test native app
+        run: swift test --package-path macos/MindRoom
+
+  packaging:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+      - name: Build installer
+        env:
+          APP_VERSION: '0.0.0'
+          BUILD_VERSION: '1'
+        run: macos/build-macos-app.sh --dmg
+      - name: Verify installer and packaged helper
+        run: |
+          codesign --verify --deep --strict dist/macos/MindRoom.app
+          hdiutil verify dist/macos/MindRoom.dmg
+          dist/macos/MindRoom.app/Contents/Resources/llama.cpp/llama-server --version
+          swift - "dist/macos/MindRoom.app/Contents/Resources/MindRoom_MindRoom.bundle" <<'SWIFT'
+          import AppKit
+          let resources = Bundle(path: CommandLine.arguments[1])!
+          guard let image = resources.image(forResource: "logo-menu"), image.isValid else {
+              fatalError("Packaged menu bar artwork is missing or invalid")
+          }
+          SWIFT
+          uv run --no-project python macos/smoke-desktop-helper.py \
+            "dist/macos/MindRoom.app/Contents/Helpers/MindRoom Desktop Helper.app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/macos/MindRoom.dmg
+          retention-days: 7

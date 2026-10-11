@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import math
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     import httpx
 
 _MATRIX_VERSIONS_PATH = "/_matrix/client/versions"
@@ -20,7 +17,7 @@ MSC4186_UNSTABLE_FEATURE = "org.matrix.simplified_msc3575"
 _MATRIX_SYNC_HEALTH_STALE_SECONDS = 180.0
 MATRIX_SYNC_STARTUP_GRACE_SECONDS = 600.0
 MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS = 120.0
-MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS = 600.0
+MATRIX_INGESTION_GRACE_SECONDS = 600.0
 
 
 @dataclass(slots=True)
@@ -30,18 +27,24 @@ class _MatrixSyncState:
     running: bool = False
     loop_started_time: datetime | None = None
     last_sync_time: datetime | None = None
-    cache_write_started_monotonic: float | None = None
+    ingestion_progress_started_monotonic: float | None = None
+    ingestion_progress_advanced_monotonic: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class SyncCacheWriteProgress:
-    """Immutable view of one active durable sync-cache phase."""
+class _SyncIngestionProgress:
+    """Immutable view of one active durable ingestion catch-up phase."""
 
     started_monotonic: float
+    advanced_monotonic: float
 
     def seconds_in_flight(self, now_monotonic: float) -> float:
-        """Return elapsed phase time without allowing a negative clock delta."""
+        """Return total phase time without allowing a negative clock delta."""
         return max(0.0, now_monotonic - self.started_monotonic)
+
+    def seconds_since_advance(self, now_monotonic: float) -> float:
+        """Return time since the latest commit-gated advance."""
+        return max(0.0, now_monotonic - self.advanced_monotonic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +89,7 @@ def response_has_matrix_versions(response: httpx.Response) -> bool:
 
 
 def response_advertises_sliding_sync(response: httpx.Response) -> bool:
-    """Return whether a valid `/versions` response advertises MSC4186 Simplified Sliding Sync."""
+    """Return whether a valid versions response advertises Simplified Sliding Sync."""
     unstable_features = response.json().get("unstable_features")
     return isinstance(unstable_features, dict) and unstable_features.get(MSC4186_UNSTABLE_FEATURE) is True
 
@@ -111,33 +114,38 @@ def mark_matrix_sync_success(entity_name: str, sync_time: datetime | None = None
         state = _matrix_sync_state.setdefault(entity_name, _MatrixSyncState())
         state.running = True
         state.last_sync_time = resolved_sync_time
+        state.ingestion_progress_started_monotonic = None
+        state.ingestion_progress_advanced_monotonic = None
     return resolved_sync_time
 
 
-@contextmanager
-def track_matrix_sync_cache_write(entity_name: str) -> Iterator[None]:
-    """Publish one entity's complete sequential durable cache phase."""
-    started_monotonic = time.monotonic()
+def mark_matrix_ingestion_progress(
+    entity_name: str,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    """Publish one commit-gated advance within an incomplete source Frame."""
+    observed = time.monotonic() if now_monotonic is None else now_monotonic
+    if not math.isfinite(observed):
+        message = "now_monotonic must be finite"
+        raise ValueError(message)
     with _matrix_sync_lock:
         state = _matrix_sync_state.setdefault(entity_name, _MatrixSyncState())
-        state.cache_write_started_monotonic = started_monotonic
-    try:
-        yield
-    finally:
-        with _matrix_sync_lock:
-            state = _matrix_sync_state.get(entity_name)
-            if state is not None and state.cache_write_started_monotonic == started_monotonic:
-                state.cache_write_started_monotonic = None
+        state.running = True
+        if state.ingestion_progress_started_monotonic is None:
+            state.ingestion_progress_started_monotonic = observed
+        state.ingestion_progress_advanced_monotonic = observed
 
 
-def get_matrix_sync_cache_write_progress(entity_name: str) -> SyncCacheWriteProgress | None:
-    """Return the sole cache-write progress snapshot for one entity."""
+def get_matrix_ingestion_progress(entity_name: str) -> _SyncIngestionProgress | None:
+    """Return the active commit-gated ingestion catch-up phase, if any."""
     with _matrix_sync_lock:
         state = _matrix_sync_state.get(entity_name)
-        started_monotonic = state.cache_write_started_monotonic if state is not None else None
-    if started_monotonic is None:
+        started = state.ingestion_progress_started_monotonic if state is not None else None
+        advanced = state.ingestion_progress_advanced_monotonic if state is not None else None
+    if started is None or advanced is None:
         return None
-    return SyncCacheWriteProgress(started_monotonic=started_monotonic)
+    return _SyncIngestionProgress(started, advanced)
 
 
 def clear_matrix_sync_state(entity_name: str) -> None:
@@ -150,7 +158,7 @@ def get_matrix_sync_health_snapshot(
     *,
     stale_after_seconds: float = _MATRIX_SYNC_HEALTH_STALE_SECONDS,
     startup_grace_seconds: float = MATRIX_SYNC_STARTUP_GRACE_SECONDS,
-    cache_write_grace_seconds: float = MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS,
+    ingestion_grace_seconds: float = MATRIX_INGESTION_GRACE_SECONDS,
     now: datetime | None = None,
     now_monotonic: float | None = None,
 ) -> _MatrixSyncHealthSnapshot:
@@ -159,8 +167,8 @@ def get_matrix_sync_health_snapshot(
     The reported `last_sync_time` is the oldest successful sync among active
     entities, because any stale entity should surface as unhealthy.
     """
-    if not math.isfinite(cache_write_grace_seconds) or cache_write_grace_seconds <= 0:
-        msg = "cache_write_grace_seconds must be a finite positive number"
+    if not math.isfinite(ingestion_grace_seconds) or ingestion_grace_seconds <= 0:
+        msg = "ingestion_grace_seconds must be a finite positive number"
         raise ValueError(msg)
     current_time = _normalize_sync_time(now or datetime.now(UTC))
     current_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
@@ -173,8 +181,12 @@ def get_matrix_sync_health_snapshot(
                         state.last_sync_time,
                         state.loop_started_time,
                         (
-                            SyncCacheWriteProgress(state.cache_write_started_monotonic)
-                            if state.cache_write_started_monotonic is not None
+                            _SyncIngestionProgress(
+                                state.ingestion_progress_started_monotonic,
+                                state.ingestion_progress_advanced_monotonic,
+                            )
+                            if state.ingestion_progress_started_monotonic is not None
+                            and state.ingestion_progress_advanced_monotonic is not None
                             else None
                         ),
                     )
@@ -195,14 +207,17 @@ def get_matrix_sync_health_snapshot(
     active_entities = tuple(entity_name for entity_name, _, _, _ in active_states)
     stale_entities = tuple(
         entity_name
-        for entity_name, last_sync_time, loop_started_time, cache_write_progress in active_states
+        for entity_name, last_sync_time, loop_started_time, ingestion_progress in active_states
         if (
             (
-                cache_write_progress is not None
-                and cache_write_progress.seconds_in_flight(current_monotonic) > cache_write_grace_seconds
+                ingestion_progress is not None
+                and (
+                    ingestion_progress.seconds_in_flight(current_monotonic) > ingestion_grace_seconds
+                    or ingestion_progress.seconds_since_advance(current_monotonic) > stale_after_seconds
+                )
             )
             or (
-                cache_write_progress is None
+                ingestion_progress is None
                 and (
                     (
                         last_sync_time is not None

@@ -8,9 +8,9 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
-from mindroom.ai import _collect_streamed_response_content, ai_response
+from mindroom.ai import ai_response, collect_streamed_response_content
 from mindroom.config.main import Config
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 from tests.conftest import make_turn_context
 
 if TYPE_CHECKING:
@@ -37,9 +37,9 @@ async def test_collect_streamed_response_preserves_tool_marker_order() -> None:
             ),
         )
 
-    body, trace = await _collect_streamed_response_content(
+    body, trace = await collect_streamed_response_content(
         stream(),
-        show_tool_calls=True,
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
     )
 
     assert body.index("Before tool.") < body.index("run_shell_command") < body.index("After tool.")
@@ -65,13 +65,109 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
         )
         yield RunContentEvent(content=" After.")
 
-    body, trace = await _collect_streamed_response_content(
+    body, trace = await collect_streamed_response_content(
         stream(),
-        show_tool_calls=False,
+        presentation=CollectedStreamPresentation(show_tool_calls=False),
     )
 
     assert body == "Before. After."
     assert trace == []
+
+
+@pytest.mark.asyncio
+async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> None:
+    """A continuation completes the persisted marker in place and appends later events in order."""
+    prior_trace = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            tool_call_id="call-1",
+        ),
+    ]
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield ToolCallCompletedEvent(
+            tool=ToolExecution(
+                tool_call_id="call-1",
+                tool_name="inspect",
+                tool_args={"path": "report.txt"},
+                result="details",
+            ),
+        )
+        yield RunContentEvent(content="\nAfter approval.")
+        yield ToolCallStartedEvent(
+            tool=ToolExecution(
+                tool_call_id="call-2",
+                tool_name="inspect",
+                tool_args={"path": "report.txt"},
+            ),
+        )
+
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(
+            show_tool_calls=True,
+            response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
+            tool_trace=prior_trace,
+        ),
+    )
+
+    assert body == ("Before approval.\n\n🔧 `inspect` [1]\nAfter approval.\n\n🔧 `inspect` [2] ⏳\n\n")
+    assert [entry.type for entry in trace] == ["tool_call_completed", "tool_call_started"]
+    assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2"]
+    assert trace[0].result_preview == "details"
+
+
+@pytest.mark.asyncio
+async def test_collect_streamed_response_does_not_merge_equal_calls_with_distinct_ids() -> None:
+    """Argument equality never collapses separate provider calls with stable identities."""
+
+    async def stream() -> AsyncGenerator[object, None]:
+        for call_id in ("call-1", "call-2"):
+            yield ToolCallStartedEvent(
+                tool=ToolExecution(
+                    tool_call_id=call_id,
+                    tool_name="inspect",
+                    tool_args={},
+                ),
+            )
+
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+
+    assert body.count("🔧 `inspect`") == 2
+    assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2"]
+
+
+@pytest.mark.asyncio
+async def test_collect_streamed_response_ignores_repeated_start_for_restored_call() -> None:
+    """A provider replay of the same stable start cannot create a second marker."""
+    prior_trace = [
+        ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1"),
+    ]
+
+    async def stream() -> AsyncGenerator[object, None]:
+        tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+        yield ToolCallStartedEvent(tool=tool)
+        yield ToolCallCompletedEvent(
+            tool=ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done"),
+        )
+
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(
+            show_tool_calls=True,
+            response_text="🔧 `inspect` [1] ⏳",
+            tool_trace=prior_trace,
+        ),
+    )
+
+    assert body == "🔧 `inspect` [1]"
+    assert len(trace) == 1
+    assert trace[0].type == "tool_call_completed"
 
 
 @pytest.mark.asyncio

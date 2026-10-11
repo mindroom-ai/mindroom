@@ -16,6 +16,7 @@ FORBIDDEN_FACADE_MODULES = {
     "mindroom.tool_system.runtime",
 }
 PRIVATE_REGISTRY_STATE_INTERFACE_VISIBILITY = {
+    "mindroom.api.sandbox_runner",
     "mindroom.mcp.registry",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
@@ -38,6 +39,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolConfigOverrideError",
+    "ToolFileAccess",
     "ToolInitOverrideError",
     "ToolManagedInitArg",
     "ToolMetadata",
@@ -47,7 +49,6 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
-    "default_worker_routed_tools",
     "deserialize_tool_validation_snapshot",
     "ensure_tool_registry_loaded",
     "export_tools_metadata",
@@ -357,8 +358,10 @@ def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
 
 
 def test_private_registry_state_import_is_whitelisted_outside_tool_system() -> None:
-    """Only the MCP registry may import private registry state directly outside tool_system."""
+    """Only explicitly allowed imports may reach registry state outside tool_system."""
     assert _private_registry_state_importers_outside_tool_system() == {
+        ("mindroom.api.sandbox_runner", "BUILTIN_TOOL_METADATA"),
+        ("mindroom.mcp.registry", "MCP_TOOL_FACTORY_MARKER"),
         ("mindroom.mcp.registry", "TOOL_REGISTRY"),
         ("mindroom.mcp.registry", "reconcile_dynamic_tool_state"),
     }
@@ -402,7 +405,9 @@ def test_tach_breaks_metadata_plugins_cycle_with_private_split_modules() -> None
 
 def test_selected_modules_do_not_hide_tool_system_imports_inside_functions() -> None:
     """Standalone tool-system helpers should be imported at module scope once the cycle is split."""
-    assert "mindroom.tool_system.worker_routing" not in _function_local_imports(SOURCE_ROOT / "credentials.py")
+    assert "mindroom.tool_system.worker_routing" not in _function_local_imports(
+        SOURCE_ROOT / "credentials" / "manager.py",
+    )
     assert "mindroom.tool_system.plugin_identity" not in _function_local_imports(
         SOURCE_ROOT / "hooks" / "context.py",
     )

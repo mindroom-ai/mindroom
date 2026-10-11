@@ -11,20 +11,27 @@ from urllib.parse import urlparse
 
 import httpx
 import typer
+from rich.markup import escape
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
-from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
-from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
-from mindroom.embeddings import create_sentence_transformers_embedder
+from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
+from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
+from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
+from mindroom.embeddings.signatures import create_sentence_transformers_embedder
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
     response_advertises_sliding_sync,
     response_has_matrix_versions,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.matrix.provisioning_env import (
+    local_pairing_required,
+    local_provisioning_client_credentials_from_env,
+    provisioning_url_from_env,
+    registration_token_from_env,
+)
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -102,26 +109,17 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
             failed += f
             warnings += w
 
-    # 5. Matrix homeserver reachable
-    p, f, w = _run_doctor_step(
-        "Checking Matrix homeserver...",
-        lambda: _check_matrix_homeserver(runtime_paths=runtime_paths, config=config),
-    )
-    passed += p
-    failed += f
-    warnings += w
-
-    # 6. Storage directory writable
-    p, f, w = _run_doctor_step("Checking storage...", lambda: _check_storage_writable(runtime_paths))
-    passed += p
-    failed += f
-    warnings += w
-
-    # 7. Matrix encryption stores match persisted device identities
-    p, f, w = _run_doctor_step("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths))
-    passed += p
-    failed += f
-    warnings += w
+    # 5+. Matrix homeserver, hosted pairing, storage, and encryption stores
+    for message, check in (
+        ("Checking Matrix homeserver...", lambda: _check_matrix_homeserver(runtime_paths=runtime_paths, config=config)),
+        ("Checking pairing...", lambda: _check_pairing(runtime_paths)),
+        ("Checking storage...", lambda: _check_storage_writable(runtime_paths)),
+        ("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths)),
+    ):
+        p, f, w = _run_doctor_step(message, check)
+        passed += p
+        failed += f
+        warnings += w
 
     # Summary
     console.print(f"\n{passed} passed, {failed} failed, {warnings} warning{'s' if warnings != 1 else ''}")
@@ -206,7 +204,7 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     "anthropic": "https://api.anthropic.com/v1/models",
     "openai": "https://api.openai.com/v1/models",
     "google": "https://generativelanguage.googleapis.com/v1beta/models",
-    "openrouter": "https://openrouter.ai/api/v1/models",
+    "openrouter": f"{OPENROUTER_BASE_URL_DEFAULT}/models",
     "deepseek": "https://api.deepseek.com/v1/models",
     "cerebras": "https://api.cerebras.ai/v1/models",
     "groq": "https://api.groq.com/openai/v1/models",
@@ -215,9 +213,25 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 }
 
 
-def _get_custom_base_url(config: Config, provider: str) -> str | None:
+def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
+    """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
+    # model_loading pulls in the Agno runtime, which doctor only needs once a provider is checked.
+    from mindroom.providers.model_loading import model_uses_own_credential  # noqa: PLC0415
+
+    try:
+        return [
+            model
+            for name, model in config.models.items()
+            if env_key_for_provider(model.provider) == env_key
+            and not model_uses_own_credential(name, model, runtime_paths)
+        ]
+    except (OSError, ValueError):
+        return None
+
+
+def _get_custom_base_url(models: list[ModelConfig], provider: str) -> str | None:
     """Get custom base_url for a provider from model extra_kwargs, if any."""
-    for model in config.models.values():
+    for model in models:
         if model.provider == provider and model.extra_kwargs:
             base_url = model.extra_kwargs.get("base_url")
             if base_url:
@@ -363,7 +377,7 @@ def _validate_vertexai_claude_connection(
     extra_kwargs = dict(model_config.extra_kwargs or {})
     project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
     region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
-    project_id = extra_kwargs.get("project_id") or runtime_paths.env_value(project_env)
+    project_id = extra_kwargs.get("project_id") or get_secret_from_env(project_env, runtime_paths=runtime_paths)
     region = extra_kwargs.get("region") or runtime_paths.env_value(region_env)
     missing = []
     if not project_id:
@@ -376,7 +390,7 @@ def _validate_vertexai_claude_connection(
     client_params = dict(extra_kwargs.get("client_params") or {})
     google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
     if "credentials" not in client_params and google_application_credentials is not None:
-        from mindroom.google_adc import load_google_application_credentials  # noqa: PLC0415
+        from mindroom.providers.google_adc import load_google_application_credentials  # noqa: PLC0415
 
         try:
             client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
@@ -522,12 +536,17 @@ def _check_single_provider(
         return 0, 0, 0
     validated_keys.add(env_key)
 
-    api_key = runtime_paths.env_value(env_key)
+    # Models with their own credential never read the shared key. When the credential store is
+    # unreadable that is unknown, so the key counts as needed and only the default endpoint is probed.
+    shared_key_models = _models_using_shared_key(config, env_key, runtime_paths)
+    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths)
     if not api_key:
-        console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, 1
+        needs_shared_key = shared_key_models is None or bool(shared_key_models)
+        if needs_shared_key:
+            console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
+        return 0, 0, int(needs_shared_key)
 
-    base_url = _get_custom_base_url(config, provider)
+    base_url = _get_custom_base_url(shared_key_models or [], provider)
     valid, detail = _validate_provider_key(provider, api_key, base_url)
     return _print_validation(
         valid,
@@ -588,13 +607,9 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         return 0, 0, 1
 
     llm_provider = config.memory.llm.provider
-    llm_host = (
-        config.memory.llm.config.get("host")
-        or config.memory.llm.config.get("openai_base_url")
-        or config.memory.llm.config.get("base_url")
-    )
+    llm_base_url = config.memory.llm.config.get("openai_base_url") or config.memory.llm.config.get("base_url")
     if llm_provider == "ollama":
-        host = llm_host or _get_ollama_host(config, runtime_paths=runtime_paths)
+        host = config.memory.llm.config.get("host") or llm_base_url or _get_ollama_host(config, runtime_paths)
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,
@@ -606,14 +621,17 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
+    # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
+    api_key = config.memory.llm.config.get("api_key") or (
+        get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+    )
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    base_url = llm_host
-    valid, detail = _validate_provider_key(llm_provider, api_key or "", base_url)
+    # The runtime drops host for memory LLMs other than Ollama.
+    valid, detail = _validate_provider_key(llm_provider, api_key or "", llm_base_url)
     return _print_validation(
         valid,
         detail,
@@ -666,7 +684,7 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
 
     env_key = env_key_for_provider(emb.provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
+    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
@@ -720,6 +738,33 @@ def _check_matrix_homeserver(runtime_paths: RuntimePaths, config: Config | None 
     detail = f"HTTP {response.status_code}" if not response.is_success else "returned invalid /versions payload"
     console.print(f"[red]✗[/red] Matrix homeserver {detail}: {homeserver}")
     return 0, 1, 0
+
+
+def _check_pairing(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check hosted pairing state. Returns (passed, failed, warnings).
+
+    An unpaired hosted install before its first run is normal because `mindroom run` pairs it, so it counts as passed.
+    A warning would keep the macOS app's Check step at "Needs attention" on every first run.
+    """
+    if provisioning_url_from_env(runtime_paths) is None or registration_token_from_env(runtime_paths) is not None:
+        # Without hosted provisioning, or with a registration token, agents register without pairing.
+        return 0, 0, 0
+    try:
+        required = local_pairing_required(runtime_paths)
+        paired = local_provisioning_client_credentials_from_env(runtime_paths) is not None
+    except ValueError as exc:
+        console.print(f"[red]✗[/red] Pairing: {escape(str(exc))}")
+        return 0, 1, 0
+    if required:
+        console.print(
+            "[green]✓[/green] Not paired yet: `mindroom run` will print a link to approve "
+            "with your MindRoom Chat account",
+        )
+        return 1, 0, 0
+    if paired:
+        console.print("[green]✓[/green] Paired with MindRoom Chat")
+        return 1, 0, 0
+    return 0, 0, 0
 
 
 def _check_storage_writable(runtime_paths: RuntimePaths) -> tuple[int, int, int]:

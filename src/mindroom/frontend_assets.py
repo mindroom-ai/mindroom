@@ -60,6 +60,5 @@ def _build_repo_frontend_dist(runtime_paths: RuntimePaths) -> Path | None:
 
     print(f"Dashboard assets missing; building frontend in {_REPO_FRONTEND_SOURCE_DIR}")
     subprocess.run([bun, "install", "--frozen-lockfile"], check=True, cwd=_REPO_FRONTEND_SOURCE_DIR)
-    subprocess.run([bun, "run", "tsc"], check=True, cwd=_REPO_FRONTEND_SOURCE_DIR)
-    subprocess.run([bun, "run", "vite", "build"], check=True, cwd=_REPO_FRONTEND_SOURCE_DIR)
+    subprocess.run([bun, "run", "build"], check=True, cwd=_REPO_FRONTEND_SOURCE_DIR)
     return _resolve_frontend_dist_dir(runtime_paths)

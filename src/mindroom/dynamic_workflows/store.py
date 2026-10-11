@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import copy
-import fcntl
 import hashlib
 import html
 import json
 import re
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +17,7 @@ import yaml
 
 from mindroom import yaml_io
 from mindroom.durable_write import write_json_file_durable
+from mindroom.dynamic_workflows.legacy_participants import upgrade_legacy_participants
 from mindroom.dynamic_workflows.validation import (
     ID_RE,
     DynamicWorkflowError,
@@ -26,9 +25,10 @@ from mindroom.dynamic_workflows.validation import (
     validate_id,
     validate_workflow_spec,
 )
+from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Mapping
 
 _REVISION_RE = re.compile(r"^[0-9]{6}$")
 _SCOPES = frozenset({"agent", "room", "tenant"})
@@ -87,7 +87,7 @@ class DynamicWorkflowStore:
         owner_id: str,
         created_by: str,
         reason: str | None = None,
-        spec_validator: Callable[[dict[str, object]], None] | None = None,
+        spec_validator: Callable[[dict[str, object]], object] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create a workflow with revision 000001."""
         validated_spec = validate_workflow_spec(spec)
@@ -95,7 +95,7 @@ class DynamicWorkflowStore:
             spec_validator(validated_spec)
         workflow_id = str(validated_spec["id"])
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
-        with _workflow_lock(workflow_dir):
+        with advisory_file_lock(workflow_dir.with_name(f".{workflow_dir.name}.lock")):
             if workflow_dir.exists():
                 msg = f"Dynamic Workflow '{workflow_id}' already exists in {scope} scope."
                 raise DynamicWorkflowError(msg)
@@ -137,11 +137,11 @@ class DynamicWorkflowStore:
         patch: dict[str, object],
         updated_by: str,
         reason: str,
-        spec_validator: Callable[[dict[str, object]], None] | None = None,
+        spec_validator: Callable[[dict[str, object]], object] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create and publish a new revision by applying a recursive patch."""
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
-        with _workflow_lock(workflow_dir):
+        with advisory_file_lock(workflow_dir.with_name(f".{workflow_dir.name}.lock")):
             summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
             current_spec = _workflow_spec_payload(self._load_revision(workflow_dir, summary.active_revision))
             patched_spec = _recursive_merge(current_spec, patch)
@@ -360,7 +360,7 @@ class DynamicWorkflowStore:
 
     def _load_revision(self, workflow_dir: Path, revision: str) -> dict[str, object]:
         _validate_revision(revision)
-        return _load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml")
+        return upgrade_legacy_participants(_load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml"))
 
     def _run_report_title(self, workflow_dir: Path, run: DynamicWorkflowRun) -> str:
         try:
@@ -645,15 +645,3 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     tmp_path.write_text(text, encoding="utf-8")
     tmp_path.replace(path)
-
-
-@contextmanager
-def _workflow_lock(workflow_dir: Path) -> Iterator[None]:
-    lock_path = workflow_dir.with_name(f".{workflow_dir.name}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

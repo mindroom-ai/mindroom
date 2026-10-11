@@ -8,6 +8,8 @@ import {
   AlertCircle,
   Key,
   Lock,
+  Plus,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,7 +46,13 @@ interface ConfigField {
   };
 }
 
-type ConfigValue = string | boolean | number;
+type ConfigValue = string | boolean | number | string[];
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
+}
 
 interface EnhancedConfigDialogProps {
   open: boolean;
@@ -153,6 +161,8 @@ export function EnhancedConfigDialog({
                   defaults[field.name] = Number.isFinite(numericValue)
                     ? numericValue
                     : String(data.credentials[field.name]);
+                } else if (field.type === "string[]") {
+                  defaults[field.name] = data.credentials[field.name];
                 } else {
                   defaults[field.name] = String(data.credentials[field.name]);
                 }
@@ -169,6 +179,8 @@ export function EnhancedConfigDialog({
                   defaults[field.name] = Number.isFinite(numericValue)
                     ? numericValue
                     : String(field.default);
+                } else if (field.type === "string[]") {
+                  defaults[field.name] = field.default;
                 } else {
                   defaults[field.name] = String(field.default);
                 }
@@ -196,6 +208,8 @@ export function EnhancedConfigDialog({
             defaults[field.name] = Number.isFinite(numericValue)
               ? numericValue
               : String(field.default);
+          } else if (field.type === "string[]") {
+            defaults[field.name] = field.default;
           } else {
             defaults[field.name] = String(field.default);
           }
@@ -215,6 +229,16 @@ export function EnhancedConfigDialog({
   ): string | null => {
     // Boolean fields don't need validation
     if (field.type === "boolean") {
+      return null;
+    }
+
+    if (field.type === "string[]") {
+      if (value !== undefined && !isStringArray(value)) {
+        return `${field.label} must be a list of strings`;
+      }
+      if (field.required && (value === undefined || value.length === 0)) {
+        return `${field.label} is required`;
+      }
       return null;
     }
 
@@ -383,6 +407,78 @@ export function EnhancedConfigDialog({
     } finally {
       setLoading(false);
     }
+  };
+
+  const renderStringArrayField = (field: ConfigField) => {
+    const value = configValues[field.name];
+    if (value !== undefined && !isStringArray(value)) {
+      return (
+        <div className="space-y-2">
+          <p role="alert" className="text-xs text-destructive">
+            The stored value is not a list of strings. Replace it to enter each
+            value separately.
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => handleFieldChange(field, [])}
+          >
+            Replace with empty list
+          </Button>
+        </div>
+      );
+    }
+
+    const items = value ?? [];
+    return (
+      <div role="group" aria-label={field.label} className="space-y-2">
+        {items.length === 0 && (
+          <p className="text-xs text-muted-foreground">No values.</p>
+        )}
+        {items.map((item, index) => (
+          <div
+            key={`${field.name}-${index}`}
+            className="flex items-center gap-2"
+          >
+            <Input
+              id={index === 0 ? field.name : `${field.name}-${index}`}
+              aria-label={`${field.label} value ${index + 1}`}
+              value={item}
+              placeholder={field.placeholder ?? field.label}
+              onChange={(event) => {
+                const nextItems = [...items];
+                nextItems[index] = event.target.value;
+                handleFieldChange(field, nextItems);
+              }}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={`Remove ${field.label} value ${index + 1}`}
+              onClick={() =>
+                handleFieldChange(
+                  field,
+                  items.filter((_, itemIndex) => itemIndex !== index),
+                )
+              }
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => handleFieldChange(field, [...items, ""])}
+        >
+          <Plus className="mr-2 h-4 w-4" />
+          Add value
+        </Button>
+      </div>
+    );
   };
 
   const getFieldIcon = (field: ConfigField) => {
@@ -555,49 +651,53 @@ export function EnhancedConfigDialog({
                               </p>
                             )}
                           </div>
-                          <div className="relative">
-                            <Input
-                              id={field.name}
-                              type={
-                                isPasswordField && !showPassword[field.name]
-                                  ? "password"
-                                  : field.type === "number"
-                                    ? "number"
-                                    : "text"
-                              }
-                              placeholder={field.placeholder}
-                              value={String(configValues[field.name] ?? "")}
-                              onChange={(e) =>
-                                handleFieldChange(field, e.target.value)
-                              }
-                              min={field.validation?.min}
-                              max={field.validation?.max}
-                              className={cn(
-                                "pr-10",
-                                hasError &&
-                                  "border-destructive focus-visible:ring-destructive",
-                                isPasswordField && "font-mono",
-                              )}
-                            />
-
-                            {isPasswordField && (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
-                                onClick={() =>
-                                  togglePasswordVisibility(field.name)
+                          {field.type === "string[]" ? (
+                            renderStringArrayField(field)
+                          ) : (
+                            <div className="relative">
+                              <Input
+                                id={field.name}
+                                type={
+                                  isPasswordField && !showPassword[field.name]
+                                    ? "password"
+                                    : field.type === "number"
+                                      ? "number"
+                                      : "text"
                                 }
-                              >
-                                {showPassword[field.name] ? (
-                                  <Lock className="h-4 w-4 text-muted-foreground" />
-                                ) : (
-                                  <Lock className="h-4 w-4 text-muted-foreground" />
+                                placeholder={field.placeholder}
+                                value={String(configValues[field.name] ?? "")}
+                                onChange={(e) =>
+                                  handleFieldChange(field, e.target.value)
+                                }
+                                min={field.validation?.min}
+                                max={field.validation?.max}
+                                className={cn(
+                                  "pr-10",
+                                  hasError &&
+                                    "border-destructive focus-visible:ring-destructive",
+                                  isPasswordField && "font-mono",
                                 )}
-                              </Button>
-                            )}
-                          </div>
+                              />
+
+                              {isPasswordField && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                                  onClick={() =>
+                                    togglePasswordVisibility(field.name)
+                                  }
+                                >
+                                  {showPassword[field.name] ? (
+                                    <Lock className="h-4 w-4 text-muted-foreground" />
+                                  ) : (
+                                    <Lock className="h-4 w-4 text-muted-foreground" />
+                                  )}
+                                </Button>
+                              )}
+                            </div>
+                          )}
 
                           {hasError && (
                             <div className="flex items-center space-x-1 text-destructive">

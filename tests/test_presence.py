@@ -53,13 +53,13 @@ class TestBuildAgentStatusMessage:
     def test_router_agent_status(self) -> None:
         """Test building status message for router agent."""
         config = Config(
-            router={"model": "gpt-4"},
-            models={"gpt-4": ModelConfig(provider="openai", id="gpt-4-turbo")},
+            router={"model": "gpt-6-astra"},
+            models={"gpt-6-astra": ModelConfig(provider="openai", id="gpt-6-astra")},
         )
 
         status = build_agent_status_message(ROUTER_AGENT_NAME, config)
 
-        assert "🤖 Model: openai/gpt-4-turbo" in status
+        assert "🤖 Model: openai/gpt-6-astra" in status
         assert "📍 Routes messages to appropriate agents or teams" in status
 
     def test_regular_agent_status_with_tools(self) -> None:
@@ -148,15 +148,15 @@ class TestBuildAgentStatusMessage:
                     display_name="Research Team",
                     role="Collaborative research team",
                     agents=["researcher", "analyst", "writer", "reviewer", "editor", "fact_checker"],
-                    model="gpt-4",
+                    model="gpt-6-astra",
                 ),
             },
-            models={"gpt-4": ModelConfig(provider="openai", id="gpt-4")},
+            models={"gpt-6-astra": ModelConfig(provider="openai", id="gpt-6-astra")},
         )
 
         status = build_agent_status_message("research_team", config)
 
-        assert "🤖 Model: openai/gpt-4" in status
+        assert "🤖 Model: openai/gpt-6-astra" in status
         assert "👥 Collaborative research team" in status
         assert "🤝 Team: researcher, analyst, writer, reviewer, editor" in status  # First 5 only
         assert "fact_checker" not in status  # 6th agent not shown

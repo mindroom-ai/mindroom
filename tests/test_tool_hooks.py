@@ -30,6 +30,7 @@ from mindroom.hooks import (
     EVENT_TOOL_BEFORE_CALL,
     CustomEventContext,
     HookRegistry,
+    HookRegistryState,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     emit_gate,
@@ -41,6 +42,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
+from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -49,7 +52,12 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import (
+    SyncToolCompletionTracker,
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+    track_sync_tool_completion,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -64,7 +72,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -146,6 +154,7 @@ def _plugin(
     return SimpleNamespace(
         name=name,
         discovered_hooks=tuple(callbacks),
+        discovered_automations=(),
         entry_config=PluginEntryConfig(path=f"./plugins/{name}", settings=settings or {}),
         plugin_order=plugin_order,
     )
@@ -679,6 +688,80 @@ async def test_sync_tool_function_call_aexecute_runs_tool_hooks(tmp_path: Path) 
         ("tool", "hi"),
         ("after", "HI", False, "$resolved-thread"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
+    """The recorder learns of a call before the tool runs and of its result after; a cancelled call stays started."""
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+    assert bridge is not None
+    events: list[tuple[str, object]] = []
+    hanging = asyncio.Event()
+
+    class _Recorder:
+        async def started(self, tool_name: str, args: Mapping[str, object]) -> str:
+            events.append(("started", (tool_name, dict(args))))
+            return tool_name
+
+        async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+            del tool_name, args
+            events.append(("finished", (call_id, result)))
+
+    async def add(a: int) -> int:
+        events.append(("ran", "add"))
+        return a + 1
+
+    async def fail() -> None:
+        msg = "boom"
+        raise ValueError(msg)
+
+    async def hang() -> None:
+        events.append(("ran", "hang"))
+        hanging.set()
+        await asyncio.Event().wait()
+
+    with recording_tool_calls(_Recorder()):
+        assert await bridge("add", add, {"a": 1}) == 2
+        with pytest.raises(ValueError, match="boom"):
+            await bridge("fail", fail, {})
+        call = asyncio.create_task(bridge("hang", hang, {}))
+        await asyncio.wait_for(hanging.wait(), timeout=5)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    assert events[:3] == [("started", ("add", {"a": 1})), ("ran", "add"), ("finished", ("add", 2))]
+    assert events[3] == ("started", ("fail", {}))
+    assert events[4][0] == "finished"
+    assert isinstance(events[4][1][1], ValueError)
+    # A call cut short may have taken effect, so it stays recorded as started.
+    assert events[5:] == [("started", ("hang", {})), ("ran", "hang")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
+    """A Stop that commits while the start record is written stops a synchronous tool the cancellation cannot reach."""
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+    assert bridge is not None
+    ran: list[str] = []
+
+    class _StoppedRecorder:
+        async def started(self, tool_name: str, args: Mapping[str, object]) -> str:
+            del tool_name, args
+            raise asyncio.CancelledError
+
+        async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+            del call_id, tool_name, args, result
+            ran.append("finished")
+
+    def sync_tool() -> str:
+        ran.append("body")
+        return "done"
+
+    with recording_tool_calls(_StoppedRecorder()), pytest.raises(asyncio.CancelledError):
+        await bridge("sync_tool", sync_tool, {})
+
+    assert ran == []
 
 
 @pytest.mark.asyncio
@@ -1316,12 +1399,21 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     )
 
 
+async def _tick_until_stopped(stop: asyncio.Event, ticks: list[None]) -> None:
+    while not stop.is_set():
+        await asyncio.sleep(0.005)
+        ticks.append(None)
+
+
 @pytest.mark.asyncio
-async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path) -> None:
-    """Sync-tool hooks should keep send_message() on the active request loop under aexecute()."""
+async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path: Path) -> None:
+    """The real async chain offloads only the synchronous leaf while loop work advances."""
     request_thread = threading.get_ident()
     request_loop = asyncio.get_running_loop()
     seen: list[tuple[str, int, int] | tuple[str, str]] = []
+    tool_thread_ids: list[int] = []
+    ticks: list[None] = []
+    stop_ticking = asyncio.Event()
 
     async def hook_message_sender(
         room_id: str,
@@ -1350,7 +1442,15 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
         event_id = await ctx.send_message("!room:localhost", "before")
         seen.append(("event_id", event_id or ""))
 
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(_ctx: ToolAfterCallContext) -> None:
+        current_loop = asyncio.get_running_loop()
+        current_thread = threading.get_ident()
+        seen.append(("after", current_thread, id(current_loop)))
+        assert current_thread == request_thread
+        assert current_loop is request_loop
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
@@ -1363,22 +1463,27 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
             super().__init__(name="demo", tools=[self.echo])
 
         def echo(self, text: str) -> str:
-            current_loop = asyncio.get_running_loop()
             current_thread = threading.get_ident()
-            seen.append(("tool", current_thread, id(current_loop)))
-            assert current_thread == request_thread
-            assert current_loop is request_loop
+            tool_thread_ids.append(current_thread)
+            seen.append(("tool", current_thread, 0))
+            time.sleep(0.05)
             return text.upper()
 
     toolkit = DemoToolkit()
     function = _first_function(toolkit)
     prepend_tool_hook_bridge(toolkit, bridge)
 
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
-        tool_execution_identity(_execution_identity()),
-    ):
-        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
+    ticker_task = asyncio.create_task(_tick_until_stopped(stop_ticking, ticks))
+    try:
+        with (
+            tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
+            tool_execution_identity(_execution_identity()),
+            track_sync_tool_completion(SyncToolCompletionTracker()),
+        ):
+            result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
+    finally:
+        stop_ticking.set()
+        await ticker_task
 
     assert result.status == "success"
     assert result.result == "HI"
@@ -1386,8 +1491,79 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
         ("hook", request_thread, id(request_loop)),
         ("sender", request_thread, id(request_loop)),
         ("event_id", "$ok"),
-        ("tool", request_thread, id(request_loop)),
+        ("tool", tool_thread_ids[0], 0),
+        ("after", request_thread, id(request_loop)),
     ]
+    assert tool_thread_ids[0] != request_thread
+    assert ticks
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_aexecute_keeps_original_agno_chain_without_background_tracker(tmp_path: Path) -> None:
+    """The broker's cancellation bridge must not rewrite ordinary agent tool execution."""
+    request_thread = threading.get_ident()
+    body_threads: list[int] = []
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            body_threads.append(threading.get_ident())
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="ordinary").aexecute()
+
+    assert result.status == "success"
+    assert result.result == "HI"
+    assert body_threads == [request_thread]
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_aexecute_cancellation_during_before_hook_never_starts_body(tmp_path: Path) -> None:
+    """Cancellation before the synchronous leaf remains ordinary task cancellation."""
+    before_started = asyncio.Event()
+    body_called = False
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(_ctx: ToolBeforeCallContext) -> None:
+        before_started.set()
+        await asyncio.Event().wait()
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+    )
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            nonlocal body_called
+            body_called = True
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        execution = asyncio.create_task(
+            FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute(),
+        )
+        await before_started.wait()
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+    assert body_called is False
 
 
 def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
@@ -1673,6 +1849,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Tool Hooks Runtime Event Tool",
         description="Test tool for runtime hook event delivery.",
         category=ToolCategory.DEVELOPMENT,
@@ -1719,7 +1896,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
 
     try:
-        with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
             target = MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -1770,6 +1947,7 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
     custom_event_name = "demo:tool_custom_event"
     sent: list[dict[str, object] | None] = []
     seen: list[tuple[dict[str, object] | None, bool]] = []
+    active_states: list[bool] = []
     room_state_querier = AsyncMock(return_value={"name": "Lobby"})
     room_state_putter = AsyncMock(return_value=True)
 
@@ -1788,6 +1966,10 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
 
     @hook(custom_event_name)
     async def on_custom_event(ctx: CustomEventContext) -> None:
+        active_states.append(ctx.is_active())
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(ctx.is_active())
+        registry_state.registry = registry
         query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
         put_result = await ctx.put_room_state(
             "!room:localhost",
@@ -1800,19 +1982,24 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
         assert event_id == "$dispatch-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
-    runtime_context = _tool_runtime_context(
-        tmp_path,
-        hook_message_sender=hook_message_sender,
-        room_state_querier=room_state_querier,
-        room_state_putter=room_state_putter,
-        message_received_depth=1,
-        hook_registry=registry,
+    registry_state = HookRegistryState(registry)
+    runtime_context = replace(
+        _tool_runtime_context(
+            tmp_path,
+            hook_message_sender=hook_message_sender,
+            room_state_querier=room_state_querier,
+            room_state_putter=room_state_putter,
+            message_received_depth=1,
+            hook_registry=registry,
+        ),
+        hook_registry_state=registry_state,
     )
 
     with tool_runtime_context(runtime_context):
         await emit_custom_event("tool-policy", custom_event_name, {"item_id": "123"})
 
     assert seen == [({"name": "Lobby"}, True)]
+    assert active_states == [True, False]
     room_state_querier.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     room_state_putter.assert_awaited_once_with(
         "!room:localhost",
@@ -1883,6 +2070,45 @@ async def test_tool_hook_bridge_fails_open_when_before_hook_raises(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_tool_hook_contexts_track_registry_lifecycle(tmp_path: Path) -> None:
+    """Before- and after-call hooks can detect registry replacement."""
+    active_states: list[tuple[str, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        active_states.append(("before", ctx.is_active()))
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(("before", ctx.is_active()))
+        registry_state.registry = registry
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        active_states.append(("after", ctx.is_active()))
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(("after", ctx.is_active()))
+        registry_state.registry = registry
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    registry_state = HookRegistryState(registry)
+    runtime_context = replace(
+        _tool_runtime_context(tmp_path, hook_registry=registry),
+        hook_registry_state=registry_state,
+    )
+    bridge = build_tool_hook_bridge(registry, agent_name="code")
+
+    with tool_runtime_context(runtime_context):
+        result = await bridge("read_file", AsyncMock(return_value="ok"), {})
+
+    assert result == "ok"
+    assert active_states == [
+        ("before", True),
+        ("before", False),
+        ("after", True),
+        ("after", False),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepend_tool_hook_bridge_preserves_existing_function_hooks() -> None:
     """The MindRoom bridge should prepend without overwriting existing Agno tool hooks."""
     seen: list[str] = []
@@ -1949,6 +2175,7 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Tool Hooks Test Tool",
         description="Test tool for tool hook interception.",
         category=ToolCategory.DEVELOPMENT,
@@ -1969,7 +2196,7 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
     plugin_state_root = runtime_paths_for(config).storage_root / "plugins" / "tool-policy"
 
     try:
-        with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
             agent = create_agent(
                 "code",
                 config,

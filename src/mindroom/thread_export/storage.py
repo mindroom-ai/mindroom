@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
+import threading
 from contextlib import suppress
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 from urllib.parse import quote, unquote
-from uuid import uuid4
 
 import yaml
 
 from mindroom import yaml_io
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import MAX_READ_BYTES, open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.models import ThreadExportRoom
@@ -29,10 +33,46 @@ _ROOM_INDEX_FILENAME = "index.json"
 _ROOT_MARKER_FILENAME = ".mindroom-thread-exports"
 _ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
+# The summary metadata keys `mindroom.thread_summary` reads to pick a thread's current summary.
+_THREAD_SUMMARY_METADATA_KEYS = ("version", "summary", "generated_at", "model", "pinned")
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# `thread.exported_at` is the only two-space-indented exported_at key a dump writes; scalar continuations indent further.
+_EXPORTED_AT_LINE = re.compile(rb"^  exported_at: .*$", re.MULTILINE)
+# An unchanged file differs from a new export only in that line's timestamp, so the comparison reads at most this much more.
+_EXPORTED_AT_SLACK_BYTES = 64
+# libyaml escapes every character outside the Basic Multilingual Plane in ten bytes, so a thread file can be
+# two and a half times the message JSON the fetch guard counts; a larger file is refused before it is compared or written.
+_MAX_THREAD_FILE_BYTES = 2 * MAX_READ_BYTES
+# Worker code can replace index.json, and decoded JSON can take forty times its size in memory, so the drift check
+# reads at most this much and rebuilds a larger index; thousands of indexed threads take far less.
+# Worker-planted thread values can also serialize to far more than their file size, so a rebuild stops adding entries here.
+_MAX_ROOM_INDEX_JSON_BYTES = 8 << 20
+# Worker code can add thread files to a room directory, and a rebuild parses each one under the process-wide export lock,
+# so one rebuild reads at most this much; four files at the read cap is far beyond an ordinary room.
+_MAX_ROOM_INDEX_BYTES = 256 << 20
+# The room index lists the thread files a rebuild left out for its read budget, so they do not count as filename drift.
+_UNINDEXED_FILES_KEY = "unindexed_files"
 
 
 logger = get_logger(__name__)
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+_THREAD_EXPORT_MUTATION_LOCK = threading.RLock()
+# Every export pass revisits the entries it leaves untouched, so each one warns once per process.
+# Worker code can create entries without limit, so a full set starts over at the cost of one repeat warning per entry.
+_MAX_WARNED_UNRECOGNIZED_ENTRIES = 4096
+_WARNED_UNRECOGNIZED_ENTRIES: set[tuple[Path, str]] = set()
+
+
+def _serialized_export_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Serialize target mutations so cleanup cannot race a replacement writer."""
+
+    @wraps(function)
+    def serialized(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with _THREAD_EXPORT_MUTATION_LOCK:
+            return function(*args, **kwargs)
+
+    return serialized
 
 
 class _UnsafeThreadExportPathError(RuntimeError):
@@ -90,6 +130,24 @@ def canonicalize_output_dir(output_dir: Path) -> Path:
     return Path(os.path.abspath(output_dir))  # noqa: PTH100 - resolve() would hide a final symlink
 
 
+def _canonicalize_trusted_output_dir(
+    output_dir: Path,
+    trusted_root: Path | None,
+) -> tuple[Path, Path | None]:
+    """Return a lexical output path and its optional containing root."""
+    canonical_output_dir = canonicalize_output_dir(output_dir)
+    if trusted_root is None:
+        return canonical_output_dir, None
+    canonical_trusted_root = Path(os.path.abspath(trusted_root))  # noqa: PTH100
+    outside_trusted_root = not canonical_output_dir.is_relative_to(
+        canonical_trusted_root,
+    )
+    if canonical_output_dir == canonical_trusted_root or outside_trusted_root:
+        msg = f"Thread export output must be a descendant of its trusted root: {canonical_output_dir}"
+        raise _UnsafeThreadExportPathError(msg)
+    return canonical_output_dir, canonical_trusted_root
+
+
 def _open_directory_at(
     parent_fd: int,
     name: str,
@@ -99,15 +157,9 @@ def _open_directory_at(
     create: bool,
 ) -> int | None:
     """Open one directory relative to a pinned parent without following symlinks."""
-    if create:
-        try:
-            os.mkdir(name, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise _unsafe_directory(path, label) from exc
     try:
-        return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+        with open_directory_within_root(parent_fd, name, create=create) as descriptor:
+            return os.dup(descriptor)
     except FileNotFoundError:
         if not create:
             return None
@@ -116,9 +168,49 @@ def _open_directory_at(
         raise _unsafe_directory(path, label) from exc
 
 
-def _open_export_root(output_dir: Path, *, create: bool) -> int | None:
+def _open_anchored_directory(
+    trusted_root: Path,
+    relative_parts: tuple[str, ...],
+    *,
+    create: bool,
+    final_label: str,
+) -> int | None:
+    """Open one descendant by descriptor-relative traversal without symlinks."""
+    try:
+        with open_directory_within_root(trusted_root, Path(*relative_parts[:-1]), create=create) as parent_fd:
+            return _open_directory_at(
+                parent_fd,
+                relative_parts[-1],
+                path=trusted_root.joinpath(*relative_parts),
+                label=final_label,
+                create=create,
+            )
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise
+    except OSError as exc:
+        raise _unsafe_directory(trusted_root.joinpath(*relative_parts[:-1]), "root parent") from exc
+
+
+def _open_export_root(
+    output_dir: Path,
+    *,
+    create: bool,
+    trusted_root: Path | None = None,
+) -> int | None:
     """Open the final export directory without following a symlink at that entry."""
-    canonical_output_dir = canonicalize_output_dir(output_dir)
+    canonical_output_dir, canonical_trusted_root = _canonicalize_trusted_output_dir(
+        output_dir,
+        trusted_root,
+    )
+    if canonical_trusted_root is not None:
+        return _open_anchored_directory(
+            canonical_trusted_root,
+            canonical_output_dir.relative_to(canonical_trusted_root).parts,
+            create=create,
+            final_label="root",
+        )
     if create:
         canonical_output_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -193,38 +285,6 @@ def _contains_thread_export_file(room_fd: int) -> bool:
     return any(_is_thread_export_filename(name) and _regular_file_at(room_fd, name) for name in names)
 
 
-def _is_thread_export_payload(room_fd: int, filename: str) -> bool:
-    """Return whether one file parses as a MindRoom thread export document."""
-    text = _read_text_at(room_fd, filename)
-    if text is None:
-        return False
-    try:
-        payload = yaml_io.safe_load(text)
-    except yaml.YAMLError:
-        return False
-    if not isinstance(payload, dict) or not isinstance(payload.get("room"), dict):
-        return False
-    if not isinstance(payload.get("messages"), list):
-        return False
-    thread = payload.get("thread")
-    return isinstance(thread, dict) and isinstance(thread.get("id"), str)
-
-
-def _contains_valid_thread_export(room_fd: int) -> bool:
-    """Return whether one pinned directory holds a thread export with MindRoom's own payload.
-
-    Ownership evidence reads the document instead of trusting the filename, because a
-    percent-encoded name like ``%24notes.yaml`` is something an unrelated directory can hold.
-    """
-    names = os.listdir(room_fd)
-    return any(
-        _is_thread_export_filename(name)
-        and _regular_file_at(room_fd, name)
-        and _is_thread_export_payload(room_fd, name)
-        for name in names
-    )
-
-
 def _open_canonical_room_directory(root_fd: int, output_dir: Path, name: str) -> int | None:
     """Open one canonically named, non-symlinked room directory below a pinned root."""
     if not _is_encoded_room_segment(name):
@@ -255,66 +315,37 @@ def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> b
         os.close(room_fd)
 
 
-def _room_directory_with_thread_exports(root_fd: int, output_dir: Path, name: str) -> bool:
-    """Return whether one root entry is a canonically named room holding a real thread export."""
-    room_fd = _open_canonical_room_directory(root_fd, output_dir, name)
-    if room_fd is None:
-        return False
-    try:
-        return _contains_valid_thread_export(room_fd)
-    finally:
-        os.close(room_fd)
-
-
-def _root_has_export_evidence(root_fd: int, output_dir: Path) -> bool:
-    """Return whether an empty root, or one holding a thread export, proves exporter ownership.
-
-    Evidence is a percent-encoded room directory holding a document that parses as one of this
-    exporter's thread exports. Neither a generic ``index.json`` nor a thread-shaped filename is
-    enough on its own, because a build directory can hold the former and any directory can hold
-    a file named ``%24notes.yaml``; adopting on either would expose unrelated data to
-    reconciliation.
-    Unrelated entries beside real evidence do not veto ownership, because a stray ``.DS_Store``,
-    ``.git`` directory, or operator note must not strand a real corpus, and every destructive
-    path is independently scoped to exporter-owned entries.
-    """
-    names = os.listdir(root_fd)
-    return not names or any(_room_directory_with_thread_exports(root_fd, output_dir, name) for name in names)
-
-
 def _has_valid_export_root_marker(root_fd: int) -> bool:
     """Return whether the marker contains the exact supported ownership text."""
     try:
-        marker_fd = os.open(_ROOT_MARKER_FILENAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
-    except FileNotFoundError:
+        marker = read_regular_file_within_root(
+            root_fd,
+            _ROOT_MARKER_FILENAME,
+            max_bytes=len(_ROOT_MARKER_TEXT.encode("utf-8")),
+        )
+    except (FileNotFoundError, ValueError):
         return False
-    try:
-        with os.fdopen(marker_fd, encoding="utf-8") as marker_file:
-            marker_fd = -1
-            return marker_file.read(len(_ROOT_MARKER_TEXT) + 1) == _ROOT_MARKER_TEXT
-    finally:
-        if marker_fd >= 0:
-            os.close(marker_fd)
+    return marker == _ROOT_MARKER_TEXT.encode("utf-8")
 
 
 def _unowned_export_root(path: Path) -> _UnsafeThreadExportPathError:
     """Return a failure for a root without MindRoom ownership proof."""
     return _UnsafeThreadExportPathError(
         f"Refusing unowned thread export root: {path}; "
-        f"the root must be empty, already contain an exported room directory, or contain a "
+        f"the root must be empty or contain a "
         f"{_ROOT_MARKER_FILENAME} file whose only line is {_ROOT_MARKER_TEXT.strip()}",
     )
 
 
 def _claim_export_root(root_fd: int, output_dir: Path) -> None:
-    """Install the marker on an empty root or one that already holds an exported room."""
+    """Install the marker on an empty root."""
     if _has_valid_export_root_marker(root_fd):
         return
-    if _root_has_export_evidence(root_fd, output_dir):
-        _atomic_write_at(root_fd, _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT)
+    if not os.listdir(root_fd):
+        _atomic_write_at(root_fd, _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT.encode("utf-8"))
         return
     logger.warning(
-        "Refusing to mark unrecognized thread export root",
+        "Refusing to mark populated thread export root",
         output_dir=str(output_dir),
     )
     raise _unowned_export_root(output_dir)
@@ -331,10 +362,19 @@ def _require_owned_export_root(root_fd: int, output_dir: Path) -> None:
     raise _unowned_export_root(output_dir)
 
 
-def prepare_export_root(output_dir: Path) -> None:
-    """Create an export root if needed and install its marker when recognizable."""
+@_serialized_export_mutation
+def prepare_export_root(
+    output_dir: Path,
+    *,
+    trusted_root: Path | None = None,
+) -> None:
+    """Create an export root if needed and install its marker when empty."""
     canonical_output_dir = canonicalize_output_dir(output_dir)
-    root_fd = _open_export_root(canonical_output_dir, create=True)
+    root_fd = _open_export_root(
+        canonical_output_dir,
+        create=True,
+        trusted_root=trusted_root,
+    )
     assert root_fd is not None
     try:
         _claim_export_root(root_fd, canonical_output_dir)
@@ -342,10 +382,19 @@ def prepare_export_root(output_dir: Path) -> None:
         os.close(root_fd)
 
 
-def _open_owned_export_root(output_dir: Path, *, create: bool) -> int | None:
-    """Open an owned root, claiming recognizable storage only for write creation."""
+def _open_owned_export_root(
+    output_dir: Path,
+    *,
+    create: bool,
+    trusted_root: Path | None = None,
+) -> int | None:
+    """Open an owned root, claiming empty storage only for write creation."""
     canonical_output_dir = canonicalize_output_dir(output_dir)
-    root_fd = _open_export_root(canonical_output_dir, create=create)
+    root_fd = _open_export_root(
+        canonical_output_dir,
+        create=create,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return None
     try:
@@ -383,48 +432,17 @@ def _fsync_directory_fd(directory_fd: int) -> None:
         os.fsync(directory_fd)
 
 
-def _read_text_at(directory_fd: int, filename: str) -> str | None:
-    """Read a regular file relative to a pinned directory without following symlinks."""
+def _read_bytes_at(directory_fd: int, filename: str, *, max_bytes: int) -> bytes | None:
+    """Read a regular file relative to a pinned directory through a capped no-follow open."""
     try:
-        file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-    except OSError:
+        return read_regular_file_within_root(directory_fd, filename, max_bytes=max_bytes)
+    except (OSError, ValueError):
         return None
-    try:
-        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
-            return None
-        with os.fdopen(file_fd, encoding="utf-8") as file:
-            file_fd = -1
-            return file.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-    finally:
-        if file_fd >= 0:
-            os.close(file_fd)
 
 
-def _atomic_write_at(directory_fd: int, filename: str, text: str) -> None:
-    """Durably replace one file relative to an already-pinned directory."""
-    temp_name = f".{filename}.{uuid4().hex}.tmp"
-    temp_fd = -1
-    try:
-        temp_fd = os.open(
-            temp_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory_fd,
-        )
-        with os.fdopen(temp_fd, mode="w", encoding="utf-8") as temp_file:
-            temp_fd = -1
-            temp_file.write(text)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        _fsync_directory_fd(directory_fd)
-    finally:
-        if temp_fd >= 0:
-            os.close(temp_fd)
-        with suppress(FileNotFoundError):
-            os.unlink(temp_name, dir_fd=directory_fd)
+def _atomic_write_at(directory_fd: int, filename: str, data: bytes) -> None:
+    """Publish bytes with the temporary naming scheme used by export cleanup."""
+    atomic_write_bytes_at(directory_fd, filename, data, temp_prefix=f".{filename}.")
 
 
 def _timestamp_iso(timestamp_ms: int) -> str | None:
@@ -461,20 +479,21 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     return payload
 
 
-def _latest_thread_summary(
-    messages: list[ResolvedVisibleMessage],
-    *,
-    trusted_sender_ids: Collection[str],
-) -> str | None:
-    """Return the latest trusted thread-summary notice text, when one exists."""
-    for message in reversed(messages):
-        if message.sender not in trusted_sender_ids:
-            continue
-        meta = message.content.get(_THREAD_SUMMARY_CONTENT_KEY)
-        if isinstance(meta, dict):
-            summary = meta.get("summary")
-            return summary if isinstance(summary, str) and summary else message.body
-    return None
+def exported_content(message: ResolvedVisibleMessage) -> dict[str, Any]:
+    """Return the only parts of one message's content that its export reads.
+
+    A thread is fetched whole before it is written, so its messages keep these beside their bodies rather than every key their senders chose.
+    """
+    content: dict[str, Any] = {}
+    if isinstance(msgtype := message.content.get("msgtype"), str):
+        content["msgtype"] = msgtype
+    if (reply_to_event_id := message.reply_to_event_id) is not None:
+        content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
+    if isinstance(meta := message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
+        content[_THREAD_SUMMARY_CONTENT_KEY] = {
+            key: value for key in _THREAD_SUMMARY_METADATA_KEYS if isinstance(value := meta.get(key), str | int)
+        }
+    return content
 
 
 def thread_payload(
@@ -483,14 +502,14 @@ def thread_payload(
     thread_id: str,
     messages: list[ResolvedVisibleMessage],
     exported_at: datetime,
-    trusted_sender_ids: Collection[str],
+    summary: str | None,
 ) -> dict[str, object]:
     """Build one YAML document for a Matrix thread."""
     thread_block: dict[str, object] = {
         "id": thread_id,
         "source": "matrix",
     }
-    if summary := _latest_thread_summary(messages, trusted_sender_ids=trusted_sender_ids):
+    if summary:
         thread_block["summary"] = summary
     thread_block["exported_at"] = exported_at.isoformat()
     thread_block["message_count"] = len(messages)
@@ -507,17 +526,30 @@ def thread_payload(
     }
 
 
-def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[str, object]] | None:
-    """Return one index pair from a thread file below a pinned room directory."""
-    text = _read_text_at(directory_fd, filename)
-    if text is None:
-        return None
+def _load_export_mapping(text: str) -> dict[str, Any] | None:
+    """Parse worker-writable export YAML within the bounded loader's limits, or return None."""
     try:
-        payload = yaml_io.safe_load(text)
+        payload = yaml_io.safe_load_without_aliases(text)
     except yaml.YAMLError:
         return None
-    if not isinstance(payload, dict):
+    return payload if isinstance(payload, dict) else None
+
+
+def _thread_index_entry(filename: str, data: bytes) -> tuple[int, dict[str, object]] | None:
+    """Return one index pair from a thread file read up to one byte past the read cap."""
+    whole = len(data) <= MAX_READ_BYTES
+    try:
+        # A file past the read cap was cut there, so only its header before the messages is decoded.
+        text = (data if whole else data.partition(b"\nmessages:")[0]).decode("utf-8")
+    except UnicodeDecodeError:
         return None
+    payload = _load_export_mapping(text) if whole else None
+    if payload is None:
+        # Reading and parsing are bounded, so a thread too long for either is indexed from the header before its messages.
+        header = _load_export_mapping(text.partition("\nmessages:")[0])
+        if header is None:
+            return None
+        payload = {**header, "messages": []}
     thread = payload.get("thread")
     messages = payload.get("messages")
     if not isinstance(thread, dict) or not isinstance(messages, list):
@@ -545,18 +577,45 @@ def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[
     return last_timestamp, entry
 
 
-def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, object]:
-    """Build one room index document from the recognizable thread files on disk."""
-    indexed = [
-        indexed_entry
-        for filename in sorted(
-            name for name in os.listdir(room_fd) if _is_thread_export_filename(name) and _regular_file_at(room_fd, name)
-        )
-        if (indexed_entry := _thread_index_entry_at(room_fd, filename)) is not None
-    ]
+def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) -> dict[str, object]:
+    """Build one room index document from the recognizable thread files on disk, newest first within the read budget."""
+    candidates: list[tuple[int, str]] = []
+    for name in os.listdir(room_fd):
+        if not _is_thread_export_filename(name):
+            continue
+        with suppress(FileNotFoundError):
+            status = os.stat(name, dir_fd=room_fd, follow_symlinks=False)
+            if stat.S_ISREG(status.st_mode):
+                candidates.append((status.st_mtime_ns, name))
+    newest_first = [name for _, name in sorted(candidates, reverse=True)]
+    indexed: list[tuple[int, dict[str, object]]] = []
+    unindexed: list[str] = []
+    read_bytes = 0
+    index_bytes = 0
+    for position, filename in enumerate(newest_first):
+        try:
+            # One byte past the cap shows whether the file was cut there.
+            data = read_regular_file_within_root(room_fd, filename, max_bytes=MAX_READ_BYTES + 1, truncate=True)
+        except (OSError, ValueError):
+            continue
+        # Each file is charged before it is parsed, so files that fail to parse spend the budget too.
+        read_bytes += len(data)
+        indexed_entry = _thread_index_entry(filename, data) if read_bytes <= _MAX_ROOM_INDEX_BYTES else None
+        if indexed_entry is not None:
+            index_bytes += len(json.dumps(indexed_entry[1], indent=2))
+        if read_bytes > _MAX_ROOM_INDEX_BYTES or index_bytes > _MAX_ROOM_INDEX_JSON_BYTES:
+            logger.warning(
+                "Thread export files exceed the room index budget; leaving older threads out",
+                output_dir=str(output_dir),
+                room_key=room.key,
+            )
+            unindexed = sorted(newest_first[position:])
+            break
+        if indexed_entry is not None:
+            indexed.append(indexed_entry)
     indexed.sort(key=lambda item: item[0], reverse=True)
     entries = [entry for _, entry in indexed]
-    return {
+    payload: dict[str, object] = {
         "version": _EXPORT_SCHEMA_VERSION,
         "room": {
             "key": room.key,
@@ -567,22 +626,34 @@ def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, objec
         "thread_count": len(entries),
         "threads": entries,
     }
+    if unindexed:
+        payload[_UNINDEXED_FILES_KEY] = unindexed
+    return payload
 
 
 def _declared_room_index_filenames(room_fd: int) -> set[str] | None:
-    """Return the thread filename set declared by the current room index."""
-    text = _read_text_at(room_fd, _ROOM_INDEX_FILENAME)
-    if text is None:
+    """Return the thread filename set the current room index indexed or left out for its read budget."""
+    data = _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=_MAX_ROOM_INDEX_JSON_BYTES)
+    if data is None:
         return None
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
+        payload = json.loads(data)
+    except (RecursionError, ValueError):
+        # Invalid JSON or UTF-8 raises ValueError, and lists nested past the recursion limit raise RecursionError.
         return None
-    if not isinstance(payload, dict) or not isinstance(threads := payload.get("threads"), list):
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(threads := payload.get("threads"), list)
+        or not isinstance(unindexed := payload.get(_UNINDEXED_FILES_KEY, []), list)
+    ):
         return None
     filenames: set[str] = set()
     for entry in threads:
         if not isinstance(entry, dict) or not isinstance(filename := entry.get("file"), str):
+            return None
+        filenames.add(filename)
+    for filename in unindexed:
+        if not isinstance(filename, str):
             return None
         filenames.add(filename)
     return filenames
@@ -601,14 +672,20 @@ def _room_index_filename_set_matches(room_fd: int) -> bool:
     return declared_filenames == disk_filenames
 
 
+@_serialized_export_mutation
 def write_room_index(
     output_dir: Path,
     room: ThreadExportRoom,
     *,
     thread_files_changed: bool = True,
+    trusted_root: Path | None = None,
 ) -> None:
     """Rebuild a room index after YAML changes or detected filename-set drift."""
-    root_fd = _open_owned_export_root(output_dir, create=False)
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return
     try:
@@ -620,17 +697,27 @@ def write_room_index(
     try:
         if not thread_files_changed and _room_index_filename_set_matches(room_fd):
             return
-        payload = _room_index_payload(room_fd, room)
-        text = f"{json.dumps(payload, indent=2)}\n"
-        if _read_text_at(room_fd, _ROOM_INDEX_FILENAME) != text:
-            _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, text)
+        payload = _room_index_payload(room_fd, output_dir, room)
+        data = f"{json.dumps(payload, indent=2)}\n".encode()
+        # Only an index of the same size can be unchanged, so a larger one is replaced without being read.
+        if _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=len(data)) != data:
+            _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, data)
     finally:
         os.close(room_fd)
 
 
-def room_has_thread_exports(output_dir: Path, room: ThreadExportRoom) -> bool:
+def room_has_thread_exports(
+    output_dir: Path,
+    room: ThreadExportRoom,
+    *,
+    trusted_root: Path | None = None,
+) -> bool:
     """Return whether a safe room directory contains recognizable thread YAML."""
-    root_fd = _open_export_root(output_dir, create=False)
+    root_fd = _open_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return False
     try:
@@ -646,8 +733,15 @@ def room_has_thread_exports(output_dir: Path, room: ThreadExportRoom) -> bool:
 
 
 def _log_unrecognized_entry(output_dir: Path, entry: str, *, room_key: str | None = None) -> None:
-    """Warn that deletion left an unrecognized entry untouched."""
-    logger.warning(
+    """Warn once per root-relative entry path that deletion left it untouched, and log later passes at debug level."""
+    warning_key = (output_dir, entry)
+    log = logger.debug
+    if warning_key not in _WARNED_UNRECOGNIZED_ENTRIES:
+        if len(_WARNED_UNRECOGNIZED_ENTRIES) >= _MAX_WARNED_UNRECOGNIZED_ENTRIES:
+            _WARNED_UNRECOGNIZED_ENTRIES.clear()
+        _WARNED_UNRECOGNIZED_ENTRIES.add(warning_key)
+        log = logger.warning
+    log(
         "Leaving unrecognized thread export entry untouched",
         output_dir=str(output_dir),
         room_key=room_key,
@@ -680,7 +774,7 @@ def _remove_room_export_entries(
                 os.unlink(filename, dir_fd=room_fd)
                 removed_files = True
             else:
-                _log_unrecognized_entry(output_dir, filename, room_key=room_key)
+                _log_unrecognized_entry(output_dir, f"{room_name}/{filename}", room_key=room_key)
         if removed_files:
             _fsync_directory_fd(room_fd)
         removed_directory = False
@@ -693,13 +787,23 @@ def _remove_room_export_entries(
         os.close(room_fd)
 
 
-def remove_room_export(output_dir: Path, room: ThreadExportRoom) -> None:
+@_serialized_export_mutation
+def remove_room_export(
+    output_dir: Path,
+    room: ThreadExportRoom,
+    *,
+    trusted_root: Path | None = None,
+) -> None:
     """Retract one room export, preserving and reporting entries the exporter does not own.
 
     Retraction is idempotent: once every exporter-owned entry is gone, later passes over the
     same room are quiet no-ops rather than a failure the operator can never clear.
     """
-    root_fd = _open_owned_export_root(output_dir, create=False)
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return
     room_name = _room_path_segment(room.key)
@@ -726,13 +830,20 @@ def remove_room_export(output_dir: Path, room: ThreadExportRoom) -> None:
         os.close(root_fd)
 
 
+@_serialized_export_mutation
 def remove_stale_thread_exports(
     output_dir: Path,
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
+    *,
+    trusted_root: Path | None = None,
 ) -> bool:
     """Remove recognizable thread files absent from a complete enumeration."""
-    root_fd = _open_owned_export_root(output_dir, create=False)
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return False
     try:
@@ -748,7 +859,7 @@ def remove_stale_thread_exports(
             if not filename.endswith(".yaml") or filename in expected_names:
                 continue
             if not _is_thread_export_filename(filename) or not _regular_file_at(room_fd, filename):
-                _log_unrecognized_entry(output_dir, filename, room_key=room.key)
+                _log_unrecognized_entry(output_dir, f"{_room_path_segment(room.key)}/{filename}", room_key=room.key)
                 continue
             os.unlink(filename, dir_fd=room_fd)
             removed = True
@@ -780,9 +891,19 @@ def _remove_reconciliation_room(root_fd: int, output_dir: Path, room_name: str) 
     return False
 
 
-def reconcile_room_directories(output_dir: Path, retained_room_keys: set[str]) -> None:
+@_serialized_export_mutation
+def reconcile_room_directories(
+    output_dir: Path,
+    retained_room_keys: set[str],
+    *,
+    trusted_root: Path | None = None,
+) -> None:
     """Remove recognizable room directories outside the retained authorization scope."""
-    root_fd = _open_owned_export_root(output_dir, create=False)
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return
     try:
@@ -798,37 +919,62 @@ def reconcile_room_directories(output_dir: Path, retained_room_keys: set[str]) -
         os.close(root_fd)
 
 
-def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object]:
-    """Return one thread payload with the per-pass exported_at timestamp removed."""
-    normalized = dict(payload)
-    thread = normalized.get("thread")
-    if isinstance(thread, dict):
-        normalized["thread"] = {key: value for key, value in thread.items() if key != "exported_at"}
-    return normalized
-
-
-def _existing_payload_matches(room_fd: int, filename: str, payload: dict[str, object]) -> bool:
-    """Return whether one regular export file already holds this payload, ignoring exported_at."""
-    text = _read_text_at(room_fd, filename)
-    if text is None:
+@_serialized_export_mutation
+def clear_thread_export_root(
+    output_dir: Path,
+    *,
+    trusted_root: Path | None = None,
+) -> bool:
+    """Remove exporter-owned content from one target, keep unrelated entries, and report whether any was removed."""
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
+    if root_fd is None:
         return False
     try:
-        existing = yaml_io.safe_load(text)
-    except yaml.YAMLError:
-        return False
-    if not isinstance(existing, dict):
-        return False
-    return _payload_without_exported_at(existing) == _payload_without_exported_at(payload)
+        removed = False
+        for name in os.listdir(root_fd):  # noqa: PTH208 - root_fd pins the directory
+            if name == _ROOT_MARKER_FILENAME:
+                continue
+            removed = _remove_reconciliation_room(root_fd, output_dir, name) or removed
+        if removed:
+            _fsync_directory_fd(root_fd)
+        return removed
+    finally:
+        os.close(root_fd)
 
 
+def _differs_only_in_exported_at(existing: bytes, data: bytes) -> bool:
+    """Return whether two serialized threads match outside their per-pass exported_at lines, without copying either."""
+    old = _EXPORTED_AT_LINE.search(existing)
+    new = _EXPORTED_AT_LINE.search(data)
+    if old is None or new is None:
+        return existing == data
+    old_view, new_view = memoryview(existing), memoryview(data)
+    return old_view[: old.start()] == new_view[: new.start()] and old_view[old.end() :] == new_view[new.end() :]
+
+
+@_serialized_export_mutation
 def write_thread_payload(
     output_dir: Path,
     room: ThreadExportRoom,
     thread_id: str,
     payload: dict[str, object],
+    *,
+    trusted_root: Path | None = None,
 ) -> bool:
     """Write one thread payload when changed and return whether bytes were replaced."""
-    root_fd = _open_owned_export_root(output_dir, create=True)
+    data = yaml_io.safe_dump(payload, default_flow_style=False, sort_keys=False, allow_unicode=True, encoding="utf-8")
+    if len(data) > _MAX_THREAD_FILE_BYTES:
+        msg = f"Thread {thread_id} is too large to export: its file passes {_MAX_THREAD_FILE_BYTES >> 20} MiB"
+        raise RuntimeError(msg)
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=True,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         msg = f"Failed to create thread export root: {output_dir}"
         raise RuntimeError(msg)
@@ -841,15 +987,12 @@ def write_thread_payload(
         raise RuntimeError(msg)
     try:
         filename = f"{_safe_path_segment(thread_id)}.yaml"
-        if _existing_payload_matches(room_fd, filename, payload):
+        # Compare bytes rather than parse them, so even a thread too long for the bounded parser is not rewritten unchanged.
+        # A larger existing file has changed, so the read stops just past the new export's size, even above the read cap.
+        existing = _read_bytes_at(room_fd, filename, max_bytes=len(data) + _EXPORTED_AT_SLACK_BYTES)
+        if existing is not None and _differs_only_in_exported_at(existing, data):
             return False
-        text = yaml_io.safe_dump(
-            payload,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
-        _atomic_write_at(room_fd, filename, text)
+        _atomic_write_at(room_fd, filename, data)
         return True
     finally:
         os.close(room_fd)

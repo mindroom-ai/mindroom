@@ -43,9 +43,17 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
     Returns True if IP should be blocked.
     """
     now = datetime.now(UTC)
+    cutoff = now - timedelta(minutes=WINDOW_MINUTES)
+    block_cutoff = now - timedelta(minutes=BLOCK_DURATION_MINUTES)
+
+    # Forget failures that left the window and blocks that expired, for every address
+    for stale_ip in [ip for ip, attempts in failed_attempts.items() if max(attempts, default=cutoff) <= cutoff]:
+        del failed_attempts[stale_ip]
+    for stale_ip in [ip for ip, block_time in blocked_ips.items() if block_time < block_cutoff]:
+        del blocked_ips[stale_ip]
+    set_blocked_ip_count(len(blocked_ips))
 
     # Clean old attempts
-    cutoff = now - timedelta(minutes=WINDOW_MINUTES)
     failed_attempts[ip_address] = [attempt for attempt in failed_attempts[ip_address] if attempt > cutoff]
 
     # Add new failure

@@ -3,106 +3,68 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
-@layer utilities {
-  .glass {
-    @apply backdrop-blur-xl bg-white/70 border border-white/20;
-  }
-  .glass-subtle {
-    @apply backdrop-blur-md bg-white/50 border border-white/10;
-  }
-  .glass-card {
-    @apply backdrop-blur-xl bg-white/60 border border-white/20 shadow-xl;
-  }
-  .dark .glass {
-    @apply bg-stone-900/70 border-white/10;
-  }
-  .dark .glass-subtle {
-    @apply bg-stone-900/50 border-white/5;
-  }
-  .dark .glass-card {
-    @apply bg-stone-900/60 border-white/10;
-  }
-  .gradient-mesh {
-    background-image:
-      radial-gradient(
-        at 27% 37%,
-        hsla(35, 90%, 48%, 0.25) 0px,
-        transparent 50%
-      ),
-      radial-gradient(at 97% 21%, hsla(30, 50%, 60%, 0.2) 0px, transparent 50%),
-      radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.15) 0px, transparent 50%);
-  }
-  .gradient-mesh-dark {
-    background-image:
-      radial-gradient(
-        at 27% 37%,
-        hsla(35, 90%, 48%, 0.15) 0px,
-        transparent 50%
-      ),
-      radial-gradient(
-        at 97% 21%,
-        hsla(30, 50%, 60%, 0.12) 0px,
-        transparent 50%
-      ),
-      radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.1) 0px, transparent 50%);
-  }
-}
-
 @layer base {
   :root {
-    /* Light mode - warm, minimal palette */
-    --background: 30 20% 98%; /* Very light warm gray */
-    --foreground: 25 25% 15%; /* Dark warm gray */
-    --card: 30 20% 100%; /* Pure white with hint of warmth */
-    --card-foreground: 25 25% 15%;
-    --popover: 30 20% 100%;
-    --popover-foreground: 25 25% 15%;
-    --primary: 35 90% 48%; /* Warm amber/orange */
-    --primary-foreground: 30 20% 98%;
-    --secondary: 30 15% 92%; /* Light warm gray */
-    --secondary-foreground: 25 25% 15%;
-    --muted: 30 10% 88%; /* Muted warm gray */
-    --muted-foreground: 25 15% 40%;
-    --accent: 35 90% 48%; /* Same as primary for consistency */
-    --accent-foreground: 30 20% 98%;
-    --destructive: 0 72% 51%; /* Warm red */
-    --destructive-foreground: 30 20% 98%;
-    --border: 30 15% 90%; /* Subtle warm gray border */
-    --input: 30 15% 90%;
-    --ring: 35 90% 48%;
-    --radius: 0.5rem;
+    --background: 42 25% 93%;
+    --foreground: 39 16% 20%;
+    --card: 44 38% 98%;
+    --card-foreground: 39 16% 20%;
+    --popover: 44 38% 98%;
+    --popover-foreground: 39 16% 20%;
+    --primary: 154 23% 33%;
+    --primary-foreground: 48 30% 98%;
+    --secondary: 40 22% 90%;
+    --secondary-foreground: 39 16% 20%;
+    --muted: 40 18% 89%;
+    --muted-foreground: 36 8% 39%;
+    --accent: 143 17% 88%;
+    --accent-foreground: 154 23% 30%;
+    --destructive: 2 65% 48%;
+    --destructive-foreground: 36 30% 98%;
+    --border: 37 17% 82%;
+    --input: 37 17% 75%;
+    --ring: 154 23% 33%;
+    --radius: 0.625rem;
+    --glass-highlight: 0 0% 100% / 0.55;
+    --glass-shadow: 35 25% 20% / 0.06;
   }
 
   .dark {
-    /* Dark mode - warm, minimal palette */
-    --background: 25 15% 10%; /* Very dark warm gray */
-    --foreground: 30 15% 88%; /* Light warm gray */
-    --card: 25 12% 14%; /* Slightly lighter warm gray */
-    --card-foreground: 30 15% 88%;
-    --popover: 25 12% 14%;
-    --popover-foreground: 30 15% 88%;
-    --primary: 35 90% 48%; /* Same warm amber/orange */
-    --primary-foreground: 25 15% 10%;
-    --secondary: 25 10% 20%; /* Dark warm gray */
-    --secondary-foreground: 30 15% 88%;
-    --muted: 25 8% 25%; /* Muted dark warm gray */
-    --muted-foreground: 30 10% 65%;
-    --accent: 35 90% 48%; /* Same as primary for consistency */
-    --accent-foreground: 25 15% 10%;
-    --destructive: 0 62% 45%; /* Warm red for dark mode */
-    --destructive-foreground: 30 15% 88%;
-    --border: 25 10% 22%; /* Subtle dark warm gray border */
-    --input: 25 10% 22%;
-    --ring: 35 90% 48%;
+    --background: 40 10% 12%;
+    --foreground: 42 23% 90%;
+    --card: 40 9% 17%;
+    --card-foreground: 42 23% 90%;
+    --popover: 40 9% 17%;
+    --popover-foreground: 42 23% 90%;
+    --primary: 145 25% 70%;
+    --primary-foreground: 145 20% 16%;
+    --secondary: 40 10% 23%;
+    --secondary-foreground: 42 23% 90%;
+    --muted: 40 9% 23%;
+    --muted-foreground: 39 11% 64%;
+    --accent: 145 12% 26%;
+    --accent-foreground: 145 25% 70%;
+    --destructive: 2 58% 48%;
+    --destructive-foreground: 34 17% 92%;
+    --border: 39 9% 28%;
+    --input: 39 9% 35%;
+    --ring: 145 25% 70%;
+    --glass-highlight: 42 30% 90% / 0.07;
+    --glass-shadow: 30 20% 3% / 0.18;
   }
-}
 
-@layer base {
   * {
     @apply border-border;
   }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
   body {
-    @apply bg-background text-foreground font-sans antialiased;
+    @apply bg-background font-sans text-foreground antialiased;
     font-feature-settings:
       "kern" 1,
       "liga" 1,
@@ -112,29 +74,22 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* Typography improvements */
   h1,
   h2,
   h3,
   h4,
   h5,
   h6 {
-    @apply tracking-tight font-semibold;
+    @apply font-semibold tracking-tight;
   }
 
   p {
     @apply leading-relaxed;
   }
 
-  /* Smoother animations */
-  * {
-    @apply transition-colors duration-200;
-  }
-
-  /* Custom scrollbar styling */
   ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
   }
 
   ::-webkit-scrollbar-track {
@@ -142,59 +97,188 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    @apply bg-gray-300/50 rounded-full;
     border: 2px solid transparent;
+    border-radius: 999px;
+    background: hsl(var(--muted-foreground) / 0.28);
     background-clip: padding-box;
   }
 
-  ::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-400/70;
-  }
-
-  .dark ::-webkit-scrollbar-thumb {
-    @apply bg-stone-700/50;
-  }
-
-  .dark ::-webkit-scrollbar-thumb:hover {
-    @apply bg-stone-600/70;
-  }
-
-  /* Firefox scrollbar styling */
   * {
+    scrollbar-color: hsl(var(--muted-foreground) / 0.28) transparent;
     scrollbar-width: thin;
-    scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+  }
+}
+
+@layer components {
+  .app-shell {
+    background:
+      radial-gradient(
+        ellipse at 0% 10%,
+        hsl(var(--primary) / 0.08),
+        transparent 45%
+      ),
+      radial-gradient(
+        ellipse at 100% 100%,
+        hsl(38 65% 65% / 0.08),
+        transparent 45%
+      ),
+      hsl(var(--background));
   }
 
-  .dark * {
-    scrollbar-color: rgba(68, 64, 60, 0.5) transparent;
+  .shell-toolbar {
+    background: transparent;
   }
 
-  /* Mobile optimizations */
-  @media (max-width: 768px) {
-    /* Improve scrolling performance on mobile */
-    * {
-      -webkit-overflow-scrolling: touch;
-    }
+  .workspace-surface {
+    background: hsl(var(--card) / 0.62);
+  }
 
-    /* Prevent text selection on interactive elements */
-    button,
-    .cursor-pointer {
-      -webkit-user-select: none;
-      user-select: none;
-      -webkit-tap-highlight-color: transparent;
-    }
+  main.workspace-surface {
+    margin: 0 16px 16px 8px;
+    border: 1px solid hsl(var(--border) / 0.45);
+    border-radius: 24px;
+  }
 
-    /* Ensure inputs zoom properly on iOS */
-    input,
-    textarea,
-    select {
-      font-size: 16px;
-    }
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    border: 1px solid hsl(var(--border) / 0.65);
+    background: hsl(var(--card) / 0.92);
+  }
 
-    /* Hide scrollbars on mobile for cleaner look */
-    ::-webkit-scrollbar {
-      width: 0px;
-      height: 0px;
-    }
+  /* Keep working surfaces clear; reserve glass for navigation and overlays. */
+  .shell-navigation,
+  .glass-control,
+  .glass-overlay {
+    background: hsl(var(--card) / 0.6);
+    -webkit-backdrop-filter: blur(20px) saturate(110%);
+    backdrop-filter: blur(20px) saturate(110%);
+    box-shadow: inset 0 1px 0 hsl(var(--glass-highlight));
+  }
+
+  .shell-navigation {
+    box-shadow:
+      inset 0 1px 0 hsl(var(--glass-highlight)),
+      0 8px 32px hsl(var(--glass-shadow));
+  }
+
+  .glass-control,
+  .glass-input {
+    border-radius: var(--radius);
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease;
+  }
+
+  .glass-input {
+    background: hsl(var(--background) / 0.5);
+    border-color: hsl(var(--input) / 0.8);
+  }
+
+  .glass-control:hover {
+    background: hsl(var(--card) / 0.9);
+  }
+
+  .glass-overlay {
+    background: hsl(var(--popover) / 0.9);
+    box-shadow:
+      0 18px 46px hsl(var(--glass-shadow)),
+      inset 0 1px 0 hsl(var(--glass-highlight));
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px))) {
+  .shell-toolbar,
+  .workspace-surface,
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    background: hsl(var(--card));
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .shell-toolbar,
+  .workspace-surface,
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    background: hsl(var(--card));
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  nav [aria-current="page"],
+  .workspace-surface [aria-pressed="true"] {
+    outline: 1px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  nav a:focus-visible,
+  .workspace-surface [role="button"]:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
+  .shell-toolbar,
+  .workspace-surface,
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+  }
+}
+
+@media (max-width: 767px) {
+  main.workspace-surface {
+    margin: 0 8px 8px;
+    border-radius: 20px;
+  }
+
+  button,
+  .cursor-pointer {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 1023px) {
+  .rooms-layout .glass-panel {
+    height: auto;
+    overflow: visible;
+  }
+
+  .rooms-layout .overflow-y-auto {
+    max-height: none;
+    overflow-y: visible;
   }
 }

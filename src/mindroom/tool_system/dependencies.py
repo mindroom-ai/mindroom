@@ -44,6 +44,7 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "pyobjc-framework-cocoa": "AppKit",
     "py-trello": "trello",
     "pygithub": "github",
+    "python-docx": "docx",
     "pyyaml": "yaml",
     "tavily-python": "tavily",
     "spider-client": "spider",
@@ -141,9 +142,13 @@ def _get_current_uv_tool_extras() -> list[str]:
 def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
-    major, minor = sys.version_info[:2]
-    python_version = f"{major}.{minor}"
-    cmd = ["uv", "tool", "install", package_spec, "--force", "--python", python_version]
+    # Pin the exact interpreter this environment was created from (what stdlib `venv` uses) and skip
+    # `--force`: a bare `X.Y` request resolving to another patch or arch, or `--force`, makes uv delete
+    # the live environment before building, so a failed build would leave nothing behind. Without them
+    # uv updates the environment in place, syncing it exactly to `extras`; callers pass the receipt's
+    # extras merged with the new ones so installed extras are kept.
+    base_python = sys._base_executable  # ty: ignore[unresolved-attribute]  # typeshed omits it
+    cmd = ["uv", "tool", "install", package_spec, "--python", base_python]
     if quiet:
         cmd.append("-q")
     env = os.environ.copy()
@@ -160,12 +165,13 @@ def _current_python_has_module(module_name: str) -> bool:
 def install_command_for_current_python() -> list[str]:
     """Build the pip/uv install command for the current interpreter."""
     in_venv = _in_virtualenv()
+    # `-P -s`: the installer's cwd or `HOME` may be a workspace whose files must not shadow its modules.
     if _current_python_has_module("uv"):
-        cmd = [sys.executable, "-m", "uv", "pip", "install", "--python", sys.executable]
+        cmd = [sys.executable, "-P", "-s", "-m", "uv", "pip", "install", "--python", sys.executable]
     elif shutil.which("uv"):
         cmd = ["uv", "pip", "install", "--python", sys.executable]
     else:
-        cmd = [sys.executable, "-m", "pip", "install"]
+        cmd = [sys.executable, "-P", "-s", "-m", "pip", "install"]
         if not in_venv:
             cmd.append("--user")
         return cmd

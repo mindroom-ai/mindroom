@@ -14,6 +14,7 @@ from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
 from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
+from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
+    from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -139,7 +141,8 @@ def response_lifecycle_reservation_context(
 class _QueuedMessageState:
     """Track queued human ingress while one response lifecycle holds the lock."""
 
-    pending_human_message_event_ids: set[str] = field(default_factory=set)
+    _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
+    mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -147,10 +150,14 @@ class _QueuedMessageState:
     def __post_init__(self) -> None:
         self._idle_event.set()
 
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Snapshot queued text in admission order without consuming any event."""
+        return tuple(self._pending_messages.values())
+
     @property
     def pending_human_messages(self) -> int:
         """Return the number of distinct queued human events."""
-        return len(self.pending_human_message_event_ids)
+        return len(self._pending_messages)
 
     def begin_response_turn(self) -> bool:
         existing_turn = self._active_response_turns > 0
@@ -165,16 +172,18 @@ class _QueuedMessageState:
         if self._active_response_turns == 0:
             self._idle_event.set()
 
-    def add_waiting_human_message(self, source_event_id: str) -> bool:
-        previous_count = self.pending_human_messages
-        self.pending_human_message_event_ids.add(source_event_id)
+    def add_waiting_human_message(self, source_event_id: str, *, text: str | None = None) -> bool:
+        if source_event_id in self._pending_messages:
+            return False
+        progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
+        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
         self._event.set()
-        return self.pending_human_messages != previous_count
+        return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
-        if source_event_id not in self.pending_human_message_event_ids:
+        if source_event_id not in self._pending_messages:
             return
-        self.pending_human_message_event_ids.remove(source_event_id)
+        del self._pending_messages[source_event_id]
         if self.pending_human_messages == 0:
             self._event.clear()
 
@@ -223,6 +232,37 @@ class ResponseLifecycleCoordinator:
 
     _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
+    # A pending approval counts as an active response turn of its conversation, by approval.
+    _approval_holds: dict[str, ResponseLifecycleKey] = field(default_factory=dict)
+
+    def hold_for_approval(self, approval_id: str, target: MessageTarget) -> None:
+        """Keep a conversation busy while an approval of its reply is pending; holding it again changes nothing.
+
+        Later messages wait as they wait behind a running response. The hold
+        does not take the lifecycle lock, so the approval's own resume and
+        settlement still run.
+        """
+        if approval_id in self._approval_holds:
+            return
+        self._approval_holds[approval_id] = target.lifecycle_key
+        self._get_or_create_queued_signal(target).begin_response_turn()
+
+    def release_approval_hold(self, approval_id: str) -> None:
+        """End the hold of an approval that ended, letting its conversation's waiting messages run."""
+        lifecycle_key = self._approval_holds.pop(approval_id, None)
+        if lifecycle_key is not None:
+            self._thread_queued_signals[lifecycle_key].finish_response_turn()
+
+    def release_approval_holds_in_room(self, room_id: str) -> None:
+        """End the holds of a room this bot left, whose approvals the departure ended."""
+        for approval_id, lifecycle_key in tuple(self._approval_holds.items()):
+            if lifecycle_key.room_id == room_id:
+                self.release_approval_hold(approval_id)
+
+    def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:
+        """Return the approvals that hold one conversation."""
+        lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
+        return tuple(approval_id for approval_id, key in self._approval_holds.items() if key == lifecycle_key)
 
     def _has_active_response_for_thread_key(self, lifecycle_key: ResponseLifecycleKey) -> bool:
         queued_signal = self._thread_queued_signals.get(lifecycle_key)
@@ -323,6 +363,13 @@ class ResponseLifecycleCoordinator:
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
 
+    def visible_progress_callback(self, target: MessageTarget) -> Callable[[str], None] | None:
+        """Bind acknowledged Matrix text to the active response's opted-in judge."""
+        signal = self._thread_queued_signals.get(target.lifecycle_key)
+        if signal is None or signal.mid_turn_gate is None:
+            return None
+        return signal.mid_turn_gate.record_visible_response
+
     @staticmethod
     def _should_signal_queued_message(
         response_envelope: MessageEnvelope,
@@ -350,7 +397,10 @@ class ResponseLifecycleCoordinator:
         if not self._has_active_response_for_thread_key(target.lifecycle_key):
             return None
         queued_signal = self._get_or_create_queued_signal(target)
-        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+        if not queued_signal.add_waiting_human_message(
+            response_envelope.source_event_id,
+            text=message_text_for_judgment(response_envelope),
+        ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
 
@@ -369,7 +419,10 @@ class ResponseLifecycleCoordinator:
             return None
         if not self._should_signal_queued_message(response_envelope):
             return None
-        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+        if not queued_signal.add_waiting_human_message(
+            response_envelope.source_event_id,
+            text=message_text_for_judgment(response_envelope),
+        ):
             return None
         return response_envelope.source_event_id
 
@@ -456,6 +509,7 @@ class ResponseLifecycleCoordinator:
         pipeline_timing: DispatchPipelineTiming | None,
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
+        mid_turn_gate: MidTurnGate | None = None,
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
@@ -466,6 +520,10 @@ class ResponseLifecycleCoordinator:
             signal_queued_message=signal_queued_message,
             reservation=reservation,
         )
+        if reservation is not None:
+            # This response now owns the reservation locally. Descendant tasks
+            # must acquire their own lifecycle instead of inheriting this one-shot claim.
+            _current_response_lifecycle_reservation.set(None)
         lock_acquired = False
         try:
             if pipeline_timing is not None:
@@ -480,10 +538,12 @@ class ResponseLifecycleCoordinator:
                     notice=notice,
                     queued_signal=queued_signal,
                 )
-                with queued_message_signal_context(queued_signal) as notice_context:
+                queued_signal.mid_turn_gate = mid_turn_gate
+                with queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context:
                     try:
                         return await locked_operation(target)
                     finally:
+                        queued_signal.mid_turn_gate = None
                         await finalize_queued_notice_response_turn_async(notice_context)
             finally:
                 if lock_acquired:
@@ -494,37 +554,6 @@ class ResponseLifecycleCoordinator:
                 notice=notice,
                 queued_signal=queued_signal,
             )
-
-    async def run_locked_target_operation(
-        self,
-        *,
-        target: MessageTarget,
-        while_waiting: Callable[[], Awaitable[None]] | None,
-        locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
-    ) -> _LockedResponseResult:
-        """Run a non-response operation under one target's response lock."""
-        lifecycle_lock = self._response_lifecycle_lock(target)
-        acquire_task = asyncio.create_task(lifecycle_lock.acquire())
-        lock_acquired = False
-        try:
-            if while_waiting is None:
-                await acquire_task
-                lock_acquired = True
-                return await locked_operation()
-            while not acquire_task.done():
-                await while_waiting()
-                await asyncio.wait({acquire_task}, timeout=0.01)
-            await acquire_task
-            lock_acquired = True
-            return await locked_operation()
-        finally:
-            if not acquire_task.done():
-                acquire_task.cancel()
-                await asyncio.gather(acquire_task, return_exceptions=True)
-            elif not lock_acquired and not acquire_task.cancelled() and acquire_task.exception() is None:
-                lifecycle_lock.release()
-            if lock_acquired:
-                lifecycle_lock.release()
 
 
 @dataclass(frozen=True)
@@ -548,6 +577,7 @@ class ResponseLifecycleDeps:
 
     response_hooks: ResponseHookService
     logger: BoundLogger
+    process_shutdown_requested: Callable[[], bool]
 
 
 def _session_exists(
@@ -595,6 +625,11 @@ class ResponseLifecycle:
         self.deps = deps
         self.identity = identity
         self.pipeline_timing = pipeline_timing
+
+    def _raise_if_process_shutdown(self) -> None:
+        """Stop best-effort lifecycle work once orderly process shutdown owns cancellation."""
+        if self.deps.process_shutdown_requested():
+            raise asyncio.CancelledError
 
     def _log_effects_failure_after_visible_delivery(
         self,
@@ -697,13 +732,18 @@ class ResponseLifecycle:
             session_id=watch.session_id,
             room_id=watch.room_id,
             thread_id=watch.thread_id,
+            _hook_registry_state=watch.tool_context.hook_registry_state,
         )
         await emit(watch.tool_context.hook_registry, EVENT_SESSION_STARTED, context)
 
     async def emit_session_started(self, watch: _SessionStartedWatch) -> None:
         """Emit session:started without aborting delivery on ordinary failures."""
+        if self.deps.process_shutdown_requested():
+            return
         try:
             await self._maybe_emit_session_started(watch)
+            if self.deps.process_shutdown_requested():
+                return
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -727,6 +767,7 @@ class ResponseLifecycle:
             if self.pipeline_timing is not None:
                 self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
             return final_delivery_outcome
+        self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             if final_delivery_outcome.terminal_status == "completed":
@@ -748,8 +789,9 @@ class ResponseLifecycle:
                     visible_response_event_id=response_event_id,
                     failure_reason=final_delivery_outcome.failure_reason,
                 )
+            self._raise_if_process_shutdown()
         except asyncio.CancelledError as error:
-            if response_event_id is None:
+            if self.deps.process_shutdown_requested() or response_event_id is None:
                 raise
             self._log_effects_failure_after_visible_delivery(
                 response_event_id=response_event_id,
@@ -779,6 +821,7 @@ class ResponseLifecycle:
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Apply post-response effects without masking failures before visible delivery."""
+        self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             if callable(post_response_outcome):
@@ -790,8 +833,9 @@ class ResponseLifecycle:
                 post_response_outcome,
                 post_response_deps,
             )
+            self._raise_if_process_shutdown()
         except asyncio.CancelledError as error:
-            if response_event_id is None:
+            if self.deps.process_shutdown_requested() or response_event_id is None:
                 raise
             self._log_effects_failure_after_visible_delivery(
                 response_event_id=response_event_id,

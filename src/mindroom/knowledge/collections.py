@@ -10,16 +10,20 @@ needs as arguments.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import sqlite3
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from agno.vectordb.chroma import ChromaDb
 from chromadb.errors import InternalError, NotFoundError
 
+from mindroom.knowledge.chroma_client import ChromaDb
+from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
+from mindroom.knowledge.strict_knowledge import StrictInsertKnowledge as Knowledge
 from mindroom.logging_config import get_logger
-from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -227,13 +231,16 @@ def paths_with_vectors(vector_db: ChromaDb, relative_paths: Sequence[str]) -> se
     return _collection_paths_with_vectors(collection, relative_paths)
 
 
+# AGNO_COMPAT: Chroma metadata deletion forces equality filters and fans out across owners.
+# Reason: Agno wraps metadata values in $eq and visits every owner collection.
+# Direct collection deletion supports one scoped $in batch instead of per-file calls.
+# Upstream issue: No matching operator-aware, collection-scoped deletion issue identified.
+# Upstream PR: None identified; the missing bulk/filter deletion API remains untracked.
+# Remove when: Agno supports operator filters for one explicitly selected collection;
+# retain source-path batching, collection ownership, and failure propagation.
+# Coverage: tests/test_knowledge_resumable_refresh.py::test_candidate_path_removal_is_batched.
 def delete_source_path_vectors(vector_db: ChromaDb, relative_paths: Sequence[str]) -> None:
     """Delete vectors for many source paths in one vector-store round trip.
-
-    Agno's ``delete_by_metadata`` wraps values in ``$eq`` and so can only
-    take one path per call, which turns a large source update into one
-    thread hop and one get+delete per file. The collection accepts ``$in``
-    directly.
 
     Unlike the ``$in`` the verification query issues, this one needs no
     ceiling protection: a delete does not bind one SQL variable per matched
@@ -276,16 +283,73 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
     return False
 
 
+# AGNO_COMPAT: Chroma collection deletion conflates absence with provider failure.
+# Reason: Agno returns False for both cases, so probe existence before reporting
+# success or reclaiming orphaned storage after a failed delete.
+# Upstream issue: No matching typed collection-deletion outcome issue identified.
+# Upstream PR: None identified; distinguishing absence from failure remains untracked.
+# Remove when: Agno reports typed deletion failures and an already-absent outcome;
+# retain idempotent owner deletion, client closure, and safe storage reclamation.
+# Coverage: tests/test_knowledge_collections.py::test_delete_collection_releases_owned_client;
+# tests/test_knowledge_collections.py::test_delete_collection_failure_releases_owned_client.
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
     """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
-    if vector_db.delete():
-        return True
+    with collection_lifetime_lock(space.storage_path, exclusive=True), closing(vector_db):
+        deleted = vector_db.delete()
+        if not deleted:
+            try:
+                vector_db.client.get_collection(name=vector_db.collection_name)
+            except NotFoundError:
+                deleted = True
+        if deleted:
+            _reclaim_orphaned_segment_directories(space)
+        return deleted
+
+
+def _reclaim_orphaned_segment_directories(space: CollectionSpace) -> None:
+    """Remove UUID-named Chroma directories that no live segment references."""
+    database_path = space.storage_path / "chroma.sqlite3"
+    if not database_path.is_file():
+        return
     try:
-        vector_db.client.get_collection(name=vector_db.collection_name)
-    except NotFoundError:
-        return True
-    return False
+        database_uri = f"{database_path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(database_uri, uri=True) as connection:
+            live_segment_ids = {row[0] for row in connection.execute("SELECT id FROM segments")}
+        entries = tuple(space.storage_path.iterdir())
+    except (OSError, sqlite3.Error):
+        logger.warning(
+            "Failed to inspect knowledge segment storage for cleanup",
+            base_id=space.base_id,
+            exc_info=True,
+        )
+        return
+
+    reclaimed = 0
+    for path in entries:
+        try:
+            is_segment_directory = not path.is_symlink() and path.is_dir() and str(uuid.UUID(path.name)) == path.name
+        except (OSError, ValueError):
+            continue
+        if not is_segment_directory or path.name in live_segment_ids:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            logger.warning(
+                "Failed to reclaim orphaned knowledge segment directory",
+                base_id=space.base_id,
+                segment_id=path.name,
+                exc_info=True,
+            )
+        else:
+            reclaimed += 1
+    if reclaimed:
+        logger.info(
+            "Reclaimed orphaned knowledge segment directories",
+            base_id=space.base_id,
+            segments=reclaimed,
+        )
 
 
 def cleanup_superseded_collections(
@@ -322,32 +386,36 @@ def cleanup_superseded_collections(
         )
         return
 
-    unowned: list[str] = []
-    for collection_name in collection_names:
-        if collection_name in preserved:
-            continue
-        is_candidate = collection_name.startswith(candidate_prefix)
-        if not is_candidate and (candidates_only or collection_name != default_collection):
-            # Reclaiming abandoned candidates must never race a legacy
-            # published collection whose metadata predates this layout.
-            if collection_name != default_collection:
-                unowned.append(collection_name)
-            continue
-        try:
-            build_vector_db(space, collection_name).delete()
-        except Exception:
-            logger.warning(
-                "Failed to clean superseded knowledge collection",
+    with collection_lifetime_lock(space.storage_path, exclusive=True):
+        unowned: list[str] = []
+        for collection_name in collection_names:
+            if collection_name in preserved:
+                continue
+            is_candidate = collection_name.startswith(candidate_prefix)
+            if not is_candidate and (candidates_only or collection_name != default_collection):
+                # Reclaiming abandoned candidates must never race a legacy
+                # published collection whose metadata predates this layout.
+                if collection_name != default_collection:
+                    unowned.append(collection_name)
+                continue
+            try:
+                deletion_db = build_vector_db(space, collection_name)
+                with closing(deletion_db):
+                    deletion_db.delete()
+            except Exception:
+                logger.warning(
+                    "Failed to clean superseded knowledge collection",
+                    base_id=space.base_id,
+                    collection=collection_name,
+                    exc_info=True,
+                )
+        _reclaim_orphaned_segment_directories(space)
+        if unowned:
+            logger.info(
+                "Preserved knowledge collections with unprovable ownership",
                 base_id=space.base_id,
-                collection=collection_name,
-                exc_info=True,
+                collections=sorted(unowned),
             )
-    if unowned:
-        logger.info(
-            "Preserved knowledge collections with unprovable ownership",
-            base_id=space.base_id,
-            collections=sorted(unowned),
-        )
 
 
 def _listed_collection_names(client: _CollectionListingClient) -> tuple[str, ...]:

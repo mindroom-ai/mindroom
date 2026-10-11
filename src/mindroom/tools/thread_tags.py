@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,8 +13,9 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="thread_tags",
+    file_access=ToolFileAccess.NONE,
     display_name="Thread Tags",
-    description="Tag, untag, and inspect Matrix threads using shared room-state markers",
+    description="Add, remove, and view tags on conversation threads",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

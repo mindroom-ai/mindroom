@@ -6,15 +6,11 @@ without touching Kubernetes or the database by stubbing dependencies.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import backend.routes.provisioner as prov
 import backend.services.provisioner_service as prov_service
+import pytest
 from fastapi.testclient import TestClient
 from main import app
-
-if TYPE_CHECKING:  # pragma: no cover
-    import pytest
 
 
 def _setup_provisioner_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +55,7 @@ def test_start_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert statuses[10] == 429
 
 
+@pytest.mark.usefixtures("stub_uninstall_cleanup")
 def test_uninstall_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """2 requests allowed; 3rd returns 429."""
     _setup_provisioner_stubs(monkeypatch)

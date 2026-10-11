@@ -11,10 +11,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mindroom.config.agent import CultureConfig
+    from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
-    from mindroom.config.models import CompactionConfig, EffectiveToolConfig
+    from mindroom.config.models import CompactionConfig, EffectiveToolConfig, FileAccess
     from mindroom.history.types import ResolvedHistorySettings
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -44,17 +44,31 @@ class ResolvedEntityView:
 
     @property
     def compaction_config(self) -> CompactionConfig:
-        """Effective destructive compaction config for this scope."""
+        """Effective text compaction config for this scope."""
         if self.name is None:
             return self._config._default_compaction_config()
         return self._config._entity_compaction_config(self.name)
 
     @property
     def has_authored_compaction_config(self) -> bool:
-        """Whether destructive compaction was explicitly configured for this scope."""
+        """Whether text compaction was explicitly configured for this scope."""
         if self.name is None:
             return self._config._has_authored_default_compaction_config()
         return self._config._has_authored_entity_compaction_config(self.name)
+
+    @property
+    def max_tool_calls_per_turn(self) -> int:
+        """Effective per-turn tool-call budget for this scope."""
+        if self.name is None:
+            return self._config.defaults.max_tool_calls_per_turn
+        return self._config._entity_max_tool_calls_per_turn(self.name)
+
+    @property
+    def file_access(self) -> FileAccess:
+        """Effective file access for in-process path tools; every non-agent scope inherits the default."""
+        if self.name is None:
+            return self._config.defaults.file_access
+        return self._config._agent_file_access(self.name)
 
     @property
     def memory_backend(self) -> MemoryBackend:
@@ -69,6 +83,11 @@ class ResolvedEntityView:
         if self.name is None:
             return self._config.memory.search
         return self._config._agent_memory_search(self.name)
+
+    @property
+    def automations(self) -> list[Automation]:
+        """Automations this agent runs."""
+        return self._config._agent_automations(self._agent_name())
 
     @property
     def model_name(self) -> str:
@@ -115,16 +134,6 @@ class ResolvedEntityView:
     def deferred_tool_scope_incompatible_tools(self, authored_tool_name: str) -> list[str]:
         """Return expanded deferred tools invalid for this agent's effective execution scope."""
         return self._config._deferred_tool_scope_incompatible_tools(self._agent_name(), authored_tool_name)
-
-    @property
-    def culture(self) -> tuple[str, CultureConfig] | None:
-        """Configured culture assignment for this agent, if any.
-
-        Unknown or team names resolve to None (culture assignment is a membership scan)
-        instead of raising like the other agent-only fields; the defaults-only scope
-        still raises like every agent-only field.
-        """
-        return self._config._agent_culture(self._agent_name())
 
     @property
     def knowledge_base_ids(self) -> list[str]:

@@ -9,7 +9,6 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
@@ -21,7 +20,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.teams import TeamMode
-from tests.bot_helpers import make_test_agent_bot
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -33,6 +33,7 @@ from tests.conftest import (
     patch_response_runner_module,
     runtime_paths_for,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
@@ -48,14 +49,15 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
 
 def _make_config(storage_path: Path) -> Config:
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-            },
-            teams={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                },
+                teams={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
         ),
         _runtime_paths(storage_path),
     )
@@ -109,14 +111,15 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
     test_room_id = "!test:localhost"
     test_user_id = "@alice:localhost"
 
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    with patch("mindroom.bot.login_agent_owned_session") as mock_login:
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
+        mock_client.rooms = {}
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.access_token = mock_calculator_agent.access_token
         mock_client.room_send = AsyncMock(
             return_value=nio.RoomSendResponse("$placeholder:localhost", test_room_id),
         )
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
 
         config = _make_config(tmp_path)
 
@@ -223,10 +226,10 @@ async def test_agent_ignores_other_agents(
     """Test that agents ignore messages from other agents."""
     test_room_id = "!test:localhost"
 
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    with patch("mindroom.bot.login_agent_owned_session") as mock_login:
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
 
         config = _make_config(tmp_path)
 
@@ -281,7 +284,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     """Test that agents respond in threads based on whether other agents are participating."""
     # Create the config first to get the actual domain
     mock_config = _make_config(tmp_path)
-    mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
+    mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-haiku-4-5")}
     mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
     fake_member = MagicMock()
     fake_member.name = "MockAgent"
@@ -298,7 +301,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     mock_calculator_agent.user_id = f"@mindroom_calculator:{domain}"
 
     with (
-        patch("mindroom.bot.login_agent_user") as mock_login,
+        patch("mindroom.bot.login_agent_owned_session") as mock_login,
         patch("mindroom.config.main.load_config", return_value=mock_config),
         patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
@@ -308,7 +311,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
             nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
         ]
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
         config = _make_config(tmp_path)
@@ -321,6 +324,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             rooms=[test_room_id],
             enable_streaming=False,
         )
+        install_direct_response_admission(bot)
         install_runtime_journal_support(bot)
 
         # Mock orchestrator
@@ -453,9 +457,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 thread_id=thread_root_id,
                 messages=thread_history,
             )
+            # A homeserver never reuses an event ID, and each reply is bound to the one it created.
             bot.client.room_send.side_effect = [
-                nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
-                nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
+                nio.RoomSendResponse.from_dict({"event_id": "$placeholder-team"}, test_room_id),
+                nio.RoomSendResponse.from_dict({"event_id": "$edit-team"}, test_room_id),
             ]
 
             mock_ai = AsyncMock()
@@ -477,7 +482,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert placeholder_content[STREAM_STATUS_KEY] == "pending"
             assert placeholder_content["body"].startswith("🤝 Team Response: Thinking...")
             assert final_content["m.relates_to"]["rel_type"] == "m.replace"
-            assert final_content["m.relates_to"]["event_id"] == "$placeholder"
+            assert final_content["m.relates_to"]["event_id"] == "$placeholder-team"
             assert final_content["m.new_content"]["body"] != placeholder_content["body"]
             bot.client.room_send.side_effect = None
 
@@ -604,7 +609,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
 
             # Test that agents can be started
             with (
-                patch("mindroom.bot.login_agent_user") as mock_login,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
             ):
                 mock_client = AsyncMock()
@@ -614,7 +619,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
                 mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
                 # Don't run sync_forever, just verify setup
                 mock_client.sync_forever = AsyncMock()
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Manually start agents without running sync_forever
                 for bot in orchestrator.agent_bots.values():
@@ -632,11 +637,12 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
     initial_room = "!initial:localhost"
     invite_room = "!invite:localhost"
 
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    with patch("mindroom.bot.login_agent_owned_session") as mock_login:
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
+        mock_client.rooms = {}
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id=invite_room))
-        mock_login.return_value = mock_client
+        mock_login.return_value = owned_matrix_login(mock_client)
 
         config = _make_config(tmp_path)
 
@@ -650,14 +656,15 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         install_runtime_journal_support(bot)
         await bot.start()
 
-        # Create invite event for a different room
-        mock_room = MagicMock()
-        mock_room.room_id = invite_room
-        mock_room.display_name = "Invite Room"
         mock_event = MagicMock(spec=nio.InviteEvent)
         mock_event.sender = "@inviter:localhost"
+        # nio caches the current invite before delivering its callback.
+        mock_room = nio.MatrixInvitedRoom(invite_room, bot.agent_user.user_id)
+        mock_room.inviter = mock_event.sender
+        bot.client.invited_rooms = {invite_room: mock_room}
 
-        await bot._on_invite(mock_room, mock_event)
+        await bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
+        await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)
 
         # Verify new room was joined (not the initial room)
         bot.client.join.assert_called_with(invite_room)

@@ -3,51 +3,90 @@
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase, limiter
+from backend.entitlements import ENDED_STRIPE_STATUSES
 from backend.models import WebhookResponse
-from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
-from fastapi import APIRouter, Header, HTTPException, Request
+from backend.services.instance_lifecycle import reconcile_account_instances
+from backend.services.subscription_projection import (
+    PermanentEventError,
+    maybe_timestamp_to_iso,
+    subscription_fields,
+    subscription_status,
+    timestamp_to_iso,
+)
 
 router = APIRouter()
 
+# Events that can change whether a subscription may run its hosted instance.
+_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+        "invoice.payment_succeeded",
+        "invoice.payment_failed",
+    }
+)
+# Events whose handler writes the subscription binding or status, or the payment records that decide whether a failed
+# renewal keeps the past_due grace period. If one raises unexpectedly, the webhook answers 500 without recording it so
+# Stripe redelivers it; those handlers are safe to run again.
+_REDELIVERED_EVENT_TYPES = frozenset(
+    {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+        "invoice.payment_succeeded",
+        "invoice.payment_failed",
+    }
+)
 
-def _timestamp_to_iso(timestamp: float) -> str:
-    """Convert Unix timestamp to ISO format string."""
-    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
 
-
-def _maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
-    """Convert Unix timestamp to ISO format string, or None if timestamp is None."""
-    return _timestamp_to_iso(timestamp) if timestamp is not None else None
-
-
-def _get_tier_from_price(price: dict) -> str:
-    """Extract the canonical tier for a Stripe price."""
-    if match := get_stripe_price_match(price.get("id")):
-        return match.tier
-
-    if (metadata := price.get("metadata", {})) and (tier := metadata.get("tier")):
-        return tier
-
-    msg = (
-        f"Unable to determine tier from price. "
-        f"Price metadata: {price.get('metadata')}, "
-        f"lookup_key: {price.get('lookup_key')}"
+def _account_id_for_stripe_subscription(sb: Any, stripe_subscription_id: str) -> str | None:
+    """Return the account bound to a Stripe subscription, or None when no row uses it (for example a superseded one)."""
+    rows = (
+        sb.table("subscriptions")
+        .select("account_id")
+        .eq("stripe_subscription_id", stripe_subscription_id)
+        .limit(1)
+        .execute()
+        .data
     )
-    raise ValueError(msg)
+    return rows[0]["account_id"] if rows else None
 
 
-def _get_billing_cycle_from_price(price: dict) -> str:
-    """Extract the canonical billing cycle for a Stripe price."""
-    if match := get_stripe_price_match(price.get("id")):
-        return match.billing_cycle
+def _without_repeated_trial(subscription: dict) -> dict | None:
+    """Return the subscription to store, or None when it duplicates an earlier trial and was cancelled.
 
-    if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
-        return cycle
-
-    msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
-    raise ValueError(msg)
+    Checkout grants one trial per customer, but checkout sessions opened side by side can each carry one. Only the
+    earliest trial counts: a later one is cancelled while the earlier subscription still runs, since the customer
+    would otherwise pay twice, and otherwise it ends at once so the subscription is paid from the start.
+    """
+    if subscription.get("trial_start") is None:
+        return subscription
+    order = (subscription["created"], subscription["id"])
+    history = stripe.Subscription.list(customer=subscription["customer"], status="all", limit=100).auto_paging_iter()
+    earlier = [other for other in history if other.trial_start is not None and (other.created, other.id) < order]
+    if not earlier:
+        return subscription
+    current = stripe.Subscription.retrieve(subscription["id"])
+    if current["status"] in ENDED_STRIPE_STATUSES:
+        # A redelivered event for a duplicate this handler already cancelled; the account keeps its binding.
+        return None
+    if current["status"] != "trialing":
+        return current
+    if any(other.status not in ENDED_STRIPE_STATUSES for other in earlier):
+        logger.warning("Cancelling Stripe subscription %s: it duplicates an earlier trial", subscription["id"])
+        stripe.Subscription.cancel(subscription["id"])
+        return None
+    logger.warning(
+        "Ending the trial of Stripe subscription %s: customer %s already had one",
+        subscription["id"],
+        subscription["customer"],
+    )
+    return stripe.Subscription.modify(subscription["id"], trial_end="now")
 
 
 def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
@@ -70,34 +109,23 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
 
     account_id = account_result.data["id"]
 
-    # Extract subscription details
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
-    tier = _get_tier_from_price(price_data)
-    _billing_cycle = _get_billing_cycle_from_price(price_data)
-    limits = get_plan_limits_from_metadata(tier)
-
-    # Prepare subscription data
-    subscription_data = {
-        "account_id": account_id,
-        "stripe_subscription_id": subscription["id"],
-        "stripe_price_id": price_data.get("id"),
-        "tier": tier,
-        "status": subscription["status"],
-        "max_agents": limits.get("max_agents", 1),
-        "max_messages_per_day": limits.get("max_messages_per_day", 100),
-        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
-        "updated_at": datetime.now(UTC).isoformat(),
-    }
-
-    # Add period dates if available
-    if start := subscription.get("current_period_start"):
-        subscription_data["current_period_start"] = _timestamp_to_iso(start)
-    if end := subscription.get("current_period_end"):
-        subscription_data["current_period_end"] = _timestamp_to_iso(end)
-
     # Check if subscription already exists for this account
-    existing = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
+    existing = sb.table("subscriptions").select("id,stripe_subscription_id").eq("account_id", account_id).execute()
+    current_stripe_id = existing.data[0].get("stripe_subscription_id") if existing.data else None
+    if current_stripe_id and current_stripe_id != subscription["id"]:
+        # A delayed creation event for an older Stripe subscription must not replace a newer binding.
+        current_created = stripe.Subscription.retrieve(current_stripe_id)["created"]
+        if subscription["created"] < current_created:
+            logger.info(
+                "Ignoring creation of Stripe subscription %s older than %s", subscription["id"], current_stripe_id
+            )
+            return True, account_id
 
+    stored = _without_repeated_trial(subscription)
+    if stored is None:
+        return True, account_id
+    subscription_data = subscription_fields(sb, stored)
+    subscription_data["account_id"] = account_id
     if existing.data:
         # Update existing subscription
         sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
@@ -105,7 +133,12 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         # Create new subscription
         sb.table("subscriptions").insert(subscription_data).execute()
 
-    logger.info("Subscription created for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    logger.info(
+        "Subscription created for account %s: tier=%s, status=%s",
+        account_id,
+        subscription_data["tier"],
+        subscription["status"],
+    )
     return True, account_id
 
 
@@ -129,35 +162,31 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
 
     account_id = account_result.data["id"]
 
-    # Extract subscription details
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
-    tier = _get_tier_from_price(price_data)
-    _billing_cycle = _get_billing_cycle_from_price(price_data)
-    limits = get_plan_limits_from_metadata(tier)
+    current = sb.table("subscriptions").select("stripe_subscription_id").eq("account_id", account_id).execute().data
+    current_stripe_id = current[0].get("stripe_subscription_id") if current else None
+    if current_stripe_id and current_stripe_id != subscription["id"]:
+        logger.info("Ignoring update for superseded Stripe subscription %s", subscription["id"])
+        return True, account_id
+    # An update can arrive before the creation event, so it must not bind a duplicate trial either.
+    if not current_stripe_id and _without_repeated_trial(subscription) is None:
+        return True, account_id
 
-    # Prepare subscription data
-    subscription_data = {
-        "stripe_subscription_id": subscription["id"],
-        "stripe_price_id": price_data.get("id"),
-        "tier": tier,
-        "status": subscription["status"],
-        "max_agents": limits.get("max_agents", 1),
-        "max_messages_per_day": limits.get("max_messages_per_day", 100),
-        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
-        "cancelled_at": _maybe_timestamp_to_iso(subscription.get("canceled_at")),
-        "updated_at": datetime.now(UTC).isoformat(),
-    }
-
-    # Add period dates if available
-    if start := subscription.get("current_period_start"):
-        subscription_data["current_period_start"] = _timestamp_to_iso(start)
-    if end := subscription.get("current_period_end"):
-        subscription_data["current_period_end"] = _timestamp_to_iso(end)
+    subscription = stripe.Subscription.retrieve(subscription["id"])
+    subscription_data = subscription_fields(sb, subscription)
+    subscription_data["cancelled_at"] = maybe_timestamp_to_iso(subscription.get("canceled_at"))
 
     # Update subscription with tenant validation
-    sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
+    query = sb.table("subscriptions").update(subscription_data).eq("account_id", account_id)
+    if current_stripe_id:
+        query = query.eq("stripe_subscription_id", current_stripe_id)
+    query.execute()
 
-    logger.info("Subscription updated for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    logger.info(
+        "Subscription updated for account %s: tier=%s, status=%s",
+        account_id,
+        subscription_data["tier"],
+        subscription["status"],
+    )
     return True, account_id
 
 
@@ -171,20 +200,10 @@ def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
     logger.info("Subscription deleted: %s", subscription["id"])
     sb = ensure_supabase()
 
-    # First verify the subscription exists and get account_id for audit trail
-    sub_result = (
-        sb.table("subscriptions")
-        .select("account_id")
-        .eq("stripe_subscription_id", subscription["id"])
-        .single()
-        .execute()
-    )
-
-    if not sub_result.data:
-        logger.warning(f"Webhook received for unknown subscription: {subscription['id']}")
-        return False, None
-
-    account_id = sub_result.data["account_id"]
+    account_id = _account_id_for_stripe_subscription(sb, subscription["id"])
+    if account_id is None:
+        logger.info("Ignoring deletion of Stripe subscription %s that no account uses", subscription["id"])
+        return True, None
 
     # Update subscription status to cancelled with tenant validation
     sb.table("subscriptions").update(
@@ -201,6 +220,52 @@ def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
     return True, account_id
 
 
+def _invoice_subscription_id(invoice: dict) -> str | None:
+    """Return the Stripe subscription an invoice bills, or None for a one-off invoice.
+
+    Since Stripe API version 2025-03-31.basil the subscription lives under ``parent.subscription_details``;
+    the top-level ``invoice.subscription`` field no longer exists.
+    """
+    details = (invoice.get("parent") or {}).get("subscription_details") or {}
+    return details.get("subscription")
+
+
+def payment_row(sb: Any, invoice: dict) -> dict[str, Any] | None:
+    """Build the ``payments`` row for a paid invoice, or None for a one-off invoice or one no account owns.
+
+    Shared by the ``invoice.payment_succeeded`` webhook and ``backend.scripts.backfill_payments``.
+    """
+    # Skip if no subscription (one-time payments)
+    subscription_id = _invoice_subscription_id(invoice)
+    if not subscription_id:
+        return None
+
+    # Get account from customer, falling back to the account bound to the subscription
+    customer_id = invoice["customer"]
+    accounts = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).limit(1).execute().data
+    account_id = accounts[0]["id"] if accounts else _account_id_for_stripe_subscription(sb, subscription_id)
+    if account_id is None:
+        logger.warning("No account found for customer %s in payment %s", customer_id, invoice["id"])
+        return None
+
+    paid_at = (invoice.get("status_transitions") or {}).get("paid_at") or invoice["created"]
+    return {
+        "invoice_id": invoice["id"],
+        "subscription_id": subscription_id,
+        "customer_id": customer_id,
+        "account_id": account_id,  # Tenant isolation
+        "amount": invoice["amount_paid"] / 100,
+        "currency": invoice["currency"],
+        "status": "succeeded",
+        "created_at": timestamp_to_iso(paid_at),
+    }
+
+
+def upsert_payment(sb: Any, row: dict[str, Any]) -> None:
+    """Write a payment row; upserting on ``invoice_id`` keeps one row per invoice however often it is written."""
+    sb.table("payments").upsert(row, on_conflict="invoice_id").execute()
+
+
 def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
     """Handle successful Stripe payment events.
 
@@ -209,68 +274,12 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
 
     """
     logger.info("Payment succeeded: %s", invoice["id"])
-
-    # Skip if no subscription (one-time payments)
-    if not invoice.get("subscription"):
-        return False, None
-
     sb = ensure_supabase()
-
-    # Get account from customer
-    customer_id = invoice["customer"]
-    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
-
-    if not account_result.data:
-        logger.warning(f"No account found for customer_id: {customer_id} in payment")
-        # Try to get account_id from subscription if available
-        if invoice.get("subscription"):
-            sub_result = (
-                sb.table("subscriptions")
-                .select("account_id")
-                .eq("stripe_subscription_id", invoice["subscription"])
-                .single()
-                .execute()
-            )
-            if sub_result.data:
-                account_id = sub_result.data["account_id"]
-            else:
-                return False, None
-        else:
-            return False, None
-    else:
-        account_id = account_result.data["id"]
-
-    # Record the payment in both tables for compatibility
-    # First, record in payments table with tenant isolation
-    sb.table("payments").insert(
-        {
-            "invoice_id": invoice["id"],
-            "subscription_id": invoice["subscription"],
-            "customer_id": customer_id,
-            "account_id": account_id,  # Add account_id for tenant isolation
-            "amount": invoice["amount_paid"] / 100,
-            "currency": invoice["currency"],
-            "status": "succeeded",
-        }
-    ).execute()
-
-    # Also record in usage table for metrics
-    sb.table("usage").insert(
-        {
-            "account_id": account_id,
-            "metric_type": "payment",
-            "metric_value": invoice["amount_paid"] / 100,  # Convert from cents
-            "metadata": {
-                "invoice_id": invoice["id"],
-                "subscription_id": invoice["subscription"],
-                "currency": invoice["currency"],
-                "billing_reason": invoice.get("billing_reason", "subscription_cycle"),
-            },
-            "timestamp": _timestamp_to_iso(invoice["created"]),
-        }
-    ).execute()
-
-    return True, account_id
+    row = payment_row(sb, invoice)
+    if row is None:
+        return False, None
+    upsert_payment(sb, row)
+    return True, row["account_id"]
 
 
 def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
@@ -283,33 +292,25 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
     logger.info("Payment failed: %s", invoice["id"])
 
     # Skip if no subscription
-    if not invoice.get("subscription"):
+    subscription_id = _invoice_subscription_id(invoice)
+    if not subscription_id:
         return False, None
 
     sb = ensure_supabase()
 
-    # Get account_id for tenant association
-    sub_result = (
-        sb.table("subscriptions")
-        .select("account_id")
-        .eq("stripe_subscription_id", invoice["subscription"])
-        .single()
-        .execute()
-    )
+    account_id = _account_id_for_stripe_subscription(sb, subscription_id)
+    if account_id is None:
+        logger.info("Ignoring payment failure for Stripe subscription %s that no account uses", subscription_id)
+        return True, None
 
-    if not sub_result.data:
-        logger.warning(f"No subscription found for payment failure: {invoice['subscription']}")
-        return False, None
-
-    account_id = sub_result.data["account_id"]
-
-    # Update subscription status to past_due
-    sb.table("subscriptions").update({"status": "past_due", "updated_at": datetime.now(UTC).isoformat()}).eq(
-        "stripe_subscription_id", invoice["subscription"]
-    ).eq(
+    # Only an active subscription becomes past_due; past_due keeps the instance running, so a failed
+    # first payment (incomplete) or a late event for a cancelled subscription must not reach it.
+    sb.table("subscriptions").update(
+        {"status": subscription_status(sb, "past_due", subscription_id), "updated_at": datetime.now(UTC).isoformat()}
+    ).eq("stripe_subscription_id", subscription_id).eq(
         "account_id",
         account_id,  # Tenant validation
-    ).execute()
+    ).eq("status", "active").execute()
 
     return True, account_id
 
@@ -317,9 +318,16 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
 @router.post("/webhooks/stripe", response_model=WebhookResponse)
 @limiter.limit("20/minute")
 async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
-    request: Request, stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None
+    request: Request,
+    background_tasks: BackgroundTasks,
+    stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
 ) -> dict[str, Any]:
     """Handle incoming Stripe webhook events."""
+    # An empty secret makes the HMAC signature forgeable, so refuse every event.
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.error("STRIPE_WEBHOOK_SECRET is not configured; rejecting Stripe webhook")
+        raise HTTPException(status_code=503, detail="Webhook not configured")
+
     if not stripe_signature:
         raise HTTPException(status_code=400, detail="Missing signature")
 
@@ -380,7 +388,14 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
                 acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
                 if acc_result.data:
                     account_id = acc_result.data["id"]
+    except PermanentEventError as e:
+        logger.exception("Webhook %s can never be applied; recording it", event.id)
+        error_msg = str(e)
     except Exception as e:
+        if event.type in _REDELIVERED_EVENT_TYPES:
+            # Not recorded as processed, so Stripe redelivers it and the idempotent handler runs again.
+            logger.exception("Webhook %s failed; asking Stripe to redeliver", event.id)
+            raise HTTPException(status_code=500, detail="Failed to process event") from e
         logger.exception("Error processing webhook")
         error_msg = str(e)
 
@@ -404,6 +419,10 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
         sb.table("webhook_events").insert(webhook_record).execute()
     except Exception:
         logger.exception("Failed to record webhook event")
+
+    # Stop, start, or reprovision instances after the response so Kubernetes trouble never fails the webhook.
+    if account_id and event.type in _LIFECYCLE_EVENT_TYPES:
+        background_tasks.add_task(reconcile_account_instances, account_id)
 
     if error_msg:
         return {"received": True, "error": error_msg}

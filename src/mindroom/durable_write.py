@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from pathlib import Path
+from stat import S_IMODE
 from tempfile import NamedTemporaryFile
+from threading import Lock
 from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import safe_replace
@@ -15,6 +18,55 @@ if TYPE_CHECKING:
 
 type OverrideRecord = dict[str, str]
 _override_load_cache: dict[Path, tuple[int, dict[str, OverrideRecord]]] = {}
+_MAX_DURABLE_DIRECTORY_IDENTITIES = 4096
+_DIRECTORY_FSYNC_SUPPORTED = os.name != "nt"
+_durable_directory_identities: OrderedDict[Path, tuple[int, int]] = OrderedDict()
+_durable_directory_identities_lock = Lock()
+
+
+def create_directory_durable(path: Path, *, mode: int) -> None:
+    """Create one directory and durably publish it when directory fsync is available."""
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    stat = _apply_directory_mode(path, mode)
+    identity = (stat.st_dev, stat.st_ino)
+    with _durable_directory_identities_lock:
+        if _durable_directory_identities.get(path) == identity:
+            _durable_directory_identities.move_to_end(path)
+            return
+    fsync_directory_durable(path)
+    fsync_directory_durable(path.parent)
+    with _durable_directory_identities_lock:
+        _durable_directory_identities[path] = identity
+        _durable_directory_identities.move_to_end(path)
+        if len(_durable_directory_identities) > _MAX_DURABLE_DIRECTORY_IDENTITIES:
+            _durable_directory_identities.popitem(last=False)
+
+
+def _apply_directory_mode(path: Path, mode: int) -> os.stat_result:
+    """Apply one directory mode without following a link that replaced the directory.
+
+    Directories under worker-mounted roots can be swapped for links by worker code, so the
+    mode is read and set through a descriptor that refuses a link at the final component.
+    A directory already at the mode is left alone, so a reader of a read-only mount is not
+    forced to write.
+    """
+    if not _DIRECTORY_FSYNC_SUPPORTED:
+        path.chmod(mode)
+        return path.stat()
+    directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        directory_stat = os.fstat(directory_fd)
+        if S_IMODE(directory_stat.st_mode) != mode:
+            os.fchmod(directory_fd, mode)
+        return directory_stat
+    finally:
+        os.close(directory_fd)
+
+
+def _replace_file_durable(source: Path, target: Path) -> None:
+    """Atomically replace one file and durably publish it when directory fsync is available."""
+    source.replace(target)
+    fsync_directory_durable(target.parent)
 
 
 def write_json_file_durable(
@@ -49,10 +101,10 @@ def write_json_file_durable(
             temp_file.flush()
             os.fsync(temp_file.fileno())
         if strict_atomic_replace:
-            temp_path.replace(path)
+            _replace_file_durable(temp_path, path)
         else:
             safe_replace(temp_path, path)
-        _fsync_directory(path.parent)
+            _fsync_directory(path.parent)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
@@ -120,5 +172,17 @@ def _fsync_directory(directory: Path) -> None:
             os.fsync(directory_fd)
         except OSError:
             return
+    finally:
+        os.close(directory_fd)
+
+
+def fsync_directory_durable(directory: Path) -> None:
+    """Flush one supported directory update and propagate durability failures."""
+    if not _DIRECTORY_FSYNC_SUPPORTED:
+        return
+    # O_DIRECTORY fails fast on a FIFO swapped in at the name instead of blocking the open.
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
     finally:
         os.close(directory_fd)

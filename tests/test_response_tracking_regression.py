@@ -28,6 +28,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_journal_support,
     install_send_response_mock,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
@@ -57,7 +58,7 @@ def mock_config() -> Config:
             },
             teams={},
             room_models={},
-            models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-haiku-4-5")},
         ),
         runtime_paths,
     )
@@ -90,7 +91,7 @@ class TestResponseTrackingRegression:
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
         bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
@@ -263,7 +264,7 @@ class TestResponseTrackingRegression:
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
         bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 

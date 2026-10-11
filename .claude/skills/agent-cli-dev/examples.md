@@ -1,12 +1,12 @@
 # Examples: Parallel Agent Workflows
 
-Real-world scenarios for spawning parallel AI coding agents, optimized for Claude 4.5 models.
+Real-world scenarios for spawning parallel AI coding agents, optimized for Claude 5 models.
 
 > **Note on prompts**: The examples below show prompt content inline for readability. In practice, **always use `--prompt-file`** for these multi-line prompts to avoid shell quoting issues:
 >
 > ```bash
 > # Write prompt to file, then spawn
-> agent-cli dev new my-feature --agent --prompt-file .claude/spawn-prompt.md
+> agent-cli dev new my-feature --agent claude --prompt-file .claude/spawn-prompt.md
 > ```
 
 ## Prompt structure guidelines
@@ -27,7 +27,7 @@ Each prompt for a spawned agent should follow this structure:
 **Strategy**: Three independent features → spawn three agents.
 
 ```bash
-agent-cli dev new auth-feature --agent --prompt "Implement JWT-based user authentication.
+agent-cli dev new auth-feature --agent claude --prompt "Implement JWT-based user authentication.
 
 <workflow>
 - Read multiple files in parallel when exploring the codebase
@@ -80,7 +80,7 @@ How to verify the implementation works
 Any items needing review
 </report>"
 
-agent-cli dev new payment-integration --agent --prompt "Integrate Stripe payment processing.
+agent-cli dev new payment-integration --agent claude --prompt "Integrate Stripe payment processing.
 
 <workflow>
 - Read multiple files in parallel when exploring the codebase
@@ -131,7 +131,7 @@ After verifying tests pass, write to .claude/REPORT.md:
 [Any items for review]
 </report>"
 
-agent-cli dev new email-notifications --agent --prompt "Implement email notification system.
+agent-cli dev new email-notifications --agent claude --prompt "Implement email notification system.
 
 <workflow>
 - Read multiple files in parallel when exploring the codebase
@@ -176,7 +176,7 @@ After verifying tests pass, write to .claude/REPORT.md with summary, files chang
 **Strategy**: One agent writes tests first, another implements.
 
 ```bash
-agent-cli dev new cache-tests --agent --prompt "Write comprehensive tests for a caching layer.
+agent-cli dev new cache-tests --agent claude --prompt "Write comprehensive tests for a caching layer.
 
 <task>
 Create a complete test suite that drives the implementation of a caching system. The tests define the interface - write them as if the implementation already exists.
@@ -242,7 +242,7 @@ When complete, write to .claude/REPORT.md:
 After reviewing the tests:
 
 ```bash
-agent-cli dev new cache-impl --from cache-tests --agent --prompt "Implement the caching layer to pass existing tests.
+agent-cli dev new cache-impl --from cache-tests --agent claude --prompt "Implement the caching layer to pass existing tests.
 
 <workflow>
 - Read all test files first to understand the complete interface
@@ -296,7 +296,7 @@ After ALL tests pass, write to .claude/REPORT.md:
 **Strategy**: Split by module, each agent handles one area.
 
 ```bash
-agent-cli dev new refactor-users-errors --agent --prompt "Refactor error handling in the users module.
+agent-cli dev new refactor-users-errors --agent claude --prompt "Refactor error handling in the users module.
 
 <workflow>
 - Read all relevant files in parallel before making any changes
@@ -364,7 +364,7 @@ After tests pass and linting is clean, write to .claude/REPORT.md:
 **Strategy**: One agent implements, another writes docs simultaneously.
 
 ```bash
-agent-cli dev new plugin-system --agent --prompt "Implement a plugin system.
+agent-cli dev new plugin-system --agent claude --prompt "Implement a plugin system.
 
 <workflow>
 - Read existing codebase structure in parallel before designing
@@ -419,7 +419,7 @@ class Plugin:
 [How to create and register a plugin]
 </report>"
 
-agent-cli dev new plugin-docs --agent --prompt "Write documentation for the plugin system.
+agent-cli dev new plugin-docs --agent claude --prompt "Write documentation for the plugin system.
 
 <context>
 Implementation is happening in parallel in another branch. Write documentation based on a standard plugin system design. The implementation agent will adapt if needed, or you can update docs after reviewing their work.
@@ -472,15 +472,15 @@ After agents complete their work:
 agent-cli dev status
 
 # Read reports from each agent
-agent-cli dev run auth-feature cat .claude/REPORT.md
-agent-cli dev run payment-integration cat .claude/REPORT.md
-agent-cli dev run email-notifications cat .claude/REPORT.md
+agent-cli dev run auth-feature -- cat .claude/REPORT.md
+agent-cli dev run payment-integration -- cat .claude/REPORT.md
+agent-cli dev run email-notifications -- cat .claude/REPORT.md
 
 # Open a worktree to review code
 agent-cli dev editor auth-feature
 
 # Run tests in a worktree
-agent-cli dev run cache-impl pytest tests/test_cache.py -v
+agent-cli dev run cache-impl -- uv run pytest tests/test_cache.py -v
 
 # Clean up after merging
 agent-cli dev clean --merged

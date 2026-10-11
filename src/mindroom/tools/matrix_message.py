@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -19,18 +20,18 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="matrix_message",
     display_name="Matrix Message",
-    description=(
-        "Send, reply, react, read, room-threads, thread-list, and edit Matrix messages with room/thread context defaults"
-    ),
+    description="Read, send, edit, and react to messages in Matrix rooms and threads",
     category=ToolCategory.COMMUNICATION,
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="MessageSquare",
     icon_color="text-green-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
     function_names=("matrix_message",),
-    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
 )
 def matrix_message_tools() -> type[MatrixMessageTools]:
     """Return native Matrix messaging tools."""

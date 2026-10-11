@@ -23,6 +23,7 @@ REFERENCES_DIR = SKILL_DIR / "references"
 CACHE_PATH = REPO_ROOT / ".cache" / "mindroom-docs-skill-references.sha256"
 _MARKDOWN_LINK_TARGET_PATTERN = re.compile(r"(!?\[[^\]\n]+\]\()([^)]+)(\))")
 _FENCE_PATTERN = re.compile(r"^\s*([`~]{3,})")
+_ANCHOR_TAG_PATTERN = re.compile(r'<a id="[^"]+"></a>')
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class NavPage:
     title: str
     source_path: str
     built_path: str
+    section: tuple[str, ...] = ()
 
 
 def _source_to_built_path(source_path: str) -> str:
@@ -44,7 +46,7 @@ def _source_to_built_path(source_path: str) -> str:
     return f"{stem}/index.md" if parent == "." else f"{parent}/{stem}/index.md"
 
 
-def _collect_nav_pages(items: list[Any], pages: list[NavPage]) -> None:
+def _collect_nav_pages(items: list[Any], pages: list[NavPage], section: tuple[str, ...] = ()) -> None:
     for item in items:
         assert isinstance(item, dict), "Expected each project.nav entry to be a table in zensical.toml"
         for title, value in item.items():
@@ -54,11 +56,12 @@ def _collect_nav_pages(items: list[Any], pages: list[NavPage]) -> None:
                         title=str(title),
                         source_path=value,
                         built_path=_source_to_built_path(value),
+                        section=section,
                     ),
                 )
                 continue
             assert isinstance(value, list), f"Expected nested nav list for {title!r} in zensical.toml"
-            _collect_nav_pages(value, pages)
+            _collect_nav_pages(value, pages, (*section, str(title)))
 
 
 def _load_project_and_nav() -> tuple[dict[str, Any], list[NavPage]]:
@@ -90,6 +93,13 @@ def _cache_key() -> str:
     return f"{_digest_paths(inputs)}\n{_digest_paths(references)}"
 
 
+def _is_redirect_stub(path: Path) -> bool:
+    """Return whether a docs page is a body-less redirect stub rendered by Zensical's redirect template."""
+    text = path.read_text(encoding="utf-8")
+    front, separator, _ = text.removeprefix("---\n").partition("\n---\n")
+    return text.startswith("---\n") and bool(separator) and "template: redirect.html" in front.splitlines()
+
+
 def _mkdocs_config(project: dict[str, Any], nav_pages: list[NavPage], site_dir: Path) -> dict[str, Any]:
     site_name = str(project.get("site_name", "MindRoom"))
     site_description = str(project.get("site_description", "MindRoom documentation"))
@@ -97,7 +107,12 @@ def _mkdocs_config(project: dict[str, Any], nav_pages: list[NavPage], site_dir: 
     nav = project.get("nav", [])
     assert isinstance(nav, list), "Expected project.nav to be a list in zensical.toml"
 
+    redirect_stubs = sorted(
+        path.relative_to(DOCS_DIR).as_posix() for path in DOCS_DIR.rglob("*.md") if _is_redirect_stub(path)
+    )
     return {
+        # MkDocs has no redirect.html template, and stubs carry no content worth indexing.
+        "exclude_docs": "\n".join(redirect_stubs),
         "site_name": site_name,
         "site_description": site_description,
         "site_url": site_url,
@@ -235,7 +250,7 @@ def _rewrite_source_links(text: str, source_path: str, site_url: str) -> str:
         if active_fence is not None:
             lines.append(line)
             continue
-        lines.append(_MARKDOWN_LINK_TARGET_PATTERN.sub(replace_match, line))
+        lines.append(_MARKDOWN_LINK_TARGET_PATTERN.sub(replace_match, _ANCHOR_TAG_PATTERN.sub("", line)))
 
     return "".join(lines)
 
@@ -281,15 +296,15 @@ def _write_reference_index(nav_pages: list[NavPage], built_to_reference: dict[st
         "",
         "## Page references",
         "",
-        "| Title | Source page | Built markdown | Reference file |",
-        "| --- | --- | --- | --- |",
+        "| Section | Title | Source page | Built markdown | Reference file |",
+        "| --- | --- | --- | --- | --- |",
     ]
 
     for page in nav_pages:
         reference_name = built_to_reference.get(page.built_path)
         assert reference_name is not None, f"Missing built page for nav source {page.source_path!r}"
         lines.append(
-            f"| {page.title} | `{page.source_path}` | `{page.built_path}` | `{reference_name}` |",
+            f"| {' > '.join(page.section)} | {page.title} | `{page.source_path}` | `{page.built_path}` | `{reference_name}` |",
         )
 
     (REFERENCES_DIR / "reference-index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

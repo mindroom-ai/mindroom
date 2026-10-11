@@ -6,15 +6,13 @@ import asyncio
 import inspect
 import threading
 import time
-from contextvars import copy_context
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass
-from functools import wraps
-from typing import TYPE_CHECKING, Any, cast
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
-
-from agno.tools.function import FunctionCall
 
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
@@ -28,6 +26,8 @@ from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
+from mindroom.tool_system import agno_compat_tool_hooks
+from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -39,21 +39,25 @@ from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure,
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Iterator
+    from concurrent.futures import Executor
 
     from agno.tools import Toolkit
     from agno.tools.function import Function
 
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import (
         HookMatrixAdmin,
         HookMessageSender,
         HookRegistry,
+        HookRegistryState,
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
     "Tool: {tool_name}\n"
@@ -62,14 +66,89 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 _ToolHookResult = Any
-# Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
-# deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
-# in uv.lock, and drop them once upstream supports this as public API.
-_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
-_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_chain
-_AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
-_AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = False
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundToolApprovalDenied:
+    """Typed background result that the broker publishes as a terminal denial."""
+
+    reason: str
+
+
+class _ToolApprovalGate(Protocol):
+    """Approval callback inserted between before-call hooks and the tool body."""
+
+    async def __call__(
+        self,
+        origin: BackgroundScriptToolOrigin,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolApprovalDecision:
+        """Return the terminal decision for one typed automation origin."""
+        ...
+
+
 logger = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class SyncToolCompletionTracker:
+    """Expose one context-bound synchronous leaf task to its resource owner.
+
+    ``executor`` runs the entrypoint; ``None`` uses the event loop's default executor.
+    An owner that supplies an executor also runs and retains the blocking call an async
+    entrypoint offloads, such as a worker proxy request, so its capacity covers that thread.
+    """
+
+    executor: Executor | None = None
+    task: asyncio.Task[_ToolHookResult] | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _started: bool = field(default=False, init=False, repr=False)
+    _cancelled_before_start: bool = field(default=False, init=False, repr=False)
+
+    def track(self, task: asyncio.Task[_ToolHookResult]) -> None:
+        """Record the one real synchronous entrypoint started in this call."""
+        if self.task is not None:
+            msg = "A tool call cannot start more than one synchronous entrypoint."
+            raise RuntimeError(msg)
+        self.task = task
+
+    def _claim_start(self) -> bool:
+        """Atomically claim actual entrypoint start against request cancellation."""
+        with self._lock:
+            if self._cancelled_before_start:
+                return False
+            self._started = True
+            return True
+
+    def _cancel_before_start(self) -> bool:
+        """Return whether cancellation won before the entrypoint began."""
+        with self._lock:
+            if self._started:
+                return False
+            self._cancelled_before_start = True
+            return True
+
+    def started_task(self) -> asyncio.Task[_ToolHookResult] | None:
+        """Return the completion task only after the real entrypoint has begun."""
+        with self._lock:
+            return self.task if self._started else None
+
+
+_SYNC_TOOL_COMPLETION_TRACKER: ContextVar[SyncToolCompletionTracker | None] = ContextVar(
+    "mindroom_sync_tool_completion_tracker",
+    default=None,
+)
+
+
+@contextmanager
+def track_sync_tool_completion(tracker: SyncToolCompletionTracker) -> Iterator[None]:
+    """Bind synchronous leaf completion ownership to one tool call."""
+    token = _SYNC_TOOL_COMPLETION_TRACKER.set(tracker)
+    try:
+        yield
+    finally:
+        _SYNC_TOOL_COMPLETION_TRACKER.reset(token)
 
 
 @dataclass(slots=True)
@@ -96,6 +175,8 @@ class _ResolvedToolContext:
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
+    hook_registry_state: HookRegistryState | None
+    origin: BackgroundScriptToolOrigin | None
 
     def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -113,6 +194,7 @@ class _ResolvedToolContext:
             "room_state_querier": self.room_state_querier,
             "room_state_putter": self.room_state_putter,
             "message_received_depth": self.message_received_depth,
+            "_hook_registry_state": self.hook_registry_state,
         }
 
 
@@ -124,9 +206,15 @@ class _ToolHookBridgeContext:
     config: Config | None
     runtime_paths: RuntimePaths | None
     dispatch_context: ToolDispatchContext | None
+    origin: BackgroundScriptToolOrigin | None
 
 
-def _correlation_id_for_runtime_context(runtime_context: ToolRuntimeContext | None) -> str:
+def _correlation_id_for_runtime_context(
+    runtime_context: ToolRuntimeContext | None,
+    origin: BackgroundScriptToolOrigin | None,
+) -> str:
+    if origin is not None:
+        return f"background-script:{origin.run_id}:{origin.call_id}"
     if runtime_context is not None and runtime_context.correlation_id:
         return runtime_context.correlation_id
     request_context = current_llm_request_log_context()
@@ -182,12 +270,14 @@ def _resolve_tool_context(
             channel=dispatch_context.execution_identity.channel,
             config=runtime_context.config,
             runtime_paths=resolved_runtime_paths,
-            correlation_id=_correlation_id_for_runtime_context(runtime_context),
+            correlation_id=_correlation_id_for_runtime_context(runtime_context, bridge_context.origin),
             message_sender=bindings.message_sender,
             matrix_admin=bindings.matrix_admin,
             room_state_querier=bindings.room_state_querier,
             room_state_putter=bindings.room_state_putter,
             message_received_depth=bindings.message_received_depth,
+            hook_registry_state=runtime_context.hook_registry_state,
+            origin=bridge_context.origin,
         )
 
     if dispatch_context is not None:
@@ -205,12 +295,14 @@ def _resolve_tool_context(
             channel=dispatch_context.execution_identity.channel,
             config=bridge_context.config,
             runtime_paths=resolved_runtime_paths,
-            correlation_id=_correlation_id_for_runtime_context(None),
+            correlation_id=_correlation_id_for_runtime_context(None, bridge_context.origin),
             message_sender=None,
             matrix_admin=None,
             room_state_querier=None,
             room_state_putter=None,
             message_received_depth=0,
+            hook_registry_state=None,
+            origin=bridge_context.origin,
         )
 
     request_context = current_llm_request_log_context()
@@ -225,12 +317,14 @@ def _resolve_tool_context(
         channel=None,
         config=bridge_context.config,
         runtime_paths=bridge_context.runtime_paths,
-        correlation_id=_correlation_id_for_runtime_context(None),
+        correlation_id=_correlation_id_for_runtime_context(None, bridge_context.origin),
         message_sender=None,
         matrix_admin=None,
         room_state_querier=None,
         room_state_putter=None,
         message_received_depth=0,
+        hook_registry_state=None,
+        origin=bridge_context.origin,
     )
 
 
@@ -266,6 +360,7 @@ def _record_debug_tool_success(
         correlation_id=resolved_context.correlation_id,
         execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
         runtime_paths=resolved_context.runtime_paths,
+        origin=resolved_context.origin,
     )
 
 
@@ -331,59 +426,56 @@ def _resolve_deferred_sync_result(result: _ToolHookResult) -> _ToolHookResult:
     return result
 
 
-def _patch_agno_sync_tool_hook_chain() -> None:
-    """Teach Agno's sync tool hook chain to unwrap deferred async bridge results."""
-    global _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED
+async def run_sync_tool_entrypoint(
+    entrypoint: Callable[..., _ToolHookResult],
+    arguments: dict[str, Any],
+) -> _ToolHookResult:
+    """Run one synchronous tool entrypoint off the event loop, retained by any completion owner."""
+    tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
 
-    if _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED:
-        return
+    def invoke() -> _ToolHookResult:
+        if tracker is not None and not tracker._claim_start():
+            raise asyncio.CancelledError
+        return entrypoint(**arguments)
 
-    @wraps(_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN)
-    def _patched_build_nested_execution_chain(
-        self: FunctionCall,
-        entrypoint_args: dict[str, Any],
-    ) -> Callable[..., _ToolHookResult]:
-        execution_chain = _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN(self, entrypoint_args)
+    async def offload() -> _ToolHookResult:
+        executor = tracker.executor if tracker is not None else None
+        return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, invoke)
 
-        def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
-            return _resolve_deferred_sync_result(execution_chain(name, func, args))
-
-        return _wrapped_execution_chain
-
-    type.__setattr__(FunctionCall, "_build_nested_execution_chain", _patched_build_nested_execution_chain)
-    _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = True
-
-
-def _patch_agno_async_tool_hook_chain() -> None:
-    """Teach Agno's async tool hook chain to unwrap deferred sync-hook awaitables."""
-    global _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED
-
-    if _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED:
-        return
-
-    @wraps(_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC)
-    async def _patched_build_nested_execution_chain_async(
-        self: FunctionCall,
-        entrypoint_args: dict[str, Any],
-    ) -> Callable[..., Awaitable[_ToolHookResult]]:
-        execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(self, entrypoint_args)
-
-        async def _wrapped_execution_chain(
-            name: str,
-            func: Callable[..., Any],
-            args: dict[str, Any],
-        ) -> _ToolHookResult:
-            result = await execution_chain(name, func, args)
-            return await _resolve_async_tool_hook_result(result)
-
-        return _wrapped_execution_chain
-
-    type.__setattr__(FunctionCall, "_build_nested_execution_chain_async", _patched_build_nested_execution_chain_async)
-    _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = True
+    task = asyncio.create_task(offload(), name="sync-tool-entrypoint")
+    if tracker is None:
+        return await task
+    tracker.track(task)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if tracker._cancel_before_start():
+            task.cancel()
+        raise
 
 
-_patch_agno_sync_tool_hook_chain()
-_patch_agno_async_tool_hook_chain()
+async def run_async_entrypoint_blocking_call(
+    call: Callable[[], _ToolHookResult],
+    *,
+    executor: Executor,
+) -> _ToolHookResult:
+    """Run one blocking call that an async entrypoint offloads to ``executor``.
+
+    A completion owner with its own executor runs and retains the call there like a synchronous
+    entrypoint; other callers keep prompt cancellation and leave the thread to finish alone.
+    """
+    tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
+    if tracker is None or tracker.executor is None:
+        return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, call)
+    return await run_sync_tool_entrypoint(call, {})
+
+
+agno_compat_tool_hooks.install_patch(
+    resolve_sync_result=_resolve_deferred_sync_result,
+    resolve_async_result=_resolve_async_tool_hook_result,
+    run_sync_entrypoint=run_sync_tool_entrypoint,
+    has_completion_tracker=lambda: _SYNC_TOOL_COMPLETION_TRACKER.get() is not None,
+)
 
 
 async def _call_tool(
@@ -404,9 +496,31 @@ async def _call_tool(
     if async_entrypoint:
         result = await func(**args)
     else:
-        result = await asyncio.to_thread(func, **args)
+        result = await run_sync_tool_entrypoint(func, args)
     if inspect.isawaitable(result):
         return await result
+    return result
+
+
+async def _call_recorded_tool(
+    func: Callable[..., Any],
+    args: dict[str, Any],
+    *,
+    tool_name: str,
+    agent_name: str | None,
+) -> _ToolHookResult:
+    """Run the tool, first recording the call where the work that makes it keeps its durable state."""
+    recorder = tool_call_recorder()
+    call_id = None if recorder is None else await recorder.started(tool_name, args)
+    if recorder is None or call_id is None:
+        return await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
+    try:
+        result = await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
+    except Exception as exc:
+        # It ran and failed. A cancelled call stays started, since it may have taken effect.
+        await recorder.finished(call_id, tool_name, args, exc)
+        raise
+    await recorder.finished(call_id, tool_name, args, result)
     return result
 
 
@@ -609,6 +723,8 @@ async def _execute_bridge(
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
+    origin: BackgroundScriptToolOrigin | None,
+    approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
     timing = _ToolBridgeTiming(started_at=started_at)
@@ -618,6 +734,7 @@ async def _execute_bridge(
         config=config,
         runtime_paths=runtime_paths,
         dispatch_context=effective_dispatch_context,
+        origin=origin,
     )
     resolved_context = _resolve_tool_context(
         bridge_context=bridge_context,
@@ -655,11 +772,31 @@ async def _execute_bridge(
             outcome="blocked_before_hooks",
         )
 
+    if origin is not None and approval_gate is not None:
+        decision = await approval_gate(origin, tool_name, deepcopy(args))
+        if not decision.approved:
+            reason = decision.reason or "The bound requester declined this background tool call."
+            await _finish_blocked_tool_call(
+                timing=timing,
+                hook_registry=hook_registry,
+                resolved_context=resolved_context,
+                hook_arguments=hook_arguments,
+                args=args,
+                tool_name=tool_name,
+                blocked_result=_format_declined_result(
+                    tool_name,
+                    reason,
+                ),
+                has_after_hooks=has_after_hooks,
+                outcome="blocked_approval",
+            )
+            return BackgroundToolApprovalDenied(reason=reason)
+
     result: _ToolHookResult = None
     error: BaseException | None = None
     tool_body_started_at = time.perf_counter()
     try:
-        result = await _call_tool(
+        result = await _call_recorded_tool(
             func,
             args,
             tool_name=tool_name,
@@ -720,6 +857,7 @@ async def _execute_bridge(
                     effective_dispatch_context.execution_identity if effective_dispatch_context is not None else None
                 ),
                 runtime_paths=resolved_context.runtime_paths,
+                origin=resolved_context.origin,
             )
         except Exception:
             logger.exception(
@@ -789,12 +927,70 @@ async def _execute_bridge(
     return result
 
 
+async def dispatch_external_tool_hooks(
+    *,
+    hook_registry: HookRegistry,
+    execution_identity: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_name: str,
+    arguments: dict[str, Any],
+    before: bool,
+    result: object = None,
+    error: BaseException | None = None,
+    blocked: bool = False,
+    duration_ms: float = 0,
+) -> str | None:
+    """Dispatch one phase of a durable external tool through the ordinary hook policy."""
+    dispatch = _explicit_bridge_dispatch_context(ToolDispatchContext(execution_identity=execution_identity))
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is not None and execution_identity_matches_tool_runtime_context(
+        replace(execution_identity, agent_name=runtime_context.agent_name),
+        runtime_context,
+    ):
+        # Team members share the live turn's bindings but retain their own hook identity.
+        dispatch = LiveToolDispatchContext.from_runtime_context(runtime_context)
+    resolved = _resolve_tool_context(
+        bridge_context=_ToolHookBridgeContext(
+            agent_name=execution_identity.agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            dispatch_context=dispatch,
+            origin=None,
+        ),
+    )
+    if before:
+        return await _maybe_block_for_before_hooks(
+            hook_registry=hook_registry,
+            resolved_context=resolved,
+            hook_arguments=None,
+            args=arguments,
+            tool_name=tool_name,
+            has_before_hooks=hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL),
+        )
+    if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
+        await _emit_after_call(
+            hook_registry=hook_registry,
+            resolved_context=resolved,
+            hook_arguments=None,
+            args=arguments,
+            tool_name=tool_name,
+            result=result,
+            error=error,
+            blocked=blocked,
+            duration_ms=duration_ms,
+        )
+    return None
+
+
 def build_tool_hook_bridge(
     hook_registry: HookRegistry,
     agent_name: str | None,
     dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
+    origin: BackgroundScriptToolOrigin | None = None,
+    approval_gate: _ToolApprovalGate | None = None,
 ) -> Callable[..., Any]:
     """Return one Agno-compatible tool hook bridge."""
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
@@ -812,6 +1008,8 @@ def build_tool_hook_bridge(
             runtime_paths=runtime_paths,
             has_before_hooks=has_before_hooks,
             has_after_hooks=has_after_hooks,
+            origin=origin,
+            approval_gate=approval_gate,
         )
 
     def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
@@ -828,6 +1026,8 @@ def build_tool_hook_bridge(
                     runtime_paths=runtime_paths,
                     has_before_hooks=has_before_hooks,
                     has_after_hooks=has_after_hooks,
+                    origin=origin,
+                    approval_gate=approval_gate,
                 ),
             )
         return _run_coroutine_from_sync(
@@ -842,6 +1042,8 @@ def build_tool_hook_bridge(
                 runtime_paths=runtime_paths,
                 has_before_hooks=has_before_hooks,
                 has_after_hooks=has_after_hooks,
+                origin=origin,
+                approval_gate=approval_gate,
             ),
         )
 
@@ -862,11 +1064,12 @@ def prepend_tool_hook_bridge(
         if id(function) in seen_functions:
             continue
         seen_functions.add(id(function))
-        _prepend_function_tool_hook(function, bridge)
+        prepend_function_tool_hook(function, bridge)
     return toolkit
 
 
-def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) -> None:
+def prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) -> None:
+    """Prepend one bridge hook to one function, preserving its existing hooks."""
     sync_bridge = _SYNC_BRIDGES.get(bridge)
     bridge_hooks = [sync_bridge if sync_bridge is not None else bridge]
 

@@ -9,6 +9,7 @@ is NOT added to ``TOOL_REGISTRY`` (no generic factory).
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -17,8 +18,9 @@ from mindroom.tool_system.registration import register_builtin_tool_metadata
 register_builtin_tool_metadata(
     ToolMetadata(
         name="delegate",
-        display_name="Agent Delegation",
-        description="Delegate tasks to other configured agents",
+        file_access=ToolFileAccess.NONE,
+        display_name="Subagents",
+        description="Start allowed subagents, continue their conversations, and return their results",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
@@ -26,6 +28,6 @@ register_builtin_tool_metadata(
         icon_color="text-blue-500",
         config_fields=[],
         dependencies=[],
-        function_names=("delegate_task",),
+        function_names=("run_subagent", "continue_subagent"),
     ),
 )

@@ -329,8 +329,9 @@ class CallSession:
                     targets=list(distribution.targets),
                 )
             self._key_manager.mark_distributed(distribution, tuple(delivered))
+            delivered_members = set(delivered)
             undelivered_device_ids = frozenset(
-                target.device_id for target in distribution.targets if target not in delivered
+                target.device_id for target in distribution.targets if target not in delivered_members
             )
             if not undelivered_device_ids:
                 self._key_retry_attempt = 0

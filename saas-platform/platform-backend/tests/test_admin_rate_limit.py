@@ -28,6 +28,9 @@ class _DummyQuery:
     def eq(self, *args, **kwargs) -> _DummyQuery:  # noqa: ANN002, ANN003, ARG002
         return self
 
+    def neq(self, *args, **kwargs) -> _DummyQuery:  # noqa: ANN002, ANN003, ARG002
+        return self
+
     def order(self, *args, **kwargs) -> _DummyQuery:  # noqa: ANN002, ANN003, ARG002
         return self
 

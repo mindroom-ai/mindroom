@@ -49,6 +49,10 @@ class ThreadSummaryTools(Toolkit):
         Pinning stops automatic re-summarization from overwriting the title, and
         is the default. Pass pin=False for a routine update that later automatic
         summaries may replace; that also releases an earlier pin.
+        To retitle many threads, start from matrix_room(action="threads",
+        include_summaries=True): each row shows the current summary and
+        summary_pinned, so there is no need to read whole threads to find the
+        titles or the threads already pinned.
         """
         context = get_tool_runtime_context()
         if context is None:
@@ -63,7 +67,7 @@ class ThreadSummaryTools(Toolkit):
             )
         assert resolved_room_id is not None
 
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
                 action="set",
@@ -110,6 +114,8 @@ class ThreadSummaryTools(Toolkit):
                 config=context.config,
                 runtime_paths=context.runtime_paths,
                 conversation_reader=context.conversation_reader,
+                entity_name=context.agent_name,
+                membership_index=context.require_agent_reply_memberships(),
                 pin=pin,
             )
         except ThreadSummaryWriteError as exc:

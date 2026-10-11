@@ -61,7 +61,6 @@ def check_rls_policies() -> list[tuple[bool, str]]:
         "accounts",
         "subscriptions",
         "instances",
-        "usage_metrics",
         "webhook_events",
         "payments",
         "audit_logs",

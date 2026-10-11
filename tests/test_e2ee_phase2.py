@@ -9,6 +9,7 @@ import nio
 import pytest
 from nio.store import SqliteStore
 
+from mindroom.access_policy import resolve_room_policy
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.main import Config
@@ -54,6 +55,7 @@ class TestRoomCreationEncryption:
         """Encrypted creation must include the m.room.encryption state event."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@bot:localhost"
+        client.access_token = None
         client.room_create.return_value = nio.RoomCreateResponse(room_id="!new:localhost")
 
         await create_room(client, "Secure", encrypted=True)
@@ -66,6 +68,7 @@ class TestRoomCreationEncryption:
         """Default creation must stay unencrypted."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@bot:localhost"
+        client.access_token = None
         client.room_create.return_value = nio.RoomCreateResponse(room_id="!new:localhost")
 
         await create_room(client, "Plain")
@@ -132,23 +135,22 @@ class TestManagedRoomEncryptionConfig:
 
     def test_defaults_to_unencrypted(self) -> None:
         """Managed rooms stay unencrypted without configuration."""
-        config = Config()
-        assert _managed_room_should_be_encrypted("lobby", config) is False
+        config = Config(rooms={"lobby": {}})
+        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "lobby")) is False
 
     def test_global_default_applies(self) -> None:
         """The global default encrypts all managed rooms."""
-        config = Config(matrix_room_access={"encrypt_managed_rooms": True})
-        assert _managed_room_should_be_encrypted("lobby", config) is True
+        config = Config(room_defaults={"encrypted": True}, rooms={"lobby": {}})
+        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "lobby")) is True
 
     def test_per_room_override_wins(self) -> None:
         """Per-room settings override the global default."""
         config = Config(
-            matrix_room_access={"encrypt_managed_rooms": True},
+            room_defaults={"encrypted": True},
             rooms={"plain": {"encrypted": False}, "secure": {"encrypted": True}},
         )
-        assert _managed_room_should_be_encrypted("plain", config) is False
-        assert _managed_room_should_be_encrypted("secure", config) is True
-        assert _managed_room_should_be_encrypted("other", config) is True
+        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "plain")) is False
+        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "secure")) is True
 
 
 def _bound_config(tmp_path: Path, **config_data: object) -> Config:
@@ -160,7 +162,7 @@ def _bound_config(tmp_path: Path, **config_data: object) -> Config:
 
 
 class TestManagedRoomEncryptionReconcile:
-    """The reconcile wiring in _ensure_room_exists must honor the encryption config."""
+    """Post-join managed policy reconciliation must honor the encryption config."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("encrypt_managed_rooms", "expected_calls"), [(True, 1), (False, 0)])
@@ -172,7 +174,11 @@ class TestManagedRoomEncryptionReconcile:
         expected_calls: int,
     ) -> None:
         """Existing managed rooms flip to encrypted on startup and hot reload when configured."""
-        config = _bound_config(tmp_path, matrix_room_access={"encrypt_managed_rooms": encrypt_managed_rooms})
+        config = _bound_config(
+            tmp_path,
+            room_defaults={"encrypted": encrypt_managed_rooms},
+            rooms={"lobby": {}},
+        )
         mock_client = AsyncMock()
         mock_client.homeserver = "https://example.com"
         mock_client.rooms = {"!lobby:example.com": object()}
@@ -182,11 +188,12 @@ class TestManagedRoomEncryptionReconcile:
             servers=["example.com"],
         )
 
-        monkeypatch.setattr(matrix_state, "load_rooms", dict)
-        monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+        recorded_room = matrix_state.MatrixRoom(room_id="!lobby:example.com", alias="#lobby:example.com", name="Lobby")
+        monkeypatch.setattr(matrix_state, "load_rooms", lambda **_kwargs: {"lobby": recorded_room})
         monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
         monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", AsyncMock(return_value=True))
+        monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", AsyncMock(return_value=True))
         enable_encryption = AsyncMock(return_value=True)
         monkeypatch.setattr(matrix_rooms, "ensure_room_encryption_enabled", enable_encryption)
 
@@ -195,14 +202,28 @@ class TestManagedRoomEncryptionReconcile:
             room_key="lobby",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            room_policy=resolve_room_policy(config, "lobby"),
             room_name="Lobby",
             power_users=[],
         )
 
         assert room_id == "!lobby:example.com"
+        mock_client.user_id = "@router:example.com"
+        mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
+            [
+                {"type": "m.room.member", "state_key": mock_client.user_id, "content": {"membership": "join"}},
+            ],
+            room_id,
+        )
+        snapshots = await matrix_rooms.reconcile_managed_rooms(
+            mock_client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": room_id},
+        )
         assert enable_encryption.await_count == expected_calls
         if expected_calls:
-            enable_encryption.assert_awaited_once_with(mock_client, "!lobby:example.com")
+            enable_encryption.assert_awaited_once_with(mock_client, room_id, snapshot=snapshots[room_id])
 
     @pytest.mark.asyncio
     async def test_new_room_created_encrypted_when_configured(
@@ -211,7 +232,11 @@ class TestManagedRoomEncryptionReconcile:
         tmp_path: Path,
     ) -> None:
         """Managed room creation passes the configured encryption flag through."""
-        config = _bound_config(tmp_path, matrix_room_access={"encrypt_managed_rooms": True})
+        config = _bound_config(
+            tmp_path,
+            room_defaults={"encrypted": True},
+            rooms={"vault": {}},
+        )
         mock_client = AsyncMock()
         mock_client.homeserver = "https://example.com"
         mock_client.rooms = {}
@@ -223,7 +248,8 @@ class TestManagedRoomEncryptionReconcile:
         monkeypatch.setattr(matrix_state, "load_rooms", dict)
         monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
         monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
-        monkeypatch.setattr(matrix_rooms, "_set_room_avatar_if_available", AsyncMock())
+        monkeypatch.setattr(matrix_rooms, "_set_room_avatar", AsyncMock())
+        monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", AsyncMock(return_value=True))
         created = AsyncMock(return_value="!new:example.com")
         monkeypatch.setattr(matrix_rooms, "create_room", created)
 
@@ -232,6 +258,7 @@ class TestManagedRoomEncryptionReconcile:
             room_key="vault",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            room_policy=resolve_room_policy(config, "vault"),
             room_name="Vault",
             power_users=[],
         )

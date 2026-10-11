@@ -11,7 +11,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
-from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ def mock_config(runtime_paths: RuntimePaths) -> Config:
     )
     config = Config(
         agents={name: {"display_name": name.replace("_", " ").title()} for name in agent_names},
-        models={"default": {"provider": "openai", "id": "gpt-5.4"}},
+        models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
     )
     persist_entity_accounts(config, runtime_paths)
     return config
@@ -59,8 +59,8 @@ def mock_config(runtime_paths: RuntimePaths) -> Config:
 class TestEventDrivenScheduling:
     """Test event-driven scheduling conversions."""
 
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
     async def test_email_urgent_event(
         self,
         mock_agent_class: MagicMock,
@@ -105,8 +105,8 @@ class TestEventDrivenScheduling:
         assert "if" in call_args.lower()
         assert "polling" in call_args.lower()
 
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
     async def test_bitcoin_price_event(
         self,
         mock_agent_class: MagicMock,
@@ -143,8 +143,8 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
     async def test_server_monitoring_event(
         self,
         mock_agent_class: MagicMock,
@@ -181,8 +181,8 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
     async def test_build_failure_event(
         self,
         mock_agent_class: MagicMock,
@@ -219,8 +219,8 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
     async def test_reddit_mention_event(
         self,
         mock_agent_class: MagicMock,
@@ -257,8 +257,8 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
     async def test_boss_email_immediate_event(
         self,
         mock_agent_class: MagicMock,
@@ -295,8 +295,8 @@ class TestEventDrivenScheduling:
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.Agent")
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
     async def test_prompt_includes_event_examples(
         self,
         mock_agent_class: MagicMock,

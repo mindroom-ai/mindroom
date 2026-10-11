@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 
-from mindroom.embedding_factory import create_configured_embedder, embedder_client_signature
+from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
     PublishedIndexState,
@@ -24,11 +24,12 @@ from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     chroma_collection_exists,
     indexing_settings_key,
+    published_index_settings_compatible,
     storage_key_for_base,
 )
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
-from mindroom.strict_knowledge import StrictSearchKnowledge
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -97,7 +98,6 @@ class PublishedIndexResolution:
 
 
 class _PublishedIndexVectorDb(Protocol):
-    client: object | None
     collection_name: str
 
     def exists(self) -> bool:
@@ -137,7 +137,8 @@ def _published_index_key_from_binding(
     config: Config,
 ) -> PublishedIndexKey:
     storage_root = binding.storage_root.expanduser().resolve()
-    knowledge_path = binding.knowledge_path.resolve()
+    # The binding already resolved its path; resolving again would follow a link swapped onto it since.
+    knowledge_path = binding.knowledge_path
     return PublishedIndexKey(
         base_id=base_id,
         storage_root=str(storage_root),
@@ -375,16 +376,13 @@ def _build_published_index_vector_db(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _PublishedIndexVectorDb:
-    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
+    from mindroom.knowledge.read_proxy import ChromaReadProxy  # noqa: PLC0415
 
-    return cast(
-        "_PublishedIndexVectorDb",
-        ChromaDb(
-            collection=_state_collection_name(state),
-            path=str(published_index_storage_path(key)),
-            persistent_client=True,
-            embedder=create_configured_embedder(config, runtime_paths),
-        ),
+    return ChromaReadProxy(
+        collection_name=_state_collection_name(state),
+        path=str(published_index_storage_path(key)),
+        embedder=create_configured_embedder(config, runtime_paths),
+        published_settings=state.settings,
     )
 
 
@@ -394,10 +392,11 @@ def _build_published_index_knowledge(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> Knowledge:
-    return StrictSearchKnowledge(
-        vector_db=_build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths),
-    )
+) -> Knowledge | None:
+    vector_db = _build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths)
+    if not vector_db.exists():
+        return None
+    return StrictSearchKnowledge(vector_db=vector_db)
 
 
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
@@ -416,34 +415,8 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
         return False
 
 
-def _indexing_settings_query_compatible(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether current queries can use a collection from published settings."""
-    return published_settings.query_compatibility_key() == current_settings.query_compatibility_key()
-
-
-def published_index_settings_compatible(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether a published index can be queried under the current config."""
-    return (
-        _indexing_settings_query_compatible(
-            published_settings,
-            current_settings,
-        )
-        and published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
-    )
-
-
 def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
-    return (
-        state.status == "complete"
-        and state.collection is not None
-        and published_index_settings_compatible(state.settings, key.indexing_settings)
-    )
+    return state.queryable_for(key.indexing_settings)
 
 
 def _published_index_availability(
@@ -526,8 +499,6 @@ def _load_queryable_index_from_state(
 ) -> Knowledge | None:
     if not _published_index_state_queryable(key, state):
         return None
-    if not published_index_collection_exists_for_state(key, state):
-        return None
     return _build_published_index_knowledge(key, state, config=config, runtime_paths=runtime_paths)
 
 
@@ -551,36 +522,35 @@ def get_published_index(
     availability = _published_index_availability(key=key, state=state, metadata_exists=metadata_path.exists())
     current_embedder_client_signature = embedder_client_signature(config, runtime_paths)
 
-    index = _published_indexes.get(key)
-    if index is not None:
-        if (
-            index.embedder_client_signature == current_embedder_client_signature
-            and state is not None
-            and _cached_index_matches_persisted_state(index, state)
-            and _cached_index_still_queryable(index)
-        ):
-            if index.state != state:
-                index = replace(index, state=state)
-                _published_indexes[key] = index
+    try:
+        index = _published_indexes.get(key)
+        if index is not None:
+            if (
+                index.embedder_client_signature == current_embedder_client_signature
+                and state is not None
+                and _cached_index_matches_persisted_state(index, state)
+                and _cached_index_still_queryable(index)
+            ):
+                if index.state != state:
+                    index = replace(index, state=state)
+                    _published_indexes[key] = index
+                return PublishedIndexResolution(
+                    key=key,
+                    index=index,
+                    state=state,
+                    availability=availability,
+                    schedule_refresh_on_access=binding.incremental_sync_on_access,
+                )
+            _published_indexes.pop(key, None)
+
+        if state is None:
             return PublishedIndexResolution(
                 key=key,
-                index=index,
+                index=None,
                 state=state,
                 availability=availability,
                 schedule_refresh_on_access=binding.incremental_sync_on_access,
             )
-        _published_indexes.pop(key, None)
-
-    if state is None:
-        return PublishedIndexResolution(
-            key=key,
-            index=None,
-            state=state,
-            availability=availability,
-            schedule_refresh_on_access=binding.incremental_sync_on_access,
-        )
-
-    try:
         knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     except Exception:
         logger.warning(

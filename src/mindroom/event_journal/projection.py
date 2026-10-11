@@ -127,7 +127,7 @@ def _loads(content_json: str) -> Mapping[str, object]:
     return cast("Mapping[str, object]", decoded)
 
 
-def _is_tombstoned(
+def is_tombstoned(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
@@ -142,6 +142,26 @@ def _is_tombstoned(
         (principal_id, room_id, event_id),
     )
     return row is not None
+
+
+def tombstoned_event_ids(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    event_ids: tuple[str, ...],
+) -> frozenset[str]:
+    """Find exact physical tombstones among one bounded batch of recorded context."""
+    if not event_ids:
+        return frozenset()
+    placeholders = ", ".join("?" for _ in event_ids)
+    rows = transaction.fetchall(
+        f"""
+        SELECT redacted_event_id FROM redaction_tombstones
+        WHERE principal_id = ? AND room_id = ? AND redacted_event_id IN ({placeholders})
+        """,  # noqa: S608 - generated placeholders, bound values
+        (principal_id, room_id, *event_ids),
+    )
+    return frozenset(str(row["redacted_event_id"]) for row in rows)
 
 
 def _record_tombstone(
@@ -201,7 +221,7 @@ def project(
             receipt_order=receipt_order,
         )
         return event.redacts_event_id
-    if _is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
+    if is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
         return event.event_id
     replaces = replacement_target(event.content)
     if replaces is None:
@@ -311,7 +331,17 @@ def _apply_unresolved_edit(
     )
     if held is None:
         return
-    if _is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
+    if is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
+        # Earlier surviving edits were discarded when this held revision won.
+        # The original cannot stand in for them: ask the server for its winner.
+        transaction.execute(
+            """
+            UPDATE visible_messages
+            SET revision_event_id = ?, revision_ts = ?, content_json = NULL, refresh_token = ?
+            WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+            """,
+            (held["edit_event_id"], int(held["edit_ts"]), receipt_order, principal_id, event.room_id, event.event_id),
+        )
         return
     content = visible_content(_loads(held["content_json"]))
     record_projected_prompt(
@@ -354,7 +384,7 @@ def _project_edit(
         (principal_id, event.room_id, target_event_id),
     )
     if current is None:
-        if _is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
+        if is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
             return
         _hold_unresolved_edit(transaction, principal_id, event, target_event_id=target_event_id)
         return
@@ -550,9 +580,11 @@ def _project_redaction(
         """,
         (principal_id, event.room_id, target),
     )
+    # Keep only identity and ordering proof so a late original requests a
+    # refetch instead of silently forgetting any earlier surviving edit.
     transaction.execute(
         """
-        DELETE FROM unresolved_edits
+        UPDATE unresolved_edits SET content_json = '{}'
         WHERE principal_id = ? AND room_id = ? AND edit_event_id = ?
         """,
         (principal_id, event.room_id, target),
@@ -620,13 +652,16 @@ def install_refetched_revision(
     expected_revision_event_id: str,
     expected_refresh_token: int,
     expected_membership_epoch: int,
-) -> bool:
+) -> int | None:
     """Install a refetched revision only if nothing changed underneath it.
+
+    Returns the size the content is stored at, which is what a page's content
+    budget counts, or 0 when the message was removed instead.
 
     A newer edit or redaction landing while the refetch was in flight changes
     either the revision identity or the refresh token, so this conditional
     update stops a slow refetch from overwriting fresher truth. Returning
-    ``False`` leaves the debt durable and the message unreadable, which is the
+    ``None`` leaves the debt durable and the message unreadable, which is the
     safe direction.
 
     Content that still holds a sidecar reference is refused for the same
@@ -660,7 +695,7 @@ def install_refetched_revision(
         transaction_id=revision_transaction_id,
         content=content,
     ):
-        return drop_refetched_message(
+        dropped = drop_refetched_message(
             transaction,
             principal_id,
             room_id=room_id,
@@ -669,10 +704,12 @@ def install_refetched_revision(
             expected_refresh_token=expected_refresh_token,
             expected_membership_epoch=expected_membership_epoch,
         )
+        return 0 if dropped else None
     if holds_unresolved_sidecar(content):
-        return False
-    if _is_tombstoned(transaction, principal_id, room_id, revision_event_id):
-        return False
+        return None
+    if is_tombstoned(transaction, principal_id, room_id, revision_event_id):
+        return None
+    content_json = _dumps(content)
     row = transaction.fetchone(
         """
         UPDATE visible_messages
@@ -684,7 +721,7 @@ def install_refetched_revision(
         (
             revision_event_id,
             revision_ts,
-            _dumps(content),
+            content_json,
             principal_id,
             room_id,
             logical_event_id,
@@ -694,7 +731,7 @@ def install_refetched_revision(
         ),
     )
     if row is None:
-        return False
+        return None
     record_projected_prompt(
         transaction,
         principal_id,
@@ -705,7 +742,8 @@ def install_refetched_revision(
         membership_epoch=int(row["membership_epoch"]),
         content=content,
     )
-    return True
+    # Stored content is ASCII, so its length in characters is its size in bytes.
+    return len(content_json)
 
 
 def drop_refetched_message(

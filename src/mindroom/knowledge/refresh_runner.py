@@ -9,12 +9,16 @@ import math
 import os
 import signal
 import sys
+import tempfile
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
+from pydantic import TypeAdapter
+
+from mindroom.background_tasks import create_background_task
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -24,9 +28,21 @@ from mindroom.constants import (
     resolve_runtime_paths,
     runtime_env_values,
 )
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.embeddings.embedder_health import (
+    EmbedderHealthRecorder,
+    capture_embedder_health_recorder,
+    check_embedder_health,
+    embedder_in_use,
+    get_embedder_failure,
+)
+from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.github_app_auth import (
+    GitHubAppTokenBinding,
+    get_runtime_github_app_token_provider,
+)
 from mindroom.knowledge.index_metadata import state_for_publication
-from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_locks import (
     mark_refresh_active,
@@ -55,7 +71,7 @@ from mindroom.knowledge.registry import (
     source_root_for_published_index_key,
     source_root_for_refresh_target,
 )
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import get_logger, setup_subprocess_logging, subprocess_logging_env
 from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.tool_system.worker_routing import (
     SerializedToolExecutionIdentity,
@@ -66,6 +82,9 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    # Imported where a manager is built, so importing this module (the API does) does not load chromadb.
+    from mindroom.knowledge.manager import KnowledgeManager
 
 
 logger = get_logger(__name__)
@@ -82,6 +101,23 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
+class _SubprocessRefreshResult(TypedDict):
+    indexed_count: int
+    index_published: bool
+    availability: KnowledgeAvailability
+    last_error: str | None
+
+
+_subprocess_result_adapter = TypeAdapter(_SubprocessRefreshResult)
+
+
+@dataclass(frozen=True)
+class _SubprocessGitHubAppToken:
+    token: str = field(repr=False)
+    expires_at_epoch: int
+    binding: GitHubAppTokenBinding
+
+
 @dataclass(frozen=True)
 class _SubprocessRefreshRequest:
     base_id: str
@@ -90,6 +126,7 @@ class _SubprocessRefreshRequest:
     storage_root: str
     runtime_knowledge_base: dict[str, object] | None = None
     execution_identity: SerializedToolExecutionIdentity | None = None
+    github_app_token: _SubprocessGitHubAppToken | None = None
     force_reindex: bool = False
 
 
@@ -130,6 +167,51 @@ _REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS = frozenset(
 )
 
 
+async def _github_app_refresh_binding(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, dict[str, Any]] | None:
+    git_config = config.get_knowledge_base_config(base_id).git
+    if git_config is None or git_config.credentials_service is None:
+        return None
+    credentials_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials = (
+        await asyncio.to_thread(
+            credentials_manager.load_credentials,
+            git_config.credentials_service,
+        )
+        or {}
+    )
+    if credentials.get("auth_type") != "github_app":
+        return None
+    return git_config.repo_url, credentials
+
+
+async def _resolve_subprocess_github_app_token(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _SubprocessGitHubAppToken | None:
+    binding = await _github_app_refresh_binding(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if binding is None:
+        return None
+    repo_url, credentials = binding
+    provider = get_runtime_github_app_token_provider()
+    resolved = await provider.resolve_token(repo_url, credentials)
+    return _SubprocessGitHubAppToken(
+        token=resolved.token,
+        expires_at_epoch=int(resolved.expires_at.timestamp()),
+        binding=provider.binding_for(repo_url, credentials),
+    )
+
+
 async def refresh_knowledge_binding_in_subprocess(
     base_id: str,
     *,
@@ -137,11 +219,12 @@ async def refresh_knowledge_binding_in_subprocess(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
-) -> None:
+    health_recorder: EmbedderHealthRecorder | None = None,
+) -> KnowledgeRefreshResult:
     """Run one knowledge refresh in a child interpreter.
 
-    Scheduled refreshes are best-effort maintenance work. Running them in a
-    subprocess keeps Chroma, embedding, Git, and reader CPU/I/O away from the
+    Manual and scheduled refreshes share this boundary. A subprocess keeps
+    Chroma, embedding, Git, and reader CPU/I/O away from the
     control-plane event loop and its shared thread pool while preserving the
     last-good published index semantics.
     """
@@ -152,81 +235,181 @@ async def refresh_knowledge_binding_in_subprocess(
         execution_identity=execution_identity,
         create=True,
     )
-    initial_state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-    request_payload = _serialize_subprocess_refresh_request(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        force_reindex=force_reindex,
-    )
-    env = dict(runtime_env_values(runtime_paths))
-    env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
-    env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
-    # Resolved before the spawn so a malformed window rejects the refresh
-    # instead of leaving a child nobody is waiting on.
+    recorder = health_recorder or capture_embedder_health_recorder()
     try:
-        timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
-    except ValueError as exc:
-        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=str(exc))
+        result = await _refresh_index_in_subprocess(
+            key,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            force_reindex=force_reindex,
+        )
+    except Exception:
+        _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=True)
         raise
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "mindroom.knowledge_refresh_runner",
-        stdin=asyncio.subprocess.PIPE,
-        env=env,
-        **_subprocess_session_kwargs(),
-    )
+    _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=False)
+    return result
+
+
+def _schedule_refresh_health_check(
+    key: PublishedIndexKey,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    health_recorder: EmbedderHealthRecorder,
+    *,
+    refresh_raised: bool,
+) -> None:
+    """Restore parent provider health after either manual or scheduled child work."""
+    if embedder_in_use(config):
+        create_background_task(
+            _check_embedder_after_refresh(
+                key,
+                config,
+                runtime_paths,
+                health_recorder,
+                refresh_raised=refresh_raised,
+            ),
+            name=f"embedder_refresh_health_check:{key.base_id}",
+        )
+
+
+async def _check_embedder_after_refresh(
+    key: PublishedIndexKey,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    health_recorder: EmbedderHealthRecorder,
+    *,
+    refresh_raised: bool,
+) -> None:
+    if not health_recorder.is_current():
+        return
+    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+    persisted_embedder_failure = state is not None and extract_classified_embedder_detail(state.last_error) is not None
+    if refresh_raised or persisted_embedder_failure:
+        if not persisted_embedder_failure:
+            return
+        reason = "knowledge_refresh_failed"
+    else:
+        if get_embedder_failure() is None:
+            return
+        reason = "knowledge_refresh_recovery"
+    await check_embedder_health(config, runtime_paths, reason=reason, health_recorder=health_recorder)
+
+
+async def _refresh_index_in_subprocess(  # noqa: PLR0915 - Keep process and result-file ownership together.
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    force_reindex: bool,
+) -> KnowledgeRefreshResult:
+    base_id = key.base_id
+    target = refresh_target_for_published_index_key(key)
+    mark_refresh_active(target)
     try:
-        async with asyncio.timeout(timeout):
-            with suppress(BrokenPipeError, ConnectionResetError):
-                await _send_subprocess_refresh_request(process, request_payload)
-            return_code = await process.wait()
-    except TimeoutError:
-        # A refresh child can wedge below Python: torch's Metal shader-library
-        # caches are unlocked, and a corrupted lookup spins forever. The child
-        # gets its own session, so nothing else would ever reap it.
-        msg = f"Knowledge refresh subprocess for {base_id!r} timed out after {timeout}s and was terminated"
-        logger.warning(msg, base_id=base_id)
-        cleanup_task = asyncio.create_task(
-            _cleanup_timed_out_refresh_subprocess(
-                process,
-                key,
-                initial_state=initial_state,
-                error=msg,
-            ),
-        )
-        cancellation = await _drain_owned_cleanup_task(cleanup_task)
-        cleanup_task.result()
-        if cancellation is not None:
-            raise cancellation from None
-        raise RuntimeError(msg) from None
-    except asyncio.CancelledError:
-        cleanup_task = asyncio.create_task(
-            _cleanup_cancelled_refresh_subprocess(
-                process,
-                key,
-                initial_state=initial_state,
-                config=config,
-                runtime_paths=runtime_paths,
-            ),
-        )
-        await _drain_owned_cleanup_task(cleanup_task)
-        with suppress(Exception):
+        # A file avoids pipe backpressure or waiting for EOF from a Git helper
+        # before the existing process-group cleanup can terminate that helper.
+        with tempfile.TemporaryFile() as output:
+            initial_state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+            try:
+                github_app_token = await _resolve_subprocess_github_app_token(
+                    base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                )
+                request_payload = await asyncio.to_thread(
+                    _serialize_subprocess_refresh_request,
+                    base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                    github_app_token=github_app_token,
+                    force_reindex=force_reindex,
+                )
+                # Resolved before the spawn so a malformed window rejects the refresh
+                # instead of leaving a child nobody is waiting on.
+                timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
+                env = dict(runtime_env_values(runtime_paths))
+                env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
+                env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
+                env.update(subprocess_logging_env())
+                env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
+                # Parent and child derive the cross-process refresh lock from their temp
+                # root, so the child shares this one whatever the runtime env names.
+                env["TMPDIR"] = tempfile.gettempdir()
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "mindroom.knowledge.refresh_entrypoint",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=output,
+                    env=env,
+                    **_subprocess_session_kwargs(),
+                )
+            except Exception as exc:
+                await _reconcile_failed_refresh_subprocess(
+                    key,
+                    initial_state=initial_state,
+                    error=redact_credentials_in_text(str(exc)),
+                )
+                raise
+            try:
+                async with asyncio.timeout(timeout):
+                    with suppress(BrokenPipeError, ConnectionResetError):
+                        await _send_subprocess_refresh_request(process, request_payload)
+                    return_code = await process.wait()
+            except TimeoutError:
+                # A refresh child can wedge below Python: torch's Metal shader-library
+                # caches are unlocked, and a corrupted lookup spins forever. The child
+                # gets its own session, so nothing else would ever reap it.
+                msg = f"Knowledge refresh subprocess for {base_id!r} timed out after {timeout}s and was terminated"
+                logger.warning(msg, base_id=base_id)
+                cleanup_task = asyncio.create_task(
+                    _cleanup_timed_out_refresh_subprocess(
+                        process,
+                        key,
+                        initial_state=initial_state,
+                        error=msg,
+                    ),
+                )
+                cancellation = await _drain_owned_cleanup_task(cleanup_task)
+                cleanup_task.result()
+                if cancellation is not None:
+                    raise cancellation from None
+                raise RuntimeError(msg) from None
+            except asyncio.CancelledError:
+                cleanup_task = asyncio.create_task(
+                    _cleanup_cancelled_refresh_subprocess(
+                        process,
+                        key,
+                        initial_state=initial_state,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                    ),
+                )
+                await _drain_owned_cleanup_task(cleanup_task)
+                with suppress(Exception):
+                    cleanup_task.result()
+                raise
+
+            cleanup_task = asyncio.create_task(_terminate_refresh_subprocess(process))
+            cancellation = await _drain_owned_cleanup_task(cleanup_task)
             cleanup_task.result()
-        raise
+            if cancellation is not None:
+                raise cancellation from None
 
-    cleanup_task = asyncio.create_task(_terminate_refresh_subprocess(process))
-    cancellation = await _drain_owned_cleanup_task(cleanup_task)
-    cleanup_task.result()
-    if cancellation is not None:
-        raise cancellation from None
+            if return_code != 0:
+                msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
+                await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
+                raise RuntimeError(msg)
 
-    if return_code != 0:
-        msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
-        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
-        raise RuntimeError(msg)
+            output.seek(0)
+            result = _subprocess_result_adapter.validate_json(output.read())
+            return KnowledgeRefreshResult(key=key, **result)
+    finally:
+        mark_refresh_inactive(target)
+        prune_private_index_bookkeeping()
 
 
 def _serialize_subprocess_refresh_request(
@@ -235,6 +418,7 @@ def _serialize_subprocess_refresh_request(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
+    github_app_token: _SubprocessGitHubAppToken | None = None,
     force_reindex: bool,
 ) -> bytes:
     runtime_knowledge_base = config.runtime_knowledge_base_overlay(base_id)
@@ -251,9 +435,13 @@ def _serialize_subprocess_refresh_request(
         execution_identity=None
         if execution_identity is None
         else serialize_tool_execution_identity(execution_identity),
+        github_app_token=github_app_token,
         force_reindex=force_reindex,
     )
-    return json.dumps(asdict(payload), sort_keys=True).encode()
+    serialized_payload = asdict(payload)
+    if github_app_token is None:
+        del serialized_payload["github_app_token"]
+    return json.dumps(serialized_payload, sort_keys=True).encode()
 
 
 async def _send_subprocess_refresh_request(
@@ -415,7 +603,7 @@ async def knowledge_binding_mutation_lock(
         yield
 
 
-async def refresh_knowledge_binding(
+async def _refresh_knowledge_binding(
     base_id: str,
     *,
     config: Config,
@@ -520,6 +708,8 @@ async def _refresh_knowledge_binding_locked(
             start_watchers=False,
             create=True,
         )
+        from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
+
         manager = KnowledgeManager(
             base_id=base_id,
             config=config,
@@ -656,6 +846,8 @@ async def _publish_file_mode_source_metadata_for_resolved(
         start_watchers=False,
         create=True,
     )
+    from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
+
     manager = KnowledgeManager(
         base_id=base_id,
         config=config,
@@ -682,6 +874,8 @@ async def _refresh_file_mode_binding_locked(
         start_watchers=False,
         create=True,
     )
+    from mindroom.knowledge.manager import KnowledgeManager  # noqa: PLC0415
+
     manager = KnowledgeManager(
         base_id=key.base_id,
         config=config,
@@ -790,7 +984,8 @@ async def _refresh_result_from_persisted_state(
             availability=availability,
             last_error=None,
         )
-    index = publish_knowledge_index_from_state(
+    index = await asyncio.to_thread(
+        publish_knowledge_index_from_state,
         key,
         state=state,
         config=config,
@@ -874,7 +1069,8 @@ async def _publish_unchanged_index(
         )
     if updated_state != state:
         await asyncio.to_thread(save_published_index_state, published_index_metadata_path(key), updated_state)
-    index = publish_knowledge_index_from_state(
+    index = await asyncio.to_thread(
+        publish_knowledge_index_from_state,
         key,
         state=updated_state,
         config=manager.config,
@@ -1024,7 +1220,8 @@ async def _reconcile_cancelled_refresh(
         if not await asyncio.to_thread(published_index_collection_exists_for_state, key, state):
             await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
             return
-        index = publish_knowledge_index_from_state(
+        index = await asyncio.to_thread(
+            publish_knowledge_index_from_state,
             key,
             state=state,
             config=config,
@@ -1035,6 +1232,62 @@ async def _reconcile_cancelled_refresh(
             await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
             return
     await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
+
+
+def _load_subprocess_github_app_binding(raw_binding_payload: object) -> GitHubAppTokenBinding:
+    if not isinstance(raw_binding_payload, dict):
+        msg = "Knowledge refresh subprocess request github_app_token.binding must be an object"
+        raise TypeError(msg)
+    binding_payload = cast("dict[str, object]", raw_binding_payload)
+    raw_app_id = binding_payload.get("app_id")
+    raw_installation_id = binding_payload.get("installation_id")
+    raw_owner = binding_payload.get("owner")
+    raw_repository = binding_payload.get("repository")
+    raw_private_key_file = binding_payload.get("private_key_file")
+    if not isinstance(raw_app_id, int) or isinstance(raw_app_id, bool) or raw_app_id <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.app_id must be positive"
+        raise TypeError(msg)
+    if not isinstance(raw_installation_id, int) or isinstance(raw_installation_id, bool) or raw_installation_id <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.installation_id must be positive"
+        raise TypeError(msg)
+    if not isinstance(raw_owner, str) or not raw_owner:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.owner must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_repository, str) or not raw_repository:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.repository must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_private_key_file, str) or not raw_private_key_file:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.private_key_file must be non-empty"
+        raise TypeError(msg)
+    return GitHubAppTokenBinding(
+        app_id=raw_app_id,
+        installation_id=raw_installation_id,
+        owner=raw_owner,
+        repository=raw_repository,
+        private_key_file=raw_private_key_file,
+    )
+
+
+def _load_subprocess_github_app_token(raw_token_payload: object) -> _SubprocessGitHubAppToken | None:
+    if raw_token_payload is None:
+        return None
+    if not isinstance(raw_token_payload, dict):
+        msg = "Knowledge refresh subprocess request github_app_token must be an object when present"
+        raise TypeError(msg)
+    token_payload = cast("dict[str, object]", raw_token_payload)
+    raw_token = token_payload.get("token")
+    raw_expires_at_epoch = token_payload.get("expires_at_epoch")
+    if not isinstance(raw_token, str) or not raw_token:
+        msg = "Knowledge refresh subprocess request github_app_token.token must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_expires_at_epoch, int) or isinstance(raw_expires_at_epoch, bool) or raw_expires_at_epoch <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.expires_at_epoch must be positive"
+        raise TypeError(msg)
+    return _SubprocessGitHubAppToken(
+        token=raw_token,
+        expires_at_epoch=raw_expires_at_epoch,
+        binding=_load_subprocess_github_app_binding(token_payload.get("binding")),
+    )
 
 
 def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshRequest:
@@ -1074,7 +1327,40 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
         storage_root=raw_storage_root,
         runtime_knowledge_base=cast("dict[str, object] | None", raw_runtime_knowledge_base),
         execution_identity=raw_execution_identity,
+        github_app_token=_load_subprocess_github_app_token(raw_payload.get("github_app_token")),
         force_reindex=bool(raw_force_reindex),
+    )
+
+
+async def _prime_subprocess_github_app_token(
+    request: _SubprocessRefreshRequest,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    if request.github_app_token is None:
+        return
+    binding = await _github_app_refresh_binding(
+        request.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if binding is None:
+        return
+    try:
+        expires_at = datetime.fromtimestamp(request.github_app_token.expires_at_epoch, tz=UTC)
+    except (OSError, OverflowError, ValueError) as exc:
+        msg = "Knowledge refresh subprocess GitHub App token expiry is invalid"
+        raise TypeError(msg) from exc
+    repo_url, credentials = binding
+    provider = get_runtime_github_app_token_provider()
+    if provider.binding_for(repo_url, credentials) != request.github_app_token.binding:
+        return
+    provider.prime(
+        repo_url,
+        credentials,
+        token=request.github_app_token.token,
+        expires_at=expires_at,
     )
 
 
@@ -1089,6 +1375,11 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
     if request.runtime_knowledge_base is not None:
         base_config = KnowledgeBaseConfig.model_validate(request.runtime_knowledge_base)
         config = config.with_runtime_knowledge_base_overlay(request.base_id, base_config)
+    await _prime_subprocess_github_app_token(
+        request,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
     execution_identity = (
         None
         if request.execution_identity is None
@@ -1097,7 +1388,7 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
             error_prefix="Knowledge refresh execution_identity",
         )
     )
-    return await refresh_knowledge_binding(
+    return await _refresh_knowledge_binding(
         request.base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -1114,19 +1405,34 @@ def _parse_refresh_runner_args(argv: list[str] | None = None) -> argparse.Namesp
 def main(argv: list[str] | None = None) -> int:
     """Internal CLI used by scheduled knowledge refresh subprocesses."""
     _parse_refresh_runner_args(argv)
+    setup_subprocess_logging()
     payload = sys.stdin.buffer.read()
-    try:
-        result = asyncio.run(_run_subprocess_refresh_request(payload))
-    except Exception:
-        logger.exception("Knowledge refresh subprocess failed")
-        return 1
-    logger.info(
-        "Knowledge refresh subprocess completed",
-        base_id=result.key.base_id,
-        indexed_count=result.indexed_count,
-        index_published=result.index_published,
-        availability=result.availability.value,
-    )
+    # Native libraries and configured handlers can retain stdout's descriptor.
+    with os.fdopen(os.dup(sys.stdout.fileno()), "wb") as output:
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        try:
+            result = asyncio.run(_run_subprocess_refresh_request(payload))
+        except Exception:
+            logger.exception("Knowledge refresh subprocess failed")
+            return 1
+        logger.info(
+            "Knowledge refresh subprocess completed",
+            base_id=result.key.base_id,
+            indexed_count=result.indexed_count,
+            index_published=result.index_published,
+            availability=result.availability.value,
+        )
+        output.write(
+            _subprocess_result_adapter.dump_json(
+                {
+                    "indexed_count": result.indexed_count,
+                    "index_published": result.index_published,
+                    "availability": result.availability,
+                    "last_error": result.last_error,
+                },
+            ),
+        )
+
     return 0
 
 

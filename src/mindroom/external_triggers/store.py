@@ -22,19 +22,16 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from mindroom import constants
 from mindroom.config.validation import non_empty_stripped
 from mindroom.durable_write import write_json_file_durable
-from mindroom.entity_resolution import (
-    MissingManagedEntityAccountError,
-    configured_routable_entity_names_for_room,
-    entity_identity_registry,
-)
+from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
+from mindroom.external_triggers.policy import is_external_trigger_administrator
+from mindroom.external_triggers.replay_store import ExternalTriggerReplayStore
 from mindroom.file_locks import advisory_file_lock
-from mindroom.matrix.identity import MatrixID, managed_account_key
-from mindroom.matrix.state import matrix_state_for_runtime, resolve_room_id
-from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import resolve_room_id
+from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -241,6 +238,7 @@ class ExternalTriggerStore:
         self._root = runtime_paths.control_state_root / _EXTERNAL_TRIGGER_STATE_DIR
         self._store_path = self._root / _TRIGGER_RECORDS_FILENAME
         self._lock_path = self._root / f"{_TRIGGER_RECORDS_FILENAME}.lock"
+        self._replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
 
     @property
     def store_path(self) -> Path:
@@ -436,7 +434,14 @@ class ExternalTriggerStore:
                 msg = "single-use trigger changed before it could be consumed"
                 raise ExternalTriggerStoreError(msg)
             records.triggers.pop(trigger_id)
-            self._write_records(records)
+            # Lets a concurrent duplicate get a duplicate answer until the next trigger write; the delivery path's current-scope check is what refuses it.
+            self._write_records(records, retained_scope=_replay_scope(record))
+
+    def is_current_replay_scope(self, trigger_id: str, replay_scope: str) -> bool:
+        """Return whether ``replay_scope`` still authenticates deliveries for ``trigger_id``."""
+        with advisory_file_lock(self._lock_path, exclusive=False):
+            record = self._read_records().triggers.get(trigger_id)
+        return record is not None and _replay_scope(record) == replay_scope
 
     def delivery_snapshot(
         self,
@@ -479,7 +484,7 @@ class ExternalTriggerStore:
             allowed_kinds=record.allowed_kinds,
             replay_window_seconds=min(record.replay_window_seconds, policy.max_replay_window_seconds),
             max_body_bytes=min(record.max_body_bytes, policy.max_body_bytes),
-            replay_scope=f"{record.uid}:{record.auth_epoch}",
+            replay_scope=_replay_scope(record),
         )
 
     def _require_owned_record(
@@ -493,7 +498,11 @@ class ExternalTriggerStore:
         if record is None:
             msg = f"external trigger not found: {trigger_id}"
             raise ExternalTriggerStoreError(msg)
-        if actor_user_id != record.owner_user_id and actor_user_id not in config.external_trigger_policy.admin_users:
+        if actor_user_id != record.owner_user_id and not is_external_trigger_administrator(
+            config,
+            self._runtime_paths,
+            actor_user_id,
+        ):
             msg = "external trigger can only be changed by its owner or an external trigger admin"
             raise ExternalTriggerStoreError(msg)
         return record
@@ -512,7 +521,11 @@ class ExternalTriggerStore:
             msg = "invalid external trigger store"
             raise ExternalTriggerStoreError(msg) from exc
 
-    def _write_records(self, records: _SerializedTriggerRecords) -> None:
+    def _write_records(self, records: _SerializedTriggerRecords, *, retained_scope: str | None = None) -> None:
+        """Publish ``records``, then drop the replay records of every scope but theirs and ``retained_scope``."""
+        live_scopes = {_replay_scope(record) for record in records.triggers.values()}
+        if retained_scope is not None:
+            live_scopes.add(retained_scope)
         try:
             write_json_file_durable(
                 self._store_path,
@@ -521,9 +534,15 @@ class ExternalTriggerStore:
                 indent=2,
                 sort_keys=True,
             )
+            self._replay_store.retain_scopes(live_scopes)
         except OSError as exc:
             msg = "external trigger store is unavailable"
             raise ExternalTriggerStoreError(msg) from exc
+
+
+def _replay_scope(record: ExternalTriggerRecord) -> str:
+    """Return the replay scope that one trigger's current signing key authenticates."""
+    return f"{record.uid}:{record.auth_epoch}"
 
 
 def _validate_trigger_id(trigger_id: str) -> str:
@@ -610,43 +629,9 @@ def _public_key_fingerprint_from_bytes(public_key_bytes: bytes) -> str:
 
 def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
     """Require an external human owner, not a managed bot identity."""
-    parsed_owner = MatrixID.parse(owner_user_id)
-    if owner_user_id in config.bot_accounts:
-        msg = "external trigger owner must not be a configured bot account"
-        raise ExternalTriggerStoreError(msg)
-    local_domain = extract_server_name_from_homeserver(
-        constants.runtime_matrix_homeserver(runtime_paths),
-        runtime_paths,
-    )
-    if (
-        config.mindroom_user
-        and parsed_owner.domain == local_domain
-        and config.mindroom_user.username == parsed_owner.username
-    ):
-        msg = "external trigger owner must not be the MindRoom user"
-        raise ExternalTriggerStoreError(msg)
-    configured_entities = [constants.ROUTER_AGENT_NAME, *config.agents, *config.teams]
-    matrix_state = matrix_state_for_runtime(runtime_paths)
-    for entity_name in configured_entities:
-        account = matrix_state.get_account(managed_account_key(entity_name))
-        if account is None:
-            continue
-        managed_id = MatrixID.from_username(account.username, account.domain or local_domain).full_id
-        if owner_user_id == managed_id:
-            msg = "external trigger owner must not be a managed entity account"
-            raise ExternalTriggerStoreError(msg)
-    try:
-        managed_account_ids = {
-            identity.full_id for identity in entity_identity_registry(config, runtime_paths).current_ids.values()
-        }
-    except MissingManagedEntityAccountError:
-        managed_account_ids = set()
-    if owner_user_id in managed_account_ids:
-        msg = "external trigger owner must not be a managed entity account"
-        raise ExternalTriggerStoreError(msg)
-    managed_localparts = {agent_username_localpart(entity_name, runtime_paths) for entity_name in configured_entities}
-    if parsed_owner.domain == local_domain and parsed_owner.username in managed_localparts:
-        msg = "external trigger owner must not be a managed entity account"
+    MatrixID.parse(owner_user_id)
+    if not is_human_requester_id(owner_user_id, config, runtime_paths):
+        msg = "external trigger owner must be a human requester"
         raise ExternalTriggerStoreError(msg)
 
 

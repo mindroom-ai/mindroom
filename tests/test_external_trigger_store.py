@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.external_triggers.auth import mint_trigger_capability
+from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
@@ -40,22 +41,29 @@ def _runtime_paths(tmp_path: Path, *, server_name: str = "example.org") -> Runti
 
 def _config(
     *,
+    administrators: list[str] | None = None,
+    authorization_aliases: dict[str, list[str]] | None = None,
     bot_accounts: list[str] | None = None,
     mindroom_user: dict[str, str] | None = None,
     **policy_overrides: object,
 ) -> Config:
     return Config.model_validate(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
-            "agents": {"watcher": {"display_name": "Watcher", "model": "default", "rooms": ["lobby"]}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "agents": {
+                "watcher": {
+                    "display_name": "Watcher",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                    "access": {"users": [_OWNER]},
+                },
+            },
             "rooms": {"lobby": {"display_name": "Lobby"}},
             "external_trigger_policy": policy_overrides,
             "bot_accounts": bot_accounts or [],
             "mindroom_user": mindroom_user,
-            "authorization": {
-                "global_users": [_OWNER],
-                "agent_reply_permissions": {"*": [_OWNER]},
-            },
+            "administrators": [_OWNER] if administrators is None else administrators,
+            "authorization": {"aliases": authorization_aliases or {}},
         },
     )
 
@@ -146,6 +154,26 @@ def test_consume_single_use_deletes_only_matching_record(tmp_path: Path) -> None
     assert store.list_records() == []
 
 
+def test_consumed_single_use_trigger_keeps_its_delivered_event_record(tmp_path: Path) -> None:
+    """A duplicate that read the trigger before it was consumed is still answered as a duplicate."""
+    config = _config()
+    runtime_paths = _runtime_paths(tmp_path)
+    assert runtime_paths.control_state_root is not None
+    store = ExternalTriggerStore(runtime_paths)
+    replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    record, _token = _create_capability(store, config)
+    snapshot = store.delivery_snapshot(record.trigger_id, config=config, config_generation=1)
+    assert snapshot is not None
+
+    claim = replay_store.claim_event_id(snapshot.replay_scope, record.uid, now=1_000, ttl_seconds=300)
+    assert claim is ExternalTriggerEventClaim.FRESH
+    replay_store.mark_event_delivered(snapshot.replay_scope, record.uid, now=1_000, ttl_seconds=300)
+    store.consume_single_use(record.trigger_id, expected_uid=record.uid)
+
+    duplicate_claim = replay_store.claim_event_id(snapshot.replay_scope, record.uid, now=1_001, ttl_seconds=300)
+    assert duplicate_claim is ExternalTriggerEventClaim.DELIVERED
+
+
 def test_capability_trigger_cannot_rotate_signing_key(tmp_path: Path) -> None:
     """Bearer-authenticated triggers do not expose irrelevant key rotation."""
     config = _config()
@@ -197,6 +225,37 @@ def test_rotate_key_increments_auth_epoch(tmp_path: Path) -> None:
     assert rotated.version == record.version + 1
     assert rotated.auth_epoch == record.auth_epoch + 1
     assert rotated.key_id == "rotated"
+
+
+def test_rotate_and_delete_drop_replay_records_of_scopes_that_can_no_longer_authenticate(tmp_path: Path) -> None:
+    """A rotated or deleted trigger keeps no replay records outside its current scope's limits."""
+    config = _config()
+    runtime_paths = _runtime_paths(tmp_path)
+    assert runtime_paths.control_state_root is not None
+    store = ExternalTriggerStore(runtime_paths)
+    replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    replay_dir = runtime_paths.control_state_root / "external_triggers" / "replay"
+    rotating = _create(store, config, trigger_id="rotating")
+    kept = _create(store, config, trigger_id="kept")
+    for record in (rotating, kept):
+        assert replay_store.claim_nonce(f"{record.uid}:1", "nonce-1", now=1_000, ttl_seconds=300)
+        assert replay_store.claim_event_id(f"{record.uid}:1", "event-1", now=1_000, ttl_seconds=300)
+
+    store.rotate_key(
+        rotating.trigger_id,
+        public_key="AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        key_id="rotated",
+        actor_user_id=_OWNER,
+        config=config,
+    )
+
+    kept_stem = hashlib.sha256(f"{kept.uid}:1".encode()).hexdigest()
+    assert sorted(path.name for path in replay_dir.iterdir()) == [f"{kept_stem}.json", f"{kept_stem}.json.lock"]
+    assert not replay_store.claim_nonce(f"{kept.uid}:1", "nonce-1", now=1_001, ttl_seconds=300)
+
+    store.delete_record(kept.trigger_id, actor_user_id=_OWNER, config=config)
+
+    assert list(replay_dir.iterdir()) == []
 
 
 def test_metadata_update_increments_version_not_auth_epoch(tmp_path: Path) -> None:
@@ -314,7 +373,7 @@ def test_store_rejects_local_generated_managed_owner_before_account_exists(tmp_p
     runtime_paths = _runtime_paths(tmp_path, server_name="example.org")
     store = ExternalTriggerStore(runtime_paths)
 
-    with pytest.raises(ExternalTriggerStoreError, match="managed entity"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="campground",
             owner_user_id="@mindroom_watcher:example.org",
@@ -340,7 +399,7 @@ def test_store_rejects_persisted_managed_account_owner(tmp_path: Path) -> None:
     matrix_state.save(runtime_paths)
     store = ExternalTriggerStore(runtime_paths)
 
-    with pytest.raises(ExternalTriggerStoreError, match="managed entity"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="campground",
             owner_user_id="@custom_watcher:example.org",
@@ -357,7 +416,7 @@ def test_store_rejects_configured_bot_account_owner(tmp_path: Path) -> None:
     """Configured bot accounts cannot own trigger records."""
     store = ExternalTriggerStore(_runtime_paths(tmp_path))
 
-    with pytest.raises(ExternalTriggerStoreError, match="bot account"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="campground",
             owner_user_id="@bridgebot:example.org",
@@ -376,7 +435,7 @@ def test_store_rejects_local_mindroom_user_but_allows_federated_same_localpart(t
     config = _config(mindroom_user={"username": "mindroom_user"})
     store = ExternalTriggerStore(runtime_paths)
 
-    with pytest.raises(ExternalTriggerStoreError, match="MindRoom user"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="local",
             owner_user_id="@mindroom_user:example.org",
@@ -417,6 +476,30 @@ def test_record_store_write_fsync_failure_fails_closed(
 
     with pytest.raises(ExternalTriggerStoreError, match="unavailable"):
         _create(store, _config())
+
+
+def test_replay_cleanup_oserror_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed replay cleanup after a record write surfaces through the typed store error."""
+    config = _config()
+    runtime_paths = _runtime_paths(tmp_path)
+    assert runtime_paths.control_state_root is not None
+    store = ExternalTriggerStore(runtime_paths)
+    record = _create(store, config)
+    replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    assert replay_store.claim_nonce(f"{record.uid}:1", "nonce-1", now=1_000, ttl_seconds=300)
+    replay_dir = runtime_paths.control_state_root / "external_triggers" / "replay"
+    original_unlink = type(replay_dir).unlink
+
+    def unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path.parent == replay_dir:
+            msg = "permission denied"
+            raise OSError(msg)
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(replay_dir), "unlink", unlink)
+
+    with pytest.raises(ExternalTriggerStoreError, match="unavailable"):
+        store.delete_record(record.trigger_id, actor_user_id=_OWNER, config=config)
 
 
 def test_corrupt_record_store_fails_closed(tmp_path: Path) -> None:
@@ -469,6 +552,27 @@ def test_non_owner_cannot_modify_trigger_but_admin_can(tmp_path: Path) -> None:
         store.set_enabled(record.trigger_id, enabled=False, actor_user_id="@other:example.org", config=config)
 
     updated = store.set_enabled(record.trigger_id, enabled=False, actor_user_id="@admin:example.org", config=config)
+
+    assert updated.enabled is False
+
+
+def test_platform_admin_alias_can_modify_another_owners_trigger(tmp_path: Path) -> None:
+    """Stored trigger mutation must honor aliased platform-administrator authority."""
+    platform_admin = "@platform-admin:example.org"
+    platform_admin_alias = "@bridge-platform-admin:example.org"
+    config = _config(
+        administrators=[_OWNER, platform_admin],
+        authorization_aliases={platform_admin: [platform_admin_alias]},
+    )
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    record = _create(store, config)
+
+    updated = store.set_enabled(
+        record.trigger_id,
+        enabled=False,
+        actor_user_id=platform_admin_alias,
+        config=config,
+    )
 
     assert updated.enabled is False
 

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import inspect
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -15,6 +17,7 @@ from agno.models.openai.chat import OpenAIChat
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, ToolResult
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
@@ -36,6 +39,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     wrap_function_for_output_files,
     wrap_toolkit_for_output_files,
+    write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 
@@ -67,7 +71,7 @@ def _openai_tool_payload(function: Function, *, strict: bool) -> dict[str, objec
     copied = function.model_copy(deep=True)
     effective_strict = strict if copied.strict is None else copied.strict
     copied.process_entrypoint(strict=effective_strict)
-    formatted_tools = OpenAIChat(id="gpt-5.4", api_key="sk-test")._format_tools([copied])
+    formatted_tools = OpenAIChat(id="gpt-6-astra", api_key="sk-test")._format_tools([copied])
     payload = formatted_tools[0]["function"]
     assert isinstance(payload, dict)
     return payload
@@ -149,6 +153,7 @@ def _plugin(*callbacks: object) -> object:
             "entry_config": PluginEntryConfig(path="test-plugin"),
             "plugin_order": 0,
             "discovered_hooks": tuple(callbacks),
+            "discovered_automations": (),
         },
     )()
 
@@ -348,15 +353,22 @@ def test_no_workspace_root_leaves_schema_unmodified() -> None:
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["properties"]
 
 
-def test_function_with_existing_mindroom_output_path_is_skipped_with_warning(tmp_path: Path) -> None:
+def test_function_with_existing_mindroom_output_path_is_skipped_with_debug(tmp_path: Path) -> None:
     def existing(mindroom_output_path: str) -> str:
         return mindroom_output_path
 
     function = Function(name="existing", entrypoint=existing)
-    with patch("mindroom.tool_system.output_files.logger.warning") as warning:
+    with capture_logs() as logs:
         wrap_function_for_output_files(function, _policy(tmp_path))
 
-    warning.assert_called_once()
+    assert logs == [
+        {
+            "argument_name": OUTPUT_PATH_ARGUMENT,
+            "event": "tool_output_path_argument_collision",
+            "function_name": "existing",
+            "log_level": "debug",
+        },
+    ]
     result = FunctionCall(
         function=function,
         arguments={OUTPUT_PATH_ARGUMENT: "not-redirected"},
@@ -519,6 +531,100 @@ def test_existing_regular_file_is_overwritten_atomically_and_receipt_marks_overw
     assert _receipt(result.result)["overwritten"] is True
 
 
+@pytest.mark.parametrize("failure", [None, "fsync", "replace"])
+def test_output_publication_and_cleanup_stay_in_opened_directory(
+    tmp_path: Path,
+    failure: str | None,
+) -> None:
+    parent = tmp_path / "reports"
+    parent.mkdir()
+    (parent / "result.bin").write_bytes(b"old")
+    original_parent = tmp_path / "renamed-reports"
+    real_fsync = os.fsync
+
+    def rename_parent_after_write(descriptor: int) -> None:
+        real_fsync(descriptor)
+        if original_parent.exists():
+            return
+        parent.rename(original_parent)
+        parent.mkdir()
+        (parent / "result.bin").write_bytes(b"replacement directory")
+        if failure == "fsync":
+            msg = "flush failed"
+            raise OSError(msg)
+
+    with (
+        patch("os.fsync", side_effect=rename_parent_after_write),
+        patch("os.replace", side_effect=OSError("replace failed") if failure == "replace" else os.replace),
+    ):
+        result = write_bytes_to_output_path(_policy(tmp_path), "reports/result.bin", b"\x00new\xff")
+
+    assert (parent / "result.bin").read_bytes() == b"replacement directory"
+    assert sorted(path.name for path in original_parent.iterdir()) == ["result.bin"]
+    assert sorted(path.name for path in parent.iterdir()) == ["result.bin"]
+    if failure is None:
+        assert not isinstance(result, str)
+        assert (original_parent / "result.bin").read_bytes() == b"\x00new\xff"
+    else:
+        assert isinstance(result, str)
+        assert "Failed to write" in result
+        assert (original_parent / "result.bin").read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("file_mode", [None, 0o600, 0o640])
+def test_binary_output_replacement_preserves_requested_permissions(tmp_path: Path, file_mode: int | None) -> None:
+    destination = tmp_path / "report.bin"
+    destination.write_bytes(b"old")
+    destination.chmod(0o666)
+
+    result = write_bytes_to_output_path(_policy(tmp_path), "report.bin", b"\x00new\xff", file_mode=file_mode)
+
+    assert not isinstance(result, str)
+    assert result.overwritten
+    assert destination.read_bytes() == b"\x00new\xff"
+    assert stat.S_IMODE(destination.stat().st_mode) == (0o600 if file_mode is None else file_mode)
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("name_length", [230, 255])
+def test_output_temp_name_does_not_limit_destination_basename(tmp_path: Path, name_length: int) -> None:
+    filename = "x" * name_length
+
+    result = write_bytes_to_output_path(_policy(tmp_path), filename, b"payload")
+
+    assert not isinstance(result, str)
+    assert (tmp_path / filename).read_bytes() == b"payload"
+    assert list(tmp_path.iterdir()) == [tmp_path / filename]
+
+
+@pytest.mark.parametrize("workspace_state", ["real", "home-relative", "replaced-by-link"])
+def test_output_write_opens_the_workspace_as_spelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_state: str,
+) -> None:
+    """Output lands in the workspace as spelled; a workspace replaced by a link is refused, not followed."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    workspace = tmp_path / "agents" / "code" / "workspace"
+    workspace.mkdir(parents=True)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    spelled = Path("~/agents/code/workspace") if workspace_state == "home-relative" else workspace
+    policy = _policy(spelled)
+    if workspace_state == "replaced-by-link":
+        workspace.rename(tmp_path / "moved-workspace")
+        workspace.symlink_to(credentials, target_is_directory=True)
+
+    result = write_bytes_to_output_path(policy, "reports/nested/out.bin", b"payload")
+
+    if workspace_state == "replaced-by-link":
+        assert result == "Failed to write redirected tool output."
+        assert list(credentials.iterdir()) == []
+    else:
+        assert not isinstance(result, str)
+        assert (workspace / "reports" / "nested" / "out.bin").read_bytes() == b"payload"
+
+
 @pytest.mark.parametrize(
     "bad_path",
     [
@@ -580,6 +686,50 @@ def test_existing_directory_rejected_without_calling_tool(tmp_path: Path) -> Non
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
+
+
+@pytest.mark.parametrize("git_path", ["knowledge/docs/.git/config", "knowledge/docs/.git", "repo/.GIT/config"])
+def test_git_metadata_output_paths_rejected_without_calling_tool(tmp_path: Path, git_path: str) -> None:
+    """Redirected output must not author Git metadata that MindRoom later runs Git against."""
+    git_config = tmp_path / "knowledge" / "docs" / ".git" / "config"
+    git_config.parent.mkdir(parents=True)
+    git_config.write_text("[core]\n", encoding="utf-8")
+    seen: list[object] = []
+    toolkit = _EchoToolkit(seen, result="should not run")
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: git_path},
+        call_id="call-1",
+    ).execute()
+
+    assert seen == []
+    assert _receipt(result.result)["status"] == "error"
+    assert validate_output_path_syntax(git_path) == "mindroom_output_path must not target Git metadata ('.git')."
+    assert git_config.read_text(encoding="utf-8") == "[core]\n"
+    assert not (tmp_path / "repo").exists()
+
+
+def test_symlink_into_git_metadata_rejected_without_calling_tool(tmp_path: Path) -> None:
+    """A workspace-internal link to ``.git`` must not bypass the name check."""
+    git_config = tmp_path / "knowledge" / "docs" / ".git" / "config"
+    git_config.parent.mkdir(parents=True)
+    git_config.write_text("[core]\n", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(git_config.parent, target_is_directory=True)
+    seen: list[object] = []
+    toolkit = _EchoToolkit(seen, result="should not run")
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "linked/config"},
+        call_id="call-1",
+    ).execute()
+
+    assert seen == []
+    assert _receipt(result.result)["status"] == "error"
+    assert git_config.read_text(encoding="utf-8") == "[core]\n"
 
 
 def test_intermediate_symlink_escape_rejected_without_calling_tool(tmp_path: Path) -> None:

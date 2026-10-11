@@ -6,11 +6,14 @@ import { createElement } from "react";
 import {
   SiGmail,
   SiGooglecalendar,
+  SiGooglecloud,
   SiGoogledocs,
   SiGoogledrive,
   SiGooglesheets,
+  SiGoogletasks,
 } from "react-icons/si";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { watchOAuthCompletion } from "@/lib/oauthCompletion";
 import type { WorkerScope } from "@/types/config";
 import {
   Integration,
@@ -21,8 +24,6 @@ import {
 import { spotifyIntegration } from "./spotify";
 import { homeAssistantIntegration } from "./homeassistant";
 
-const OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete";
-
 type OAuthStatus = {
   connected: boolean;
   hasClientConfig: boolean;
@@ -31,30 +32,9 @@ type OAuthStatus = {
   clientConfigService?: string;
   clientConfigRedirectUriSupported: boolean;
   toolConfigService?: string;
+  resetRequired: boolean;
   statusError?: string;
 };
-
-function isOAuthCompleteMessage(
-  event: MessageEvent,
-  authWindow: Window,
-  providerId: string,
-  expectedOrigin: string,
-): boolean {
-  if (
-    event.origin !== expectedOrigin ||
-    event.source !== authWindow ||
-    event.data === null ||
-    typeof event.data !== "object"
-  ) {
-    return false;
-  }
-  const data = event.data as Record<string, unknown>;
-  return (
-    data.type === OAUTH_COMPLETE_MESSAGE_TYPE &&
-    data.provider === providerId &&
-    data.status === "connected"
-  );
-}
 
 function oauthCompletionOrigin(rawOrigin: unknown): string {
   if (typeof rawOrigin === "string" && rawOrigin.length > 0) {
@@ -90,9 +70,11 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     const integrationStatus: Partial<Integration> = {
       status: status.connected
         ? "connected"
-        : status.hasClientConfig
-          ? "available"
-          : "not_connected",
+        : status.resetRequired
+          ? "not_connected"
+          : status.hasClientConfig
+            ? "available"
+            : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
       oauth_custom_client_configured: status.hasCustomClientConfig,
@@ -100,8 +82,13 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       oauth_client_redirect_uri_supported:
         status.clientConfigRedirectUriSupported,
       oauth_service_account_configured: status.hasServiceAccountConfig,
+      oauth_reset_required: status.resetRequired,
       config_service: status.toolConfigService,
     };
+    if (status.resetRequired) {
+      integrationStatus.helper_text =
+        "Stored OAuth credentials cannot be read. Reset the OAuth connection to remove them.";
+    }
     if (status.statusError) {
       integrationStatus.helper_text = status.statusError;
       integrationStatus.status_error = status.statusError;
@@ -185,6 +172,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           hasCustomClientConfig: false,
           hasServiceAccountConfig: false,
           clientConfigRedirectUriSupported: false,
+          resetRequired: false,
           statusError: detail,
         };
       }
@@ -194,6 +182,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         hasClientConfig: data.has_client_config === true,
         hasCustomClientConfig: data.has_custom_client_config === true,
         hasServiceAccountConfig: data.has_service_account_config === true,
+        resetRequired: data.reset_required === true,
         clientConfigRedirectUriSupported:
           data.client_config_redirect_uri_supported === true,
         clientConfigService:
@@ -213,6 +202,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         hasCustomClientConfig: false,
         hasServiceAccountConfig: false,
         clientConfigRedirectUriSupported: false,
+        resetRequired: false,
         statusError: `Failed to load ${this.integration.name} OAuth status.`,
       };
     }
@@ -227,51 +217,20 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       throw new Error("OAuth popup was blocked");
     }
     return new Promise((resolve, reject) => {
-      let completed = false;
-      let receivedCompletion = false;
-      let pollInterval = 0;
-      const finish = (error?: Error) => {
-        if (completed) {
-          return;
-        }
-        completed = true;
-        window.clearInterval(pollInterval);
-        window.removeEventListener("message", handleMessage);
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      };
-      const handleMessage = (event: MessageEvent) => {
-        if (
-          !isOAuthCompleteMessage(
-            event,
-            authWindow,
-            this.providerId,
-            expectedCompletionOrigin,
-          )
-        ) {
-          return;
-        }
-        receivedCompletion = true;
-        if (!authWindow.closed) {
-          authWindow.close();
-        }
-        finish();
-      };
-      pollInterval = window.setInterval(() => {
-        if (authWindow.closed) {
-          finish(
-            receivedCompletion
-              ? undefined
-              : new Error(
-                  `${this.integration.name} authorization was cancelled`,
-                ),
-          );
-        }
-      }, 1000);
-      window.addEventListener("message", handleMessage);
+      watchOAuthCompletion(authWindow, {
+        provider: this.providerId,
+        expectedOrigin: () => expectedCompletionOrigin,
+        pollIntervalMs: 1000,
+        cancellationMessage: `${this.integration.name} authorization was cancelled`,
+        onSettled: (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          if (!authWindow.closed) authWindow.close();
+          resolve();
+        },
+      });
     });
   }
 }
@@ -342,6 +301,40 @@ const googleSheetsIntegration = new GenericOAuthIntegrationProvider(
   "google_sheets",
 );
 
+const googleTasksIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_tasks",
+    name: "Google Tasks",
+    description:
+      "List, create, update, complete, and delete tasks with Google Tasks",
+    category: "productivity",
+    icon: createElement(SiGoogletasks, {
+      className: "h-5 w-5 text-blue-600",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_tasks",
+);
+
+const googleCloudIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_cloud",
+    name: "Google Cloud",
+    description:
+      "Connect Google Cloud with read-only access for Google Cloud tools",
+    category: "development",
+    icon: createElement(SiGooglecloud, {
+      className: "h-5 w-5 text-blue-600",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_cloud",
+);
+
 const googleGmailIntegration = new GenericOAuthIntegrationProvider(
   {
     id: "google_gmail",
@@ -361,10 +354,12 @@ const googleGmailIntegration = new GenericOAuthIntegrationProvider(
 // Export all integration providers
 export const integrationProviders: Record<string, IntegrationProvider> = {
   google_calendar: googleCalendarIntegration,
+  google_cloud: googleCloudIntegration,
   google_docs: googleDocsIntegration,
   google_drive: googleDriveIntegration,
   google_gmail: googleGmailIntegration,
   google_sheets: googleSheetsIntegration,
+  google_tasks: googleTasksIntegration,
   spotify: spotifyIntegration,
   homeassistant: homeAssistantIntegration,
 };

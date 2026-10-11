@@ -13,19 +13,18 @@ from unittest.mock import patch
 import pytest
 from agno.models.message import Message
 
-from mindroom import kimi_model
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.kimi_model import (
+from mindroom.providers import kimi_model
+from mindroom.providers.kimi_model import (
     _KIMI_BASE_URL,
     KimiChat,
     _borrow_kimi_token,
     _kimi_home_path,
     normalize_kimi_model_id,
 )
-from mindroom.model_loading import get_model_instance
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.providers.model_loading import get_model_instance
 
 
 def _write_kimi_credentials(kimi_home: Path, access_token: str, refresh_value: str, *, expires_at: int) -> None:
@@ -80,7 +79,7 @@ def test_borrow_kimi_token_refreshes_expired_access_token(tmp_path: Path) -> Non
     rotated_refresh = "new-refresh-value"
 
     with patch(
-        "mindroom.kimi_model._refresh_kimi_tokens",
+        "mindroom.providers.kimi_model._refresh_kimi_tokens",
         return_value={
             "access_token": refreshed_access,
             "refresh_token": rotated_refresh,
@@ -197,7 +196,7 @@ def test_kimi_chat_client_params_refresh_expired_tokens(tmp_path: Path, monkeypa
     monkeypatch.setattr(kimi_model, "_KIMI_REFRESH_SKEW_SECONDS", 7200)
 
     with patch(
-        "mindroom.kimi_model._refresh_kimi_tokens",
+        "mindroom.providers.kimi_model._refresh_kimi_tokens",
         return_value={"access_token": "refreshed-access", "expires_in": 900},
     ):
         assert model._get_client_params()["api_key"] == "refreshed-access"
@@ -219,39 +218,6 @@ def test_kimi_chat_request_params_include_prompt_cache_key() -> None:
     assert "prompt_cache_key" not in model_without_key.get_request_params()
 
 
-def test_kimi_model_loader_derives_prompt_cache_key_from_execution_identity(tmp_path: Path) -> None:
-    """MindRoom should use a stable per-agent/session Kimi cache key by default."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    config = Config(
-        models={
-            "default": ModelConfig(
-                provider="kimi",
-                id="k3",
-            ),
-        },
-        agents={},
-    )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread:example.org",
-        resolved_thread_id="$thread:example.org",
-        session_id="!room:example.org:$thread:example.org",
-    )
-
-    model = get_model_instance(config, runtime_paths, execution_identity=identity)
-
-    assert isinstance(model, KimiChat)
-    assert model.prompt_cache_key == "mindroom-7ac97f304c4001bd9939c88ddba8b0e2"
-    assert model.get_request_params()["prompt_cache_key"] == "mindroom-7ac97f304c4001bd9939c88ddba8b0e2"
-
-
 @pytest.mark.parametrize("provider", ["kimi", "kimi_code"])
 def test_get_model_instance_supports_kimi_provider(tmp_path: Path, provider: str) -> None:
     """The model loader should expose Kimi as a first-class model provider."""
@@ -270,7 +236,7 @@ def test_get_model_instance_supports_kimi_provider(tmp_path: Path, provider: str
         agents={},
     )
 
-    with patch("mindroom.model_loading.logger.info") as log_info:
+    with patch("mindroom.providers.model_loading.logger.info") as log_info:
         model = get_model_instance(config, runtime_paths)
 
     assert isinstance(model, KimiChat)

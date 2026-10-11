@@ -7,6 +7,9 @@ read_when:
 
 # HEARTBEAT.md
 
-# Keep this file empty (or with only comments) to skip heartbeat API calls.
-
-# Add tasks below when you want the agent to check something periodically.
+This file is optional checklist context for requested or scheduled checks.
+Adding tasks here does not create a schedule, and leaving it empty does not disable model calls.
+Use the `scheduler` tool to create periodic checks explicitly.
+For a silent scheduled task, set `silent=True` and return an empty final response or exactly `NO_REPLY` when there is nothing to report.
+That suppresses the routine final response only for silent scheduled runs; findings, failures, and independent tool messages remain visible.
+It does not suppress ordinary room replies.

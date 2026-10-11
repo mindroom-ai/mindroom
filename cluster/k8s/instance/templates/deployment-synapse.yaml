@@ -1,7 +1,9 @@
 {{- $instanceSecretName := include "mindroom.instanceSecretName" .Values -}}
 {{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
 {{- $matrixOidc := .Values.matrixOidc | default (dict) -}}
-{{- $synapseConfigHash := printf "%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) ($matrixOidc.enabled | default "" | toString) ($matrixOidc.issuer | default "" | toString) ($matrixOidc.clientId | default "" | toString) (.Values.matrixAutoJoinRoomKeys | default (list) | toJson) | sha256sum -}}
+{{- /* Bump when a homeserver.yaml template change must restart running Synapse pods on upgrade. */ -}}
+{{- $synapseConfigRevision := "closed-registration" -}}
+{{- $synapseConfigHash := printf "%s|%s|%s|%s|%s|%s|%s" $synapseConfigRevision (.Values.customer | toString) (.Values.baseDomain | toString) ($matrixOidc.enabled | default "" | toString) ($matrixOidc.issuer | default "" | toString) ($matrixOidc.clientId | default "" | toString) (.Values.matrixAutoJoinRoomKeys | default (list) | toJson) | sha256sum -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,6 +27,8 @@ spec:
         mindroom.ai/synapse-config-hash: {{ $synapseConfigHash | quote }}
         mindroom.ai/instance-secret-hash: {{ $instanceSecretHash | quote }}
     spec:
+      # Synapse never calls the Kubernetes API.
+      automountServiceAccountToken: false
       containers:
       - name: synapse
         image: {{ .Values.synapse_image | default "matrixdotorg/synapse:latest" }}

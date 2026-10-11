@@ -1,0 +1,377 @@
+"""Foreground response ownership across automatic approval checkpoints."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from itertools import count
+from typing import TYPE_CHECKING, Literal
+from unittest.mock import AsyncMock, patch
+
+import nio
+import pytest
+from agno.models.response import ToolExecution
+
+from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalDecision,
+    EventClass,
+    EventKind,
+    InboundEvent,
+    ProjectedEvent,
+)
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from tests.approval_continuation_helpers import approval_continuation, resumed_approval
+from tests.conftest import unwrap_extracted_collaborator
+from tests.reply_span_helpers import paused_for_approval
+from tests.response_runner_helpers import _bot, _plain_request, _target
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.approval.response import _ApprovalPausePlan
+    from mindroom.bot import AgentBot
+    from mindroom.message_target import MessageTarget
+    from mindroom.response_runner import ResponseRequest, ResponseRunner, _EarlyPlaceholderState
+    from mindroom.streaming import ProgressPublisher
+    from mindroom.tool_system.events import ToolTraceEntry
+
+
+async def _runner_with_source(tmp_path: Path) -> tuple[AgentBot, ResponseRunner]:
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    client = runner._client()
+    event_ids = count(1)
+    client.room_send.side_effect = lambda *_args, **_kwargs: nio.RoomSendResponse(
+        event_id=f"$response-{next(event_ids)}",
+        room_id="!room:localhost",
+    )
+    await runner.deps.approval_store.admit(
+        InboundEvent(
+            event_id="$source",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": "$source", "content": {"body": "Read the reports"}},
+        ),
+        ProjectedEvent(
+            event_id="$source",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            sender="@user:localhost",
+            origin_server_ts=1,
+            content={"body": "Read the reports"},
+            replaces_event_id=None,
+            redacts_event_id=None,
+        ),
+    )
+    return bot, runner
+
+
+def _pause(call_id: str) -> PausedAttempt:
+    return PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(ToolExecution(tool_call_id=call_id, tool_name="read_report", tool_args={}),),
+        toolkit_owners={("general", "read_report"): "reports"},
+        response_text="The first report is read; another remains.",
+    )
+
+
+def _ready_continuation() -> ApprovalContinuation:
+    return approval_continuation(
+        approval_id="approval-1",
+        continuation_count=2,
+        response_event_id="$original-response",
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="read_report",
+                invoking_agent="general",
+                toolkit_name="reports",
+                expires_at_ns=2**62,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=False,
+            ),
+        ),
+        show_tool_calls=False,
+        execution_identity=serialize_tool_execution_identity(
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="@user:localhost",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                resolved_thread_id="$thread",
+                session_id="session-1",
+            ),
+        ),
+    )
+
+
+async def _seed_ready_continuation(bot: AgentBot) -> ApprovalContinuation:
+    """Pause a reply for a ready continuation, then start the bot that resumes it."""
+    continuation = _ready_continuation()
+    assert await paused_for_approval(bot.journal_principal(), continuation) == continuation
+    await bot._reply_runtime.start()
+    return continuation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize("terminal_run_id", ["continued-run", None, "", 7])
+async def test_final_approval_links_the_delivered_attempt(
+    tmp_path: Path,
+    terminal_run_id: str | int | None,
+    *,
+    recover: bool,
+) -> None:
+    """Live and recovered finals persist the attempt identified by their durable metadata."""
+    bot, runner = await _runner_with_source(tmp_path)
+    continuation = _ready_continuation()
+    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+    persist_event_id = AsyncMock()
+    completed = CompletedApprovalRun(
+        response_text="Finished after refreshing the tools.",
+        metadata_content={AI_RUN_METADATA_KEY: {"run_id": terminal_run_id, "status": "completed"}},
+    )
+    with (
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(return_value=completed)),
+        patch.object(runner, "_approval_response_event_persistence", return_value=persist_event_id),
+    ):
+        async with resumed_approval(bot, continuation) as claimed:
+            if recover:
+                await runner._execute_claimed_approval(
+                    claimed,
+                    request=_plain_request(target, source_event_id="$source"),
+                    target=target,
+                )
+                await runner._recover_claimed_approval_lifecycle(claimed, target=target)
+            else:
+                await runner._run_claimed_approval_lifecycle(claimed, target=target)
+
+    expected_run_id = terminal_run_id if isinstance(terminal_run_id, str) and terminal_run_id else "run-1"
+    persist_event_id.assert_awaited_once_with(expected_run_id, "$original-response")
+
+
+async def _drain_tasks(*tasks: asyncio.Task[object] | None) -> None:
+    """Keep a failed assertion from leaving blocked test tasks behind."""
+    started = [task for task in tasks if task is not None]
+    for task in started:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*started, return_exceptions=True)
+
+
+async def _run_follow_up(
+    runner: ResponseRunner,
+    target: MessageTarget,
+    dispatched: asyncio.Event,
+    order: list[str],
+) -> str | None:
+    async def answer(
+        _target: MessageTarget,
+        _early_placeholder: _EarlyPlaceholderState,
+    ) -> str:
+        order.append("follow-up")
+        return "$follow-up-response"
+
+    dispatched.set()
+    return await runner._run_locked_response_lifecycle(
+        _plain_request(target, source_event_id="$follow-up"),
+        response_kind="ai",
+        locked_operation=answer,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", ["initial", "chained"])
+async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR0915 - two checkpoint flows
+    tmp_path: Path,
+    checkpoint: Literal["initial", "chained"],
+) -> None:
+    """A follow-up cannot run between automatically approved generations."""
+    bot, runner = await _runner_with_source(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+    request = _plain_request(target, source_event_id="$source")
+    if checkpoint == "chained":
+        await _seed_ready_continuation(bot)
+    batch_started = asyncio.Event()
+    release_batch = asyncio.Event()
+    follow_up_dispatched = asyncio.Event()
+    order: list[str] = []
+    generations: list[int] = []
+    lifecycle = runner._lifecycle_coordinator
+
+    async def continue_model(
+        continuation: ApprovalContinuation,
+        *,
+        request: ResponseRequest,
+        target: MessageTarget,
+        tool_trace_collector: list[ToolTraceEntry],
+        progress: ProgressPublisher | None,
+        cli_approval_handler: object = None,
+    ) -> CompletedApprovalRun | PausedAttempt:
+        assert cli_approval_handler is None
+        del request, tool_trace_collector, progress
+        generations.append(continuation.generation)
+        assert continuation.continuation_count == 2
+        if checkpoint == "chained" and len(generations) == 1:
+            order.append("first batch")
+            batch_started.set()
+            await release_batch.wait()
+            return _pause("call-2")
+        assert lifecycle._get_or_create_queued_signal(target).has_pending_human_messages()
+        order.append("original handoff")
+        return CompletedApprovalRun(
+            response_text="A newer message arrived. One report is read; one remains. I will resume after your update.",
+            metadata_content={},
+        )
+
+    async def initial_model(
+        resolved_target: MessageTarget,
+        _early_placeholder: _EarlyPlaceholderState,
+    ) -> str | None:
+        assert checkpoint == "initial"
+        # The turn claims its reply, as the locked generation does before the model runs.
+        history_scope = runner.deps.state_writer.history_scope()
+        claimed_request = await runner._claim_reply_span(request, history_scope=history_scope)
+        assert claimed_request is not None
+        order.append("initial model")
+        batch_started.set()
+        await release_batch.wait()
+        await runner._suspend_for_approval(
+            replace(_pause("call-1"), continuation_count=2),
+            request=claimed_request,
+            target=resolved_target,
+            execution_identity=runner.deps.tool_runtime.build_execution_identity(
+                target=resolved_target,
+                user_id=request.user_id,
+            ),
+            entity_kind="agent",
+            history_scope=history_scope,
+            show_tool_calls=False,
+        )
+        return None
+
+    with patch.object(runner, "_continue_entity_call", new=continue_model):
+        original = asyncio.create_task(
+            runner._run_locked_response_lifecycle(request, response_kind="ai", locked_operation=initial_model),
+        )
+        follow_up: asyncio.Task[str | None] | None = None
+        try:
+            await asyncio.wait_for(batch_started.wait(), timeout=5)
+            follow_up = asyncio.create_task(
+                _run_follow_up(runner, target, follow_up_dispatched, order),
+            )
+            await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
+            assert lifecycle._get_or_create_queued_signal(target).has_pending_human_messages()
+            release_batch.set()
+            await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
+        finally:
+            release_batch.set()
+            await _drain_tasks(original, follow_up)
+
+    assert order == ["initial model" if checkpoint == "initial" else "first batch", "original handoff", "follow-up"]
+    assert generations == ([0] if checkpoint == "initial" else [0, 1])
+    assert await runner.deps.approval_store.approval_continuation_for_source("$source") is None
+    assert not await runner.deps.approval_store.is_pending("$source")
+    assert not original.cancelled()
+    assert follow_up is not None
+    assert not follow_up.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: Path) -> None:
+    """A chained pause gives up the conversation's lock, so a turn that already waited on it runs.
+
+    Messages that arrive later wait for the approval, which still holds the conversation.
+    """
+    bot, runner = await _runner_with_source(tmp_path)
+    await _seed_ready_continuation(bot)
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+    batch_started = asyncio.Event()
+    release_batch = asyncio.Event()
+    follow_up_dispatched = asyncio.Event()
+    order: list[str] = []
+
+    async def continue_model(
+        continuation: ApprovalContinuation,
+        *,
+        request: ResponseRequest,
+        target: MessageTarget,
+        tool_trace_collector: list[ToolTraceEntry],
+        progress: ProgressPublisher | None,
+        cli_approval_handler: object = None,
+    ) -> PausedAttempt:
+        assert cli_approval_handler is None
+        del continuation, request, target, tool_trace_collector, progress
+        order.append("first batch")
+        batch_started.set()
+        await release_batch.wait()
+        return replace(
+            _pause("call-needs-human"),
+            tools=(
+                ToolExecution(
+                    tool_call_id="call-needs-human",
+                    tool_name="read_report",
+                    tool_args={},
+                    requires_confirmation=True,
+                ),
+            ),
+        )
+
+    async def publish_cards(
+        continuation: ApprovalContinuation,
+        plan: _ApprovalPausePlan,
+        *,
+        target: MessageTarget,
+        failure_reason: str,
+    ) -> None:
+        # Only external card publication is replaced: release its real journal
+        # publication lease without granting the still-undecided tool call.
+        del plan, target, failure_reason
+        assert all(call.decision is None for call in continuation.calls)
+        activated = await runner.deps.approval_store.activate_approval_continuation(
+            continuation.approval_id,
+            expected_generation=continuation.generation,
+        )
+        assert activated is not None
+        assert activated.state == "waiting"
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=continue_model),
+        patch.object(runner._approval_responses, "_publish_cards", new=publish_cards),
+    ):
+        original = asyncio.create_task(runner._resume_approval_source("$source"))
+        follow_up: asyncio.Task[str | None] | None = None
+        try:
+            await asyncio.wait_for(batch_started.wait(), timeout=5)
+            follow_up = asyncio.create_task(_run_follow_up(runner, target, follow_up_dispatched, order))
+            await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
+            assert runner._lifecycle_coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
+            release_batch.set()
+            await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
+        finally:
+            release_batch.set()
+            await _drain_tasks(original, follow_up)
+
+    assert order == ["first batch", "follow-up"]
+    waiting = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert waiting is not None
+    assert waiting.state == "waiting"
+    assert waiting.generation == 1
+    assert waiting.continuation_count == 2
+    assert waiting.calls[0].decision is None
+    assert await runner.deps.approval_store.is_pending("$source")
+    assert runner.is_held_for_approval(target)
+    assert not original.cancelled()
+    assert follow_up is not None
+    assert not follow_up.cancelled()

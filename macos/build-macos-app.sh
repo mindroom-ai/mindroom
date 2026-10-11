@@ -6,18 +6,16 @@ APP_NAME="MindRoom"
 DISPLAY_NAME="MindRoom"
 INSTALL=false
 CREATE_DMG=false
-UNIVERSAL=false
 
 usage() {
     cat <<'EOF'
-Usage: macos/build-macos-app.sh [--install] [--dmg] [--universal]
+Usage: macos/build-macos-app.sh [--install] [--dmg]
 
-Build the native macOS menu bar app for MindRoom.
+Build the native Apple silicon macOS app and menu bar companion for MindRoom.
 
 Options:
   --install   Copy the built app to /Applications and open it.
   --dmg       Create dist/macos/MindRoom.dmg.
-  --universal Build and verify an app for Apple silicon and Intel Macs.
   -h, --help  Show this help text.
 
 Environment:
@@ -30,6 +28,9 @@ Environment:
                      Public EdDSA key for Sparkle updates. If unset, the app
                      builds without enabling Sparkle update checks.
   UV_BINARY          uv binary to bundle. Defaults to the uv found on PATH.
+  SKIP_DESKTOP_HELPER_BUILD
+                     Set to 1 to bundle the helper that macos/build-desktop-helper.sh
+                     already built in dist/macos/desktop-helper instead of rebuilding it.
   INSTALL_DIR        Install destination. Defaults to /Applications.
   MINDROOM_SKIP_OPEN Set to 1 to skip opening the app after --install.
   NOTARIZE           Set to 1 to notarize and staple the DMG. Requires --dmg.
@@ -50,10 +51,6 @@ while [[ $# -gt 0 ]]; do
             CREATE_DMG=true
             shift
             ;;
-        --universal)
-            UNIVERSAL=true
-            shift
-            ;;
         -h|--help)
             usage
             exit 0
@@ -68,41 +65,54 @@ done
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PACKAGE_DIR="$ROOT_DIR/macos/$APP_NAME"
+HELPER_BUILD_DIR="$ROOT_DIR/dist/macos/desktop-helper"
+HELPER_BUILD_SCRIPT="$ROOT_DIR/macos/build-desktop-helper.sh"
+HELPER_VERIFY_SCRIPT="$ROOT_DIR/macos/verify-desktop-helper.sh"
 DIST_DIR="$ROOT_DIR/dist/macos"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
+HELPER_APP="$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app"
 DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
 DMG_RW_PATH="$DIST_DIR/$APP_NAME-rw.dmg"
 INFO_PLIST="$PACKAGE_DIR/Resources/Info.plist"
 ENTITLEMENTS_PLIST="$PACKAGE_DIR/Resources/MindRoom.entitlements"
-ICON_SOURCE_PNG="$ROOT_DIR/frontend/public/logo-square.png"
-ICONSET_DIR="$DIST_DIR/MindRoom.iconset"
-APP_ICON_ICNS="$DIST_DIR/MindRoom.icns"
+ICON_SOURCE="$PACKAGE_DIR/Resources/MindRoom.icon"
+ICON_BUILD_DIR="$DIST_DIR/icon-assets"
+ICON_INFO_PLIST="$DIST_DIR/icon-info.plist"
 CODESIGN_IDENTITY=${CODESIGN_IDENTITY:--}
 APP_VERSION=${APP_VERSION:-}
 BUILD_VERSION=${BUILD_VERSION:-${GITHUB_RUN_NUMBER:-}}
 UV_BINARY=${UV_BINARY:-$(command -v uv || true)}
+SKIP_DESKTOP_HELPER_BUILD=${SKIP_DESKTOP_HELPER_BUILD:-0}
 INSTALL_DIR=${INSTALL_DIR:-/Applications}
 NOTARIZE=${NOTARIZE:-0}
 SPARKLE_PUBLIC_ED_KEY=${SPARKLE_PUBLIC_ED_KEY:-}
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "This script builds a macOS .app bundle and must run on macOS." >&2
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "The MindRoom app must be built natively on an Apple silicon Mac." >&2
     exit 1
 fi
 
-REQUIRED_TOOLS=(swift sips iconutil)
-if [[ "$UNIVERSAL" == true ]]; then
-    REQUIRED_TOOLS+=(lipo)
-fi
-for required_tool in "${REQUIRED_TOOLS[@]}"; do
+for required_tool in swift xcrun xcodebuild lipo; do
     if ! command -v "$required_tool" >/dev/null 2>&1; then
         echo "$required_tool is required to build the MindRoom app." >&2
         exit 1
     fi
 done
 
+XCODE_VERSION=$(xcodebuild -version | awk '/^Xcode / { print $2 }')
+if [[ "${XCODE_VERSION%%.*}" -lt 26 ]] || ! xcrun --find actool >/dev/null 2>&1; then
+    echo "Xcode 26 or newer is required to compile the light and dark app icons." >&2
+    exit 1
+fi
+
 if [[ -z "$UV_BINARY" || ! -x "$UV_BINARY" ]]; then
     echo "uv is required so it can be bundled into the app. Set UV_BINARY or install uv." >&2
+    exit 1
+fi
+
+# An Intel uv would need Rosetta, which Apple silicon Macs do not install by default.
+if ! lipo "$UV_BINARY" -verify_arch arm64; then
+    echo "The bundled uv must support Apple silicon: $UV_BINARY" >&2
     exit 1
 fi
 
@@ -116,8 +126,8 @@ if [[ ! -f "$ENTITLEMENTS_PLIST" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$ICON_SOURCE_PNG" ]]; then
-    echo "MindRoom icon source is missing: $ICON_SOURCE_PNG" >&2
+if [[ ! -f "$ICON_SOURCE/icon.json" ]]; then
+    echo "MindRoom icon sources are missing from $PACKAGE_DIR/Resources." >&2
     exit 1
 fi
 
@@ -153,27 +163,6 @@ sign_app() {
 
 first_find_match() {
     find "$@" -print | sed -n '1p'
-}
-
-require_architectures() {
-    local binary="$1"
-    shift
-    if [[ ! -f "$binary" ]]; then
-        echo "Required universal binary not found: $binary" >&2
-        exit 1
-    fi
-    local architectures
-    if ! architectures=$(lipo -archs "$binary"); then
-        echo "Could not inspect architectures for required universal binary: $binary" >&2
-        exit 1
-    fi
-    architectures=" $architectures "
-    for architecture in "$@"; do
-        if [[ "$architectures" != *" $architecture "* ]]; then
-            echo "$binary is missing the required $architecture architecture." >&2
-            exit 1
-        fi
-    done
 }
 
 resolve_app_version() {
@@ -234,20 +223,18 @@ stamp_info_plist() {
 }
 
 build_app_icon() {
-    rm -rf "$ICONSET_DIR" "$APP_ICON_ICNS"
-    mkdir -p "$ICONSET_DIR"
-    sips -z 16 16 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null
-    sips -z 32 32 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null
-    sips -z 32 32 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_32x32.png" >/dev/null
-    sips -z 64 64 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_32x32@2x.png" >/dev/null
-    sips -z 128 128 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_128x128.png" >/dev/null
-    sips -z 256 256 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_128x128@2x.png" >/dev/null
-    sips -z 256 256 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_256x256.png" >/dev/null
-    sips -z 512 512 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/null
-    sips -z 512 512 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null
-    sips -z 1024 1024 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null
-    iconutil -c icns "$ICONSET_DIR" -o "$APP_ICON_ICNS"
-    rm -rf "$ICONSET_DIR"
+    rm -rf "$ICON_BUILD_DIR"
+    mkdir -p "$ICON_BUILD_DIR"
+    xcrun actool "$ICON_SOURCE" \
+        --compile "$ICON_BUILD_DIR" \
+        --app-icon MindRoom \
+        --platform macosx \
+        --target-device mac \
+        --minimum-deployment-target 14.0 \
+        --enable-on-demand-resources NO \
+        --development-region en \
+        --output-partial-info-plist "$ICON_INFO_PLIST" \
+        --output-format human-readable-text --errors --warnings
 }
 
 require_notarization_env() {
@@ -315,14 +302,12 @@ quit_running_app() {
     pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 }
 
-SWIFT_BUILD_ARGS=(-c release --package-path "$PACKAGE_DIR" --product "$APP_NAME")
-if [[ "$UNIVERSAL" == true ]]; then
-    SWIFT_BUILD_ARGS+=(--arch arm64 --arch x86_64)
-fi
+SWIFT_BUILD_ARGS=(-c release --package-path "$PACKAGE_DIR" --product "$APP_NAME" --arch arm64)
 
 echo "Building $DISPLAY_NAME..."
 swift build "${SWIFT_BUILD_ARGS[@]}"
 BIN_DIR=$(swift build "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)
+RESOURCE_BUNDLE="$BIN_DIR/${APP_NAME}_${APP_NAME}.bundle"
 EXPECTED_BINARY="$BIN_DIR/$APP_NAME"
 BINARY="$EXPECTED_BINARY"
 
@@ -338,11 +323,23 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
+if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
+    echo "Built app resources not found: $RESOURCE_BUNDLE" >&2
+    exit 1
+fi
+
+if [[ "$SKIP_DESKTOP_HELPER_BUILD" == "1" ]]; then
+    echo "Using the prebuilt fixed-identity desktop helper..."
+else
+    echo "Building fixed-identity desktop helper..."
+    UV_BINARY="$UV_BINARY" "$HELPER_BUILD_SCRIPT" --output "$HELPER_BUILD_DIR"
+fi
+
 echo "Building app icon..."
 build_app_icon
 
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources/bin"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources/bin" "$APP_DIR/Contents/Helpers"
 
 EXPECTED_SPARKLE_FRAMEWORK="$BIN_DIR/Sparkle.framework"
 SPARKLE_FRAMEWORK="$EXPECTED_SPARKLE_FRAMEWORK"
@@ -360,33 +357,32 @@ fi
 
 cp "$BINARY" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Merge '$ICON_INFO_PLIST'" "$APP_DIR/Contents/Info.plist"
 ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
-cp "$APP_ICON_ICNS" "$APP_DIR/Contents/Resources/MindRoom.icns"
+bash "$ROOT_DIR/macos/bundle-llama-cpp.sh" "$APP_DIR/Contents/Resources/llama.cpp"
+ditto "$ICON_BUILD_DIR" "$APP_DIR/Contents/Resources"
+ditto "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/${APP_NAME}_${APP_NAME}.bundle"
+ditto "$HELPER_BUILD_DIR/dist/MindRoom Desktop Helper.app" "$HELPER_APP"
 chmod 755 "$APP_DIR/Contents/MacOS/$APP_NAME" "$APP_DIR/Contents/Resources/bin/uv"
-
-if [[ "$UNIVERSAL" == true ]]; then
-    UNIVERSAL_BINARIES=(
-        "$APP_DIR/Contents/MacOS/$APP_NAME"
-        "$APP_DIR/Contents/Resources/bin/uv"
-        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Sparkle"
-        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate"
-        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app/Contents/MacOS/Updater"
-        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
-        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc/Contents/MacOS/Installer"
-    )
-    for binary in "${UNIVERSAL_BINARIES[@]}"; do
-        require_architectures "$binary" arm64 x86_64
-    done
-    echo "Verified Apple silicon and Intel support."
-fi
 
 if ! otool -l "$APP_DIR/Contents/MacOS/$APP_NAME" | grep -q '@executable_path/../Frameworks'; then
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents/MacOS/$APP_NAME"
 fi
 
 stamp_info_plist
+HELPER_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist")
+HELPER_BUILD_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_DIR/Contents/Info.plist")
 sign_executable "$APP_DIR/Contents/Resources/bin/uv"
+for library in "$APP_DIR/Contents/Resources/llama.cpp/"*.dylib; do
+    if [[ ! -L "$library" ]]; then sign_executable "$library"; fi
+done
+sign_executable "$APP_DIR/Contents/Resources/llama.cpp/llama-server"
+HELPER_INFO="$HELPER_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $HELPER_VERSION" "$HELPER_INFO"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $HELPER_BUILD_VERSION" "$HELPER_INFO"
+sign_app "$HELPER_APP"
+"$HELPER_VERIFY_SCRIPT" "$HELPER_APP"
 sign_app "$APP_DIR"
 
 echo "Built $APP_DIR"

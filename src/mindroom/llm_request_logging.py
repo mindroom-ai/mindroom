@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -16,11 +17,12 @@ from uuid import uuid4
 from agno.models.message import Message
 from pydantic import BaseModel
 
+from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_data
-from mindroom.tool_system.context_bound_streams import context_bound_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Sequence
@@ -646,11 +648,12 @@ def _stream_with_llm_request_logging(
                 context_factory=lambda: _model_request_scope(model, wire_tools_capture),
                 stream_factory=lambda: original_ainvoke_stream(*args, **kwargs),
             )
-            async for chunk in scoped_stream:
-                await _write_request_once()
-                if chunk.response_usage is not None:
-                    last_usage = chunk.response_usage
-                yield chunk
+            async with closing_async_stream(scoped_stream):
+                async for chunk in scoped_stream:
+                    await _write_request_once()
+                    if chunk.response_usage is not None:
+                        last_usage = chunk.response_usage
+                    yield chunk
         finally:
             await _write_request_once()
             await _write_llm_response_log_best_effort(
@@ -674,14 +677,12 @@ def install_llm_request_logging(
     configured_provider: str | None = None,
 ) -> None:
     """Wrap one model for usage telemetry and optional full request logging."""
-    model_dict = vars(model)
-    if model_dict.get(_INSTALLED_ATTR) is True:
-        return
 
-    original_ainvoke = model.ainvoke
-    original_ainvoke_stream = model.ainvoke_stream
-
-    def _logged_ainvoke(*args: object, **kwargs: object) -> Coroutine[object, object, ModelResponse]:
+    def _logged_ainvoke(
+        original_ainvoke: Callable[..., Coroutine[object, object, ModelResponse]],
+        *args: object,
+        **kwargs: object,
+    ) -> Coroutine[object, object, ModelResponse]:
         if id(model) in _ACTIVE_MODEL_CALLS.get():
             return original_ainvoke(*args, **kwargs)
         return _invoke_with_llm_request_logging(
@@ -696,7 +697,11 @@ def install_llm_request_logging(
             request_context=_snapshot_request_log_context(),
         )
 
-    def _logged_ainvoke_stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+    def _logged_ainvoke_stream(
+        original_ainvoke_stream: Callable[..., AsyncIterator[ModelResponse]],
+        *args: object,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse]:
         if id(model) in _ACTIVE_MODEL_CALLS.get():
             return original_ainvoke_stream(*args, **kwargs)
         return _stream_with_llm_request_logging(
@@ -711,6 +716,9 @@ def install_llm_request_logging(
             request_context=_snapshot_request_log_context(),
         )
 
-    model_dict["ainvoke"] = _logged_ainvoke
-    model_dict["ainvoke_stream"] = _logged_ainvoke_stream
-    model_dict[_INSTALLED_ATTR] = True
+    install_async_invocation_hooks(
+        model,
+        marker=_INSTALLED_ATTR,
+        wrap_invoke=lambda original: partial(_logged_ainvoke, original),
+        wrap_stream=lambda original: partial(_logged_ainvoke_stream, original),
+    )

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,11 +20,13 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="desktop",
+    file_access=ToolFileAccess.NONE,
     display_name="Matrix Desktop",
-    description="Operate exact locally allowlisted applications through accessibility state over Matrix encryption",
+    description="Let the agent use allowed apps, read selected folders, and run shell commands you approve on your computer",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     requires_room_context=True,
     icon="MonitorUp",
     icon_color="text-cyan-500",
@@ -28,7 +37,10 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=30,
-            description="Short-lived command and response timeout, from 1 to 120 seconds.",
+            description=(
+                "Short-lived command and response timeout, from 1 to 120 seconds. Shell command starts always "
+                "wait up to 120 seconds for approval on the computer."
+            ),
         ),
     ],
     docs_url="https://docs.mindroom.chat/tools/desktop/",
