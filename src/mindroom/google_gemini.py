@@ -160,7 +160,7 @@ class MindRoomGoogleGemini(Gemini):
     # output and totals missed all thinking.
     # Upstream issue: https://github.com/agno-agi/agno/issues/10763
     # Upstream PR: https://github.com/agno-agi/agno/pull/10764 counts thinking in output;
-    # https://github.com/agno-agi/agno/pull/10722 does too and also uses the provider total.
+    # https://github.com/agno-agi/agno/pull/10722 does too since commit 2232999, and also uses the provider total.
     # Remove when: The pinned Agno release counts thinking in output while totalling input and output;
     # PR #10722's provider total would also add tool-use prompt tokens, which MindRoom leaves uncounted.
     # Coverage: tests/test_provider_usage_metrics.py::test_gemini_output_includes_thinking.
