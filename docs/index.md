@@ -8,7 +8,7 @@ hide:
 
 <div class="mr-hero" markdown>
 
-<img src="assets/logo.svg" alt="MindRoom logo" width="128" height="128" />
+<img src="assets/logo.svg" alt="" width="128" height="128" />
 
 # MindRoom
 
@@ -62,14 +62,14 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
 
 <div class="grid cards mr-why" markdown>
 
--   :lucide-plug-zap:{ .lg } **Agents that know you and your work**
+-   ### :lucide-plug-zap:{ .lg } Agents that know you and your work
 
     ---
 
     Agents connect to 100+ tools, including Gmail, Google Drive, Slack, Jira, Confluence, GitHub, and any MCP server ([Tools](tools/index.md), [MCP Servers](mcp.md)), and search knowledge bases built from your folders and Git repositories ([Knowledge Bases](knowledge.md)).
     Each person can get a private room with their own agent ([Personal Rooms](personal-rooms.md)), each team can share agents that answer only its members ([Access Control](authorization.md)), and agents can work as a team or hand tasks to each other ([Teams](configuration/teams.md), [Agent Orchestration](tools/agent-orchestration.md)).
 
--   :lucide-lock:{ .lg } **Private where it matters**
+-   ### :lucide-lock:{ .lg } Private where it matters
 
     ---
 
@@ -78,7 +78,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     Pair a local model with local memory and your own server, and nothing that agent sees leaves your home ([Memory](memory.md), [Deployment](deployment/index.md)).
     Each agent keeps its own memory, tools, and access, so what you tell a private agent stays out of shared ones, and rooms can be end-to-end encrypted ([End-to-End Encryption](matrix.md#end-to-end-encryption)).
 
--   :lucide-brain:{ .lg } **They remember, and keep improving**
+-   ### :lucide-brain:{ .lg } They remember, and keep improving
 
     ---
 
@@ -87,14 +87,14 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     With skill learning on, an agent also turns work it repeats into reusable skills, following the self-improvement loop of Hermes Agent ([Automatic Skill Learning](skills.md#automatic-skill-learning)).
     You can teach it directly too: tell it a preference or a correction, and it is remembered.
 
--   :lucide-calendar-clock:{ .lg } **They work while you don't**
+-   ### :lucide-calendar-clock:{ .lg } They work while you don't
 
     ---
 
     Schedule recurring jobs in plain language, such as a daily briefing or a weekly report, including silent checks that post only when something changed ([Scheduling](scheduling.md)).
     Send a voice message from your phone ([Voice Messages](voice.md)), or call an agent and talk while it hands longer tasks to background agents ([Voice Calls](voice-calls.md)).
 
--   :lucide-shield-check:{ .lg } **Safe to give real access**
+-   ### :lucide-shield-check:{ .lg } Safe to give real access
 
     ---
 
@@ -105,7 +105,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
 
     The [Security Model](architecture/security-posture.md) documents exactly which boundary protects what.
 
--   :lucide-messages-square:{ .lg } **A chat app built for agents**
+-   ### :lucide-messages-square:{ .lg } A chat app built for agents
 
     ---
 
@@ -119,7 +119,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     - An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](canvases.md)).
     - You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](configuration/models.md#model-overrides-in-chat)).
 
--   :lucide-key-round:{ .lg } **Yours to own**
+-   ### :lucide-key-round:{ .lg } Yours to own
 
     ---
 
@@ -128,7 +128,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     - **Federated like email:** separate MindRoom deployments, such as groups with different data rules, can still share rooms where that is allowed.
     - **Extensible:** add your own tools, skills, and event hooks as plugins, which reload while MindRoom keeps running ([Plugins](plugins.md), [Hooks](hooks.md)).
 
--   :lucide-globe:{ .lg } **Works where you already are**
+-   ### :lucide-globe:{ .lg } Works where you already are
 
     ---
 
@@ -161,7 +161,7 @@ Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [I
 
 <div class="grid cards" markdown>
 
--   :lucide-download:{ .lg } **1. Install & First Run**
+-   ### :lucide-download:{ .lg } 1. Install & First Run
 
     ---
 
@@ -169,7 +169,7 @@ Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [I
 
     [:lucide-arrow-right: Install & First Run](getting-started.md)
 
--   :lucide-sliders-horizontal:{ .lg } **2. Configuration**
+-   ### :lucide-sliders-horizontal:{ .lg } 2. Configuration
 
     ---
 
@@ -177,7 +177,7 @@ Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [I
 
     [:lucide-arrow-right: Configuration](configuration/index.md)
 
--   :lucide-server:{ .lg } **3. Deployment**
+-   ### :lucide-server:{ .lg } 3. Deployment
 
     ---
 

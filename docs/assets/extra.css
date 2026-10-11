@@ -7,10 +7,8 @@
 
 [data-md-color-scheme="default"] {
   --md-primary-fg-color: #0b6f86;
-  --md-primary-fg-color--light: #2f97ad;
-  --md-primary-fg-color--dark: #08566a;
-  --md-accent-fg-color: #0a8aa3;
-  --md-accent-fg-color--transparent: #0a8aa31a;
+  --md-accent-fg-color: #08566a;
+  --md-accent-fg-color--transparent: #08566a1a;
   --md-typeset-a-color: #0b6f86;
   --mr-heading-gradient: linear-gradient(120deg, var(--mr-navy) 10%, #0b6f86 90%);
   --mr-card-border: #0b6f8626;
@@ -18,10 +16,11 @@
 }
 
 [data-md-color-scheme="slate"] {
+  /* Text on the bright dark-mode teal, such as primary buttons, needs navy rather than white to stay readable. */
   --md-primary-fg-color: #4cc9d6;
-  --md-primary-fg-color--light: #7fe3ea;
-  --md-primary-fg-color--dark: #22b2c4;
+  --md-primary-bg-color: #081a2e;
   --md-accent-fg-color: #7fe3ea;
+  --md-accent-bg-color: #081a2e;
   --md-accent-fg-color--transparent: #7fe3ea1a;
   --md-typeset-a-color: #5fd3de;
   --mr-heading-gradient: linear-gradient(120deg, #ffffff 15%, var(--mr-teal-light) 55%, var(--mr-teal) 95%);
@@ -33,7 +32,6 @@
 .mr-hero {
   position: relative;
   padding: 1.5rem 0 1rem;
-  overflow-x: clip;
   text-align: center;
 }
 
@@ -94,21 +92,12 @@
   box-shadow: 0 0.8rem 2rem #081a2e33;
 }
 
-/* Cards: a quiet brand-tinted border that lights up on hover. */
+/* Cards: a quiet brand-tinted border and icon. */
 .md-typeset .grid.cards > ul > li {
   border-color: var(--mr-card-border);
-  transition: border-color 150ms, box-shadow 150ms, transform 150ms;
-}
-
-.md-typeset .grid.cards > ul > li:hover {
-  border-color: var(--md-primary-fg-color);
-  box-shadow: 0 0.4rem 1.2rem #081a2e1f;
-  transform: translateY(-1px);
 }
 
 .md-typeset .grid.cards .lg {
-  width: 1.6em;
-  height: 1.6em;
   color: var(--md-primary-fg-color);
 }
 

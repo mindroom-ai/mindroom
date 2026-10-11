@@ -111,8 +111,6 @@ def _links(page: str) -> list[tuple[int, str]]:
     lines = (DOCS / page).read_text(encoding="utf-8").split("\n")
     found = []
     for number, line in _outside_fences(lines):
-        if line.startswith(("    ", "\t")):
-            continue  # indented code block
         bare = _INLINE_CODE.sub("", line)
         found += [(number, m.group(1)) for m in _LINK.finditer(bare)]
         definition = _DEFINITION.match(bare)
