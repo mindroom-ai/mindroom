@@ -334,7 +334,7 @@ async def test_claude_stream_that_fails_after_starting_counts_nothing(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_stalled_claude_stream_counts_nothing(tmp_path: Path) -> None:
-    """A stream that starts and then goes silent fails as a stall; a failed attempt keeps no start usage."""
+    """A stream that starts and then goes silent fails as a stall and leaves no start usage behind."""
     storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
     held = _HeldStream()
     client = AsyncAnthropic(
@@ -355,6 +355,7 @@ async def test_stalled_claude_stream_counts_nothing(tmp_path: Path) -> None:
             async for _ in agent.arun("Check status", session_id="session", stream=True):
                 pass
 
+        assert model.take_unfinished_stream_usage() is None
         session = storage.get_session("session", session_type=SessionType.AGENT)
         assert isinstance(session, AgentSession)
         assert not session.session_data["session_metrics"].get("input_tokens")

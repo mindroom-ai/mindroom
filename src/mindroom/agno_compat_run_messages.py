@@ -91,10 +91,10 @@ def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None)
     return request.model.take_unfinished_stream_usage()
 
 
-def _settle_claude_start_usage(request: _ModelRequest) -> None:
-    """Give an interrupted Claude request its start usage before Agno counts the request on unwind."""
+def _settle_claude_start_usage(request: _ModelRequest, error: BaseException) -> None:
+    """Give a stopped or closed Claude request its start usage before Agno counts it; a failed request forgets it."""
     start = _claude_start_usage(request, request.assistant_message.metrics)
-    if start is not None:
+    if start is not None and not isinstance(error, Exception):
         request.assistant_message.metrics = start
 
 
@@ -223,9 +223,7 @@ def _with_metered_messages(
             )
         except BaseException as error:
             if _finish_request(request):
-                if not isinstance(error, Exception):
-                    # Only a stopped or closed stream keeps Claude's start usage; a failed attempt counts none.
-                    _settle_claude_start_usage(request)
+                _settle_claude_start_usage(request, error)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
@@ -265,9 +263,7 @@ def _with_metered_messages_async(
                 yield response
         except BaseException as error:
             if _finish_request(request):
-                if not isinstance(error, Exception):
-                    # Only a stopped or closed stream keeps Claude's start usage; a failed attempt counts none.
-                    _settle_claude_start_usage(request)
+                _settle_claude_start_usage(request, error)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
