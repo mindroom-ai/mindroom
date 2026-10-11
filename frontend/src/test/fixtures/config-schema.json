@@ -803,7 +803,7 @@
     },
     "BackgroundToolJobsConfig": {
       "additionalProperties": false,
-      "description": "Startup-pinned generic execution policy for registered toolkits.",
+      "description": "Generic execution policy for registered toolkits; its feature switch and exclusions are pinned at startup.",
       "properties": {
         "enabled": {
           "default": false,
@@ -4797,7 +4797,7 @@
         ],
         "approval_wait_timeout": 300.0
       },
-      "description": "Opt-in managed background tool execution, fixed at process startup."
+      "description": "Opt-in managed background tool execution; turning it on or off and its exclusions need a restart."
     },
     "event_journal": {
       "$ref": "#/$defs/EventJournalConfig",

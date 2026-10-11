@@ -86,7 +86,7 @@ class CoalescingConfig(BaseModel):
 
 
 class BackgroundToolJobsConfig(BaseModel):
-    """Startup-pinned generic execution policy for registered toolkits."""
+    """Generic execution policy for registered toolkits; its feature switch and exclusions are pinned at startup."""
 
     model_config = ConfigDict(extra="forbid")
 
