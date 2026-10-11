@@ -20,7 +20,6 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ClaudeSDKError,
-    ConversationResetMessage,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
@@ -108,10 +107,6 @@ def _parse_optional_int(value: int | None, *, minimum: int) -> int | None:
     return max(minimum, value)
 
 
-# Input, output, cache-read, and cache-write tokens of one model.
-type _UsageCounts = tuple[int, int, int, int]
-
-
 @dataclass
 class _ClaudeSessionState:
     """Runtime state for one persistent Claude coding session."""
@@ -126,8 +121,8 @@ class _ClaudeSessionState:
     last_used_at: float = field(default_factory=monotonic)
     ttl_seconds: int = _DEFAULT_SESSION_TTL_MINUTES * 60
     claude_session_id: str | None = None
-    # Claude Code's running usage totals per model, as of the last counted turn.
-    usage_totals: dict[str, _UsageCounts] = field(default_factory=dict)
+    # Model of the latest turn's main conversation, which its result usage covers.
+    turn_model: str | None = None
     stderr_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
@@ -138,8 +133,6 @@ class _ClaudeSessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, _ClaudeSessionState] = {}
-        # Last counted running totals per Claude session ID, so resuming or forking one counts only new usage.
-        self.usage_totals: dict[str, dict[str, _UsageCounts]] = {}
         self._lock = asyncio.Lock()
         self._namespace_limits: dict[str, tuple[int, int]] = {}
 
@@ -184,7 +177,6 @@ class _ClaudeSessionManager:
                     owner=owner,
                     close_requested=close_requested,
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
-                    usage_totals=dict(self.usage_totals.get(options.resume, {})) if options.resume else {},
                 )
                 self._sessions[session_key] = session
                 return session, True
@@ -308,43 +300,35 @@ async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
         logger.warning("Claude session cleanup failed", error=str(error))
 
 
-def _turn_usage(previous: dict[str, _UsageCounts], current: dict[str, _UsageCounts]) -> dict[str, _UsageCounts]:
-    """Return each model's usage since the previous running totals; a lower total means the session was cleared."""
-    turn: dict[str, _UsageCounts] = {}
-    for model_id, counts in current.items():
-        before = previous.get(model_id, (0, 0, 0, 0))
-        if any(now < then for now, then in zip(counts, before, strict=True)):
-            before = (0, 0, 0, 0)
-        delta = cast("_UsageCounts", tuple(now - then for now, then in zip(counts, before, strict=True)))
-        if any(delta):
-            turn[model_id] = delta
-    return turn
+async def _record_turn_usage(result: ResultMessage | None, model_id: str | None) -> None:
+    """Count one Claude Code turn's usage toward the conversation and requester that ran it.
 
-
-async def _record_turn_usage(turn: dict[str, _UsageCounts]) -> None:
-    """Count one Claude Code turn's usage toward the conversation and requester that ran it."""
+    A result's usage covers only its own turn's main conversation, while its model usage is a running total
+    that also restores earlier spend when a session resumes, so each turn records its own usage.
+    """
     owner = get_helper_usage_owner()
-    if owner is None or not turn:
+    usage = result.usage if result is not None else None
+    if owner is None or not usage or model_id is None:
         return
-    models = [
-        ModelMetrics(
-            id=model_id,
-            provider="Anthropic",
-            input_tokens=inputs,
-            output_tokens=outputs,
-            total_tokens=inputs + outputs,
-            cache_read_tokens=cache_reads,
-            cache_write_tokens=cache_writes,
-        )
-        for model_id, (inputs, outputs, cache_reads, cache_writes) in turn.items()
-    ]
-    metrics = RunMetrics(details={"model": models})
-    for model in models:
-        metrics.input_tokens += model.input_tokens
-        metrics.output_tokens += model.output_tokens
-        metrics.total_tokens += model.total_tokens
-        metrics.cache_read_tokens += model.cache_read_tokens
-        metrics.cache_write_tokens += model.cache_write_tokens
+    model = ModelMetrics(
+        id=model_id,
+        provider="Anthropic",
+        input_tokens=usage.get("input_tokens") or 0,
+        output_tokens=usage.get("output_tokens") or 0,
+        cache_read_tokens=usage.get("cache_read_input_tokens") or 0,
+        cache_write_tokens=usage.get("cache_creation_input_tokens") or 0,
+    )
+    model.total_tokens = model.input_tokens + model.output_tokens
+    if not (model.total_tokens or model.cache_read_tokens or model.cache_write_tokens):
+        return
+    metrics = RunMetrics(
+        input_tokens=model.input_tokens,
+        output_tokens=model.output_tokens,
+        total_tokens=model.total_tokens,
+        cache_read_tokens=model.cache_read_tokens,
+        cache_write_tokens=model.cache_write_tokens,
+        details={"model": [model]},
+    )
     context = get_tool_runtime_context()
     invocation_id = uuid4().hex
     await record_helper_usage(
@@ -653,8 +637,6 @@ class ClaudeAgentTools(Toolkit):
                 await session.client.query(trimmed_prompt)
                 response_text, tool_names, msg_result = await self._collect_response(session)
                 session.last_used_at = monotonic()
-                if msg_result is not None:
-                    await self._count_turn_usage(session, msg_result)
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
@@ -669,33 +651,12 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        return self._format_response_output(response_text, tool_names, msg_result)
-
-    async def _count_turn_usage(self, session: _ClaudeSessionState, result: ResultMessage) -> None:
-        """Record a turn's increase in Claude Code's running totals for the requester who ran it."""
-        # A crashed turn reports empty usage without clearing the conversation; a /clear resets the baseline itself.
-        if not result.model_usage:
-            return
-        totals = {
-            model_id: (
-                usage["inputTokens"],
-                usage["outputTokens"],
-                usage["cacheReadInputTokens"],
-                usage["cacheCreationInputTokens"],
-            )
-            for model_id, usage in result.model_usage.items()
-        }
-        # A new session that continues a conversation keeps its Claude session ID, whose totals the manager
-        # already counted; a cleared or brand-new conversation starts empty.
-        previous = session.usage_totals or self._session_manager.usage_totals.get(result.session_id, {})
-        session.usage_totals = totals
-        self._session_manager.usage_totals[result.session_id] = totals
         try:
-            await _record_turn_usage(_turn_usage(previous, totals))
+            await _record_turn_usage(msg_result, session.turn_model)
         except Exception as error:
-            # Claude has already done the work, so a failed write must not hide its reply. The turn's usage is not
-            # carried into the next turn, which may belong to another requester.
+            # Claude has already done the work, so a usage write failure must not hide its reply.
             logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
+        return self._format_response_output(response_text, tool_names, msg_result)
 
     async def _collect_response(
         self,
@@ -707,15 +668,13 @@ class ClaudeAgentTools(Toolkit):
 
         async for message in session.client.receive_response():
             if isinstance(message, AssistantMessage):
+                if message.parent_tool_use_id is None:
+                    session.turn_model = message.model
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
                         text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_names.append(block.name)
-            elif isinstance(message, ConversationResetMessage):
-                # /clear zeroes Claude Code's running totals, so the next totals start from nothing.
-                # The cleared conversation continues under a new session ID; the old ID keeps its counted totals.
-                session.usage_totals = {}
             elif isinstance(message, ResultMessage):
                 result = message
                 session.claude_session_id = message.session_id
