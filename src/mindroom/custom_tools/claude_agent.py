@@ -646,7 +646,6 @@ class ClaudeAgentTools(Toolkit):
         response_text = ""
         tool_names: list[str] = []
         msg_result: ResultMessage | None = None
-        turn_usage: dict[str, _UsageCounts] = {}
         session_error: str | None = None
         async with session.lock:
             session.last_used_at = monotonic()
@@ -654,23 +653,8 @@ class ClaudeAgentTools(Toolkit):
                 await session.client.query(trimmed_prompt)
                 response_text, tool_names, msg_result = await self._collect_response(session)
                 session.last_used_at = monotonic()
-                if msg_result is not None and msg_result.model_usage is not None:
-                    # Claude Code reports running session totals, so count only this turn's increase.
-                    totals = {
-                        model_id: (
-                            usage["inputTokens"],
-                            usage["outputTokens"],
-                            usage["cacheReadInputTokens"],
-                            usage["cacheCreationInputTokens"],
-                        )
-                        for model_id, usage in msg_result.model_usage.items()
-                    }
-                    # A new session that continues a conversation keeps its Claude session ID, whose totals the
-                    # manager already counted; a cleared or brand-new conversation has a new ID and starts empty.
-                    previous = session.usage_totals or self._session_manager.usage_totals.get(msg_result.session_id, {})
-                    turn_usage = _turn_usage(previous, totals)
-                    session.usage_totals = totals
-                    self._session_manager.usage_totals[msg_result.session_id] = totals
+                if msg_result is not None:
+                    await self._count_turn_usage(session, msg_result)
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
@@ -685,12 +669,32 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        try:
-            await _record_turn_usage(turn_usage)
-        except Exception as error:
-            # Claude has already done the work, so a usage write failure must not hide its reply.
-            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
         return self._format_response_output(response_text, tool_names, msg_result)
+
+    async def _count_turn_usage(self, session: _ClaudeSessionState, result: ResultMessage) -> None:
+        """Record a turn's increase in Claude Code's running totals, counting the totals only once they are saved."""
+        if result.model_usage is None:
+            return
+        totals = {
+            model_id: (
+                usage["inputTokens"],
+                usage["outputTokens"],
+                usage["cacheReadInputTokens"],
+                usage["cacheCreationInputTokens"],
+            )
+            for model_id, usage in result.model_usage.items()
+        }
+        # A new session that continues a conversation keeps its Claude session ID, whose totals the manager
+        # already counted; a cleared or brand-new conversation starts empty.
+        previous = session.usage_totals or self._session_manager.usage_totals.get(result.session_id, {})
+        try:
+            await _record_turn_usage(_turn_usage(previous, totals))
+        except Exception as error:
+            # Claude has already done the work, so a failed write must not hide its reply; the next turn counts it.
+            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
+            return
+        session.usage_totals = totals
+        self._session_manager.usage_totals[result.session_id] = totals
 
     async def _collect_response(
         self,
@@ -710,6 +714,8 @@ class ClaudeAgentTools(Toolkit):
             elif isinstance(message, ConversationResetMessage):
                 # /clear zeroes Claude Code's running totals, so the next totals start from nothing.
                 session.usage_totals = {}
+                if session.claude_session_id is not None:
+                    self._session_manager.usage_totals.pop(session.claude_session_id, None)
             elif isinstance(message, ResultMessage):
                 result = message
                 session.claude_session_id = message.session_id

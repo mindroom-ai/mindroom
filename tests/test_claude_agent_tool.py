@@ -38,6 +38,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterator
     from pathlib import Path
 
+    from agno.run.agent import RunOutput
+
+    from mindroom.helper_usage import HelperUsageOwner
+    from mindroom.usage_storage import IndependentUsageKind
+
 
 @dataclass
 class _FakeClaudeSDKClient:
@@ -95,6 +100,7 @@ def _model_usage(inputs: int, outputs: int, cache_reads: int, cache_writes: int)
 
 
 _CLEARED = {"cleared": True}
+_CLEARED_WITHOUT_USAGE = {"cleared": True, "usage": None}
 _TWO_MODEL_USAGE = {
     "claude-sonnet-5-5": _model_usage(1000, 200, 5000, 300),
     "claude-haiku-5-5": _model_usage(400, 50, 0, 0),
@@ -111,14 +117,14 @@ class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
         self,
     ) -> AsyncGenerator[AssistantMessage | ConversationResetMessage | ResultMessage, None]:
         usage = type(self).usage_totals.pop(0)
-        if usage == _CLEARED:
+        if usage in (_CLEARED, _CLEARED_WITHOUT_USAGE):
             # /clear discards the transcript and zeroes the running totals.
             yield ConversationResetMessage(
                 new_conversation_id="conversation-2",
                 uuid="reset-1",
                 session_id="claude-session-123",
             )
-            usage = {}
+            usage = {} if usage == _CLEARED else None
         yield AssistantMessage(content=[TextBlock(text="Fixed it")], model="claude-sonnet-5-5")
         yield ResultMessage(
             subtype="success",
@@ -1258,11 +1264,13 @@ async def test_claude_session_records_only_each_turns_new_usage(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("after_clear", [(300, 50), (1500, 260)], ids=["lower", "higher"])
+@pytest.mark.parametrize("cleared", [_CLEARED, _CLEARED_WITHOUT_USAGE], ids=["empty_usage", "no_usage"])
 async def test_cleared_claude_session_counts_its_new_totals(
     tmp_path: Path,
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
     after_clear: tuple[int, int],
+    cleared: dict[str, Any],
 ) -> None:
     """A /clear zeroes Claude Code's running totals, so the next totals are that turn's whole usage."""
     inputs, outputs = after_clear
@@ -1271,7 +1279,7 @@ async def test_cleared_claude_session_counts_its_new_totals(
         monkeypatch,
         [
             {"claude-sonnet-5-5": _model_usage(1000, 200, 0, 0)},
-            _CLEARED,
+            cleared,
             {"claude-sonnet-5-5": _model_usage(inputs, outputs, 0, 0)},
         ],
         [("@alice:localhost", None, None)] * 3,
@@ -1358,3 +1366,42 @@ async def test_continued_claude_conversation_counts_only_new_usage(
     )
 
     assert rows == [("@alice:localhost", 1000, 200, 5000), ("@bob:localhost", 500, 60, 4000)]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_whose_usage_write_failed_is_counted_by_the_next_turn(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed write leaves the running totals uncounted, so the next saved turn includes them."""
+    record = claude_agent_module.record_helper_usage
+    failures = 1
+
+    async def fail_once(
+        response: RunOutput,
+        *,
+        owner: HelperUsageOwner,
+        invocation_id: str,
+        kind: IndependentUsageKind,
+        requester_id: str | None,
+    ) -> None:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            msg = "database is locked"
+            raise RuntimeError(msg)
+        await record(response, owner=owner, invocation_id=invocation_id, kind=kind, requester_id=requester_id)
+
+    monkeypatch.setattr(claude_agent_module, "record_helper_usage", fail_once)
+    rows = await _send_metered_turns(
+        tmp_path,
+        monkeypatch,
+        [
+            {"claude-sonnet-5-5": _model_usage(1000, 200, 5000, 0)},
+            {"claude-sonnet-5-5": _model_usage(1500, 260, 9000, 0)},
+        ],
+        [("@alice:localhost", None, None), ("@alice:localhost", None, None)],
+    )
+
+    assert rows == [("@alice:localhost", 1500, 260, 9000)]
