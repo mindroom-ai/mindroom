@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.event_journal import ConversationPage, VisibleMessage
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -177,7 +178,16 @@ def _summary_message(event_id: str, sender: str, summary: str) -> ResolvedVisibl
         event_id,
         sender,
         summary,
-        {"msgtype": "m.notice", "body": summary, "io.mindroom.thread_summary": {"summary": summary}},
+        {
+            "msgtype": "m.notice",
+            "body": summary,
+            "io.mindroom.thread_summary": {
+                "version": 1,
+                "summary": summary,
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "model": "summary-model",
+            },
+        },
     )
 
 
@@ -197,6 +207,8 @@ def _resolve_context(*, rooms: dict | None = None) -> SimpleNamespace:
         conversation_reader=make_conversation_reader_mock(),
         config=object(),
         runtime_paths=object(),
+        agent_name="helper",
+        require_agent_reply_memberships=AgentReplyMembershipIndex,
     )
 
 
@@ -612,6 +624,35 @@ async def test_resolve_uses_cross_room_membership_policy(
     assert allowed is not None
     assert allowed.messages == (_CallBriefMessage(label=_REQUESTER_ID, body="Plan the trip"),)
     read.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_resolve_titles_the_thread_with_its_current_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A title a person set after the agent's summary is the title the call is told, as thread listings show it."""
+    context = await _integration_context(tmp_path, requester_joined=True)
+    agent_id = context.client.user_id
+    person_title = _summary_message("$3", _REQUESTER_ID, "Person title")
+    person_title.content["io.mindroom.thread_summary"].update(
+        {"model": "manual", "pinned": True, "generated_at": "2026-01-01T00:00:01+00:00"},
+    )
+    history = _history(
+        _message("$root", _REQUESTER_ID, "Plan the trip"),
+        _summary_message("$2", agent_id, "Trip planning"),
+        person_title,
+    )
+    monkeypatch.setattr(call_origin, "complete_thread_history", AsyncMock(return_value=history))
+
+    resolved = await resolve_call_origin_context(
+        CallOrigin(room_id=_INTEGRATION_ORIGIN_ROOM_ID, thread_id="$root"),
+        context=context,
+    )
+
+    assert resolved is not None
+    assert resolved.thread_title == "Person title"
 
 
 @pytest.mark.parametrize(

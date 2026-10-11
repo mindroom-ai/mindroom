@@ -3961,6 +3961,7 @@ depends_on = [
     "mindroom.thread_export.projected_history",
     "mindroom.thread_export.selection",
     "mindroom.thread_export.storage",
+    "mindroom.thread_summary",
 ]
 visibility = ["mindroom.thread_export.service"]
 
@@ -4114,6 +4115,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.conversation_reads",
+    "mindroom.thread_summary",
 ]
 
 [[modules]]
