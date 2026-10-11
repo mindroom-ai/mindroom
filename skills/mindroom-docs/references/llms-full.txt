@@ -18018,6 +18018,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `knowledge_db/` - Knowledge base vector stores
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
 - `credentials/` - Secrets synchronized from `.env`
+- `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)

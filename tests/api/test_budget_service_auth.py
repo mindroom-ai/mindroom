@@ -1,6 +1,7 @@
 """Budget service authentication integration tests."""
 # ruff: noqa: D103
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import jwt
@@ -43,6 +44,13 @@ def budget_service_auth(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, str]
         },
         private_key,
     )
+
+
+@pytest.fixture(autouse=True)
+def _unbind_budget_monitor() -> Iterator[None]:
+    """Leave the shared API app without a budget monitor, as other tests expect."""
+    yield
+    config_lifecycle.app_state(main.app).budget_monitor = None
 
 
 def _client(temp_config_file: Path, tmp_path: Path, env: dict[str, str]) -> TestClient:

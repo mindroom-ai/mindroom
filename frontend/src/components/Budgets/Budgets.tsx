@@ -63,12 +63,14 @@ function UsdInput({
   placeholder,
   onCommit,
   className,
+  readOnly,
 }: {
   label: string;
   value: number | null | undefined;
   placeholder?: string;
   onCommit: (value: number | undefined) => void;
   className?: string;
+  readOnly?: boolean;
 }) {
   const [text, setText] = useState(value == null ? "" : String(value));
   useEffect(() => {
@@ -87,6 +89,7 @@ function UsdInput({
       aria-invalid={invalid}
       value={text}
       placeholder={placeholder}
+      readOnly={readOnly}
       className={cn("aria-invalid:border-destructive", className)}
       onChange={(event) => {
         setText(event.target.value);
@@ -260,6 +263,8 @@ function UsersCard({
   const queryClient = useQueryClient();
   const [newUserId, setNewUserId] = useState("");
   const [newUserCap, setNewUserCap] = useState<number | undefined>();
+  // The add form is read-only while saving, so finishing cannot clear a newer entry.
+  const [adding, setAdding] = useState(false);
   // Until a spend scan has reported, spend is unknown rather than zero.
   const spendKnown = status?.generated_at != null;
   const users = status?.users ?? [];
@@ -310,7 +315,10 @@ function UsersCard({
       });
       return;
     }
-    if (await saveCap(userId, newUserCap)) {
+    setAdding(true);
+    const saved = await saveCap(userId, newUserCap);
+    setAdding(false);
+    if (saved) {
       setNewUserId("");
       setNewUserCap(undefined);
     }
@@ -433,6 +441,7 @@ function UsersCard({
             onChange={(event) => setNewUserId(event.target.value)}
             placeholder="@user:example.com"
             aria-label="New user Matrix ID"
+            readOnly={adding}
             className="font-mono sm:max-w-xs"
           />
           <UsdInput
@@ -440,11 +449,13 @@ function UsersCard({
             value={newUserCap}
             placeholder="Cap (USD)"
             className="sm:w-40"
+            readOnly={adding}
             onCommit={setNewUserCap}
           />
           <Button
             type="button"
             variant="outline"
+            disabled={adding}
             onClick={() => void handleAdd()}
           >
             Add user

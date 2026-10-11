@@ -311,6 +311,34 @@ describe("Budgets", () => {
     );
   });
 
+  it("keeps the add form read-only until the new cap is saved", async () => {
+    let finishPut: (response: Response) => void = () => {};
+    vi.mocked(fetch).mockImplementation(async (_input, init) =>
+      init?.method === "PUT"
+        ? new Promise<Response>((resolve) => {
+            finishPut = resolve;
+          })
+        : respond(status),
+    );
+    renderBudgets();
+    await screen.findByRole("row", { name: /@alice:example.org/ });
+    const userId = screen.getByPlaceholderText("@user:example.com");
+    const cap = screen.getByRole("textbox", { name: "New user cap" });
+    const add = screen.getByRole("button", { name: "Add user" });
+
+    fireEvent.change(userId, { target: { value: "@carol:example.org" } });
+    fireEvent.change(cap, { target: { value: "5" } });
+    fireEvent.click(add);
+
+    await waitFor(() => expect(add).toBeDisabled());
+    expect(userId).toHaveAttribute("readonly");
+    expect(cap).toHaveAttribute("readonly");
+    finishPut(respond({}));
+    await waitFor(() => expect(add).toBeEnabled());
+    expect(userId).toHaveValue("");
+    expect(userId).not.toHaveAttribute("readonly");
+  });
+
   it("shows why a cap could not be saved", async () => {
     routeFetch(status, () =>
       respond({ detail: "Caps apply only to people, not agents or bots" }, 422),
@@ -392,7 +420,6 @@ describe("Budgets", () => {
 
   it("ignores edits to a cap while it is saving", async () => {
     let finishPut: (response: Response) => void = () => {};
-    routeFetch(status, () => respond({}));
     vi.mocked(fetch).mockImplementation(async (_input, init) =>
       init?.method === "PUT"
         ? new Promise<Response>((resolve) => {
