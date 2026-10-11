@@ -15,8 +15,8 @@ import pytest
 from mcp import StdioServerParameters
 from mcp.types import CallToolResult, ListToolsResult, TextContent
 
-from mindroom import playwright_mcp_session
-from mindroom.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.browser import playwright_mcp_session
+from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
 
 
 @pytest.fixture
@@ -57,8 +57,8 @@ def transport(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         finally:
             events.append("reaped")
 
-    monkeypatch.setattr("mindroom.playwright_mcp_session.ClientSession", Session)
-    monkeypatch.setattr("mindroom.playwright_mcp_session.stdio_client", stdio)
+    monkeypatch.setattr("mindroom.browser.playwright_mcp_session.ClientSession", Session)
+    monkeypatch.setattr("mindroom.browser.playwright_mcp_session.stdio_client", stdio)
     return events
 
 
@@ -255,7 +255,7 @@ async def test_cleanup_failure_cannot_strand_queued_calls_or_replace_abandonment
         await actor.close()
         await actor.close()
         assert transport.count("cleanup") == 1
-        errors = [record for record in caplog.records if record.name == "mindroom.playwright_mcp_session"]
+        errors = [record for record in caplog.records if record.name == "mindroom.browser.playwright_mcp_session"]
         assert len(errors) == 1
         assert errors[0].getMessage() == "Playwright MCP cancelled-call cleanup failed for stuck"
         assert errors[0].exc_info is not None
@@ -385,7 +385,7 @@ require('readline').createInterface({input:process.stdin}).on('line', line => {
         sys.executable,
         "-I",
         "-m",
-        "mindroom.playwright_mcp_process",
+        "mindroom.browser.playwright_mcp_process",
         node,
         str(script),
         str(exit_code),

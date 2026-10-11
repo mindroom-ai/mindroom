@@ -56,7 +56,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history.session_context import close_team_runtime_state_dbs
@@ -64,7 +64,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.matrix.state import MatrixState
-from mindroom.private_instance_identity import (
+from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
 )

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import (
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
 
 logger = get_logger(__name__)
 

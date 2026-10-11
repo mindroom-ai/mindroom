@@ -14,11 +14,11 @@ from uuid import uuid4
 
 from agno.agent import Agent
 
-from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage, load_agent_session
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.providers import model_loading
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import (
     SerializedToolExecutionIdentity,

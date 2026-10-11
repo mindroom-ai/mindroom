@@ -14,7 +14,7 @@ import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
-from mindroom.embedding_errors import (
+from mindroom.embeddings.errors import (
     describe_embedder_error,
     embedder_failure_is_transient,
     embedder_retry_after_seconds,

@@ -17,14 +17,14 @@ from mindroom.config.main import Config
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, build_hook_matrix_admin, hook
 from mindroom.logging_config import setup_logging
-from mindroom.scheduling import (
+from mindroom.scheduling.executor import execute_scheduled_workflow, set_scheduling_hook_registry
+from mindroom.scheduling.tasks import (
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
     _run_cron_task,
     _run_once_task,
 )
-from mindroom.scheduling_executor import execute_scheduled_workflow, set_scheduling_hook_registry
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -213,7 +213,7 @@ async def test_one_time_task_cancel_log_includes_workflow_thread_context(
         "!room:localhost",
     )
 
-    with patch("mindroom.scheduling._get_pending_task_record", new=fake_get_pending_task_record):
+    with patch("mindroom.scheduling.tasks._get_pending_task_record", new=fake_get_pending_task_record):
         task = asyncio.create_task(
             _run_once_task(
                 client,
@@ -265,7 +265,7 @@ async def test_cron_task_cancel_log_includes_workflow_thread_context(
         await release_pending_read.wait()
         return SimpleNamespace(workflow=workflow)
 
-    with patch("mindroom.scheduling._get_pending_task_record", new=fake_get_pending_task_record):
+    with patch("mindroom.scheduling.tasks._get_pending_task_record", new=fake_get_pending_task_record):
         task = asyncio.create_task(
             _run_cron_task(
                 AsyncMock(),

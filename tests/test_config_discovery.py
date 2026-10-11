@@ -82,9 +82,9 @@ _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
     ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
     ("src/mindroom/agent_storage.py", "create_session_storage", "execution_identity"),
     ("src/mindroom/agents.py", "create_agent", "execution_identity"),
-    ("src/mindroom/credentials.py", "load_scoped_credentials", "worker_target"),
-    ("src/mindroom/credentials.py", "_resolve_worker_credentials_manager", "worker_target"),
-    ("src/mindroom/credentials.py", "save_scoped_credentials", "worker_target"),
+    ("src/mindroom/credentials/manager.py", "load_scoped_credentials", "worker_target"),
+    ("src/mindroom/credentials/manager.py", "_resolve_worker_credentials_manager", "worker_target"),
+    ("src/mindroom/credentials/manager.py", "save_scoped_credentials", "worker_target"),
     ("src/mindroom/tool_system/metadata.py", "_build_tool_instance", "worker_target"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_execution", "execution_identity"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime", "execution_identity"),
@@ -243,8 +243,8 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
             # and passes execution_identity explicitly to the routing helper.
             # Keep exact expressions: a new free helper call still needs review.
             bound_target_calls = {
-                ("src/mindroom/approval_execution.py", "runtime_context.resolve_worker_target"),
-                ("src/mindroom/approval_tools.py", "context.resolve_worker_target"),
+                ("src/mindroom/approval/execution.py", "runtime_context.resolve_worker_target"),
+                ("src/mindroom/approval/tool_owners.py", "context.resolve_worker_target"),
                 ("src/mindroom/agent_cli/response_owner.py", "runtime.resolve_worker_target"),
                 ("src/mindroom/custom_tools/dynamic_workflow.py", "context.resolve_worker_target"),
             }

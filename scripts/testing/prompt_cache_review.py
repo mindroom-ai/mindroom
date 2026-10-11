@@ -30,13 +30,13 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from mindroom.claude_prompt_cache import (  # noqa: E402
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
+from mindroom.providers.claude_prompt_cache import (  # noqa: E402
     MESSAGE_RUNG_COUNT,
     install_claude_prompt_cache_hook,
     mark_message_cache_rungs,
     prompt_cache_control,
 )
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
 
 DEFAULT_AGENT_DB = "mindroom_dev"
 SQLITE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

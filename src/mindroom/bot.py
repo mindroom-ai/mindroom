@@ -15,16 +15,18 @@ import nio
 from nio import AuthenticatedToDeviceEvent
 from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
-from mindroom.approval_inbound import (
+from mindroom.approval.inbound import (
     handle_tool_approval_action,
     maybe_handle_tool_approval_reply,
     parse_approval_response_event,
 )
+from mindroom.approval.tool_approval import is_process_active_approval_card
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -61,7 +63,6 @@ from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_loop import bot_ingestion_config, sliding_sync_room_subscriptions
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
-from mindroom.matrix_delivery import TurnHandoff
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
@@ -80,15 +81,14 @@ from mindroom.runtime_shutdown import (
 )
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
 from .background_tasks import create_background_task, wait_for_background_tasks
-from .coalescing import CoalescingGate
-from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
+from .coalescing.batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
+from .coalescing.gate import CoalescingGate
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths
@@ -109,7 +109,7 @@ from .event_journal import (
     PrincipalStore,
     SemanticConsumer,
 )
-from .event_journal_open import OpenEventJournal, open_event_journal
+from .event_journal.opening import OpenEventJournal, open_event_journal
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -143,7 +143,7 @@ from .response_runner import (
     prepare_memory_and_model_context,
 )
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .scheduling import (
+from .scheduling.tasks import (
     ScheduledTaskRunnerOwner,
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -159,7 +159,7 @@ from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
-from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -172,7 +172,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync, ReplyMembershipPreAdmission
-    from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission

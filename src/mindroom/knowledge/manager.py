@@ -25,7 +25,6 @@ from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from chromadb.errors import InternalError
 
-from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
     DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
     KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV,
@@ -33,12 +32,12 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
 )
-from mindroom.embedding_errors import (
+from mindroom.embeddings.errors import (
     classified_embedder_error,
     embedder_failure_is_transient,
     is_embedder_auth_failure_detail,
 )
-from mindroom.embedding_factory import create_configured_embedder
+from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.knowledge.candidate_checkpoint import (
     CandidateCheckpoint,
     CandidateFailure,
@@ -50,6 +49,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     save_candidate_checkpoint,
 )
 from mindroom.knowledge.chroma_client import ChromaDb
+from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import (
     SOURCE_DIGEST_KEY,
     SOURCE_MTIME_NS_KEY,
@@ -97,9 +97,9 @@ from mindroom.knowledge.indexing_config import (
 )
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
+from mindroom.knowledge.strict_knowledge import StrictInsertKnowledge as Knowledge
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import MAX_READ_BYTES
-from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence

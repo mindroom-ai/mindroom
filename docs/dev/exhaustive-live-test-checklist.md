@@ -272,7 +272,7 @@ Expected outcome: Parse or validation errors are explained clearly and no partia
 
 ## 8. Authorization And Room Access Policy
 
-Source anchors: `src/mindroom/access_policy.py`, `src/mindroom/authorization.py`, `src/mindroom/config/access.py`, `src/mindroom/bot.py`, `src/mindroom/voice_handler.py`.
+Source anchors: `src/mindroom/access_policy.py`, `src/mindroom/authorization.py`, `src/mindroom/config/access.py`, `src/mindroom/bot.py`, `src/mindroom/voice/handler.py`.
 
 - [ ] `AUTH-001` Test a user listed in `administrators`.
 Expected outcome: The user bypasses responder access without being invited or granted Matrix room power automatically.
@@ -297,7 +297,7 @@ Expected outcome: Voice dispatch uses the original human sender for permission e
 
 ## 9. Images, Files, Attachments, Videos, And Voice
 
-Source anchors: `src/mindroom/matrix/image_handler.py`, `src/mindroom/matrix/media.py`, `src/mindroom/attachments.py`, `src/mindroom/attachment_media.py`, `src/mindroom/voice_handler.py`, `src/mindroom/bot.py`.
+Source anchors: `src/mindroom/matrix/image_handler.py`, `src/mindroom/matrix/media.py`, `src/mindroom/attachments.py`, `src/mindroom/attachment_media.py`, `src/mindroom/voice/handler.py`, `src/mindroom/bot.py`.
 
 - [ ] `MEDIA-001` Send an unencrypted image with a text caption to a room with a vision-capable agent.
 Expected outcome: The image and caption reach the agent and produce a response that reflects both the media and the text.
@@ -444,7 +444,7 @@ Expected outcome: Unknown worker keys are rejected before container creation, no
 
 ## 12. Scheduling And Background Task Execution
 
-Source anchors: `src/mindroom/scheduling.py`, `src/mindroom/background_tasks.py`, `src/mindroom/api/schedules.py`, `src/mindroom/commands/parsing.py`, `src/mindroom/bot.py`.
+Source anchors: `src/mindroom/scheduling/tasks.py`, `src/mindroom/background_tasks.py`, `src/mindroom/api/schedules.py`, `src/mindroom/commands/parsing.py`, `src/mindroom/bot.py`.
 
 - [ ] `SCH-001` Create a one-time natural-language schedule in a room thread.
 Expected outcome: The task is parsed, stored, acknowledged, and later executes in the originating thread.

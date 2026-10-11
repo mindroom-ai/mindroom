@@ -19,7 +19,7 @@ from rich.text import Text
 
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace_avatar_path
-from mindroom.credentials_sync import get_secret_from_env
+from mindroom.credentials.sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
 from mindroom.managed_avatars import clear_failed_stock_downloads, room_avatar_path, root_space_avatar_path

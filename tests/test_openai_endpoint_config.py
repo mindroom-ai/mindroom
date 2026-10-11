@@ -11,8 +11,8 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.model_loading import get_model_instance
-from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.approval_inbound import handle_tool_approval_action
+from mindroom.approval.inbound import handle_tool_approval_action
 from mindroom.commands import config_confirmation
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -21,11 +21,11 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.coalescing.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
-    from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
     from mindroom.user_stop_reconciliation import UserStopReconciler

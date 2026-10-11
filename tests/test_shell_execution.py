@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.shell_execution import ProcessRecord, kill_all_records, kill_command, run_command, signal_record
-from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell.execution import ProcessRecord, kill_all_records, kill_command, run_command, signal_record
+from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

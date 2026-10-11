@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
 
+from mindroom.approval.tool_approval import (
+    BackgroundScriptToolOrigin,
+    ToolApprovalDecision,
+    evaluate_tool_approval,
+)
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.script_runs.models import (
     ScriptCallRecord,
@@ -29,11 +34,6 @@ from mindroom.script_runs.store import (
     ScriptReceiptTooLargeError,
     ScriptRunNotFoundError,
     ScriptRunStore,
-)
-from mindroom.tool_approval import (
-    BackgroundScriptToolOrigin,
-    ToolApprovalDecision,
-    evaluate_tool_approval,
 )
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.runtime_context import (

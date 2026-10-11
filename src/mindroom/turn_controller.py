@@ -11,14 +11,18 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from mindroom import interactive
 from mindroom.authorization import ensure_room_membership_synced, is_requester_joined_to_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
-from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import (
+from mindroom.coalescing.batch import (
     CoalescingKey,
     PendingEvent,
     PreparedTurn,
     build_prepared_turn,
     is_active_follow_up_coalescing_key,
     requester_coalescing_key,
+)
+from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
+from mindroom.coalescing.ingress_lanes import IngressRetryError, ReceiptLaneKey
+from mindroom.coalescing.prompt_ingress_reservation import (
+    PromptIngressReservationOwner as _PromptIngressReservationOwner,
 )
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -66,7 +70,6 @@ from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     TextNormalizationRequest,
 )
-from mindroom.ingress_lanes import IngressRetryError, ReceiptLaneKey
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.conversation_reads import ThreadReadMode
@@ -84,7 +87,6 @@ from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
-from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_admission import admitted_response_decision
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
@@ -116,7 +118,7 @@ from mindroom.turn_origin import (
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
-from mindroom.voice_readiness import VoiceReadiness
+from mindroom.voice.readiness import VoiceReadiness
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -139,7 +141,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
-    from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle
+    from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"

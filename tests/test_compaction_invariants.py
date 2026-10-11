@@ -69,10 +69,10 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
-from mindroom.openai_models import MindRoomOpenRouter
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.providers.openai_models import MindRoomOpenRouter
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.token_budget import estimate_compaction_input_tokens
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test, seed_session
 from tests.history_helpers import latest_summary_model
 
@@ -500,7 +500,7 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1983,7 +1983,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     runtime_generate_summary = AsyncMock()
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -2033,7 +2033,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

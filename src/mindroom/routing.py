@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from agno.agent import Agent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mindroom import model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
@@ -15,6 +14,7 @@ from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
+from mindroom.providers import model_loading
 from mindroom.routing_judgment import ResponderSelection, judge_responder
 
 if TYPE_CHECKING:

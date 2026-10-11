@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp.types import CallToolResult
 
-from mindroom.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
 
 

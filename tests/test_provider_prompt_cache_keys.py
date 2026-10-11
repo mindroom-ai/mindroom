@@ -12,7 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.model_loading import get_model_instance
+from mindroom.providers.model_loading import get_model_instance
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 

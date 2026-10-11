@@ -22,11 +22,11 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
-from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from mindroom.usage_stats import collect_admin_usage, collect_private_usage, collect_self_usage
-from mindroom.usage_storage import quote_identifier
+from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
+from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
