@@ -9,14 +9,14 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-import mindroom.credentials as credential_runtime
+import mindroom.credentials.manager as credential_runtime
 from mindroom import constants
 from mindroom.api import credentials_oauth_policy, credentials_target, main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
-from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.credentials_sync import get_embedder_api_key
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
+from mindroom.credentials.sync import get_embedder_api_key
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.oauth.providers import OAuthProvider

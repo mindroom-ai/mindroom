@@ -21,7 +21,7 @@ from google.auth.exceptions import TransportError as GoogleTransportError
 from requests import exceptions as requests_exceptions
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     scoped_credentials_path,
 )

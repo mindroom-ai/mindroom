@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
-from mindroom import scheduling
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
@@ -23,8 +22,9 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
-from mindroom.scheduling_executor import ScheduledWorkflowOutcome
+from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.executor import ScheduledWorkflowOutcome
+from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_scheduling_runtime_from_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock
 from tests.identity_helpers import persist_entity_accounts
@@ -119,7 +119,7 @@ async def test_departed_owner_cancels_persisted_schedule(
     client, workflow, state = _owner_schedule([{"membership": membership}], pre_approved_call=pre_approved_call)
     cancel_approval = AsyncMock()
 
-    with patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=cancel_approval):
+    with patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=cancel_approval):
         task = await scheduling._reconcile_runnable_task_retrying(
             client,
             "!test:server",
@@ -146,8 +146,8 @@ async def test_departed_owner_cancellation_retries_a_failed_approval_withdrawal(
     withdraw = AsyncMock(side_effect=[RuntimeError("journal unavailable"), None])
 
     with (
-        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
-        patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
+        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        patch("mindroom.scheduling.tasks.asyncio.sleep", new=AsyncMock()),
     ):
         task = await scheduling._reconcile_runnable_task_retrying(
             client,
@@ -226,9 +226,12 @@ async def test_runner_cancels_absent_owner_before_waiting_or_firing(
         client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     runtime_paths = schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER)
     with (
-        patch("mindroom.scheduling.asyncio.sleep", side_effect=AssertionError("Departed owner's task kept waiting")),
         patch(
-            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            "mindroom.scheduling.tasks.asyncio.sleep",
+            side_effect=AssertionError("Departed owner's task kept waiting"),
+        ),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
             return_value=ScheduledWorkflowOutcome(status="delivered"),
         ) as execute,
     ):
@@ -282,7 +285,7 @@ async def test_unknown_membership_waits_for_authoritative_state(
         assert state["status"] == "pending"
         client.room_put_state.assert_not_awaited()
 
-    with patch("mindroom.scheduling.asyncio.sleep", side_effect=wait_for_retry) as sleep:
+    with patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=wait_for_retry) as sleep:
         task = await scheduling._reconcile_runnable_task_retrying(
             client,
             "!test:server",
@@ -330,7 +333,7 @@ async def test_edit_during_membership_lookup_survives_stale_departure(
     client.room_get_state_event.side_effect = blocked_lookup
     updated = workflow.model_copy(update={"message": message, "created_by": editor})
     with patch(
-        "mindroom.scheduling_executor.execute_scheduled_workflow",
+        "mindroom.scheduling.executor.execute_scheduled_workflow",
         return_value=ScheduledWorkflowOutcome(status="delivered"),
     ) as execute:
         async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
@@ -455,7 +458,7 @@ async def test_edit_during_cancellation_retry_invalidates_old_departure(
             timezone="UTC",
         )
 
-    with patch("mindroom.scheduling.asyncio.sleep", side_effect=edit_on_retry):
+    with patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=edit_on_retry):
         runnable = await scheduling._reconcile_runnable_task_retrying(
             client,
             "!test:server",
@@ -525,10 +528,10 @@ async def test_departure_is_checked_while_waiting_and_before_firing(
     occurrence = RecurringOccurrence(tmp_path / "checkpoint.json", _RecurringCheckpoint("workflow", execute_at))
     runtime_paths = schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER)
     with (
-        patch("mindroom.scheduling.plan_recurring_occurrence", return_value=occurrence),
-        patch("mindroom.scheduling.asyncio.sleep", side_effect=[None, AssertionError("Task kept waiting")]),
+        patch("mindroom.scheduling.tasks.plan_recurring_occurrence", return_value=occurrence),
+        patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=[None, AssertionError("Task kept waiting")]),
         patch(
-            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
             return_value=ScheduledWorkflowOutcome(status="delivered"),
         ) as execute,
     ):
@@ -562,7 +565,7 @@ async def test_cancellation_write_failure_retries_without_reviving_departed_owne
         assert state["status"] == "pending"
         client.room_put_state.side_effect = write_state
 
-    with patch("mindroom.scheduling.asyncio.sleep", side_effect=recover_state_write) as sleep:
+    with patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=recover_state_write) as sleep:
         task = await scheduling._reconcile_runnable_task_retrying(
             client,
             "!test:server",

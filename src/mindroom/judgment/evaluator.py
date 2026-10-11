@@ -6,7 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.config.judgment import LLMJudgmentConfig, OpenAIDecisionsJudgmentConfig
-from mindroom.credentials_sync import get_api_key_for_provider, get_api_key_for_service
+from mindroom.credentials.sync import get_api_key_for_provider, get_api_key_for_service
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.openai_decisions import OPENAI_DECISIONS

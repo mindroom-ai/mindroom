@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow, _run_cron_task
+from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow, _run_cron_task
 from tests.conftest import test_runtime_paths as runtime_paths
 from tests.scheduling_helpers import joined_member_state
 
@@ -51,8 +51,8 @@ async def test_cancel_mid_wait_cron_task(tmp_path: Path) -> None:
         await asyncio.Event().wait()
 
     with (
-        patch("mindroom.scheduling.asyncio.sleep", new=wait_until_cancelled),
-        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
+        patch("mindroom.scheduling.tasks.asyncio.sleep", new=wait_until_cancelled),
+        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
     ):
         task = asyncio.create_task(
             _run_cron_task(

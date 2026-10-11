@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import legacy_private_storage_aliases as compat
-from mindroom import private_instance_identity_store as store
+from mindroom.private_storage import legacy_private_storage_aliases as compat
+from mindroom.private_storage import private_instance_identity_store as store
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 
 if TYPE_CHECKING:

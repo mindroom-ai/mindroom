@@ -15,7 +15,7 @@ from authlib.integrations import httpx_client as authlib_httpx_client
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot_sync,
     refresh_oauth_credentials,

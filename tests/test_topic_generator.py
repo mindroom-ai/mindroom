@@ -111,7 +111,7 @@ async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) ->
         return RunOutput(content="Ops topic")
 
     with (
-        patch("mindroom.model_loading.get_model_instance", return_value=None),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=None),
         patch("mindroom.topic_generator.cached_agent_run", new=AsyncMock(side_effect=capture_run)),
     ):
         topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))
@@ -152,7 +152,7 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
         return RunOutput(content="Ops topic")
 
     with (
-        patch("mindroom.model_loading.get_model_instance", return_value=None),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=None),
         patch("mindroom.topic_generator.cached_agent_run", new=AsyncMock(side_effect=capture_run)),
     ):
         topic = await generate_room_topic_ai("ops", "Ops", config, runtime_paths_for(config))

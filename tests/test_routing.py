@@ -185,7 +185,7 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
                 getattr(module, attr)
             assert attr not in getattr(module, "__all__", ())
 
-    model_loading_module = importlib.import_module("mindroom.model_loading")
+    model_loading_module = importlib.import_module("mindroom.providers.model_loading")
     assert callable(model_loading_module.get_model_instance)
 
 
@@ -227,7 +227,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             # Mock the Agent and response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -267,7 +267,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = {"entity_name": "general", "reasoning": "Custom route"}
@@ -303,7 +303,7 @@ class TestAIRouting:
             _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = {
@@ -346,7 +346,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance"):
+        with patch("mindroom.providers.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             # AI suggests an agent not in available list
@@ -383,7 +383,7 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.model_loading.get_model_instance") as mock_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_model:
             mock_model.side_effect = Exception("Model error")
 
             agents = [MatrixID(username="mindroom_general", domain="localhost")]

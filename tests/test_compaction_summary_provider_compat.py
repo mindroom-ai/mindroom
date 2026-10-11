@@ -11,15 +11,15 @@ from agno.exceptions import ModelProviderError
 from anthropic import AsyncAnthropic, AsyncAnthropicBedrockMantle, AsyncAnthropicVertex
 from google.oauth2.credentials import Credentials
 
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
-from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.summary_call import (
     CompactionSummaryIncompleteError,
     CompactionSummaryOutputLimitError,
     generate_compaction_summary,
 )
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 
 if TYPE_CHECKING:
     from agno.models.anthropic import Claude

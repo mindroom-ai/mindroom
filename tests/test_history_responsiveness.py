@@ -26,7 +26,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import archive_compaction_chunk, reconcile_compaction_state, set_force_compaction_state
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import _ALL_HISTORY_SETTINGS, _agent, _completed_run, _make_config, _session

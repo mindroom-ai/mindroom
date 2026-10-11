@@ -80,8 +80,8 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
 
     with (
         patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-explicit-edit")),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None):
             await runner._suspend_for_approval(

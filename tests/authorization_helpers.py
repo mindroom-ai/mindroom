@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.commands.handler import CommandHandlerContext
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
-    from mindroom.scheduling import SchedulingRuntime
+    from mindroom.scheduling.tasks import SchedulingRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.turn_policy import TurnPolicyDeps
 
@@ -74,7 +74,7 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
 
 def make_test_scheduling_runtime(*args: Any, **kwargs: Any) -> SchedulingRuntime:  # noqa: ANN401
     """Build a detached scheduling runtime with an explicit isolated index."""
-    from mindroom.scheduling import SchedulingRuntime  # noqa: PLC0415
+    from mindroom.scheduling.tasks import SchedulingRuntime  # noqa: PLC0415
 
     _add_default_responder_candidate_resolver(kwargs)
     return SchedulingRuntime(*args, **kwargs)

@@ -35,7 +35,7 @@ from mindroom.matrix.room_membership import cached_member_ids, room_membership_i
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.scheduling import (
+from mindroom.scheduling.tasks import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
     cancel_scheduled_task,

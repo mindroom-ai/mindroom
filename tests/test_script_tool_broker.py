@@ -18,6 +18,7 @@ from agno.tools.function import Function, FunctionCall
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
+from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -51,7 +52,6 @@ from mindroom.script_runs.models import (
     ScriptToolGrant,
 )
 from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
-from mindroom.tool_approval import ToolApprovalDecision
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 

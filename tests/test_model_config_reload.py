@@ -19,8 +19,8 @@ from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import resolve_agent_preparation_inputs
 from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.model_loading import get_model_instance
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.providers.model_loading import get_model_instance
 from mindroom.teams import TeamMode, build_materialized_team_instance, materialize_exact_team_members
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, write_config_yaml

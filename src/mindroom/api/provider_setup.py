@@ -17,7 +17,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.credentials import save_dashboard_api_key
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OPENROUTER_BASE_URL_DEFAULT
-from mindroom.model_loading import missing_model_api_key_provider
+from mindroom.providers.model_loading import missing_model_api_key_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

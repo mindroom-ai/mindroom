@@ -62,8 +62,8 @@ if TYPE_CHECKING:
 
     from mindroom.cancellation import CancelSource
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
+    from mindroom.event_journal.matrix_delivery import ReplyRowEnqueuer
     from mindroom.event_journal.replies import PostCommitEffect
-    from mindroom.matrix_delivery import ReplyRowEnqueuer
     from mindroom.turn_record import TurnRecord
 
 

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_operator_key
-from mindroom.config_reload import ConfigReloadStatus
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.runtime_state import get_runtime_state
 
 router = APIRouter(prefix="/api/config", tags=["config"])

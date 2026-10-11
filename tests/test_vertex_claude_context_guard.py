@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from agno.exceptions import ContextWindowExceededError
 from agno.media import Image
+from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -16,10 +18,14 @@ from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
 
-from mindroom.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, TOOL_SEARCH_TOOL_TYPE
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
-from mindroom.provider_stream_retry import install_provider_stream_retry_hook
-from mindroom.vertex_claude_compat import (
+from mindroom.providers.claude_wire_blocks import (
+    SERVER_TOOL_USE_BLOCK_TYPE,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_TYPE,
+)
+from mindroom.providers.stream_retry import install_provider_stream_retry_hook
+from mindroom.providers.vertex_claude_compat import (
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
     _request_for_vertex_token_count,
@@ -135,10 +141,10 @@ def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:
 
     with (
         patch(
-            "mindroom.vertex_claude_compat.approximate_o200k_tokens",
+            "mindroom.providers.vertex_claude_compat.approximate_o200k_tokens",
             return_value=30,
         ) as estimator,
-        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
+        patch("mindroom.providers.vertex_claude_compat.count_schema_tokens", return_value=5),
     ):
         estimated_tokens = model._estimate_request_input_tokens(
             _tool_loop_messages(),
@@ -160,7 +166,7 @@ def test_estimate_requires_exact_count_for_images() -> None:
         Message(role="user", content="what is in this picture?", images=[Image(content=image_bytes)]),
     ]
 
-    with patch("mindroom.vertex_claude_compat.approximate_o200k_tokens") as estimator:
+    with patch("mindroom.providers.vertex_claude_compat.approximate_o200k_tokens") as estimator:
         estimated_tokens = model._estimate_request_input_tokens(
             messages,
             tools=None,
@@ -196,7 +202,7 @@ def test_estimate_requires_exact_count_for_base64_documents() -> None:
 
     with (
         patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
-        patch("mindroom.vertex_claude_compat.approximate_o200k_tokens") as estimator,
+        patch("mindroom.providers.vertex_claude_compat.approximate_o200k_tokens") as estimator,
     ):
         estimated_tokens = model._estimate_request_input_tokens(
             [Message(role="user", content="summarize")],
@@ -353,7 +359,7 @@ async def test_exact_count_uses_vertex_compatible_tool_search_payload() -> None:
     with (
         patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
         patch.object(model, "get_async_client", return_value=client),
-        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
+        patch("mindroom.providers.vertex_claude_compat.count_schema_tokens", return_value=5),
     ):
         input_tokens = await model._count_request_input_tokens(
             [Message(role="user", content="hello")],
@@ -590,3 +596,20 @@ async def test_stream_retry_does_not_repeat_current_turn_fit_failure() -> None:
 
     assert raised.value.message == "Vertex Claude current turn uses more than the 80-token input limit."
     estimator.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_attempt_forgets_earlier_start_usage_before_fitting() -> None:
+    """A Stop while a retry fits its request must not settle the earlier attempt's start usage."""
+    model = _model()
+    model._stream_start_usage = MessageMetrics(input_tokens=1200, cache_read_tokens=48000)
+
+    async def stopped_while_fitting(*_args: object, **_kwargs: object) -> list[Message]:
+        raise asyncio.CancelledError
+
+    model._fit_request_messages = stopped_while_fitting  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in model.ainvoke_stream(_tool_loop_messages(), Message(role="assistant")):
+            pass
+
+    assert model.take_unfinished_stream_usage() is None
