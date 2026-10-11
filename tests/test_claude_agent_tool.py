@@ -86,6 +86,7 @@ class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client reporting each turn's main-conversation usage beside Claude Code's running totals."""
 
     turn_usage: ClassVar[list[dict[str, int]]] = []
+    ends_with_api_error: ClassVar[bool] = False
 
     async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
         yield AssistantMessage(content=[TextBlock(text="Fixed it")], model="claude-sonnet-5-5")
@@ -95,6 +96,9 @@ class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
             model="claude-haiku-5-5",
             parent_tool_use_id="tool-1",
         )
+        if type(self).ends_with_api_error:
+            # Claude Code reports a request that failed every retry as a placeholder message.
+            yield AssistantMessage(content=[TextBlock(text="API Error: Overloaded")], model="<synthetic>")
         yield ResultMessage(
             subtype="success",
             duration_ms=1,
@@ -1236,3 +1240,19 @@ async def test_claude_reply_survives_a_failed_usage_write(
     monkeypatch.setattr(_MeteredFakeClaudeSDKClient, "turn_usage", [_turn_usage(1000, 200)])
 
     assert await _send_metered_turns(tmp_path, ["@user:localhost"]) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_ending_in_an_api_error_keeps_its_model(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Code's placeholder error message names no real model, so the turn keeps the model it ran on."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _MeteredFakeClaudeSDKClient)
+    monkeypatch.setattr(_MeteredFakeClaudeSDKClient, "turn_usage", [_turn_usage(1000, 200)])
+    monkeypatch.setattr(_MeteredFakeClaudeSDKClient, "ends_with_api_error", True)
+
+    rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
+
+    assert rows == [("@user:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0)]

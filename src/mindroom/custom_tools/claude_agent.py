@@ -44,6 +44,7 @@ _MAX_STDERR_LINES = 12
 _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 logger = get_logger(__name__)
+_SYNTHETIC_MODEL = "<synthetic>"
 
 
 @runtime_checkable
@@ -668,7 +669,8 @@ class ClaudeAgentTools(Toolkit):
 
         async for message in session.client.receive_response():
             if isinstance(message, AssistantMessage):
-                if message.parent_tool_use_id is None:
+                # Claude Code's placeholder messages, such as a request that failed every retry, name no real model.
+                if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL:
                     session.turn_model = message.model
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
