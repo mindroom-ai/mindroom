@@ -439,7 +439,7 @@ def _parse_payload(body: bytes) -> ExternalTriggerPayload:
     try:
         return ExternalTriggerPayload.model_validate_json(body)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
+        raise HTTPException(status_code=422, detail=exc.errors(include_context=False, include_input=False)) from exc
 
 
 async def _in_replay_executor(call: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
