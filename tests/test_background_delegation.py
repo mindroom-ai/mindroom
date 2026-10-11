@@ -21,6 +21,7 @@ from mindroom import approval_manager
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -186,11 +187,14 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop", [False, True], ids=["cancelled", "user-stop"])
 async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stop: bool,
 ) -> None:
-    """Cancellation before start returns must still relinquish the parent's child ownership."""
+    """Cancellation before start returns must still relinquish the parent's child ownership; a Stop stops the child."""
     paths = _runtime_paths(tmp_path)
     config = with_responder_access(
         Config(
@@ -249,16 +253,25 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
                 ),
             )
             await written.wait()
-            driving.cancel()
+            if stop:
+                # A Stop committed while the job was admitted, before any job existed for it to record.
+                request_task_cancel(driving, cancel_source="user_stop")
+            else:
+                driving.cancel()
             release_writer.set()
             with pytest.raises(asyncio.CancelledError):
                 await driving
-            await executing.wait()
             state = DelegationState.from_metadata(response.metadata)
             assert state.children == []
             assert len(state.hooks) == 1
             assert next(iter(state.hooks.values())).after_called
-            assert children[0].status == "running"
+            [job] = await runtime.list_jobs(owner=owner, depth=0)
+            if stop:
+                assert job.user_stop_receipt_order == 0
+                await wait_for_status(runtime, job.job_id, "cancelled")
+            else:
+                await executing.wait()
+                assert children[0].status == "running"
     finally:
         release_writer.set()
         await runtime.shutdown()

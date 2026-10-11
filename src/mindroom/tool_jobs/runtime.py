@@ -695,6 +695,18 @@ class ToolJobRuntime:
                 failures.append(error)
         return failures
 
+    async def stop_admitted(self, job_id: str) -> None:
+        """Stop a job a stopped reply's call admitted, as a Stop the reply recorded would; a recorded one wins.
+
+        A Stop that committed while the job was being admitted can find no job to record, so the call stops it.
+        """
+
+        async def admitted(job: BackgroundJob) -> bool:
+            return job.job_id == job_id
+
+        # The lowest receipt order, so the recorded Stop that also names this job still sets its own.
+        await self.stop_jobs(receipt_order=0, matches=admitted)
+
     async def stop_recorded(self, job_id: str) -> bool:
         """Return whether a Stop reached a job, applied or only recorded for the reply that owns it."""
         async with self._lock:
