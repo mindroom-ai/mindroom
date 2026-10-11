@@ -46,6 +46,8 @@ def _config(tmp_path: Path) -> Config:
                 agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
                 teams={},
                 models={"default": ModelConfig(provider="openai", id="test-model")},
+                # A finished response would otherwise persist memory through a real embedding request.
+                memory={"backend": "none"},
             ),
         ),
         test_runtime_paths(tmp_path),
