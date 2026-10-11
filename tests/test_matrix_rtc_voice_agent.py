@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from livekit import rtc
 from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm
+from livekit.agents.metrics.usage import AgentSessionUsage, LLMModelUsage, TTSModelUsage
 from livekit.agents.voice import io as agents_io
 from openai import AsyncOpenAI
 from structlog.testing import capture_logs
@@ -24,6 +25,7 @@ from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
+    RealtimeCallUsage,
     RealtimeVoiceBridge,
     SpeechServiceOptions,
     VoiceAgentOptions,
@@ -34,7 +36,7 @@ from mindroom.matrix_rtc.voice_agent import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 
 @pytest.mark.asyncio
@@ -214,6 +216,157 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     await bridge.aclose()
 
     fake_model.aclose.assert_awaited_once()
+
+
+def _llm_usage(inputs: int, outputs: int = 10, **counters: int) -> LLMModelUsage:
+    return LLMModelUsage(
+        provider="openai",
+        model="gpt-realtime-2.1",
+        input_tokens=inputs,
+        output_tokens=outputs,
+        **counters,
+    )
+
+
+async def _realtime_bridge_with_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    record_usage: Callable[[RealtimeCallUsage], Awaitable[None]],
+    *,
+    usage_on_close: tuple[LLMModelUsage, ...] = (),
+) -> tuple[RealtimeVoiceBridge, Callable[..., None]]:
+    """Start a realtime bridge on a fake session; return it and a function reporting LiveKit's running usage."""
+
+    def report_to(handlers: dict[str, Callable[[object], None]], *model_usage: object) -> None:
+        handlers["session_usage_updated"](SimpleNamespace(usage=AgentSessionUsage(model_usage=list(model_usage))))
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+            self.handlers: dict[str, Callable[[object], None]] = {}
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            return
+
+        def on(self, event: str, callback: Callable[[object], None]) -> None:
+            self.handlers[event] = callback
+
+        async def aclose(self) -> None:
+            # A response cut off by the hang-up can report its usage while LiveKit drains the session.
+            if usage_on_close:
+                report_to(self.handlers, *usage_on_close)
+
+    fake_session = FakeSession()
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            record_usage=record_usage,
+        ),
+    )
+    return bridge, lambda *model_usage: report_to(fake_session.handlers, *model_usage)
+
+
+@pytest.mark.asyncio
+async def test_realtime_session_records_each_responses_token_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LiveKit reports running totals after each response; the call keeps one record listing every response."""
+    recorded: list[RealtimeCallUsage] = []
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        recorded.append(usage)
+
+    bridge, report = await _realtime_bridge_with_usage(monkeypatch, record_usage)
+    tts = TTSModelUsage(provider="openai", model="tts", characters_count=10)
+    report(_llm_usage(900, 300, input_cached_tokens=400, input_audio_tokens=800, output_audio_tokens=250), tts)
+    report(_llm_usage(2000, 700, input_cached_tokens=1200, input_audio_tokens=1800, output_audio_tokens=600), tts)
+    await bridge.aclose()
+
+    assert len({usage.usage_id for usage in recorded}) == 1
+    latest = recorded[-1]
+    assert latest.model == "gpt-realtime-2.1"
+    assert [
+        (r.input_tokens, r.output_tokens, r.cache_read_tokens, r.audio_input_tokens, r.audio_output_tokens)
+        for r in latest.responses
+    ] == [(900, 300, 400, 800, 250), (1100, 400, 800, 1000, 350)]
+
+
+@pytest.mark.asyncio
+async def test_realtime_usage_reported_while_the_call_closes_is_saved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response cut off by the hang-up reports its usage while LiveKit drains the session."""
+    recorded: list[RealtimeCallUsage] = []
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        recorded.append(usage)
+
+    bridge, report = await _realtime_bridge_with_usage(monkeypatch, record_usage, usage_on_close=(_llm_usage(2000),))
+    report(_llm_usage(900))
+    await bridge.aclose()
+
+    assert [response.input_tokens for response in recorded[-1].responses] == [900, 1100]
+
+
+@pytest.mark.asyncio
+async def test_slow_realtime_usage_saves_never_overlap_or_go_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer total reported during a slow save is saved after it, never before it."""
+    release_first = asyncio.Event()
+    saving = 0
+    overlapped = False
+    saved: list[int] = []
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        nonlocal saving, overlapped
+        saving += 1
+        overlapped = overlapped or saving > 1
+        if not saved:
+            await release_first.wait()
+        saved.append(len(usage.responses))
+        saving -= 1
+
+    bridge, report = await _realtime_bridge_with_usage(monkeypatch, record_usage)
+    report(_llm_usage(900))
+    await asyncio.sleep(0)
+    report(_llm_usage(2000))
+    release_first.set()
+    await bridge.aclose()
+
+    assert not overlapped
+    assert saved[-1] == 2
+
+
+@pytest.mark.asyncio
+async def test_unsaved_realtime_usage_is_retried_when_the_call_closes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed save of the latest total is retried at teardown, as GPT-Live duration is."""
+    saved: list[int] = []
+    failures = 1
+
+    async def record_usage(usage: RealtimeCallUsage) -> None:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            msg = "database is locked"
+            raise RuntimeError(msg)
+        saved.append(len(usage.responses))
+
+    bridge, report = await _realtime_bridge_with_usage(monkeypatch, record_usage)
+    report(_llm_usage(900))
+    await bridge.aclose()
+
+    assert saved == [1]
 
 
 @pytest.mark.asyncio
