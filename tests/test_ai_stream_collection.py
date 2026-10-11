@@ -211,6 +211,27 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
 
 
 @pytest.mark.asyncio
+async def test_a_joined_quiet_attempt_from_a_terminal_only_provider_stays_quiet() -> None:
+    """A join's separator before a terminal-only quiet attempt is not prose, so its control token stays hidden."""
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield RunContentEvent(content="Finding")
+        yield RunCompletedEvent(content="Finding")
+        # The join separates the continuation, whose provider sends its text only at completion.
+        yield RunContentEvent(content="\n\n")
+        yield RunCompletedEvent(content="NO_REPLY")
+        yield RunContentEvent(content="NO_REPLY")
+
+    body, _trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=False),
+        suppress_quiet_attempts=True,
+    )
+    assert "NO_REPLY" not in body
+    assert body.strip() == "Finding"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_only", [False, True])
 @pytest.mark.parametrize("show_tools", [False, True])
 @pytest.mark.parametrize("first", ["NO_REPLY", "First finding"])

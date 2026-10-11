@@ -565,8 +565,8 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
                 for item in pending
                 if isinstance(item, (str, RunContentEvent))
             )
-            if not prose and chunk.content:
-                # The agent adapter emits terminal-only content after this event.
+            if not prose.strip() and chunk.content:
+                # The agent adapter emits terminal-only content after this event; a join's separator is no prose.
                 terminal_echo = str(chunk.content)
                 pending.append(RunContentEvent(content=terminal_echo))
                 prose = terminal_echo
