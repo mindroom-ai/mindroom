@@ -27,8 +27,18 @@ class SubagentPersona:
     source_name: str
     system_prompt: str
     tools: tuple[str, ...] | None = None
-    # None keeps every caller skill, and an empty tuple keeps none.
     skills: tuple[str, ...] | None = None
+
+    @property
+    def kept_skills(self) -> tuple[str, ...] | None:
+        """Return the caller skills this persona keeps, or None for every one.
+
+        Like knowledge search, skills follow an explicit tool list: a persona that lists tools but
+        no skills keeps none, so a child narrowed to a few tools never gains skill functions.
+        """
+        if self.skills is None and self.tools is not None:
+            return ()
+        return self.skills
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> SubagentPersona:

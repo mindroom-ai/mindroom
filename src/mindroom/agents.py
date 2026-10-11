@@ -2096,7 +2096,7 @@ def create_agent(
     hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
     skills = (
         None
-        if disable_runtime_capabilities or (persona is not None and persona.skills == ())
+        if disable_runtime_capabilities
         else _load_agent_skills(
             agent_name,
             config,
@@ -2107,7 +2107,7 @@ def create_agent(
                 runtime_paths,
                 config.defaults.tool_output_auto_save_threshold_bytes,
             ),
-            only=persona.skills if persona is not None else None,
+            only=persona.kept_skills if persona is not None else None,
             unavailable_functions=hidden_skill_functions,
         )
     )

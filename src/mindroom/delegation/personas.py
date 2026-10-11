@@ -489,18 +489,17 @@ def capped_persona_skills(
     available_skills: Callable[[], Sequence[str]],
     skill_cap: tuple[str, ...] | None,
 ) -> SubagentPersona:
-    """Require a persona's skills to be caller skills within ``skill_cap``, resolving a persona that names none.
+    """Freeze a persona's kept skills, requiring them to be caller skills within ``skill_cap``.
 
-    Like knowledge search, skills follow an explicit tool list: a persona that names tools but no
-    skills gets none, and one that names neither inherits the ``skill_cap`` skills its caller still
-    has, as a follow-up loads them, or every caller skill without a cap. The caller's skills are read
-    only when the persona names or inherits some.
+    A persona that keeps every caller skill inherits instead the ``skill_cap`` skills its caller still
+    has, as a follow-up loads them. The caller's skills are read only when the persona names or
+    inherits some.
     """
-    if persona.skills is None and persona.tools is None and skill_cap:
-        available = set(available_skills())
+    kept = persona.kept_skills
+    if kept is None and skill_cap is not None:
+        available = set(available_skills()) if skill_cap else set()
         return replace(persona, skills=tuple(skill for skill in skill_cap if skill in available))
-    if persona.skills is None:
-        persona = replace(persona, skills=() if persona.tools is not None else skill_cap)
+    persona = replace(persona, skills=kept)
     if persona.skills:
         available = set(available_skills())
         for skill in persona.skills:

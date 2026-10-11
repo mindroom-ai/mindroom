@@ -314,6 +314,8 @@ def build_agent_skills(
 
     ``unavailable_functions`` names skill functions the agent is not offered, which its prompt then excludes.
     """
+    if only is not None and not only:
+        return None
     agent_config = config.get_agent(agent_name)
     resolved_credential_keys = (
         credential_keys if credential_keys is not None else _collect_credential_keys(config, runtime_paths)

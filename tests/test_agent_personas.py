@@ -24,6 +24,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
+from mindroom.delegation.state import SubagentPersona
 from mindroom.history.archive import archive_runs
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
@@ -40,7 +41,6 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
 
-    from mindroom.delegation.state import SubagentPersona
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -374,6 +374,27 @@ async def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: li
 
     assert set(agent.skills.get_skill_names() if agent.skills is not None else ()) == listed
     assert {name for name in ("scripted", "other") if f"The {name} skill" in prompt} == listed
+
+
+@pytest.mark.asyncio
+async def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Path) -> None:
+    """A persona listing tools but no skills gets none however it was built, so a narrow child stays narrow."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    _write_skills(runtime, "scripted")
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        identity,
+        persist_runtime_state=False,
+        persona=persona,
+    )
+
+    assert agent.skills is None
+    assert not {"get_skill_instructions", "get_skill_reference", "get_skill_script"} & set(await _function_names(agent))
 
 
 @pytest.mark.asyncio
