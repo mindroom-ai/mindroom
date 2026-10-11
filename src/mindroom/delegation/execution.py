@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, NotRequired, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
 from agno.db.base import BaseDb
@@ -71,6 +71,7 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
+from mindroom.tool_jobs.consumption import retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
@@ -770,6 +771,14 @@ async def _settle_background_wait(
     await persist(state)
 
 
+class _ParentCall(NamedTuple):
+    """The parent run and exact tool call that receive a background child's result."""
+
+    run_id: str
+    team: bool
+    call_id: str
+
+
 async def _await_background_child(
     background: ToolJobRuntime,
     child: DelegationChild,
@@ -783,6 +792,7 @@ async def _await_background_child(
     wait_timeout: float | None,
     settle: Callable[[str], Awaitable[None]],
     finished: Callable[[object], Awaitable[None]],
+    parent_call: _ParentCall,
 ) -> None:
     """Hand a new child to its job, or find the job a crash left it with, then wait for it as the parent's call.
 
@@ -792,8 +802,8 @@ async def _await_background_child(
     child, and a parent claim held across the wait would block cancel cleanup.
     """
     context = get_tool_runtime_context()
-    source_event_id = context.membership_turn_id if context is not None else None
     claim = None
+    retained = False
     try:
         if fresh:
             _, claim = await start_delegation(background, child, owner=owner, operation=operation, cancel=cancel)
@@ -827,9 +837,19 @@ async def _await_background_child(
         await settle(returned)
         await finished(returned)
         if waited.claim is not None:
-            await background.acknowledge_wait(child.delegation_id, waited.claim, source_event_id=source_event_id)
+            # The outcome counts as read once the parent run saves this call's result, as a native call's does.
+            await retain_parent_call_claim(
+                background,
+                child.delegation_id,
+                waited.claim,
+                run_id=parent_call.run_id,
+                team=parent_call.team,
+                call_id=parent_call.call_id,
+            )
+            retained = True
     finally:
-        await background.release_wait(child.delegation_id, waited.claim)
+        if not retained:
+            await background.release_wait(child.delegation_id, waited.claim)
 
 
 async def _resolve_delegation_target(
@@ -1256,6 +1276,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         owner=caller_identity,
                         depth=delegation_depth,
                         wait_timeout=wait_timeout,
+                        parent_call=_ParentCall(
+                            run_id=response.run_id or "",
+                            team=isinstance(response, TeamRunOutput),
+                            call_id=tool.tool_call_id or "",
+                        ),
                         settle=partial(
                             _settle_background_wait,
                             state,

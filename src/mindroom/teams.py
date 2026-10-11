@@ -2689,7 +2689,6 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     progress: ProgressPublisher | None,
-    continuation_count: int = 0,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
@@ -2825,7 +2824,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             toolkit_owners=toolkit_owners_for_agents(members.agents),
         )
         if paused is not None:
-            return _continued_team_pause(presentation, replace(paused, continuation_count=continuation_count))
+            return _continued_team_pause(presentation, paused)
         if continued.status != RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
         if tool_trace_collector is not None and show_tool_calls:
@@ -3973,8 +3972,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     completed_tool_executions.append(event.tool)
                 presentation.complete_tool("team", event.tool)
             elif isinstance(event, TeamRunCompletedEvent):
-                # Record usage and identity even for providers that omit the
-                # aggregate terminal output after their stream events.
+                # Real Agno team streams never yield a terminal run output;
+                # this event is the stream's usage/identity source instead.
                 if event.team_id in (None, "", bound_team_id):
                     completed_run_event = event
                     holder.attempt_run_id = event.run_id or attempt_run_id

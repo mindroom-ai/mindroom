@@ -122,7 +122,6 @@ class _Job:
     cleanup_gate: asyncio.Event = field(default_factory=asyncio.Event)
     observed: BackgroundJob | None = None
     consumed: bool = False
-    consumer: str | None = None
     # What stopped the job, in order; the first cause stands.
     causes: list[_Cause] = field(default_factory=list)
 
@@ -133,7 +132,6 @@ class JobFuzzRunner:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._epoch = 0
-        self._sources = 0
         self._recovering = False
         self._crashing = False
         self._baseline = asyncio.all_tasks()
@@ -328,17 +326,13 @@ class JobFuzzRunner:
         if held is None or not held.ready:
             return
         del self.claims[job_id]
-        self._sources += 1
-        source = f"$source{self._sources}"
         if held.epoch != self._epoch:
             # A claim from an earlier process consumes nothing.
             with pytest.raises(ValueError, match="no longer belongs"):
-                await self.runtime.acknowledge_wait(job_id, held.claim, source_event_id=source)
+                await self.runtime.acknowledge_wait(job_id, held.claim)
             return
-        await self.runtime.acknowledge_wait(job_id, held.claim, source_event_id=source)
-        model = self.jobs[job_id]
-        if not model.consumed:
-            model.consumed, model.consumer = True, source
+        await self.runtime.acknowledge_wait(job_id, held.claim)
+        self.jobs[job_id].consumed = True
 
     async def _drop(self, _action: Action, job_id: str) -> None:
         if (held := self.claims.pop(job_id, None)) is not None:
@@ -422,7 +416,7 @@ class JobFuzzRunner:
                 self._forget(job_id)
                 continue
             job, model = entry.job, self.jobs[job_id]
-            model.consumed, model.consumer = job.consumed, job.consumed_by_source
+            model.consumed = job.consumed
             if job.status in {"running", "awaiting_approval"}:
                 # A cancellation that took effect would have saved its request.
                 model.causes = [cause for cause in model.causes if cause != "cancel"]
@@ -509,7 +503,7 @@ class JobFuzzRunner:
     def _observe(self, job: BackgroundJob) -> None:
         model = self.jobs[job.job_id]
         previous, model.observed = model.observed, job
-        assert (job.consumed, job.consumed_by_source) == (model.consumed, model.consumer), job.job_id
+        assert job.consumed == model.consumed, job.job_id
         if previous is not None:
             _check_transition(previous, job)
         if job.status in TERMINAL_STATUSES and (previous is None or previous.status not in TERMINAL_STATUSES):

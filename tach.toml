@@ -7052,6 +7052,7 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.delegation.execution"
 depends_on = [
     "mindroom.delegation.job_approvals",
+    "mindroom.tool_jobs.consumption",
     "mindroom.cancellation",
     "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
@@ -7987,6 +7988,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.approval.execution",
+    "mindroom.delegation.execution",
     "mindroom.response_turn",
     "mindroom.teams",
     "mindroom.tool_jobs.agno_execution",

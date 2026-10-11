@@ -18,7 +18,6 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
 from mindroom.tool_jobs.execution_authority import current_tool_call
 from mindroom.tool_jobs.results import read_result_payload
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -40,8 +39,6 @@ class _Consumption:
     run_id: str
     team: bool
     call_id: str
-    # The admitted turn whose reply consumes the result; recovery of that unfinished reply may still read it.
-    source_event_id: str | None
 
     def saved(self, storage: BaseDb) -> bool:
         """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team."""
@@ -68,10 +65,27 @@ class ConsumptionOwner:
         if function_actor(call.function) is None:
             msg = "Tool result consumption requires a concrete agent or team"
             raise ValueError(msg)
-        team = function_agent(call.function) is None
-        tool_context = get_tool_runtime_context()
-        source = tool_context.membership_turn_id if tool_context is not None else None
-        self._claims.append(_Consumption(runtime, job_id, claim, context.run_id, team, call.call_id, source))
+        self._keep(
+            runtime,
+            job_id,
+            claim,
+            run_id=context.run_id,
+            team=function_agent(call.function) is None,
+            call_id=call.call_id,
+        )
+
+    def _keep(
+        self,
+        runtime: ToolJobRuntime,
+        job_id: str,
+        claim: JobClaim,
+        *,
+        run_id: str,
+        team: bool,
+        call_id: str,
+    ) -> None:
+        """Keep a claim until the parent run ``run_id`` is saved with its tool call ``call_id`` finished."""
+        self._claims.append(_Consumption(runtime, job_id, claim, run_id, team, call_id))
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""
@@ -83,11 +97,7 @@ class ConsumptionOwner:
                     consumption.saved,
                 )
                 if saved:
-                    await consumption.runtime.acknowledge_wait(
-                        consumption.job_id,
-                        consumption.claim,
-                        source_event_id=consumption.source_event_id,
-                    )
+                    await consumption.runtime.acknowledge_wait(consumption.job_id, consumption.claim)
             except Exception:
                 logger.warning(
                     "Tool result persistence was not confirmed",
@@ -185,6 +195,23 @@ async def _retain_claim(
     except BaseException:
         await runtime.release_wait(job_id, claim)
         raise
+
+
+async def retain_parent_call_claim(
+    runtime: ToolJobRuntime,
+    job_id: str,
+    claim: JobClaim,
+    *,
+    run_id: str,
+    team: bool,
+    call_id: str,
+) -> None:
+    """Keep a claim until the parent run saves its tool call ``call_id``, as a native call's result does."""
+    owner = _OWNER.get()
+    if owner is None or not run_id or not call_id:
+        await runtime.release_wait(job_id, claim)
+        return
+    owner._keep(runtime, job_id, claim, run_id=run_id, team=team, call_id=call_id)
 
 
 async def consume_tool_job(

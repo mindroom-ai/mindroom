@@ -100,9 +100,8 @@ class BackgroundJob:
     summary_truncated: bool = False
     # Whether the outcome saved a payload; an outcome the runtime authored has only its summary.
     has_result_payload: bool = False
-    # Whether a parent run saved the outcome as its tool result, and the admitted turn whose run first saved it.
+    # Whether a parent run saved the outcome as its tool result.
     consumed: bool = False
-    consumed_by_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -659,13 +658,7 @@ class ToolJobRuntime:
 
         await run_coroutine_until_complete(release())
 
-    async def acknowledge_wait(
-        self,
-        job_id: str,
-        claim: JobClaim | None,
-        *,
-        source_event_id: str | None = None,
-    ) -> None:
+    async def acknowledge_wait(self, job_id: str, claim: JobClaim | None) -> None:
         """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved."""
         async with self._lock:
             self._ensure_open()
@@ -673,12 +666,7 @@ class ToolJobRuntime:
             if claim is None or entry.claim != claim:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
-            # A reread keeps the first consumer, whose unfinished reply still owns recovering this outcome.
-            source = entry.job.consumed_by_source if entry.job.consumed else source_event_id
-            await self._publish(
-                entry,
-                _updated(entry.job, consumed=True, consumed_by_source=source),
-            )
+            await self._publish(entry, _updated(entry.job, consumed=True))
             entry.claim = None
 
     async def request_cancel(self, job_id: str) -> None:

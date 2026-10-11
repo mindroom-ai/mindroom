@@ -1,4 +1,4 @@
-"""Joined response-turn coverage for retained background tool results."""
+"""Response turns whose background tool results outlive the reply that started them."""
 
 from __future__ import annotations
 

@@ -301,7 +301,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
         await runner._run_job_follow_up(event)
         request = runner.generate_response.await_args.args[0]
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
-        await runtime.acknowledge_wait("work", collected.claim, source_event_id="$reply")
+        await runtime.acknowledge_wait("work", collected.claim)
         assert await runner._follow_up_under_lock(request) is None
         # Nothing claimed a reply for it, so its source settles.
         assert not await bot.journal_principal().is_pending("job-follow-up:1")

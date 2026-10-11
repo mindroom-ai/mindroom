@@ -51,6 +51,7 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
     BackgroundOutcome,
     register_background_runtime,
 )
@@ -540,8 +541,6 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             assert "write_report" not in {record[1] for record in recorder.records}
             saved = await lookup(runtime, child.delegation_id, owner=identity, depth=0)
             assert saved.adapter["child"]["status"] == saved.status
-            # Only the reader's own reply consumed the outcome, so that reply alone can still recover it.
-            assert saved.consumed_by_source in {None, "$native-reader"}
     finally:
         release.set()
         await runtime.shutdown()
@@ -1541,3 +1540,16 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
         assert (offered, instructed) == (depth == 0, depth == 0)
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_childs_outcome_counts_as_read_only_once_its_parent_run_saves_it(tmp_path: Path) -> None:
+    """A parent whose run never saves the child's result leaves the outcome for a later reply to collect."""
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        return "Child answer"
+
+    await _drive_background_child(tmp_path, await tool_job_runtime(tmp_path), run_child)
+    [job] = (await saved_jobs(tmp_path)).values()
+    assert job.status in TERMINAL_STATUSES
+    assert not job.consumed
