@@ -4410,6 +4410,55 @@ async def test_session_failure_after_stable_session_retries_quickly(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_slow_teardown_does_not_count_as_a_stable_session(tmp_path: Path) -> None:
+    """Time spent stopping a failed session is not time the call worked."""
+    now_ms = [int(time.time() * 1000)]
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
+    delays = _record_retry_delays(manager)
+    stop_session = manager._stop_session
+
+    async def slow_stop(session: CallSession, **kwargs: str) -> None:
+        now_ms[0] += 60_000
+        await stop_session(session, **kwargs)
+
+    manager._stop_session = slow_stop  # type: ignore[method-assign]
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    for _ in range(3):
+        await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+
+    assert delays == [1.0, 5.0, 30.0]
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_undelivered_failure_notice_is_posted_on_the_next_failure(tmp_path: Path) -> None:
+    """A notice that Matrix rejected is not counted as reported for the call."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.side_effect = [
+        nio.RoomSendError("M_UNKNOWN: temporarily unavailable"),
+        nio.RoomSendResponse("$notice", ROOM_ID),
+    ]
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    _record_retry_delays(manager)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    for _ in range(3):
+        await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+
+    assert client.room_send.await_count == 2
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path: Path) -> None:
     """A connected-but-broken voice provider cannot fail as silent audio."""
     client = _client()

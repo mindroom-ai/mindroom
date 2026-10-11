@@ -1162,7 +1162,6 @@ class CallManager:
         """Post a cross-client Matrix notice explaining a silent call failure, once per logical call."""
         if message in logical_call.reported_failures:
             return
-        logical_call.reported_failures.add(message)
         requester_id = logical_call.requester_id
         try:
             async with admitted_response_decision(
@@ -1192,6 +1191,7 @@ class CallManager:
             error = response.message if isinstance(response, nio.RoomSendError) else "no Matrix response"
             logger.warning("call_failure_notice_send_failed", room_id=room_id, error=error)
             return
+        logical_call.reported_failures.add(message)
         logger.info("call_failure_notice_sent", room_id=room_id)
 
     async def _handle_session_termination(
@@ -1208,15 +1208,17 @@ class CallManager:
                 return
             self._clear_reconcile_retry(room.room_id)
             logical_call = self._logical_calls.get(room.room_id)
+            stable = False
             if logical_call is not None:
                 logical_call.join_blocked = True
+                stable = self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS
             await self._stop_session(session, event="call_failed_session_stop_failed")
             if self._sessions.get(room.room_id) is session:
                 self._sessions.pop(room.room_id, None)
             if retryable and not self._shutting_down:
                 if logical_call is not None:
                     logical_call.join_blocked = False
-                    if self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS:
+                    if stable:
                         logical_call.failed_sessions = 0
                     # Resume this call's backoff, so a provider that fails every session cannot rejoin every second.
                     self._retry_attempts[room.room_id] = logical_call.failed_sessions
