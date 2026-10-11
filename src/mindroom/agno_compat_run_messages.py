@@ -14,6 +14,7 @@ from agno.models.base import MessageData, Model
 from agno.models.response import ModelResponse
 from agno.team import _run as team_run
 
+from mindroom.agno_compat_claude import ClaudeProviderSDKCompat, take_unfinished_stream_usage
 from mindroom.usage_storage import has_token_usage
 
 if TYPE_CHECKING:
@@ -62,11 +63,14 @@ def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
     if request is None:
         return
     settled = request.assistant_message.model_copy()
+    received = request.stream_data.response_metrics
+    if isinstance(request.model, ClaudeProviderSDKCompat) and not has_token_usage(
+        received.to_dict() if received is not None else {},
+    ):
+        # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
+        received = take_unfinished_stream_usage() or received
     # Reuse provider accounting, including counters retained from failed attempts.
-    request.model._populate_assistant_message_from_stream_data(
-        settled,
-        MessageData(response_metrics=request.stream_data.response_metrics),
-    )
+    request.model._populate_assistant_message_from_stream_data(settled, MessageData(response_metrics=received))
     # Late finalization of the abandoned stream must not count this request again.
     request.assistant_message.metrics = MessageMetrics()
     if not has_token_usage(settled.metrics.to_dict()):

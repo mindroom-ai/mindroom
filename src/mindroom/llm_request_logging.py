@@ -623,7 +623,7 @@ def _stream_with_llm_request_logging(
         wire_tools_capture = _WireToolsCapture(enabled=debug_config.log_llm_requests)
         request_log_ref: _RequestLogRef | None = None
         request_logged = False
-        usage: MessageMetrics | None = None
+        last_usage: MessageMetrics | None = None
 
         async def _write_request_once() -> None:
             nonlocal request_log_ref, request_logged
@@ -652,8 +652,7 @@ def _stream_with_llm_request_logging(
                 async for chunk in scoped_stream:
                     await _write_request_once()
                     if chunk.response_usage is not None:
-                        # Agno adds up a stream's usage chunks, and Claude reports usage in two of them.
-                        usage = chunk.response_usage if usage is None else usage + chunk.response_usage
+                        last_usage = chunk.response_usage
                     yield chunk
         finally:
             await _write_request_once()
@@ -662,7 +661,7 @@ def _stream_with_llm_request_logging(
                 agent_name=agent_name,
                 configured_provider=configured_provider,
                 request_log_ref=request_log_ref,
-                usage=usage,
+                usage=last_usage,
                 request_context=request_context,
             )
 

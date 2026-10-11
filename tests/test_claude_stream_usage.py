@@ -18,6 +18,10 @@ from anthropic import AsyncAnthropic
 
 from mindroom.agent_storage import create_state_storage
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
+from mindroom.config.models import DebugConfig
+from mindroom.llm_request_logging import install_llm_request_logging
+from mindroom.provider_media_fallback import install_provider_media_fallback
 from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 
 if TYPE_CHECKING:
@@ -70,13 +74,18 @@ class _HeldStream(httpx.AsyncByteStream):
         self.closed.set()
 
 
-def _agent(storage: object, response: httpx.Response) -> Agent:
+def _agent(storage: object, response: httpx.Response, log_dir: Path) -> Agent:
     client = AsyncAnthropic(
         api_key="test-key",
         max_retries=0,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: response)),
     )
     model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", async_client=client, max_tokens=1024)
+    # The hooks model loading installs wrap the provider stream, as they do in production.
+    install_llm_request_logging(model, agent_name="status", debug_config=DebugConfig(), default_log_dir=log_dir)
+    install_claude_prompt_cache_hook(model)
+    install_provider_stream_retry_hook(model, idle_timeout_seconds=30)
+    install_provider_media_fallback(model, fallback_prompt="Media unavailable.")
     return Agent(id="status", model=model, db=storage, telemetry=False)
 
 
@@ -96,7 +105,11 @@ async def test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start(tmp
     held = _HeldStream()
     run_output: RunOutput | None = None
     try:
-        agent = _agent(storage, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held))
+        agent = _agent(
+            storage,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
+            tmp_path / "logs",
+        )
         async with asyncio.timeout(5):
             async for event in agent.arun(
                 "Check status",
@@ -128,14 +141,19 @@ async def test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start(tmp
 
 
 @pytest.mark.asyncio
-async def test_completed_claude_stream_counts_its_usage_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delta_usage", [_FINAL_USAGE, {"output_tokens": 50}], ids=["cumulative", "output_only"])
+async def test_completed_claude_stream_counts_its_usage_once(tmp_path: Path, delta_usage: dict[str, int]) -> None:
     """Usage known at the start of the stream is not counted again when the final usage arrives."""
     storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
     events = _start_and_text("Ready") + _event("content_block_stop", index=0)
-    events += _event("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None}, usage=_FINAL_USAGE)
+    events += _event("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None}, usage=delta_usage)
     events += _event("message_stop")
     try:
-        agent = _agent(storage, httpx.Response(200, headers={"content-type": "text/event-stream"}, content=events))
+        agent = _agent(
+            storage,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, content=events),
+            tmp_path / "logs",
+        )
         async for _ in agent.arun("Check status", session_id="session", stream=True):
             pass
 
@@ -154,7 +172,7 @@ async def test_claude_stream_still_retries_an_overload_after_it_starts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Start usage alone must not stop a retry; both attempts started, so both report their usage."""
+    """A stream that has only started is retried after an overload, and the retry's usage counts once."""
     monkeypatch.setattr("mindroom.provider_stream_retry._retry_delay_seconds", lambda _attempt: 0)
     storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
     overloaded = _start_and_text() + _event("error", error={"type": "overloaded_error", "message": "Overloaded"})
@@ -188,10 +206,10 @@ async def test_claude_stream_still_retries_an_overload_after_it_starts(
         assert content == "Ready"
         assert len(requests) == 2
         assert _session_usage(storage) == {
-            "input_tokens": 2400,
-            "output_tokens": 51,
-            "cache_read_tokens": 96000,
-            "cache_write_tokens": 1600,
+            "input_tokens": 1200,
+            "output_tokens": 50,
+            "cache_read_tokens": 48000,
+            "cache_write_tokens": 800,
         }
     finally:
         storage.close()

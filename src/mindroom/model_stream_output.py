@@ -13,8 +13,6 @@ def has_meaningful_stream_output(response: ModelResponse) -> bool:
 
     Role/event bookkeeping alone is safe to repeat. Downstream consumers
     accumulate payload fields, including provider data and tool calls.
-    Usage alone is also safe to repeat: every attempt is a separate billed
-    request, and its reported usage is added to the retry's.
     """
     return bool(
         response.content
@@ -30,6 +28,7 @@ def has_meaningful_stream_output(response: ModelResponse) -> bool:
         or response.reasoning_content
         or response.redacted_reasoning_content
         or response.citations
+        or response.response_usage
         or response.extra
         or response.updated_session_state,
     )

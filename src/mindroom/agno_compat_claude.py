@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.claude_wire_blocks import (
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
     from anthropic.types.beta import BetaMessage
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
-# Usage from message_start of the Claude stream this task is reading; a task reads one stream at a time.
+# Usage from message_start of the Claude stream this task is reading, until it reports its final usage.
 _STREAM_START_USAGE: ContextVar[MessageMetrics | None] = ContextVar("claude_stream_start_usage", default=None)
 
 # AGNO_COMPAT: Claude requests include unsupported sampling controls.
@@ -43,22 +42,28 @@ _STREAM_START_USAGE: ContextVar[MessageMetrics | None] = ContextVar("claude_stre
 # another stable terminal-metadata interface.
 # Coverage: tests/test_compaction_summary_provider_compat.py::test_summary_uses_stop_reason_and_raw_body_precedence.
 
+
 # AGNO_COMPAT: Claude streams report usage only when they complete.
-# Reason: Agno 3.0.9 reads stream usage only from the final message_stop snapshot, although
-# Anthropic reports input and cache usage in message_start. A reply stopped before message_stop
-# records no usage for that request, though Anthropic bills the input and cache tokens it reported.
+# Reason: Agno 3.0.9 reads stream usage only from the final message_stop snapshot, although Anthropic
+# reports input and cache usage in message_start. A reply stopped before message_stop records no usage
+# for that request, though Anthropic bills the input and cache tokens it reported.
 # Upstream issue: Tracking gap; no issue tracks stopped streams. Agno moved Claude stream usage to
 # message_stop to fix double counting in https://github.com/agno-agi/agno/issues/6537, so a fix must still
 # count completed streams once.
 # Upstream PR: None identified.
-# Remove when: The pinned Agno parser reports message_start usage and counts only the remainder
-# when the final usage arrives.
+# Remove when: The pinned Agno release keeps message_start usage for a stream that ends before
+# message_stop, while counting completed streams once.
 # Coverage: tests/test_claude_stream_usage.py::test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start;
 # tests/test_claude_stream_usage.py::test_completed_claude_stream_counts_its_usage_once.
+def take_unfinished_stream_usage() -> MessageMetrics | None:
+    """Return and forget the start usage of a Claude stream this task read that never reported final usage."""
+    start = _STREAM_START_USAGE.get()
+    _STREAM_START_USAGE.set(None)
+    return start
 
 
 class ClaudeProviderSDKCompat:
-    """Sanitize Agno-built requests, preserve terminal metadata, and count stream usage as it is reported."""
+    """Sanitize Agno-built requests, preserve terminal metadata, and keep stream start usage for settlement."""
 
     id: str
 
@@ -110,22 +115,10 @@ class ClaudeProviderSDKCompat:
             response_format=response_format,
         )
         if isinstance(response, (RawMessageStartEvent, BetaRawMessageStartEvent)):
-            start = self._get_metrics(response.message.usage)  # ty: ignore[unresolved-attribute]
-            _STREAM_START_USAGE.set(start)
-            parsed.response_usage = start
-            return parsed
-        start = _STREAM_START_USAGE.get()
-        final = parsed.response_usage
-        if start is not None and final is not None:
+            # Keep it aside: settlement adds it only if the stream ends before its final usage.
+            _STREAM_START_USAGE.set(self._get_metrics(response.message.usage))  # ty: ignore[unresolved-attribute]
+        elif parsed.response_usage is not None:
             _STREAM_START_USAGE.set(None)
-            parsed.response_usage = replace(
-                final,
-                input_tokens=final.input_tokens - start.input_tokens,
-                output_tokens=final.output_tokens - start.output_tokens,
-                total_tokens=final.total_tokens - start.total_tokens,
-                cache_read_tokens=final.cache_read_tokens - start.cache_read_tokens,
-                cache_write_tokens=final.cache_write_tokens - start.cache_write_tokens,
-            )
         return parsed
 
 
