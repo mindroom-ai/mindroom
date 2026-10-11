@@ -149,7 +149,7 @@ A terminal row Matrix refused for good, a reply's only message included, ends th
 ## Lifetime
 
 Each bot instance writes a fresh generation for its principal at start, then ends what older instances left (`owner_lost`): orphaned spans end `lost`, replies whose sources settled fail with the restart note (or end `gone` when they never wrote anything), and replies whose sources are pending wait for their replay.
-A membership departure ends the room's replies `gone` inside the departure fence and cancels their spans afterwards.
+A membership departure ends the room's replies `gone` inside the departure fence, records the cancellation of their background work as a Stop does, and cancels their spans afterwards.
 A replay that a newer message from the same requester supersedes settles its sources with its reply, unless the reply still owes Matrix a write.
 A bot instance that another took over writes nothing more: its claims and every write its running spans make, approval resumes included, are refused against the principal's persisted generation; a resume it left stays open to the owner's approval recovery, which ends it.
 A replay that ingress settles without a turn, such as one whose requester lost access, ends its reply in that commit with the interrupted note, or removes a reply that showed only its placeholder.

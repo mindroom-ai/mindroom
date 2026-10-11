@@ -597,6 +597,22 @@ def drop_replays(
     return tuple(ended)
 
 
+def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, now_ns: int) -> None:
+    """End the room's replies as its membership ends, without touching Matrix.
+
+    Running replies end gone with their spans released, their background work is cancelled, and what finished
+    replies still owed the room is dropped. The departing bot cancels the span tasks it runs after this commits, and
+    the job runtime applies the cancellation on its next pass.
+    """
+    for reply in reply_messages.departing(transaction, principal_id, room_id):
+        current = (
+            None
+            if reply.current_span_id is None
+            else reply_spans.load(transaction, principal_id, reply.current_span_id)
+        )
+        apply(transaction, principal_id, rl.departed(reply, current, now_ns=now_ns))
+
+
 def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
     """End the open replies of entities with no bot any more, without writing to Matrix."""
     ended = 0

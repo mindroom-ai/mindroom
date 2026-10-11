@@ -1706,13 +1706,17 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
 
 
 def departed(reply: Reply, current: Span | None, *, now_ns: int) -> Transition:
-    """The bot left the room: non-terminal replies end without touching Matrix."""
+    """The bot left the room: non-terminal replies end without touching Matrix.
+
+    As a Stop would, the departure cancels the background work such a reply started or waits for, which no message
+    in the room could stop any more.
+    """
     if reply.terminal:
         if not reply.redaction_pending and reply.owed_write is None:
             return _unchanged(Outcome.DUPLICATE, reply)
         return Transition(outcome=Outcome.APPLIED, reply=_touch(reply, now_ns, redaction_pending=(), owed_write=None))
     updated, spans = _end_running(reply, current, SpanOutcome.RELEASED)
-    effects = tuple(CancelSpan(span.span_id) for span in spans)
+    effects = (*(CancelSpan(span.span_id) for span in spans), StopJobs(reply.reply_id))
     updated = _bump(
         _stop_applied(updated),
         now_ns,

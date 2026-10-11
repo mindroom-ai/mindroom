@@ -27,7 +27,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   A conversation is not held by a waiting reply: later messages are answered as usual.
 - Stop cancels the reply and the background work it started or waits for; work a newer message of the conversation started is that message's to stop.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
-  Deleting the messages a reply answers, or editing a waiting reply's message, cancels that work too.
+  Deleting the messages a reply answers, editing a waiting reply's message, or the bot leaving the room cancels that work too.
 - A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.
 - A background child that needs approval asks through cards its job posts, and the job stays `awaiting_approval` until the decisions arrive.
   A gated call of a top-level agent that can become a managed job asks the same way, as its job's first phase: it is marked `mindroom_job` instead of pausing the run, the reply waits up to `approval_wait_timeout` for the decision and then goes on, and the call runs only once approved.

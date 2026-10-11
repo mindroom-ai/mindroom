@@ -2034,6 +2034,22 @@ async def test_a_stop_records_the_work_it_cancels_as_the_reply_was(journal_store
     assert await journal_store.reply_job_stops() == ()
 
 
+async def test_leaving_a_room_records_the_work_its_waiting_reply_waits_for(journal_store: EventJournalStore) -> None:
+    """No message in a room the bot left can stop its work any more, so the departure cancels it as a Stop would."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply = await _waiting(principal)
+    await journal_store.backend.write(
+        lambda tx: tx.execute("INSERT INTO tool_jobs (job_id, job_json) VALUES (?, ?)", ("job", "{}")),
+    )
+    await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+    departed = await principal.replies.load(reply.reply_id)
+    assert departed is not None
+    assert departed.state is ReplyState.GONE
+    [stop] = await journal_store.reply_job_stops()
+    assert stop.sources == ("$source",)
+    assert stop.hold_key == _KEY
+
+
 async def test_a_stop_records_nothing_while_no_background_job_exists(journal_store: EventJournalStore) -> None:
     """A stopped reply starts nothing afterwards, so with no job saved there is no work to cancel."""
     principal = journal_store.principal(PRINCIPAL)

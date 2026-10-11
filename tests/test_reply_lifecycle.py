@@ -1580,14 +1580,14 @@ def test_deleting_the_message_of_a_reply_running_for_its_approval_ends_that_span
 
 
 def test_departure_ends_replies_without_touching_matrix() -> None:
-    """A departed room's replies end gone, cancel their spans, and drop pending redactions."""
+    """A departed room's replies end gone, cancel their spans and background work, and drop pending redactions."""
     reply, span = _turn()
     reply = replace(reply, redaction_pending=("$x",), stop_button_event_id="$button")
     transition = rl.departed(reply, span, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.GONE
     assert transition.reply.redaction_pending == ()
-    assert transition.effects == (CancelSpan(span.span_id),)
+    assert transition.effects == (CancelSpan(span.span_id), rl.StopJobs(reply.reply_id))
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.RELEASED
 
 

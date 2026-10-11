@@ -15,7 +15,6 @@ from mindroom.reply_lifecycle import (
     OwedWrite,
     Reply,
     ReplyState,
-    departed,
 )
 
 from . import reply_spans
@@ -193,13 +192,8 @@ def event_ids_of_spans(
     return frozenset(str(row["event_id"]) for row in rows)
 
 
-def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, now_ns: int) -> None:
-    """End the room's replies as its membership ends, without touching Matrix.
-
-    Running replies end gone with their spans released, and what finished
-    replies still owed the room is dropped. The departing bot cancels the span
-    tasks it runs after this commits.
-    """
+def departing(transaction: Transaction, principal_id: str, room_id: str) -> tuple[Reply, ...]:
+    """Return the room's replies a departure ends: running ones, and finished ones that still owe the room."""
     rows = transaction.fetchall(
         f"""
         SELECT {_REPLY_COLUMNS} FROM reply_messages
@@ -209,13 +203,7 @@ def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, no
         """,  # noqa: S608 - a fixed column list
         (principal_id, room_id),
     )
-    for reply in (_reply(row) for row in rows):
-        current = (
-            None
-            if reply.current_span_id is None
-            else reply_spans.load(transaction, principal_id, reply.current_span_id)
-        )
-        persist(transaction, principal_id, departed(reply, current, now_ns=now_ns))
+    return tuple(_reply(row) for row in rows)
 
 
 def naming_logical_source(transaction: Transaction, principal_id: str, event_id: str) -> tuple[str, ...]:
