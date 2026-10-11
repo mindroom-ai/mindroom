@@ -26,6 +26,7 @@ from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_tu
 from mindroom.delegation.personas import inline_persona
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
+from mindroom.knowledge import utils as knowledge_utils
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
@@ -349,7 +350,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A profile child paused for approval resumes with its frozen persona after the file is deleted."""
+    """A profile child paused for approval resumes with its frozen persona and knowledge after the file is deleted."""
     profile = _write_profile(
         tmp_path,
         "adder",
@@ -366,6 +367,15 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
         ],
     )
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
+    resumed_knowledge: list[object] = []
+    # The approval resume imports the resolver from its module when it runs.
+    resolve = knowledge_utils.resolve_agent_knowledge_access_async
+
+    async def recording_resolve(*args: object, **kwargs: object) -> object:
+        resumed_knowledge.append(kwargs.get("only"))
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge_utils, "resolve_agent_knowledge_access_async", recording_resolve)
     identity = _identity()
     options = {
         "run_child": run_delegated_child_response,
@@ -401,6 +411,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
 
     assert completed.status == RunStatus.completed
     assert model.authored_prompts == ["You add numbers.", "You add numbers."]
+    assert resumed_knowledge == [()]
     assert len(model.offered) == 2
     assert all("add" in offered and "read_file" not in offered for offered in model.offered)
     assert DelegationState.from_metadata(completed.metadata).children[0].persona == SubagentPersona(

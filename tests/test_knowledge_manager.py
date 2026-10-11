@@ -395,6 +395,34 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     assert all(alpha_marker not in document.content for document in beta_cross)
 
 
+def _published_result_index(base_id: str, **_kwargs: object) -> object:
+    """Publish one "result from <base_id>" document, so merged search results name the bases searched."""
+    vector_db = _VectorDb(collection=f"collection_{base_id}")
+    vector_db.create()
+    _VectorDb.collections[vector_db.collection_name] = [
+        {
+            "content": f"result from {base_id}",
+            "metadata": {"source_path": f"{base_id}.md"},
+        },
+    ]
+    knowledge = SimpleNamespace(
+        vector_db=vector_db,
+        name=None,
+        description=None,
+        max_results=10,
+    )
+    return SimpleNamespace(
+        key=SimpleNamespace(base_id=base_id),
+        index=SimpleNamespace(
+            knowledge=knowledge,
+            state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
+        ),
+        availability=KnowledgeAvailability.READY,
+        state=None,
+        schedule_refresh_on_access=False,
+    )
+
+
 @pytest.mark.parametrize(
     ("authored_source_count", "expected_result_count", "memory_source_expected"),
     [
@@ -421,33 +449,7 @@ def test_default_merged_search_budget_is_bounded_while_representing_sources_that
     )
     runtime_paths = runtime_paths_for(config)
 
-    def _published_index(base_id: str, **_kwargs: object) -> object:
-        vector_db = _VectorDb(collection=f"collection_{base_id}")
-        vector_db.create()
-        _VectorDb.collections[vector_db.collection_name] = [
-            {
-                "content": f"result from {base_id}",
-                "metadata": {"source_path": f"{base_id}.md"},
-            },
-        ]
-        knowledge = SimpleNamespace(
-            vector_db=vector_db,
-            name=None,
-            description=None,
-            max_results=10,
-        )
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                knowledge=knowledge,
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-            schedule_refresh_on_access=False,
-        )
-
-    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_index)
+    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_result_index)
 
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
@@ -458,6 +460,46 @@ def test_default_merged_search_budget_is_bounded_while_representing_sources_that
         any(document.content.startswith("result from file_memory_agent_helper_") for document in documents)
         is memory_source_expected
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("only", "expected_sources"),
+    [
+        pytest.param(None, {"docs", "faq", "file memory"}, id="all"),
+        pytest.param(("faq",), {"faq"}, id="named"),
+        pytest.param((), set(), id="none"),
+    ],
+)
+async def test_narrowed_agent_knowledge_searches_only_the_named_bases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
+    only: tuple[str, ...] | None,
+    expected_sources: set[str],
+) -> None:
+    """A narrowed resolution searches only the named configured bases, without the file-memory overlay."""
+    config = _file_memory_config(tmp_path, "helper")
+    config.agents["helper"].knowledge_bases = ["docs", "faq"]
+    config.knowledge_bases.update(
+        {base_id: KnowledgeBaseConfig(path=str(tmp_path / base_id)) for base_id in ("docs", "faq")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_result_index)
+
+    resolution = (
+        await knowledge_utils.resolve_agent_knowledge_access_async("helper", config, runtime_paths, only=only)
+        if asynchronous
+        else resolve_agent_knowledge_access("helper", config, runtime_paths, only=only)
+    )
+
+    knowledge = resolution.knowledge
+    documents = knowledge.vector_db.search(query="anything", limit=10) if knowledge is not None else []
+    searched = {document.content.removeprefix("result from ") for document in documents}
+    assert {
+        "file memory" if base_id.startswith("file_memory_") else base_id for base_id in searched
+    } == expected_sources
 
 
 def _record_git_sync(
