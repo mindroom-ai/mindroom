@@ -612,6 +612,25 @@ async def test_audio_discarded_after_a_clear_does_not_count_as_queued(
 
 
 @pytest.mark.asyncio
+async def test_clearing_a_flushed_segment_keeps_counting_the_next_one(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """A caller talking over the queued tail of a finished utterance must not blind the next one."""
+    with capture_logs() as logs:
+        for value in range(15):
+            await deliver(call.output, output_clock, value, at=0.0)
+        call.output.flush()
+        call.caller("speaking")
+        call.caller("listening")
+        for value in range(15, 30):
+            await deliver(call.output, output_clock, value, at=3.0)
+        call.caller("speaking")
+    assert call.sink.calls == ["flush", "clear", "clear"]
+    assert len(drop_logs(logs)) == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("queued_deltas", "cleared"), [(1, False), (5, False), (6, True)])
 async def test_caller_speech_leaves_up_to_half_a_second_queued(
     output_clock: OutputClock,
