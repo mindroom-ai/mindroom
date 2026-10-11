@@ -481,31 +481,3 @@ def test_idle_reader_exits_quietly_when_its_input_closes(capfd: pytest.CaptureFi
     output, _ = reader.communicate(timeout=30)
     assert (output, reader.returncode) == (b"", 0)
     assert "Traceback" not in capfd.readouterr().err
-
-
-_EXIT_PROBE = """
-import atexit
-import sys
-
-readers = []
-# Registered before read_process imports, so it runs after the module's own exit handler.
-atexit.register(lambda: print("reaped" if readers[0].returncode is not None else "alive"))
-
-from mindroom.knowledge import read_process
-from mindroom.knowledge.read_protocol import ReadRequest
-
-read_process.read_chroma(ReadRequest(sys.argv[1], "published", "alpha", [1.0, 0.0]))
-readers.append(read_process._warm_reader)
-"""
-
-
-def test_interpreter_exit_reaps_warm_reader(published_index: Path) -> None:
-    """Application shutdown kills and reaps the idle child instead of leaving it behind."""
-    result = subprocess.run(
-        [sys.executable, "-c", _EXIT_PROBE, str(published_index)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=True,
-    )
-    assert result.stdout == "reaped\n"

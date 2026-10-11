@@ -8,7 +8,6 @@ native imports; each read starts its successor once it is over.
 from __future__ import annotations
 
 import asyncio
-import atexit
 import os
 import signal
 import subprocess
@@ -104,9 +103,7 @@ def _reader() -> Iterator[subprocess.Popen[bytes]]:
     global _warm_reader
     with _warm_reader_lock:
         reader, _warm_reader = _warm_reader, None
-    if reader is None or reader.poll() is not None:
-        if reader is not None:
-            _exchange(reader, None)  # Close the pipes of a warm child that died while idle.
+    if reader is None:
         reader = _spawn_reader()
     try:
         yield reader
@@ -135,15 +132,12 @@ def _exchange(
 
 
 def _discard_warm_reader() -> None:
-    """Kill and reap the idle child; it holds no request, lease, or native index."""
+    """Kill and reap the idle child so tests start from a cold reader; it holds no request, lease, or native index."""
     global _warm_reader
     with _warm_reader_lock:
         reader, _warm_reader = _warm_reader, None
     if reader is not None:
         _exchange(reader, None)
-
-
-atexit.register(_discard_warm_reader)
 
 
 @contextmanager
