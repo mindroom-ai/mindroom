@@ -384,7 +384,7 @@ async def test_outbox_upgrade_keeps_rows_and_admits_edit_stage(legacy_database: 
         )
 
 
-# The reply tables as v2026.10.228 through v2026.10.233 created them.
+# The reply tables as v2026.10.228 through v2026.10.235 created them.
 _PRE_WAIT_REPLY_MESSAGES = """
 CREATE TABLE reply_messages (
     principal_id TEXT NOT NULL,

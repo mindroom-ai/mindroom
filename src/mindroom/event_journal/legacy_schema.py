@@ -140,7 +140,7 @@ _PRE_WAKE_SPAN_COLUMNS = (
 # LEGACY_COMPAT: Reply records without background-work waits.
 # Legacy format: reply_messages without the hold_key column, whose state CHECK constraint does not admit 'waiting',
 # and reply_spans whose kind CHECK constraint does not admit 'wake'.
-# Last legacy release: v2026.10.233; replacement: the unreleased background tool jobs add the 'waiting' reply state,
+# Last legacy release: v2026.10.235; replacement: the unreleased background tool jobs add the 'waiting' reply state,
 # the 'wake' span kind, and the nullable hold_key column.
 # Handling: SQLite rebuilds both tables under the new definitions and copies every row unchanged, before the
 # schema's indexes are created; PostgreSQL adds the column and replaces both constraints. Existing replies keep a
