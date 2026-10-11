@@ -25,7 +25,7 @@ including markers Agno itself adds, is capped at the API limit of four.
 
 Agent-built system prompts carry an explicit boundary before their session
 context. Split that text into two system blocks and move the existing system
-marker to the shared prefix. Dates, summaries, and learning can then change
+marker to the shared prefix. Dates and learning can then change
 without invalidating the agent's instructions. The message rungs still cache
 the full system and conversation prefix within each thread.
 
@@ -461,8 +461,8 @@ def _request_kwargs_with_deferred_tool_search(
 def split_shared_system_prefix(system: list[Any]) -> list[Any]:
     """Move a marked first system text block's cache marker to the shared instructions.
 
-    The session-context suffix becomes a separate unmarked block, so dates,
-    summaries, and learning can change without invalidating the shared prefix.
+    The session-context suffix becomes a separate unmarked block, so dates
+    and learning can change without invalidating the shared prefix.
     Returns the input list unchanged when there is no marked boundary to split.
     """
     if not system:

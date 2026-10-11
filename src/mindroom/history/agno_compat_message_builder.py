@@ -68,8 +68,10 @@ if TYPE_CHECKING:
 # MindRoom turns that flag off and places the summary as the first history message in every new and continued
 # request instead. Agno also loads a run's session privately and writes that object back when the run ends, so the
 # builders record it for mid-turn compaction, which must update the object Agno will write.
-# Upstream issue: Tracking gap; no issue identified for a history-positioned session summary or for a public
-# reference to the session a running loop persists.
+# Upstream issue: Tracking gap. Related open issues https://github.com/agno-agi/agno/issues/8790 (rolling
+# compaction, still injected into the system prompt) and https://github.com/agno-agi/agno/issues/9461 (unify
+# history, summary, and compression across agents, members, and workflows) do not propose a history-positioned
+# summary or a public reference to the session a running loop persists.
 # Upstream PR: None identified.
 # Remove when: Agno can replay the session summary as a history message for new and continued runs and exposes the
 # session object a running loop persists; the summary must still replay exactly once and be counted once.

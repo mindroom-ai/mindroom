@@ -325,7 +325,9 @@ def install_response_request_gate(
 # Reason: Mid-turn compaction must inspect and rewrite the loop's own message list, with the formatted tools and
 # the run, after Agno appends each tool batch and before the next provider request. Agno's CompressionManager runs
 # at that point but only compresses tool results, is enabled only by compress_tool_results, and never sees the run.
-# Upstream issue: Tracking gap; no issue identified for a caller-owned hook consulted before each model request.
+# Upstream issue: Tracking gap. Related open issues https://github.com/agno-agi/agno/issues/4952 and
+# https://github.com/agno-agi/agno/issues/8342 ask for token-aware compaction but not for a caller-owned hook
+# consulted before each model request.
 # Upstream PR: None identified.
 # Remove when: Agno awaits a public callback before every provider request of its async streaming and
 # non-streaming loops, passing the mutable message list, the formatted tools, and the run; the owner's compaction
