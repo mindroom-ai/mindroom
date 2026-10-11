@@ -231,7 +231,12 @@ def _tool_payload(result: str) -> dict[str, Any]:
 def _run_config(context: ToolRuntimeContext, function_owners: dict[str, frozenset[str]]) -> Config:
     """Build the participant overlay with the allowed tools the caller's config and dashboard grant."""
     allowed = dynamic_workflow_module._workflow_allowed_tools(context)
-    return dynamic_workflow_module._participant_run_config(context, function_owners, allowed=allowed)
+    return dynamic_workflow_module._participant_run_config(
+        context,
+        function_owners,
+        allowed=allowed,
+        reads_skills=False,
+    )
 
 
 def test_dynamic_workflow_tool_registered() -> None:

@@ -66,7 +66,7 @@ def _function(name: str, toolkit: str | None) -> Function:
 def test_inline_persona_keeps_prompt_bytes() -> None:
     """Braces and trailing whitespace survive validation and serialization unchanged."""
     prompt = "Use {braces} and {{x}}\n"
-    persona = inline_persona(prompt, ["file"])
+    persona = inline_persona(prompt, ["file"], None)
     assert persona == SubagentPersona(source_kind="inline", source_name="", system_prompt=prompt, tools=("file",))
     assert SubagentPersona.from_dict(json.loads(json.dumps(asdict(persona)))) == persona
 
@@ -85,17 +85,17 @@ def test_inline_persona_keeps_prompt_bytes() -> None:
 def test_inline_persona_rejects_empty_oversized_and_wrong_types(system_prompt: object, tools: object) -> None:
     """Invalid prompts and tool lists raise a user-facing persona error."""
     with pytest.raises(PersonaError):
-        inline_persona(system_prompt, tools)
+        inline_persona(system_prompt, tools, None)
 
 
 def test_inline_persona_accepts_prompt_at_size_limit() -> None:
     """A prompt of exactly 64 KiB is accepted."""
-    assert len(inline_persona("x" * (64 * 1024), None).system_prompt) == 64 * 1024
+    assert len(inline_persona("x" * (64 * 1024), None, None).system_prompt) == 64 * 1024
 
 
 def test_empty_tool_list_means_no_tools() -> None:
     """An explicit empty tool list keeps no tools instead of falling back to all of them."""
-    persona = inline_persona("P", [])
+    persona = inline_persona("P", [], None)
     assert persona.tools == ()
     assert not persona_allows((), "file", "read_file")
     _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None, frozenset())
@@ -435,7 +435,7 @@ def test_mcp_function_entries_are_not_checked_against_bridge_metadata(monkeypatc
 
 def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path) -> None:
     """A copy without tools inherits its parent's cap minus delegate at the maximum depth, and refuses any other loss."""
-    cap = inline_persona("P", ["delegate", "file"])
+    cap = inline_persona("P", ["delegate", "file"], None)
     at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: ["file"])
     lost_file = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: ["delegate"])
 
@@ -447,7 +447,7 @@ def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path)
 
 def test_inline_persona_reads_skills() -> None:
     """Skills are optional, deduplicated names, and an empty list means no skills."""
-    assert inline_persona("P", None).skills is None
+    assert inline_persona("P", None, None).skills is None
     assert inline_persona("P", None, [" research ", "research", "writing"]).skills == ("research", "writing")
     assert inline_persona("P", None, []).skills == ()
     for skills in ("research", [""], [1]):
@@ -499,7 +499,7 @@ def test_copy_without_skills_inherits_its_parents_skills(tmp_path: Path) -> None
 
 def test_unrestricted_authored_subagent_may_start_a_configured_copy(tmp_path: Path) -> None:
     """An authored subagent that keeps every caller tool and skill may still start a configured copy."""
-    plain = _resolve(tmp_path, cap=inline_persona("P", None))
+    plain = _resolve(tmp_path, cap=inline_persona("P", None, None))
 
     assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
 

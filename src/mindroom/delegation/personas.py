@@ -95,7 +95,7 @@ def _name_entries(value: object, field: str) -> tuple[str, ...] | None:
 def inline_persona(
     system_prompt: object,
     tools: object,
-    skills: object = None,
+    skills: object,
     *,
     source_kind: PersonaSourceKind = "inline",
     source_name: str = "",

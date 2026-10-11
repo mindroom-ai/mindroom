@@ -213,7 +213,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
-    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; a standard-mode participant can load its skills only when an operator `auto_approve` rule allows `get_skill_instructions`, because participants cannot pause for approval.
+    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but runs a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     A participant used by several steps continues one session.
     Each run uses the prompt, tools, skills, and model its participants had when the run started, even if a profile changes during the run.

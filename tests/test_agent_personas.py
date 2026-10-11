@@ -82,7 +82,7 @@ def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        persona=inline_persona(prompt, tools),
+        persona=inline_persona(prompt, tools, None),
         **options,
     )
 
@@ -108,7 +108,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_p
     prompt = "Plain {not_a_var} text"
     configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
     assert "Configured personality" in str(configured.role)
-    prepared = await _prepare(runtime, inline_persona(prompt, None), "task")
+    prepared = await _prepare(runtime, inline_persona(prompt, None, None), "task")
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
 
@@ -158,7 +158,7 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
     ) as scope_context:
         assert scope_context is not None
         prepared = await ai._prepare_agent_and_prompt(
-            replace(_turn_context(), persona=inline_persona("P", None)),
+            replace(_turn_context(), persona=inline_persona("P", None, None)),
             prompt="task",
             runtime_paths=runtime.runtime_paths,
             config=runtime.config,
@@ -492,7 +492,7 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
             runtime_paths,
             None,
             persist_runtime_state=False,
-            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"]),
+            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None),
         )
 
 
@@ -540,7 +540,7 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
         raise AssertionError(msg)
 
     monkeypatch.setattr(ai, "build_memory_prompt_parts", recall)
-    prepared = await _prepare(runtime, inline_persona("P", None), "the task")
+    prepared = await _prepare(runtime, inline_persona("P", None, None), "the task")
     assert "the task" in prepared.prompt_text
 
 

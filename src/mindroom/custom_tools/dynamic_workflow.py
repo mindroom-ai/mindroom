@@ -13,6 +13,7 @@ from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 
 from mindroom.authorization import responder_candidate_entities_from_cached_room
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -58,6 +59,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -656,7 +658,12 @@ async def _aexecute_subagent_participant(
     _reject_unapproved_participant_tools(context, persona.tools or (), allowed=allowed)
     if participant_id not in state.function_owners:
         state.function_owners[participant_id] = await _participant_function_owners(context, persona)
-    approval_config = _participant_run_config(context, state.function_owners[participant_id], allowed=allowed)
+    approval_config = _participant_run_config(
+        context,
+        state.function_owners[participant_id],
+        allowed=allowed,
+        reads_skills=bool(persona.skills),
+    )
     owner = build_execution_identity_from_runtime_context(context)
     child = prepare_child_turn(
         context.agent_name,
@@ -898,14 +905,31 @@ def _participant_run_config(
     function_owners: Mapping[str, frozenset[str]],
     *,
     allowed: frozenset[str],
+    reads_skills: bool,
 ) -> Config:
-    """Return the participant policy: approval by default, with the caller's allowed tools pre-approved."""
-    return build_automation_approval_config(
+    """Return the participant policy: approval by default, with the caller's allowed tools pre-approved.
+
+    A participant that names skills may read them whenever its caller could without approval;
+    running a skill's scripts still needs an operator rule.
+    """
+    config = build_automation_approval_config(
         context.config,
         function_owners=function_owners,
         preapproved_toolkits=allowed,
         never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
     )
+    skill_reads = sorted(
+        name
+        for name in SKILL_READ_FUNCTION_NAMES
+        if reads_skills and not tool_may_require_approval(context.config, name)
+    )
+    if not skill_reads:
+        return config
+    rules = [
+        *config.tool_approval.rules,
+        *(ApprovalRuleConfig(match=name, action="auto_approve") for name in skill_reads),
+    ]
+    return config.model_copy(update={"tool_approval": config.tool_approval.model_copy(update={"rules": rules})})
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:

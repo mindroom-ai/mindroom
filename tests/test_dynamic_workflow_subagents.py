@@ -528,7 +528,7 @@ def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) 
     entity_ids(config, paths)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=_identity()),
-        persona=inline_persona("P", ["file"]),
+        persona=inline_persona("P", ["file"], None),
     )
 
     request = workflow_module._participant_request(
@@ -565,25 +565,37 @@ async def test_participant_skills_must_be_caller_skills(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved", [True, False])
-async def test_participant_offers_only_the_skills_it_names(
+@pytest.mark.parametrize("approval_default", ["auto_approve", "require_approval"])
+async def test_participant_reads_only_the_skills_it_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    approved: bool,
+    approval_default: str,
 ) -> None:
-    """A participant lists only its named skills, and only when an operator rule auto-approves skill loading."""
-    rules = {"get_skill_instructions": "auto_approve"} if approved else {}
-    workflow = _Workflow(tmp_path, monkeypatch, _config(rules=rules))
+    """A participant reads its named skills whenever its caller could without approval, but never runs their scripts."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config(approval_default=approval_default))
     _write_skill(workflow, "research")
     _write_skill(workflow, "writing")
+    readable = approval_default == "auto_approve"
 
     run = await workflow.run(_spec([{"id": "critic", "system_prompt": "Critic.", "tools": [], "skills": ["research"]}]))
 
     assert run["status"] == "completed", run
-    assert workflow.model.offered == [["get_skill_instructions"] if approved else []]
+    assert workflow.model.offered == [["get_skill_instructions", "get_skill_reference"] if readable else []]
     [prompt] = workflow.model.system_prompts
-    assert ("The research skill" in prompt) is approved
+    assert ("The research skill" in prompt) is readable
     assert "The writing skill" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_participant_without_skills_reads_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant that names no skills is offered no skill functions, even when its caller has skills."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    _write_skill(workflow, "research")
+
+    run = await workflow.run(_spec([{"id": "critic", "system_prompt": "Critic.", "tools": []}]))
+
+    assert run["status"] == "completed", run
+    assert workflow.model.offered == [[]]
 
 
 def test_participant_from_authored_child_stays_within_its_skills(tmp_path: Path) -> None:

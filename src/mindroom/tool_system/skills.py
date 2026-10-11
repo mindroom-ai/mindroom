@@ -43,7 +43,9 @@ logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
 # The functions Agno generates for an agent's skills; none has an owning toolkit.
-SKILL_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference", "get_skill_script"})
+# The first two only read a skill, while get_skill_script can also run its scripts.
+SKILL_READ_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference"})
+SKILL_FUNCTION_NAMES = SKILL_READ_FUNCTION_NAMES | {"get_skill_script"}
 _WORKSPACE_SKILLS_DIRNAME = "skills"
 _MAX_WORKSPACE_SKILLS = 256
 MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
