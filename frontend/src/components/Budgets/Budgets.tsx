@@ -212,29 +212,27 @@ function CapInput({
   label: string;
   value: number | undefined;
   placeholder: string;
-  onSave: (value: number | undefined) => Promise<boolean>;
+  onSave: (value: number | undefined) => Promise<unknown>;
 }) {
   const shown = value == null ? "" : String(value);
   const [text, setText] = useState(shown);
+  // Only typed text is saved, and the field shows the saved cap whenever nothing typed is pending.
+  const [typed, setTyped] = useState(false);
   // The field is read-only while saving, so a later edit cannot be overwritten by this save.
   const [saving, setSaving] = useState(false);
-  // A refresh shows a newer saved cap only once the field is no longer being edited.
-  const [editing, setEditing] = useState(false);
   useEffect(() => {
-    if (!editing && !saving) setText(shown);
-  }, [shown, editing, saving]);
+    if (!typed) setText(shown);
+  }, [shown, typed]);
   const invalid = parseUsd(text) === null;
   const save = async () => {
+    if (!typed || saving) return;
     const parsed = parseUsd(text);
-    if (parsed === null) {
-      setText(shown);
-      return;
+    if (parsed !== null && parsed !== value) {
+      setSaving(true);
+      await onSave(parsed);
+      setSaving(false);
     }
-    if (saving || parsed === value) return;
-    setSaving(true);
-    const saved = await onSave(parsed);
-    setSaving(false);
-    if (!saved) setText(shown);
+    setTyped(false);
   };
   return (
     <Input
@@ -245,12 +243,11 @@ function CapInput({
       placeholder={placeholder}
       readOnly={saving}
       className="w-40 aria-invalid:border-destructive"
-      onChange={(event) => setText(event.target.value)}
-      onFocus={() => setEditing(true)}
-      onBlur={() => {
-        setEditing(false);
-        void save();
+      onChange={(event) => {
+        setText(event.target.value);
+        setTyped(true);
       }}
+      onBlur={() => void save()}
       onKeyDown={(event) => {
         if (event.key === "Enter") void save();
       }}

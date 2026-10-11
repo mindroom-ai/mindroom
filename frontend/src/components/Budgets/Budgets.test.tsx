@@ -348,6 +348,32 @@ describe("Budgets", () => {
     );
   });
 
+  it("leaves an untouched cap alone when a refresh brings a newer saved cap", async () => {
+    let current: unknown = status;
+    vi.mocked(fetch).mockImplementation(async (_input, init) =>
+      init?.method === "PUT" ? respond({}) : respond(current),
+    );
+    const { client } = renderBudgets();
+    const bobCap = await screen.findByRole("textbox", {
+      name: "Monthly cap for @bob:example.org",
+    });
+
+    fireEvent.focus(bobCap);
+    current = {
+      ...status,
+      users: [status.users[0], { ...status.users[1], override_usd: 50 }],
+    };
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["budgets"] });
+      // React Query notifies observers on a later tick.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    fireEvent.blur(bobCap);
+
+    expect(bobCap).toHaveValue("50");
+    expect(writes()).toEqual([]);
+  });
+
   it("keeps the add form read-only until the new cap is saved", async () => {
     let finishPut: (response: Response) => void = () => {};
     vi.mocked(fetch).mockImplementation(async (_input, init) =>
