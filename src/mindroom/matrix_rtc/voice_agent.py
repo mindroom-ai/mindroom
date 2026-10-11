@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
         FunctionToolsExecutedEvent,
         SpeechCreatedEvent,
     )
-    from livekit.agents.voice.io import AudioInput
+    from livekit.agents.voice.io import AudioInput, AudioOutput
     from livekit.agents.voice.speech_handle import SpeechHandle
 
     from mindroom.matrix_rtc.call_tools import CallAgentResponse
@@ -53,6 +54,16 @@ _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
 _CALL_TURN_CORRELATION_KEY = "mindroom_call_turn_id"
+#: GPT-Live streams speech in real time, one 100 ms delta at a time and at most
+#: one delta early, so a delta normally arrives with at most 100 ms still queued
+#: for playback. An event-loop or network stall delivers the held-back deltas at
+#: once, and queueing them would play the rest of the utterance, including speech
+#: the model already abandoned after a barge-in, that much late. Up to 500 ms
+#: queued still plays, which absorbs the provider's lead, delivery jitter, and the
+#: ~0.3 s garbage-collection pauses seen in production without an audible skip.
+#: Beyond it, deltas are dropped until the queue is back to the normal lead.
+_LIVE_OUTPUT_MAX_QUEUED_S = 0.5
+_LIVE_OUTPUT_RESYNC_QUEUED_S = 0.1
 
 
 class _AudioFrameStream:
@@ -528,6 +539,8 @@ class RealtimeVoiceBridge:
         if isinstance(options, CascadedVoiceAgentOptions):
             private_sync_close = await _attach_private_transcript_synchronizer(session)
             self._owned_speech_resource_closers += (private_sync_close,)
+        elif isinstance(options, LiveVoiceAgentOptions):
+            session.output.audio = _bound_live_output_lag(_session_audio_output(session))
 
     def _log_media_snapshot(self) -> None:
         """Log local publications and remote subscription state for call diagnostics."""
@@ -901,18 +914,23 @@ def _build_mindroom_llm(
     return _MindRoomLLM()
 
 
+def _session_audio_output(session: AgentSession) -> AudioOutput:
+    """Return the RoomIO audio output attached by ``session.start()``."""
+    audio_output = session.output.audio
+    if audio_output is None:
+        msg = "Voice session has no audio output"
+        raise RuntimeError(msg)
+    return audio_output
+
+
 async def _attach_private_transcript_synchronizer(
     session: AgentSession,
 ) -> Callable[[], Awaitable[None]]:
     """Sync assistant playout text without publishing transcripts to the SFU."""
     from livekit.agents.voice.transcription import TranscriptSynchronizer  # noqa: PLC0415
 
-    audio_output = session.output.audio
-    if audio_output is None:
-        msg = "Cascaded voice session has no audio output to synchronize"
-        raise RuntimeError(msg)
     synchronizer = TranscriptSynchronizer(
-        next_in_chain_audio=audio_output,
+        next_in_chain_audio=_session_audio_output(session),
         next_in_chain_text=None,
     )
     try:
@@ -922,6 +940,57 @@ async def _attach_private_transcript_synchronizer(
         await synchronizer.aclose()
         raise
     return synchronizer.aclose
+
+
+def _bound_live_output_lag(audio_output: AudioOutput) -> AudioOutput:
+    """Drop GPT-Live speech that a stall would otherwise queue to play late."""
+    from livekit.agents.voice import io  # noqa: PLC0415
+
+    class _LiveOutputLagBound(io.AudioOutput):
+        def __init__(self) -> None:
+            super().__init__(
+                label="MindRoomLiveOutputLagBound",
+                capabilities=io.AudioOutputCapabilities(pause=True),
+                next_in_chain=audio_output,
+                sample_rate=audio_output.sample_rate,
+            )
+            # The base class may put a proxy in front of the sink; use the chain it built.
+            self._sink = cast("AudioOutput", self.next_in_chain)
+            # When the audio already handed to the sink finishes playing at real-time pace.
+            self._playout_end = 0.0
+            self._forwarded_in_segment = False
+            self._dropped_s = 0.0
+
+        async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+            await super().capture_frame(frame)
+            now = time.monotonic()
+            queued = max(self._playout_end - now, 0.0)
+            limit = _LIVE_OUTPUT_RESYNC_QUEUED_S if self._dropped_s else _LIVE_OUTPUT_MAX_QUEUED_S
+            # The sink reports playout only for segments that reached it.
+            if queued > limit and self._forwarded_in_segment:
+                self._dropped_s += frame.duration
+                return
+            self._report_dropped()
+            self._forwarded_in_segment = True
+            self._playout_end = now + queued + frame.duration
+            await self._sink.capture_frame(frame)
+
+        def flush(self) -> None:
+            super().flush()
+            self._report_dropped()
+            self._forwarded_in_segment = False
+            self._sink.flush()
+
+        def clear_buffer(self) -> None:
+            self._playout_end = 0.0
+            self._sink.clear_buffer()
+
+        def _report_dropped(self) -> None:
+            if self._dropped_s:
+                logger.warning("call_output_backlog_dropped", dropped_ms=round(self._dropped_s * 1000))
+                self._dropped_s = 0.0
+
+    return _LiveOutputLagBound()
 
 
 def _latest_user_transcript(chat_ctx: ChatContext) -> str:
