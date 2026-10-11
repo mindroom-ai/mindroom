@@ -68,7 +68,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
-from mindroom.tool_system.skills import agent_workspace_skills_root, build_agent_skills
+from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
@@ -1400,6 +1400,7 @@ def _load_agent_skills(
     workspace_root: Path | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: tuple[str, ...] | None = None,
+    unavailable_functions: frozenset[str] = frozenset(),
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
@@ -1408,6 +1409,7 @@ def _load_agent_skills(
         workspace_root=workspace_root,
         output_file_policy=output_file_policy,
         only=only,
+        unavailable_functions=unavailable_functions,
     )
 
 
@@ -2080,6 +2082,9 @@ def create_agent(
     )
 
     workspace = agent_runtime.workspace
+    # Approval rules hide generated functions, so the skills prompt names the skill functions they hide
+    # and is left out when they hide all of them.
+    hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
     skills = (
         None
         if disable_runtime_capabilities or (persona is not None and persona.skills == ())
@@ -2094,13 +2099,10 @@ def create_agent(
                 config.defaults.tool_output_auto_save_threshold_bytes,
             ),
             only=persona.skills if persona is not None else None,
+            unavailable_functions=hidden_skill_functions,
         )
     )
-    # Approval rules hide generated functions, so prompts must not advertise skills whose functions are all hidden.
-    skill_functions_hidden = skills is not None and all(
-        tool_may_require_approval(config, function.name) for function in skills.get_tools()
-    )
-    prompt_skills = None if skill_functions_hidden else skills
+    prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
     instructions = _build_agent_instructions(
         agent_name,
         agent_config.instructions if persona is None else (),

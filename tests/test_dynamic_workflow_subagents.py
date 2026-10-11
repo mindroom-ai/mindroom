@@ -583,6 +583,7 @@ async def test_participant_reads_only_the_skills_it_names(
     assert workflow.model.offered == [["get_skill_instructions", "get_skill_reference"] if readable else []]
     [prompt] = workflow.model.system_prompts
     assert ("The research skill" in prompt) is readable
+    assert ("These skill functions are not available to you: get_skill_script." in prompt) is readable
     assert "The writing skill" not in prompt
 
 
