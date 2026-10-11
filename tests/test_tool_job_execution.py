@@ -17,6 +17,7 @@ from agno.media import Image
 from agno.models.response import ModelResponse
 from agno.run import RunContext
 from agno.run.agent import RunContentEvent
+from agno.run.base import RunStatus
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.team import Team
 from agno.tools import Toolkit
@@ -1239,5 +1240,38 @@ async def test_a_stop_during_admission_stops_the_job_it_admits(tmp_path: Path, m
         [job] = await runtime.list_jobs(owner=owner, depth=0)
         assert job.user_stop_receipt_order == 0
         await wait_for_status(runtime, job.job_id, "cancelled")
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_job_fails_its_call_not_the_reply(tmp_path: Path) -> None:
+    """A call the job runtime refuses, as while room membership re-resolves, fails as that call; the run goes on."""
+    ran: list[str] = []
+
+    async def write_note() -> str:
+        ran.append("note")
+        return "noted"
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: False)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("write_note", "note-call")]), ModelResponse(content="done")],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[assembled_function(write_note)])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                response = await agent.arun("Note", session_id=context.session_id)
+        assert response.status is RunStatus.completed
+        assert response.content == "done"
+        assert response.tools is not None
+        assert response.tools[0].tool_call_error
+        assert ran == []
     finally:
         await runtime.shutdown()

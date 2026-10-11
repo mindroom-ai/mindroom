@@ -41,7 +41,7 @@ from mindroom.tool_jobs.agno_compat_functions import (
     isolated_function_call,
     uses_sdk_async_dispatch,
 )
-from mindroom.tool_jobs.approvals import ask_tool_call_approval
+from mindroom.tool_jobs.approvals import STOPPED_BEFORE_APPROVED_CALL, ask_tool_call_approval
 from mindroom.tool_jobs.authorization import function_authority
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
@@ -55,6 +55,7 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
+    JobAccessError,
     format_job_handle,
     get_background_runtime,
 )
@@ -357,7 +358,7 @@ async def _run_operation(
             job_checkpoint()
             # A Stop recorded while the call waited for its approval wins over that approval.
             if await approval.stopped():
-                return BackgroundOutcome("cancelled", "Stopped before the approved call ran.")
+                return BackgroundOutcome("cancelled", STOPPED_BEFORE_APPROVED_CALL)
         with (
             tool_execution_identity(owner),
             authorized_tool_call(owner, owned_call),
@@ -593,6 +594,10 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 retained = True
             # A released wait's call returned its job handle, which names the job a restart's account points to.
             await record_return(call.result if call.error is None else call.error)
+        except JobAccessError as error:
+            # The runtime refused the job, or this caller's wait for it: the call fails, not the reply's run.
+            response = _failed_call(call, error)
+            await record_return(call.error)
         except asyncio.CancelledError as cancelled:
             if classify_cancel_source(cancelled) == "user_stop":
                 # A Stop that committed while this job was admitted can find no job to record; this job is its work.
