@@ -1,6 +1,6 @@
 # Compaction unification and mid-turn compaction
 
-Design spec, October 10, 2026, revised after a GPT-6 Astra design review the same day.
+Design spec, October 10, 2026, revised after two GPT-6 Astra design review rounds the same day.
 Branch base: `origin/main` at `d649e5657` (#2776 merged).
 
 ## Goal
@@ -24,7 +24,7 @@ Success criteria:
 - Agno renders `session.summary` inside the system prompt when `add_session_summary_to_context` is on (`agents.py` sets it to `persist_runtime_state`, `teams.py` to `True`), so every compaction rewrites the system prompt and loses the whole cached prefix.
 - A string `system_message` bypasses that builder, so minimal agents never see the summary in their prompt; it only exists in the on-demand `agent-context` document.
   Authored subagents get it through the interim `with_session_summary` code from #2776, which the persona PR (brief `/work/handoffs/persona-prompt-builder-20261010/PROMPT.md`) deletes.
-- Inside a turn nothing compacts: Vertex AI Claude drops the oldest replayed turns per request (`vertex_claude_compat.py` `_fit_request_messages`), which breaks the cache each time, and falls back from a native checkpoint to canonical history when the projected request does not fit; every other provider fails with a context-window error.
+- Inside a turn, portable text compaction never runs; native routes compact provider-side, Vertex AI Claude drops the oldest replayed turns per request (`vertex_claude_compat.py` `_fit_request_messages`), which breaks the cache each time, and falls back from a native checkpoint to canonical history when the projected request does not fit; every other text route fails with a context-window error.
 - MindRoom never stores history copies in runs (`store_history_messages=False` for agents and teams), so an approval resume re-fetches history from the session (`_build_continue_run_messages`, `input_has_history` is false), and MindRoom's builder patch (`history/agno_compat_message_builder.py`) already wraps both the new-run and the continuation builders.
   A paused run does keep its system message, which Agno reuses on resume.
 - Agno loads a run's session at its start and writes that object's row at its end; `cache_session` is off and `RunContext` holds no session, so no public API returns the object a running loop will write.
@@ -63,7 +63,7 @@ Success criteria:
   ```
 
 - The builder patch inserts it into the run messages of every Agent and Team request whose target replays persisted history (the `add_history_to_context` value the builder resolves for that request), new runs and continuations alike, directly after the leading system and developer messages and before replayed history.
-  It reads the summary from the `session` the builder received and skips insertion when the list already holds a marked summary.
+  It reads the summary from the `session` the builder received and skips insertion when the list already holds a marked summary with `from_history=True`; a stored run-local summary (section 6) never suppresses it.
 - Replay plans that replay only the summary keep `add_history_to_context=True` with `num_history_runs=0`, instead of turning history off, so the summary still replays; a scheduled task with `history_limit=0` turns history off and therefore no longer sees the summary, matching "`0` for none" in `docs/scheduling.md`.
 - The inserted message is `from_history=True`, so Agno drops it when it stores the run (`store_history_messages=False`) and never replays it from a run.
 - Minimal agents and authored subagents get the summary through this path with no special case; their system prompts stay byte for byte, and `agent-context` no longer contains a summary.
@@ -77,6 +77,7 @@ Success criteria:
 - Later turns cannot replay the summary twice, because no stored run contains it.
 - No session migration is needed (question 8): existing sessions already cache the latest generation summary.
 - A run paused before this release stored a system message that embeds Agno's summary block; resuming it inserts no summary message, so that request keeps the single summary it was paused with (a `LEGACY_COMPAT` rule in `history/legacy_summary_system_prompt.py`, keyed on Agno's `<summary_of_previous_interactions>` wrapper).
+  Leaving the paused prefix unchanged keeps the paused tool call's signed reasoning valid; if the conversation compacted between pause and resume, that one resumed request pairs the old summary with the newer history.
 - Native checkpoint routes hash the rendered summary message instead of the raw summary text, so a checkpoint recorded while the summary lived in the system prompt is not reused with a request that now carries it as a message; affected conversations rebuild from their stored history once, as after a model switch.
 
 ### 3. Mid-turn compaction hook (question 2)
@@ -90,19 +91,21 @@ Success criteria:
 - The builder patch records on the same binding the session object Agno built the request from, because that is the object Agno writes at the end of the run (section 5).
 - Before each request the hook:
   1. skips when compaction is disabled or text compaction is unavailable for the entity, or when this run already failed a mid-turn compaction;
-  2. sizes the request: the provider-reported context of the latest current-turn assistant message (`context_input_tokens_from_counts` over its usage counters, or the native `context_usage` when present) plus its output tokens and an estimate of the messages after it, or, before any response in this loop, the replay planner's estimate of the whole list plus the tool definitions; native routes size their projected request (checkpoint plus tail);
-  3. compacts when that size exceeds the replay window minus `reserve_tokens`, the same limit the pre-reply trigger applies.
+  2. sizes the request: when this response loop has already received a response, the provider-reported input context of the latest one (`context_input_tokens_from_counts` over its usage counters, or the native final-iteration `context_usage` when present) plus an estimate of that assistant message and every message after it; otherwise the replay planner's estimate of the whole list plus the tool definitions.
+     A response loaded with a resumed run never anchors the size, because the resume rebuilt the prefix it was billed against; native routes size their projected request (checkpoint plus tail);
+  3. compacts when that size exceeds the replay window minus `reserve_tokens`, the same limit the pre-reply trigger applies; `reserve_tokens` stays the headroom for output.
 - On a native route the provider compacts inside the request, so the hook only acts when the projected request still exceeds the limit; it then turns native compaction off for the rest of the run and compacts the canonical messages as a text route does, replacing Vertex AI Claude's per-request fallback.
 - Vertex AI Claude's per-request fitting (trimming, exact counting, and native fallback) is deleted.
 
 ### 4. What stays verbatim (question 3)
 
-The rewritten request is `[leading system and developer messages, summary message, current input, queued-message notices]`:
+The rewritten request is `[leading system and developer messages, summary message, current prompt, transient messages, queued-message notices]`, in their original relative order:
 
-- **Current input**: this turn's input messages, identified by the message ids in `run_response.input.input_content` when the input is a message list (MindRoom's agents and teams), otherwise Agno's single user message.
-  Agno stores `run_response.input` with message ids, so a continuation finds the same input.
+- **Current prompt**: the last message of this turn's input, which MindRoom always builds as the user's current message with its attachments; identified by the last message id in `run_response.input.input_content` when the input is a message list (MindRoom's agents and teams), otherwise Agno's single user message.
+  Agno stores `run_response.input` with message ids, so a continuation finds the same prompt.
+- **Transient messages**: messages with `add_to_agent_memory=False`, such as the per-turn transient context and the approval receipt; they are never stored, so they are never summarized either.
 - **Queued-message notices**: the hidden notices that a newer message is waiting, recognized by their existing marker.
-- **Folded**: replayed history, an earlier summary, and every other current-turn message (assistant, tool, tool media follow-ups).
+- **Folded**: replayed history, an earlier summary, the rest of the turn's input (unseen thread messages and other context), and every other current-turn message (assistant, tool, tool media follow-ups).
   The run's tool trace (`run_response.tools`) is untouched, so the visible reply still lists every tool call.
 - With no assistant message left, Agno has no `response_id` to chain from, so OpenAI Responses cannot restore folded items through `previous_response_id`, whether or not portable replay is on.
 - With nothing to fold, compaction is skipped.
@@ -111,15 +114,17 @@ The rewritten request is `[leading system and developer messages, summary messag
 
 A request is scoped when its target replays persisted history (`add_history_to_context`) and has session storage.
 
-- The hook loads the scope's latest session, reconciles it, and runs the existing scope compactor (`compact_scope_history` through `history/runtime.py`) with one addition: an in-progress snapshot appended as the last compactable run.
+- The hook runs the existing scope compactor (`compact_scope_history` through `history/runtime.py`) on the session object Agno loaded for this run, which the builder patch recorded, after reconciling it; the compactor already adopts the freshest stored row into that object after every committed chunk, so Agno's end-of-run row write carries the new summary even when a later chunk fails or the run is cancelled.
+  The one addition is an in-progress snapshot appended as the last compactable run.
 - The snapshot is a `RunOutput` or `TeamRunOutput` with the scope's agent or team id, status completed, a copy of the live run's metadata (every Matrix event id the run has consumed so far), and the folded current-turn messages plus the current input as context for the summarizer.
-  Its run id is derived from the live run's id (`archive.snapshot_run_id(origin_run_id)`), so the archive can find every snapshot of a run, and it never collides with the live run, which keeps its own id and stays live.
+  Its run id is unique per snapshot and starts with the live run's id (`archive.snapshot_run_id(origin_run_id)` appends a fresh suffix), so the archive can find every snapshot of a run, two snapshots of one run never collide, and none collides with the live run, which keeps its own id and stays live.
 - Redaction treats a run and its snapshots as one: when redaction removes a live run, or hits a run archived later, compaction rolls back to the earliest archived row of that run or any of its snapshots, using the existing `roll_back_to`.
+  Redaction therefore keeps the ids of the runs it removes (`remove_run_by_event_id` returns them) and looks up their snapshots before rolling back.
   This covers events the run consumed after its snapshot was taken and the reply event attached to the live run after it finished.
   Snapshots are always the last run of their generation and are never restored as live runs.
-- The in-flight list is rewritten only when the snapshot was archived, which means every earlier run was archived too.
-  A compaction that commits earlier chunks and then fails leaves the request unchanged and marks the run as failed for mid-turn compaction; storage stays consistent, and the next reply's preparation continues from the committed chunks.
-- After the rewrite the hook sets the recorded session's summary to the new generation and removes the archived runs from it, so the end-of-run row write keeps the new summary instead of making reconciliation restore it and drop the scope's metadata seen ids.
+- The in-flight list is rewritten only when the snapshot was archived, which means every earlier run was archived too; that includes a cancellation that arrives after the snapshot's chunk committed, where the hook rewrites the list before the cancellation propagates.
+  A compaction that commits earlier chunks and then fails leaves the request unchanged and marks the run as failed for mid-turn compaction; storage and the live session stay consistent, and the next reply's preparation continues from the committed chunks.
+- After the rewrite the hook re-sizes the request; when the system prompt, tools, current prompt, and new summary still exceed the limit, it raises the error replay planning already uses, `Saved conversation summary exceeds the available history budget`, instead of sending an oversized request.
 - The force-compaction flag is left untouched, so a `compact_context` request made during the turn still applies before the next reply.
 - Folded assistant messages leave the run record, so their per-request usage is appended to `run_response.metadata` under a dedicated key that `usage_storage.project_usage` merges into the run's request list in order; run totals and the request breakdown stay complete across repeated compactions, approval resumes, and cancellation.
   The summary input omits that metadata key.
@@ -186,7 +191,11 @@ Failing-first tests at the owning seams (history modules, the builder patch, the
 - Summary message first and system prompt byte-identical across a compaction, for a configured agent, a team, a minimal agent, an authored subagent, a `run_subagent` child, and a summary-only replay plan.
 - Approval resume after a pre-reply compaction and after a mid-turn compaction replays a summary consistent with its replayed history (agent and team), and a resumed run paused before this release keeps its single embedded summary.
 - One long single-turn run on a scripted model compacts mid-turn, continues, and finishes; the next turn replays `[summary, current input, post-compaction messages, final answer]` behind an unchanged prefix, and the session row written at the run's end already holds the new summary.
-- The first request of a loop, before any current-turn assistant message, folds only history and keeps the input once.
+- The first request of a loop, before any current-turn assistant message, folds history and unseen thread context and keeps the current prompt and transient context once.
+- A large unseen thread context with a short current prompt is folded, not kept.
+- A resumed run sizes its first request by estimate, not by the paused response's usage.
+- A rewritten request that still exceeds the limit raises `Saved conversation summary exceeds the available history budget`.
+- A cancellation after the snapshot's chunk committed still leaves the request rewritten and the live session holding the new summary.
 - A team member's long tool loop compacts run-locally and its approval resume keeps the run-local summary.
 - Redacting each of: an event the run consumed before its snapshot, an event it consumed after its snapshot, and its reply event, rolls back to before the run, after one and after two mid-turn compactions, including team member runs.
 - A compaction that commits an earlier chunk and then fails leaves the request unchanged and storage consistent.
@@ -199,6 +208,9 @@ Live tests over Matrix on a text route (Gemini or a local OpenAI-compatible mode
 A Claude text route (for example with an explicit `compaction.model`) also runs one mid-turn compaction when credentials allow, since Claude validates reasoning most strictly.
 
 ## Out of scope
+
+- An approval resume of a scheduled task with `history_limit` rebuilds its agent with the configured history settings instead of the task's limit; this predates the design and is unchanged by it.
+- Turning native replay off does not remove an authored `compact_20260112` policy from the request, as in today's pre-reply fallback.
 
 - Fallback models (`FallbackConfig`) do not get the mid-turn hook; a fallback serves only after the primary fails.
 - Synchronous Agno response loops; MindRoom runs every agent and team asynchronously.
