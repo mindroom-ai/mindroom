@@ -131,6 +131,7 @@ from mindroom.tool_system.events import (
     format_tool_combined,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.worker_routing import tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -1522,7 +1523,8 @@ async def run_delegated_child_response(
         active_model_name=child.model_name,
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
     )
-    with tool_runtime_context(child_context), delegated_child_context():
+    # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
+    with tool_runtime_context(child_context), delegated_child_context(), tool_execution_identity(identity):
         return await ai_response(
             turn,
             prompt=prompt,

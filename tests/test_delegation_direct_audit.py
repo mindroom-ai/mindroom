@@ -18,10 +18,14 @@ from agno.tools.function import Function
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.lifecycle import observe_child_event, prepare_child_turn
+from mindroom.delegation.lifecycle import child_execution_identity, observe_child_event, prepare_child_turn
 from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    get_tool_execution_identity,
+    tool_execution_identity,
+)
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.history_helpers import RecordingModel
@@ -455,3 +459,37 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
     assert result == "native child answer"
     assert response.await_args.kwargs["collect_streamed_response"] is True
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> None:
+    """Workflow participants run through this envelope too, so the child's identity, not its caller's, is current."""
+    _toolkit, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    seen: list[ToolExecutionIdentity | None] = []
+
+    async def respond(*_args: object, **_kwargs: object) -> str:
+        seen.append(get_tool_execution_identity())
+        return "child answer"
+
+    with tool_runtime_context(context), tool_execution_identity(_identity()), patch("mindroom.ai.ai_response", respond):
+        child = prepare_child_turn(
+            "leader",
+            "child",
+            "Do the work",
+            owner=_identity(),
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=0,
+        )
+        await run_delegated_child_response(
+            child,
+            prompt=child.task,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=None,
+            supports_native_tool_approval=True,
+        )
+        assert get_tool_execution_identity() == _identity()
+
+    assert seen == [child_execution_identity(child)]

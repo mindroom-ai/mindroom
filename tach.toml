@@ -707,6 +707,7 @@ depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
+    "mindroom.tool_system.worker_routing",
     "mindroom.cli_shell_agent",
     "mindroom.minimal_agent",
     "mindroom.agent_cli.events",
