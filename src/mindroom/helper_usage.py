@@ -13,7 +13,7 @@ from mindroom.agent_storage import create_state_storage, run_session_storage_ope
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.logging_config import get_logger
-from mindroom.usage_storage import (
+from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_SESSION_TABLE,
     SYSTEM_USAGE_STORAGE_NAME,
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.usage_storage import IndependentUsageKind
+    from mindroom.usage.storage import IndependentUsageKind
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from mindroom import reply_lifecycle as rl
-from mindroom.history_recovery import (
+from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     RoomHistoryRecovery,
 )

@@ -28,7 +28,7 @@ from agno.tools.function import Function
 from pydantic import BaseModel
 
 from mindroom.history import agno_compat_message_builder, message_content
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

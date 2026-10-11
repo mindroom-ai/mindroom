@@ -20,7 +20,7 @@ from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools, _is_read_only_select
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA

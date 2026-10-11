@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from mindroom import credentials as credentials_module
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import (
+from mindroom.credentials import manager as credentials_module
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
 )
-from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import credential_store, providers
 from mindroom.oauth.providers import (
     OAuthProvider,

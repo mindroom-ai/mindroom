@@ -13,8 +13,8 @@ from mindroom.api.main import initialize_api_app
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
-from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
+from mindroom.credentials.manager import CredentialsManager
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 
 
 @pytest.fixture
@@ -158,7 +158,7 @@ class TestCredentialsAPI:
                 return_value=_active_embedder_runtime(mock_credentials_manager),
             ),
             patch(
-                "mindroom.embedder_health.create_background_task",
+                "mindroom.embeddings.embedder_health.create_background_task",
                 side_effect=lambda coroutine, **_kwargs: coroutine.close(),
             ),
         ):
@@ -238,7 +238,7 @@ class TestCredentialsAPI:
                 return_value=runtime_config,
             ),
             patch(
-                "mindroom.embedder_health.create_background_task",
+                "mindroom.embeddings.embedder_health.create_background_task",
                 side_effect=lambda coroutine, **_kwargs: coroutine.close(),
             ),
         ):
@@ -272,9 +272,9 @@ class TestCredentialsAPI:
                 "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
                 return_value=(config, runtime_paths),
             ),
-            patch("mindroom.embedder_health.check_embedder_health", return_value=object()) as check_health,
+            patch("mindroom.embeddings.embedder_health.check_embedder_health", return_value=object()) as check_health,
             patch(
-                "mindroom.embedder_health.create_background_task",
+                "mindroom.embeddings.embedder_health.create_background_task",
                 side_effect=lambda coroutine, **_kwargs: coroutine.close(),
             ) as create_task,
         ):

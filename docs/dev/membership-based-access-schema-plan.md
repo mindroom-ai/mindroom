@@ -435,14 +435,14 @@ git commit -m "feat: reconcile membership room policy"
 **Files:**
 - Modify: `src/mindroom/authorization.py:94-230`
 - Modify: `src/mindroom/agent_reply_membership.py:1-410`
-- Modify: `src/mindroom/approval_inbound.py:70-105`
+- Modify: `src/mindroom/approval/inbound.py:70-105`
 - Modify: `src/mindroom/reaction_dispatch.py:60-205`
 - Modify: `src/mindroom/api/external_triggers.py:240-265`
 - Modify: `src/mindroom/orchestration/script_runtime.py:175-210`
 - Modify: `src/mindroom/custom_tools/delegate.py:105-130`
 - Modify: `src/mindroom/custom_tools/attachment_helpers.py:25-50`
 - Modify: `src/mindroom/matrix_rtc/call_manager.py:625-650`
-- Modify: `src/mindroom/visible_voice_echo.py:270-310,495-515`
+- Modify: `src/mindroom/voice/visible_voice_echo.py:270-310,495-515`
 - Modify: `src/mindroom/bot_room_lifecycle.py:325-415`
 - Modify: `src/mindroom/bot.py:2750-2780`
 - Modify: `src/mindroom/thread_utils.py:330-355`
@@ -530,7 +530,7 @@ Expected: PASS.
 - [x] **Step 5: Commit responder authorization**
 
 ```bash
-git add src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/approval_inbound.py src/mindroom/reaction_dispatch.py src/mindroom/api/external_triggers.py src/mindroom/orchestration/script_runtime.py src/mindroom/custom_tools/delegate.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/matrix_rtc/call_manager.py src/mindroom/visible_voice_echo.py src/mindroom/bot_room_lifecycle.py src/mindroom/bot.py src/mindroom/thread_utils.py src/mindroom/ingress_validation.py src/mindroom/turn_policy.py tests/test_authorization.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_turn_controller_focused.py
+git add src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/approval/inbound.py src/mindroom/reaction_dispatch.py src/mindroom/api/external_triggers.py src/mindroom/orchestration/script_runtime.py src/mindroom/custom_tools/delegate.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/matrix_rtc/call_manager.py src/mindroom/voice/visible_voice_echo.py src/mindroom/bot_room_lifecycle.py src/mindroom/bot.py src/mindroom/thread_utils.py src/mindroom/ingress_validation.py src/mindroom/turn_policy.py tests/test_authorization.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_turn_controller_focused.py
 git commit -m "feat: authorize responders by room membership"
 ```
 
@@ -635,7 +635,7 @@ git commit -m "feat: separate credential and platform authority"
 - Modify: `src/mindroom/orchestration/rooms.py`
 - Modify: `src/mindroom/orchestration/config_updates.py`
 - Modify: `src/mindroom/orchestrator.py`
-- Modify: `src/mindroom/approval_inbound.py`
+- Modify: `src/mindroom/approval/inbound.py`
 - Modify: `src/mindroom/bot_room_lifecycle.py`
 - Modify: `src/mindroom/custom_tools/attachment_helpers.py`
 - Modify: `src/mindroom/custom_tools/delegate.py`
@@ -743,7 +743,7 @@ Expected: PASS.
 - [x] **Step 7: Commit automatic migration and the single runtime model**
 
 ```bash
-git add src/mindroom/config/legacy_access.py src/mindroom/config/main.py src/mindroom/config/auth.py src/mindroom/config/agent.py src/mindroom/config/models.py src/mindroom/config/matrix.py src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/matrix/rooms.py src/mindroom/orchestration/rooms.py src/mindroom/orchestration/config_updates.py src/mindroom/orchestrator.py src/mindroom/approval_inbound.py src/mindroom/bot_room_lifecycle.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/custom_tools/delegate.py src/mindroom/workers/backends/docker_projection.py src/mindroom/cli/migrate.py src/mindroom/cli/config.py tests/test_access_migration.py tests/test_cli_config.py tests/test_access_schema.py tests/test_authorization.py tests/test_matrix_room_access.py README.md config.yaml docs/authorization.md docs/chat-commands.md docs/configuration/index.md docs/dashboard.md docs/dev/agent_configuration.md docs/matrix-space.md docs/oauth-framework.md docs/tools/agent-orchestration.md
+git add src/mindroom/config/legacy_access.py src/mindroom/config/main.py src/mindroom/config/auth.py src/mindroom/config/agent.py src/mindroom/config/models.py src/mindroom/config/matrix.py src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/matrix/rooms.py src/mindroom/orchestration/rooms.py src/mindroom/orchestration/config_updates.py src/mindroom/orchestrator.py src/mindroom/approval/inbound.py src/mindroom/bot_room_lifecycle.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/custom_tools/delegate.py src/mindroom/workers/backends/docker_projection.py src/mindroom/cli/migrate.py src/mindroom/cli/config.py tests/test_access_migration.py tests/test_cli_config.py tests/test_access_schema.py tests/test_authorization.py tests/test_matrix_room_access.py README.md config.yaml docs/authorization.md docs/chat-commands.md docs/configuration/index.md docs/dashboard.md docs/dev/agent_configuration.md docs/matrix-space.md docs/oauth-framework.md docs/tools/agent-orchestration.md
 git commit -m "feat: auto migrate membership access config"
 ```
 

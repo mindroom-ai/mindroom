@@ -8,7 +8,7 @@ from agno.tools.function import FunctionCall, ToolResult  # noqa: TC002 - Agno i
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agno_compat_prepared_tools import BashPresentationFunction
-from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS
+from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:

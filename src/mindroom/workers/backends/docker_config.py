@@ -16,7 +16,7 @@ from mindroom.constants import (
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
 )
-from mindroom.credentials import runtime_credentials_manager_key
+from mindroom.credentials.manager import runtime_credentials_manager_key
 from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,

@@ -13,8 +13,8 @@ from anthropic import AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
 
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from tests.test_claude_native_compaction import _CHECKPOINT, _TEXT, _response, _stream_response
 
 

@@ -11,7 +11,7 @@ import pytest
 from mindroom import tools as _mindroom_tools  # noqa: F401
 from mindroom.api import tools as tools_api
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 

@@ -10,7 +10,7 @@ from agno.db.utils import build_single_run_row
 from sqlalchemy import event, func, select
 from sqlalchemy.dialects.sqlite import insert
 
-from mindroom.usage_storage import project_usage, usage_table_sql, usage_upsert_sql
+from mindroom.usage.storage import project_usage, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

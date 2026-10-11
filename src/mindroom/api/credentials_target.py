@@ -19,14 +19,14 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
-from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     CredentialsManager,
     delete_scoped_credentials,
     get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
 )
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (

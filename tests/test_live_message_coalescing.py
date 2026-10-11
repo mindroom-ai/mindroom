@@ -14,10 +14,9 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom import coalescing
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
-from mindroom.coalescing import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
-from mindroom.coalescing_batch import (
+from mindroom.coalescing import gate as coalescing
+from mindroom.coalescing.batch import (
     CoalescingKey,
     PendingEvent,
     PreparedTurn,
@@ -25,6 +24,8 @@ from mindroom.coalescing_batch import (
     active_follow_up_coalescing_key,
     build_prepared_turn,
 )
+from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
+from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -74,7 +75,6 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     _BatchMediaAttachmentResult,
 )
-from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
@@ -3755,7 +3755,7 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
+    with patch("mindroom.coalescing.gate.emit_elapsed_timing") as mock_emit:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4248,7 +4248,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
+    with patch("mindroom.coalescing.gate.emit_elapsed_timing") as mock_emit:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4276,7 +4276,7 @@ async def test_coalescing_enqueue_logs_pending_count() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.info") as mock_info:
+    with patch("mindroom.coalescing.gate.logger.info") as mock_info:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
@@ -4305,8 +4305,8 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
         is_shutting_down=lambda: False,
     )
     with (
-        patch("mindroom.coalescing._COALESCING_FLUSH_WARNING_SECONDS", 0.0),
-        patch("mindroom.coalescing.logger.warning") as mock_warning,
+        patch("mindroom.coalescing.gate._COALESCING_FLUSH_WARNING_SECONDS", 0.0),
+        patch("mindroom.coalescing.gate.logger.warning") as mock_warning,
     ):
         await _admit_ready(
             gate,
@@ -4351,7 +4351,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 
     loop.set_exception_handler(capture_loop_exception)
     try:
-        with patch("mindroom.coalescing.logger.exception") as mock_exception:
+        with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
             await _admit_ready(
                 gate,
                 CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4391,7 +4391,7 @@ async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback()
         on_dispatch_failure=failure_handoffs.append,
     )
 
-    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+    with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4468,7 +4468,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+    with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4519,7 +4519,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+    with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4660,7 +4660,7 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.debug") as mock_debug:
+    with patch("mindroom.coalescing.gate.logger.debug") as mock_debug:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),

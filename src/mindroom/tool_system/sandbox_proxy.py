@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.workers.backend import WorkerBackend
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0

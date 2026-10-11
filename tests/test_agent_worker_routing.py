@@ -17,7 +17,7 @@ from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.message_target import MessageTarget
-from mindroom.shell_execution import ShellRunResult
+from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity

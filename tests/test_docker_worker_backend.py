@@ -29,7 +29,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
 )
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,

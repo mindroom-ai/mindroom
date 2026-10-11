@@ -12,8 +12,8 @@ from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.message import Message
 from openai import OpenAI
 
-from mindroom import provider_stream_retry
 from mindroom.error_handling import IncompleteResponsesStreamError
+from mindroom.providers import stream_retry as provider_stream_retry
 from tests.test_openai_responses_stream import _created, _event, _response, _tool_stream
 from tests.test_provider_stream_retry import _model, _Provider
 from tests.test_provider_stream_retry import retry_delays as retry_delays  # noqa: PLC0414 - expose shared fixture

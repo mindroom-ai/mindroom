@@ -1501,7 +1501,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     agent = _agent(db=storage)
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

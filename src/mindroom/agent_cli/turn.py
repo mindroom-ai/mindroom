@@ -15,6 +15,7 @@ from uuid import uuid4
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.tools.function import ToolResult
 
+from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
 from mindroom.agent_cli.events import emit_cli_run_event, emit_cli_tool_event, project_cli_execution
@@ -37,7 +38,6 @@ from mindroom.agent_cli.session import (
     TurnToolBridge,
 )
 from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
-from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.agno_compat_prepared_tools import stop_function_call
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown

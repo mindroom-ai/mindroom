@@ -24,7 +24,7 @@ from agno.tools.calculator import CalculatorTools
 from agno.tools.function import Function
 from openai import AsyncOpenAI
 
-from mindroom.approval_tools import approval_denial_context, toolkit_owners_for_agents
+from mindroom.approval.tool_owners import approval_denial_context, toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.event_journal.approval_continuations import ApprovalDecision
@@ -34,9 +34,9 @@ from mindroom.history.session_context import (
     open_resolved_scope_session_context,
 )
 from mindroom.history.types import HistoryScope
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
-from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import (
     TeamMode,
     _attach_team_pause_presentation,
@@ -395,7 +395,7 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         client = AsyncOpenAI(api_key="test-key", http_client=http_client)
         monkeypatch.setattr(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             lambda *_args, **_kwargs: MindRoomOpenAIResponses(
                 id="test-model",
                 async_client=client,

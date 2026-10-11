@@ -10,12 +10,12 @@ import httpx
 import pytest
 from openai import AuthenticationError
 
-from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
-from mindroom.embedding_errors import (
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
+from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
 )
-from mindroom.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

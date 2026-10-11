@@ -6,9 +6,9 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embedding_factory import resolve_embedder_settings
-from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
+from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
+from mindroom.embeddings.factory import resolve_embedder_settings
+from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.timing import timed
@@ -275,7 +275,7 @@ async def create_memory_instance(
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.
-        from mindroom.embedding_factory import create_configured_embedder  # noqa: PLC0415
+        from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
         strict_embedder = cast("_StrictOpenAIEmbedder", create_configured_embedder(config, runtime_paths))
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)

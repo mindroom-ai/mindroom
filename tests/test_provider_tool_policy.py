@@ -12,11 +12,11 @@ from google.genai.types import GenerateContentConfig
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.model_loading import get_model_instance
-from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses, MindRoomOpenRouter
-from mindroom.openai_tool_search import install_openai_deferred_tool_search
-from mindroom.provider_tool_policy import without_provider_tools
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses, MindRoomOpenRouter
+from mindroom.providers.openai_tool_search import install_openai_deferred_tool_search
+from mindroom.providers.tool_policy import without_provider_tools
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.gemini_helpers import gemini_client
 

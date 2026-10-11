@@ -24,9 +24,9 @@ from agno.tools.function import Function
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
-from mindroom.approval_execution import _collect_agent_continuation
-from mindroom.approval_response import require_ordered_pause_presentation
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.execution import _collect_agent_continuation
+from mindroom.approval.response import require_ordered_pause_presentation
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig

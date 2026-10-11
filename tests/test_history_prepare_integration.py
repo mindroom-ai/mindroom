@@ -63,7 +63,10 @@ from tests.identity_helpers import persist_entity_accounts
 def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=2)
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with patch(
+        "mindroom.providers.model_loading.get_model_instance",
+        return_value=FakeModel(id="fake-model", provider="fake"),
+    ):
         agent = create_agent(
             "test_agent",
             config,
@@ -132,7 +135,7 @@ def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
         runtime_paths,
     )
     with patch(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         return_value=FakeModel(id="fake-model", provider="fake"),
     ) as mock_get:
         create_agent(

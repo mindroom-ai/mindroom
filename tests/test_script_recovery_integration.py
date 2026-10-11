@@ -33,7 +33,7 @@ from mindroom.script_runs.models import (
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import WorkerScriptCancel, WorkerScriptStatus
-from mindroom.shell_supervisor import (
+from mindroom.shell.supervisor import (
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,

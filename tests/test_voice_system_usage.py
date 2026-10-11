@@ -13,10 +13,11 @@ from agno.metrics import MessageMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 
-from mindroom import helper_usage, voice_handler
+from mindroom import helper_usage
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
+from mindroom.voice import handler as voice_handler
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
 

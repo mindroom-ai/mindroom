@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlparse
 
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.file_locks import current_inherited_file_lock
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.file_listing import (

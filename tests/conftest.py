@@ -46,7 +46,7 @@ from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
-import mindroom.approval_manager as approval_manager_module
+import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.handled_turns as handled_turns_module
@@ -54,14 +54,14 @@ import mindroom.knowledge.read_process as knowledge_read_process_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
-import mindroom.scheduling as scheduling_module
+import mindroom.scheduling.tasks as scheduling_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import CoalescingDrainResult
-from mindroom.coalescing_batch import PendingEvent
+from mindroom.coalescing.batch import PendingEvent
+from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
@@ -96,6 +96,7 @@ from mindroom.event_journal import (
     VisibleMessage,
 )
 from mindroom.event_journal import reads as journal_reads
+from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
@@ -126,10 +127,9 @@ from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
-from mindroom.provider_media_fallback import reset_model_media_capability_cache
+from mindroom.providers.media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -146,7 +146,7 @@ from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
-from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
+from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -3177,7 +3177,7 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                     ),
                 )
                 stack.enter_context(
-                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", new=allow_sender),
+                    patch("mindroom.approval.inbound.is_sender_allowed_for_responder", new=allow_sender),
                 )
                 stack.enter_context(
                     patch(

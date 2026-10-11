@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from cryptography.hazmat.primitives.asymmetric import rsa
 
-    from mindroom.usage_storage import IndependentUsageKind
+    from mindroom.usage.storage import IndependentUsageKind
 
 
 @pytest.mark.parametrize("route", ["/api/usage", "/api/usage/export"])

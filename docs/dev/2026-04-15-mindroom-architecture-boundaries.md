@@ -86,7 +86,7 @@ This domain is responsible for what agents know and remember over time.
 
 This domain owns chat commands, scheduling, REST API entrypoints, and dashboard-facing control paths.
 
-Representative modules include `commands/*`, `scheduling.py`, and `api/*`.
+Representative modules include `commands/*`, `scheduling/tasks.py`, and `api/*`.
 
 This domain is responsible for control-plane interaction, not low-level storage or raw Matrix protocol details.
 

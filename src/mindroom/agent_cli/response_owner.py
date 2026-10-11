@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, cli_turn_owner
 from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.approval_tools import authorize_prepared_tool_call
+from mindroom.approval.tool_owners import authorize_prepared_tool_call
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

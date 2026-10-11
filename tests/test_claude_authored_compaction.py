@@ -14,10 +14,10 @@ from anthropic import AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
 
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.history.native import restore_native_history
-from mindroom.openai_models import MindRoomOpenAIResponses
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from tests.history_helpers import _completed_run, _session
 from tests.test_claude_native_compaction import _CHECKPOINT, _TEXT, _response
 

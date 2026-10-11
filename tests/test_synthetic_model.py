@@ -9,7 +9,7 @@ import pytest
 from agno.models.message import Message
 from agno.models.response import ModelResponse, ModelResponseEvent
 
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.tool_system.metadata import get_tool_by_name
 from tests.conftest import test_runtime_paths
 
@@ -46,7 +46,7 @@ def test_fixed_rate_applies_to_each_streamed_chunk() -> None:
     """Each chunk waits for its character count at the configured fixed rate."""
     model = _model(min_response_chars=10, max_response_chars=10, chunk_chars=4, chars_per_second=2)
 
-    with patch("mindroom.synthetic_model.time.sleep") as sleep:
+    with patch("mindroom.providers.synthetic_model.time.sleep") as sleep:
         list(model.invoke_stream([Message(role="user", content="hello")]))
 
     assert [call.args[0] for call in sleep.call_args_list] == [2.0, 2.0, 1.0]
