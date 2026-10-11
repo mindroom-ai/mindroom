@@ -292,10 +292,6 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
         (_model_metrics("provider-a", "model-a", total_tokens=5),),
         (_model_metrics(None, "model-a", input_tokens=97, output_tokens=3, total_tokens=100),),
         (_model_metrics("provider-a", None, input_tokens=97, output_tokens=3, total_tokens=100),),
-        (
-            _model_metrics("provider-a", "model-a", input_tokens=97, output_tokens=3, total_tokens=100),
-            _model_metrics("provider-b", "model-b"),
-        ),
     ],
     ids=[
         "absent",
@@ -304,7 +300,6 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
         "unreconciled",
         "missing-provider",
         "missing-model",
-        "empty-entry",
     ],
 )
 def test_admin_keeps_cumulative_totals_under_unknown_when_model_detail_is_unusable(
@@ -352,6 +347,40 @@ def test_admin_keeps_cumulative_totals_under_unknown_when_model_detail_is_unusab
         },
     ]
     assert payload["cumulative_model_coverage"]["unavailable_sources"] == 1
+
+
+def test_admin_attributes_cumulative_usage_beside_a_model_that_reported_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model whose requests reported no usage, such as a reply stopped before usage arrived, adds nothing."""
+    source = _source()
+    session_models = (
+        _model_metrics("provider-a", "model-a"),
+        _model_metrics("provider-b", "model-b", input_tokens=97, output_tokens=3, total_tokens=100),
+    )
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(total_tokens=20),
+                    session_metrics=_metrics(100),
+                    session_model_metrics=session_models,
+                ),
+            ),
+        },
+    )
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+
+    assert [
+        (entry["provider"], entry["model"], entry["totals"]["total_tokens"])
+        for entry in payload["cumulative_model_breakdown"]
+    ] == [("provider-b", "model-b", 100)]
+    assert payload["cumulative_model_coverage"]["unavailable_sources"] == 0
 
 
 def _wire(

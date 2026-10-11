@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.metrics import RunMetrics
+from agno.run.agent import RunOutput
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -23,6 +25,7 @@ from mindroom.teams import (
     decide_team_formation,
     select_ad_hoc_team_mode,
 )
+from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
@@ -156,12 +159,9 @@ class TestSelectAdHocTeamMode:
         with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = _TeamModeDecision(
-                mode="coordinate",
-                reasoning="Different agents handle different subtasks",
+            mock_agent.arun.return_value = RunOutput(
+                content=_TeamModeDecision(mode="coordinate", reasoning="Different agents handle different subtasks"),
             )
-            mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await _select_team_mode_for_test(
@@ -179,12 +179,12 @@ class TestSelectAdHocTeamMode:
         with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = _TeamModeDecision(
-                mode="collaborate",
-                reasoning="All agents work on the same brainstorming task",
+            mock_agent.arun.return_value = RunOutput(
+                content=_TeamModeDecision(
+                    mode="collaborate",
+                    reasoning="All agents work on the same brainstorming task",
+                ),
             )
-            mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await _select_team_mode_for_test(
@@ -225,9 +225,7 @@ class TestSelectAdHocTeamMode:
         with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response with wrong type
             mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = "Just a string, not TeamModeDecision"
-            mock_agent.arun.return_value = mock_response
+            mock_agent.arun.return_value = RunOutput(content="Just a string, not TeamModeDecision")
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await _select_team_mode_for_test(
@@ -238,6 +236,25 @@ class TestSelectAdHocTeamMode:
 
                 # Should fallback to COLLABORATE on unexpected response
                 assert result == TeamMode.COLLABORATE
+
+    @pytest.mark.asyncio
+    async def test_team_mode_choice_is_counted_as_internal_usage(self, mock_config):
+        """The mode choice is a paid model call, so organization usage reports it under system:internal."""
+        mock_agent = AsyncMock()
+        mock_agent.arun.return_value = RunOutput(
+            run_id="mode-choice",
+            content=_TeamModeDecision(mode="coordinate", reasoning="Different subtasks"),
+            model="gpt-6-luna",
+            model_provider="OpenAI",
+            metrics=RunMetrics(input_tokens=600, output_tokens=20, total_tokens=620),
+        )
+        with patch("mindroom.model_loading.get_model_instance"), patch("mindroom.teams.Agent", return_value=mock_agent):
+            result = await _select_team_mode_for_test("Send me an email then call me", ["email", "phone"], mock_config)
+
+        assert result == TeamMode.COORDINATE
+        report = collect_admin_usage(config=mock_config, runtime_paths=runtime_paths_for(mock_config))
+        assert report.totals.total_tokens == 620
+        assert [(row.key, row.totals.total_tokens) for row in report.breakdown] == [("system:internal", 620)]
 
 
 class TestShouldFormTeam:
