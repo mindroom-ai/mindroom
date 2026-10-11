@@ -19,8 +19,6 @@ if TYPE_CHECKING:
 
 __all__ = ["MinimalBashTools"]
 
-_PERSONA_HINT = "MindRoom tools are callable from Bash through mindroom-agent; run mindroom-agent --help to list them."
-
 
 class MinimalBashTools(Toolkit):
     """Project only effective shell functions into one provider-visible function.
@@ -35,15 +33,12 @@ class MinimalBashTools(Toolkit):
         *,
         execute: Callable[[ToolKey, dict[str, object], FunctionCall], Awaitable[str | ToolResult]] | None = None,
         on_prepare: Callable[[Function], None] | None = None,
-        persona_hint: bool = False,
     ) -> None:
         self._execute = execute
         super().__init__(name="minimal_bash", tools=[])
         function = BashPresentationFunction.from_callable(self.bash)
         assert isinstance(function, BashPresentationFunction)
         function.bind_preparation(on_prepare)
-        if persona_hint:
-            function.description = f"{function.description} {_PERSONA_HINT}"
         self.async_functions["bash"] = function
         self.functions["bash"] = function
 

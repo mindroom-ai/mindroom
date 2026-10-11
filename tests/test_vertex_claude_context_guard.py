@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from agno.exceptions import ContextWindowExceededError
 from agno.media import Image
+from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -590,3 +592,20 @@ async def test_stream_retry_does_not_repeat_current_turn_fit_failure() -> None:
 
     assert raised.value.message == "Vertex Claude current turn uses more than the 80-token input limit."
     estimator.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_attempt_forgets_earlier_start_usage_before_fitting() -> None:
+    """A Stop while a retry fits its request must not settle the earlier attempt's start usage."""
+    model = _model()
+    model._stream_start_usage = MessageMetrics(input_tokens=1200, cache_read_tokens=48000)
+
+    async def stopped_while_fitting(*_args: object, **_kwargs: object) -> list[Message]:
+        raise asyncio.CancelledError
+
+    model._fit_request_messages = stopped_while_fitting  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in model.ainvoke_stream(_tool_loop_messages(), Message(role="assistant")):
+            pass
+
+    assert model.take_unfinished_stream_usage() is None

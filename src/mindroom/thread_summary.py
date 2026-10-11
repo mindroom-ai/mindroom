@@ -1157,6 +1157,37 @@ async def current_thread_summary(
             error=str(exc),
         )
         return None
+    return current_thread_summary_from_history(
+        client,
+        room_id,
+        thread_id,
+        thread_history,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=entity_name,
+        membership_index=membership_index,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+
+
+def current_thread_summary_from_history(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+    trusted_sender_ids: Collection[str],
+) -> _CurrentThreadSummary | None:
+    """Return the summary and pin state of a thread history the caller already read.
+
+    Applies the same rules as ``current_thread_summary``, which reads the
+    history itself. Returns ``None`` when room membership needed to authorize a
+    human pin is still pending.
+    """
     human_sender_allowed = _human_summary_authorizer(
         client,
         room_id,

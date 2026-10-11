@@ -32,6 +32,7 @@ from mindroom.thread_export.storage import (
     write_room_index,
     write_thread_payload,
 )
+from mindroom.thread_summary import _CurrentThreadSummary, _recover_summary_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -706,26 +707,48 @@ def test_unchanged_thread_check_holds_one_copy_of_each_export(tmp_path: Path) ->
     assert peak < 4 * size
 
 
-def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
-    """A fetched thread drops the content its export never writes, and the written payload stays the same."""
+def test_exported_content_keeps_everything_a_thread_export_reads() -> None:
+    """A fetched thread drops the content its export never reads, and its current summary and payload stay the same."""
     router = "@mindroom_router:localhost"
-    contents: list[dict[str, object]] = [
-        {
-            "msgtype": "m.notice",
-            "body": "Summary text",
-            "formatted_body": "<p>Summary text</p>",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$root"}},
-            "io.mindroom.thread_summary": {"version": 1, "summary": "Deploy fix"},
-            "io.mindroom.stream_status": "completed",
-            "padding": ["unused"] * 100,
-        },
-        {"msgtype": "m.text", "body": "later notice", "io.mindroom.thread_summary": {"version": 1}},
-        {"body": "plain", "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}},
+    person = "@alice:localhost"
+    automatic_summary = {
+        "version": 1,
+        "summary": "Deploy fix",
+        "message_count": 2,
+        "generated_at": "2026-10-01T00:00:01+00:00",
+        "model": "summary-model",
+        "padding": ["unused"] * 100,
+    }
+    person_title = {
+        "version": 1,
+        "summary": "Person title",
+        "message_count": 3,
+        "generated_at": "2026-10-01T00:00:02+00:00",
+        "model": "manual",
+        "pinned": True,
+        "padding": {"nested": ["unused"] * 100},
+    }
+    senders_and_contents: list[tuple[str, dict[str, object]]] = [
+        (
+            router,
+            {
+                "msgtype": "m.notice",
+                "body": "Deploy fix",
+                "formatted_body": "<p>Deploy fix</p>",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$root"}},
+                "io.mindroom.thread_summary": automatic_summary,
+                "io.mindroom.stream_status": "completed",
+                "padding": ["unused"] * 100,
+            },
+        ),
+        (person, {"msgtype": "m.notice", "body": "Person title", "io.mindroom.thread_summary": person_title}),
+        (router, {"msgtype": "m.text", "body": "later notice", "io.mindroom.thread_summary": {"version": 1}}),
+        (router, {"body": "plain", "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}),
     ]
     messages = [
         ResolvedVisibleMessage.from_message_data(
             {
-                "sender": router,
+                "sender": sender,
                 "body": str(content["body"]),
                 "timestamp": index + 1,
                 "event_id": f"$event-{index}",
@@ -734,8 +757,16 @@ def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
             thread_id="$root",
             latest_event_id=f"$event-{index}",
         )
-        for index, content in enumerate(contents)
+        for index, (sender, content) in enumerate(senders_and_contents)
     ]
+
+    def current_summary() -> _CurrentThreadSummary:
+        return _recover_summary_state(
+            messages,
+            trusted_sender_ids={router},
+            human_sender_allowed=lambda sender: sender == person,
+            thread_id="$root",
+        )
 
     def payload() -> dict[str, object]:
         return thread_payload(
@@ -743,19 +774,29 @@ def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
             thread_id="$root",
             messages=messages,
             exported_at=datetime(2026, 10, 1, tzinfo=UTC),
-            trusted_sender_ids={router},
+            summary="Person title",
         )
 
+    summary = current_summary()
     written = payload()
     for message in messages:
         message.content = exported_content(message)
 
+    assert summary == _CurrentThreadSummary(summary="Person title", pinned=True)
+    assert current_summary() == summary
     assert payload() == written
     assert [set(message.content) for message in messages] == [
         {"msgtype", "m.relates_to", "io.mindroom.thread_summary"},
         {"msgtype", "io.mindroom.thread_summary"},
+        {"msgtype", "io.mindroom.thread_summary"},
         set(),
     ]
+    assert messages[0].content["io.mindroom.thread_summary"] == {
+        "version": 1,
+        "summary": "Deploy fix",
+        "generated_at": "2026-10-01T00:00:01+00:00",
+        "model": "summary-model",
+    }
 
 
 def test_room_index_rebuild_reads_its_newest_threads_within_a_budget(

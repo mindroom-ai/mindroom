@@ -68,6 +68,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "markdown",
         "max_tool_calls_from_history",
         "max_tool_calls_per_turn",
+        "mcp_gateway_shared_credentials",
         "memory_backend",
         "memory_search",
         "mid_turn",

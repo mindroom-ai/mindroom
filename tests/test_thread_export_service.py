@@ -9,6 +9,8 @@ from urllib.parse import quote
 
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export import (
     ThreadExportSource,
@@ -36,7 +38,13 @@ def _client_for_group(_group: ThreadExportGroup) -> Mock:
 
 
 def _source_for_group(group: ThreadExportGroup) -> ThreadExportSource:
-    return ThreadExportSource(client=_client_for_group(group), reader=Mock(), rooms=group.rooms)
+    return ThreadExportSource(
+        client=_client_for_group(group),
+        reader=Mock(),
+        rooms=group.rooms,
+        entity_name=group.entity_name,
+        membership_index=AgentReplyMembershipIndex(),
+    )
 
 
 @pytest.mark.asyncio
@@ -727,7 +735,13 @@ async def test_export_threads_to_sources_exports_each_source_and_reconciles(tmp_
     output_dir = tmp_path / "out"
     lobby = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
     dev = ThreadExportRoom(key="dev", room_id="!dev:localhost", alias="", name="Dev")
-    source = ThreadExportSource(client=Mock(), reader=Mock(), rooms=(lobby,))
+    source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(lobby,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+    )
 
     with patch(
         "mindroom.thread_export.service.export_threads_for_targets_for_client",
@@ -763,12 +777,16 @@ async def test_export_threads_to_sources_honors_each_sources_targets(tmp_path: P
         client=Mock(),
         reader=Mock(),
         rooms=(room,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
         target_output_dirs=(code_target.output_dir,),
     )
     other_source = ThreadExportSource(
         client=Mock(),
         reader=Mock(),
         rooms=(room,),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
         target_output_dirs=(other_target.output_dir,),
     )
 
@@ -801,6 +819,8 @@ async def test_export_threads_to_sources_skips_matrix_work_without_valid_targets
         client=Mock(),
         reader=Mock(),
         rooms=(),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
         target_output_dirs=(target.output_dir,),
     )
 
@@ -826,7 +846,13 @@ async def test_cancelled_export_drains_its_shielded_hydration(tmp_path: Path) ->
     config = thread_export_config(tmp_path)
     client = Mock(close=AsyncMock())
     reader = export_conversation_reader(client=client, config=config, store=Mock(), self_sender="@router:localhost")
-    source = ThreadExportSource(client=client, reader=reader, rooms=(ThreadExportRoom("lobby", "!lobby", "", ""),))
+    source = ThreadExportSource(
+        client=client,
+        reader=reader,
+        rooms=(ThreadExportRoom("lobby", "!lobby", "", ""),),
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
+    )
     started = asyncio.Event()
     finished = asyncio.Event()
 

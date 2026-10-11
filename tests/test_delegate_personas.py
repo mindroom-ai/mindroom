@@ -152,7 +152,7 @@ async def test_inline_persona_starts_self_child(tmp_path: Path, monkeypatch: pyt
     )
 
     assert "Reply 0." in result
-    assert harness.model.system_prompts == ["Inline {x} prompt"]
+    assert harness.model.authored_prompts == ["Inline {x} prompt"]
     child = harness.session_child()
     assert child["child_agent_name"] == "leader"
     assert child["persona"] == {
@@ -172,7 +172,7 @@ async def test_profile_persona_uses_profile_prompt_and_model(tmp_path: Path, mon
     await harness.run(harness.toolkit.run_subagent(task="Find the risk", profile="critic"))
     await harness.run(harness.toolkit.run_subagent(task="Find another risk", profile="critic", model="sonnet"))
 
-    assert harness.model.system_prompts == ["You are a hostile critic.", "You are a hostile critic."]
+    assert harness.model.authored_prompts == ["You are a hostile critic.", "You are a hostile critic."]
     assert harness.models_loaded == ["haiku", "sonnet"]
 
 
@@ -208,7 +208,7 @@ async def test_invalid_authoring_is_refused_before_a_child_runs(
     result = await harness.run(harness.toolkit.run_subagent(task="Do it", **arguments))
 
     assert result.startswith(refusal)
-    assert harness.model.system_prompts == []
+    assert harness.model.authored_prompts == []
 
 
 def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,7 +250,7 @@ async def test_follow_up_keeps_snapshot_after_profile_edit(tmp_path: Path, monke
 
     await harness.run(harness.toolkit.continue_subagent(subagent_id=subagent_id, message="And another?"))
 
-    assert harness.model.system_prompts == ["You are a hostile critic.", "You are a hostile critic."]
+    assert harness.model.authored_prompts == ["You are a hostile critic.", "You are a hostile critic."]
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_follow_up_after_caller_lost_a_tool_is_refused(
     )
 
     assert refusal in result
-    assert harness.model.system_prompts == ["P"]
+    assert harness.model.authored_prompts == ["P"]
 
 
 @pytest.mark.asyncio
@@ -295,7 +295,7 @@ async def test_persona_naming_a_function_its_caller_lacks_never_runs(
     )
 
     assert "'file.save_file' is not available to you" in result
-    assert harness.model.system_prompts == []
+    assert harness.model.authored_prompts == []
 
 
 @pytest.mark.asyncio
@@ -388,7 +388,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
         )
 
     assert completed.status == RunStatus.completed
-    assert model.system_prompts == ["You add numbers.", "You add numbers."]
+    assert model.authored_prompts == ["You add numbers.", "You add numbers."]
     assert len(model.offered) == 2
     assert all("add" in offered and "read_file" not in offered for offered in model.offered)
     assert DelegationState.from_metadata(completed.metadata).children[0].persona == SubagentPersona(
@@ -416,7 +416,7 @@ async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypa
     )
 
     assert "Child answer." in result
-    assert harness.model.system_prompts == ["P", "P", "P", "Q", "P"]
+    assert harness.model.authored_prompts == ["P", "P", "P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"]
         for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
@@ -458,7 +458,7 @@ async def test_copy_at_max_depth_inherits_tools_without_delegate(
     )
 
     assert "Child answer." in result
-    assert harness.model.system_prompts == ["P", "Q", "P"]
+    assert harness.model.authored_prompts == ["P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"]
         for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
@@ -604,7 +604,7 @@ async def test_native_nested_persona_stays_within_running_child_tools(
         )
 
     assert completed.status == RunStatus.completed
-    assert model.system_prompts == ["P", "P", "P", "Q", "P"]
+    assert model.authored_prompts == ["P", "P", "P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"] for path in (paths.storage_root / "subagent_sessions").glob("*.json")
     ]
@@ -629,7 +629,7 @@ async def test_fresh_direct_persona_checks_the_current_config(tmp_path: Path, mo
     )
 
     assert result.startswith("Cannot delegate: unknown tool 'file'. Your tools: ")
-    assert harness.model.system_prompts == []
+    assert harness.model.authored_prompts == []
 
 
 @pytest.mark.asyncio
