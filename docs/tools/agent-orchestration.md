@@ -185,6 +185,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 Turning the option off parks unfinished jobs and their approvals without replaying their tools, and later messages in their conversations are answered as usual; re-enable it and restart to recover them.
+A reply that a crash cut short while it used jobs stays unfinished while the option is off, and continues once it is back on.
 When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function, and shell tools keep their own background commands.
 
 Tools that can run as background jobs accept an optional `wait_timeout` argument, which the tool itself never receives.
@@ -230,6 +231,7 @@ Pressing **Stop** cancels the reply and requests cancellation of the managed job
 Their outcomes are no longer offered to later replies, and a restart does not resume them.
 Jobs belonging to other requesters, conversations, agents, or newer messages remain unaffected.
 Deleting the message a reply answers cancels that reply's jobs the same way, and editing your message while its reply is still running or waiting stops that reply the same way and answers the edit in its place.
+Removing the agent from a room cancels the jobs of its unfinished replies there the same way.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
 Saved results remain available for explicit retrieval.
 Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
