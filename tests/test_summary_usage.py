@@ -202,6 +202,7 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
         runtime_paths=paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
         config_provider=lambda: config,
+        budget_monitor=None,
     )
     try:
         with detached_requester_context(authority):
