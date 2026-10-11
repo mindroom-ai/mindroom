@@ -183,7 +183,6 @@ class ScriptWorkerClient:
             message = f"Worker script request failed: {exc}"
             raise ScriptWorkerError(message, failure_kind="worker") from exc
         if response.status_code >= 400:
-            # Validation errors echo rejected request values, such as the launch's config snapshot.
             detail = error_detail_from_response(
                 response,
                 fallback=f"Worker script request failed with status {response.status_code}.",

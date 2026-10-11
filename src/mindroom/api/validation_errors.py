@@ -1,7 +1,7 @@
 """Request validation errors answered without the rejected request values.
 
 FastAPI's default 422 body repeats each rejected value under ``input``, which echoes request bodies back
-and cannot be rendered when the value is a non-finite number such as ``NaN``, so the client got a 500.
+and cannot be rendered when the value is a non-finite number such as ``NaN``.
 """
 
 from __future__ import annotations

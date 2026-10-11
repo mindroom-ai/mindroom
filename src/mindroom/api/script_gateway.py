@@ -165,10 +165,7 @@ async def _bounded_payload(request: Request) -> ScriptToolCallRequestModel:
     try:
         return ScriptToolCallRequestModel.model_validate_json(body)
     except ValidationError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=exc.errors(include_url=False, include_context=False, include_input=False),
-        ) from exc
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_input=False)) from exc
 
 
 def _unavailable() -> HTTPException:
