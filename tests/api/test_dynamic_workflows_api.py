@@ -26,7 +26,7 @@ def _workflow_spec() -> dict[str, object]:
         "name": "Competitor Research Report",
         "description": "Create a cited HTML report about competitors.",
         "kind": "workflow",
-        "participants": [{"id": "writer", "kind": "ephemeral_agent", "name": "Report Writer"}],
+        "participants": [{"id": "writer", "kind": "subagent", "system_prompt": "You write reports."}],
         "workflow": [
             {
                 "id": "write",
