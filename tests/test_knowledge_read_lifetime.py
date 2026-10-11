@@ -220,7 +220,8 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
     refresh_task = None
     try:
         async with asyncio.timeout(10):
-            while not selected.exists():  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
+            # The reader creates the file before writing the collection name into it.
+            while not (selected.exists() and selected.read_text()):  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
                 await asyncio.sleep(0.01)
         assert selected.read_text() == proxy.collection_name
         [reader] = processes
@@ -348,7 +349,7 @@ else:
                 ',"collection":"published","query":"query","embedding":[1.0]}').encode())
             process.stdin.close()
         deadline = time.monotonic() + 15
-        while not pid_path.exists():
+        while not (pid_path.exists() and pid_path.read_text()):
             assert process.poll() is None, process.stderr.read().decode()
             assert time.monotonic() < deadline
             time.sleep(.01)
