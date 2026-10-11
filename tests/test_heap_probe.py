@@ -183,9 +183,8 @@ def test_freeze_startup_heap_collects_then_freezes_and_logs_the_frozen_count(
 
     with capture_logs() as logs:
         freeze_startup_heap()
-        freeze_startup_heap()
 
     assert gc_calls == ["collect", "freeze"]
     [record] = [entry for entry in logs if entry["event"] == "startup_heap_frozen"]
     assert record["frozen_objects"] == 469_281
-    assert record["collect_ms"] >= 0
+    assert record["collect_seconds"] >= 0

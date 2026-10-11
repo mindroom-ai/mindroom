@@ -1,4 +1,7 @@
-"""Opt-in periodic type histogram of the primary process's Python heap.
+"""Startup heap freeze and opt-in periodic type histogram of the primary process's Python heap.
+
+Call audio shares the event loop with full garbage collections, so the primary
+freezes its import-time heap once before any bot exists.
 
 A long-running primary can grow for hours without saying what it holds, and
 external memory profilers cannot attach inside hardened containers. When
@@ -127,20 +130,18 @@ def _malloc_stats() -> dict[str, int] | None:
 
 
 def freeze_startup_heap() -> None:
-    """Collect garbage, then exclude every surviving object from later collections, once per process.
+    """Collect garbage, then exclude every surviving object from later collections.
 
     Call audio is pumped on the event loop, and a full collection that walks every
     imported module pauses agent speech for hundreds of milliseconds. Run this
     before any bot exists, so runtime objects, including bots a config reload
     replaces, stay collectable.
     """
-    if gc.get_freeze_count():
-        return
-    started_at = time.monotonic()
+    started = time.perf_counter()
     gc.collect()
-    collect_ms = round((time.monotonic() - started_at) * 1000, 1)
+    collect_seconds = time.perf_counter() - started
     gc.freeze()
-    logger.info("startup_heap_frozen", frozen_objects=gc.get_freeze_count(), collect_ms=collect_ms)
+    logger.info("startup_heap_frozen", frozen_objects=gc.get_freeze_count(), collect_seconds=round(collect_seconds, 3))
 
 
 def _log_heap_type_probe() -> None:
