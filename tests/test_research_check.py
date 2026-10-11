@@ -370,7 +370,9 @@ async def test_many_long_tool_calls_still_fit_one_request(harness: _Harness) -> 
     [request] = harness.requests
     tools = _conversation(request)[1]["text"]
     assert "example.com/0/" in tools
-    assert tools.endswith("more")
+    assert tools.splitlines()[-1].endswith(
+        "more tool calls not shown here, which may support claims the calls above do not",
+    )
 
 
 @pytest.mark.asyncio
@@ -391,7 +393,7 @@ async def test_multibyte_tool_calls_still_fit_one_request(harness: _Harness) -> 
     )
 
     [request] = harness.requests
-    assert _conversation(request)[1]["text"].endswith("more")
+    assert "more tool calls not shown here" in _conversation(request)[1]["text"].splitlines()[-1]
 
 
 @pytest.mark.asyncio

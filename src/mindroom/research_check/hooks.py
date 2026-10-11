@@ -87,7 +87,9 @@ def _research_check_messages(
         line = _tool_line(entry)
         budget -= len(line.encode()) + 1
         if budget < 0:
-            lines.append(f"- and {len(tool_trace) - index} more")
+            lines.append(
+                f"- and {len(tool_trace) - index} more tool calls not shown here, which may support claims the calls above do not",
+            )
             break
         lines.append(line)
     tools = "\n".join(["Tool calls made for this reply:", *lines]) if lines else "Tool calls made for this reply: none"
