@@ -131,7 +131,7 @@ from mindroom.tool_system.events import (
     format_tool_combined,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
-from mindroom.tool_system.worker_routing import tool_execution_identity
+from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -1524,24 +1524,27 @@ async def run_delegated_child_response(
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
     )
     # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
-    with tool_runtime_context(child_context), delegated_child_context(), tool_execution_identity(identity):
-        return await ai_response(
-            turn,
-            prompt=prompt,
-            runtime_paths=runtime_paths,
-            config=active_config,
-            knowledge=knowledge.knowledge,
-            run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
-            include_interactive_questions=False,
-            include_openai_compat_guidance=identity.channel == "openai_compat",
-            tool_function_filter=context.tool_function_filter if context is not None else None,
-            execution_identity=identity,
-            delegation_depth=child.depth,
-            refresh_scheduler=refresh_scheduler,
-            attempt_model_runtime=ToolRuntimeModelBinding(),
-            supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
-            collect_streamed_response=True,
-            turn_recorder=TurnRecorder(user_message=prompt),
+    with tool_runtime_context(child_context), delegated_child_context():
+        return await run_with_tool_execution_identity(
+            identity,
+            operation=lambda: ai_response(
+                turn,
+                prompt=prompt,
+                runtime_paths=runtime_paths,
+                config=active_config,
+                knowledge=knowledge.knowledge,
+                run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
+                include_interactive_questions=False,
+                include_openai_compat_guidance=identity.channel == "openai_compat",
+                tool_function_filter=context.tool_function_filter if context is not None else None,
+                execution_identity=identity,
+                delegation_depth=child.depth,
+                refresh_scheduler=refresh_scheduler,
+                attempt_model_runtime=ToolRuntimeModelBinding(),
+                supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
+                collect_streamed_response=True,
+                turn_recorder=TurnRecorder(user_message=prompt),
+            ),
         )
 
 
