@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import socket
 import threading
 import time
@@ -4444,7 +4445,7 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
     wait_for = asyncio.wait_for
 
     async def deadline_from_acceptance(awaitable: Awaitable[object], timeout: float | None) -> object:  # noqa: ASYNC109
-        if getattr(awaitable, "__name__", None) != "apply_update_boundary":
+        if not (inspect.iscoroutine(awaitable) and awaitable.cr_code.co_name == "apply_update_boundary"):
             return await wait_for(awaitable, timeout)
         boundary = asyncio.ensure_future(awaitable)
         boundaries.append(boundary)
@@ -4469,13 +4470,14 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
             await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
         returned_at = loop.time()
+        # The accepted revocation finished before the reload returned.
+        assert store.get_run("run-1").cancel_requested_at is not None
     finally:
         release.set()
         await releaser
 
     assert released_at
     assert returned_at >= released_at[0]
-    assert store.get_run("run-1").cancel_requested_at is not None
     assert broker_revocations == []
 
 
