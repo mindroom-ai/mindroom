@@ -318,6 +318,8 @@ class ResponseTurnContext:
     background_tool_jobs: bool = False
     # Set for a voice call's turn: no reply owns its calls' outcomes afterwards, so they finish inside it.
     inline_tools: bool = False
+    # The jobs whose outcomes the turn's prompt already asks the model to retrieve, as a wake's does.
+    asked_job_ids: tuple[str, ...] = ()
     tool_job_agent_names: tuple[str, ...] | None = None
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
@@ -1032,7 +1034,7 @@ async def run_blocking_response_turn(
     continuation: DynamicContinuationRunState,
 ) -> str:
     """Run one blocking response turn to a final user-visible text."""
-    run = TurnRunState()
+    run = TurnRunState(attempted_job_outcomes=set(ctx.asked_job_ids))
     try:
         async with (
             response_cli_lifetime() as cli_lifetime,
@@ -1428,7 +1430,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     initial_continuation_count: int = 0,
 ) -> AsyncGenerator[ChunkT | StructuredStreamChunk, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
-    run = TurnRunState()
+    run = TurnRunState(attempted_job_outcomes=set(ctx.asked_job_ids))
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             await _remove_history_of_redacted_events(ctx, scope_context)

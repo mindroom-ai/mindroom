@@ -646,6 +646,8 @@ class ResponseRequest:
     interactive_span_id: str | None = None
     # Set for a wake: the waiting reply it continues with background work results.
     wake_reply_id: str | None = None
+    # The jobs whose outcomes a wake's prompt already asks the model to retrieve; its turn does not ask again.
+    asked_job_ids: tuple[str, ...] = ()
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -3562,7 +3564,12 @@ class ResponseRunner:
             return None
         # A wake a restart cut short retries even when what it retrieved is no longer ready to retrieve again.
         prompt = completion_prompt(ready) if ready else WAKE_RETRY_PROMPT
-        return replace(request, prompt=prompt, response_envelope=replace(request.response_envelope, body=prompt))
+        return replace(
+            request,
+            prompt=prompt,
+            response_envelope=replace(request.response_envelope, body=prompt),
+            asked_job_ids=tuple(job.job_id for job in ready),
+        )
 
     async def _job_wake_request(
         self,
@@ -3986,6 +3993,7 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
             redacted_history_events=partial(self.deps.redacted_history_events, runtime.resolved_target),
+            asked_job_ids=request.asked_job_ids,
         )
 
     async def _request_remains_authorized(
@@ -4795,6 +4803,7 @@ class ResponseRunner:
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
         team_turn_ctx = ResponseTurnContext(
+            asked_job_ids=request.asked_job_ids,
             entity_label=self.deps.agent_name,
             session_id=session_id,
             run_id=response_run_id,

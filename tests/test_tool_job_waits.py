@@ -350,6 +350,7 @@ async def test_a_wake_decides_under_the_lock_what_it_retrieves(tmp_path: Path) -
         assert woken is not None
         assert 'job_id="work"' in woken.prompt
         assert woken.response_envelope.body == woken.prompt
+        assert woken.asked_job_ids == ("work",)
 
         retrieved = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", retrieved.claim, source_event_id="$newer")

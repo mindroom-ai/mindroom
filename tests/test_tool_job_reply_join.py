@@ -159,11 +159,16 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("asked", [False, True])
 async def test_response_boundary_joins_ready_results_without_repeating_ignored_prompt(
     tmp_path: Path,
     streaming: bool,
+    asked: bool,
 ) -> None:
-    """Both shared drivers continue once at the safe boundary even if the model ignores retrieval."""
+    """Both shared drivers continue once at the safe boundary even if the model ignores retrieval.
+
+    A turn whose prompt already asked for those results, as a wake's does, does not ask again.
+    """
     paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
     runtime = await tool_job_runtime(tmp_path)
     context = replace(
@@ -189,12 +194,13 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
         await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         await runtime.release_wait("quiet", waited.claim)
+        ctx = replace(_ctx(), asked_job_ids=("quiet",) if asked else ())
         with tool_runtime_context(context):
             if streaming:
                 _ = [
                     item
                     async for item in stream_response_turn(
-                        _ctx(),
+                        ctx,
                         _streaming_adapter(_AdapterLog(), stream_attempt),
                         TurnSinks(),
                         continuation=_continuation(),
@@ -202,13 +208,13 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
                 ]
             else:
                 await run_blocking_response_turn(
-                    _ctx(),
+                    ctx,
                     _blocking_adapter(_AdapterLog(), attempt),
                     TurnSinks(),
                     continuation=_continuation(),
                 )
-        assert len(prompts) == 2
-        assert 'job_id="quiet"' in prompts[1]
+        assert len(prompts) == (1 if asked else 2)
+        assert asked or 'job_id="quiet"' in prompts[1]
         assert pending_outcome(runtime, "quiet") is not None
     finally:
         await runtime.shutdown()
