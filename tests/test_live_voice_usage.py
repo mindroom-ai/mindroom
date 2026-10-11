@@ -12,7 +12,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
-from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
+from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage_stats import collect_admin_usage, collect_private_usage
 from tests.conftest import test_runtime_paths
@@ -67,7 +67,7 @@ async def test_voice_usage_keeps_caller_ownership(tmp_path: Path, private: bool)
 
 @pytest.mark.asyncio
 async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) -> None:
-    """Realtime speech models bill tokens; each update replaces the call's running totals."""
+    """Realtime speech models bill tokens per response; each save replaces the call's responses so far."""
     paths = test_runtime_paths(tmp_path)
     config = Config(agents={"helper": AgentConfig(display_name="Helper")})
     identity = ToolExecutionIdentity(
@@ -79,36 +79,43 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
         resolved_thread_id=None,
         session_id="call",
     )
-    for usage in (
-        RealtimeCallUsage(
+    first = _RealtimeResponseUsage(
+        created_at=1_700_000_010,
+        input_tokens=900,
+        output_tokens=300,
+        cache_read_tokens=400,
+        audio_input_tokens=800,
+        audio_output_tokens=250,
+    )
+    second = _RealtimeResponseUsage(
+        created_at=1_700_000_040,
+        input_tokens=1100,
+        output_tokens=400,
+        cache_read_tokens=800,
+        audio_input_tokens=1000,
+        audio_output_tokens=350,
+    )
+    for responses in ((first,), (first, second)):
+        usage = RealtimeCallUsage(
             usage_id="call-1",
             model="gpt-realtime-2.1",
             created_at=1_700_000_000,
-            input_tokens=900,
-            output_tokens=300,
-            cache_read_tokens=400,
-            audio_input_tokens=800,
-            audio_output_tokens=250,
-        ),
-        RealtimeCallUsage(
-            usage_id="call-1",
-            model="gpt-realtime-2.1",
-            created_at=1_700_000_000,
-            input_tokens=2000,
-            output_tokens=700,
-            cache_read_tokens=1200,
-            audio_input_tokens=1800,
-            audio_output_tokens=600,
-        ),
-    ):
+            responses=responses,
+        )
         await record_call_token_usage(usage, config=config, runtime_paths=paths, execution_identity=identity)
 
-    report = collect_admin_usage(config=config, runtime_paths=paths)
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     totals = report.totals
     assert (totals.input_tokens, totals.output_tokens, totals.cache_read_tokens) == (2000, 700, 1200)
     assert (totals.audio_input_tokens, totals.audio_output_tokens) == (1800, 600)
     assert [(row.user_id, row.totals.total_tokens) for row in report.user_breakdown] == [("@alice:example.org", 2700)]
     assert [(row.model, row.totals.total_tokens) for row in report.model_breakdown] == [("gpt-realtime-2.1", 2700)]
+    assert [(row.kind, row.created_at, row.totals.input_tokens) for row in report.request_breakdown] == [
+        ("realtime_voice", 1_700_000_010, 900),
+        ("realtime_voice", 1_700_000_040, 1100),
+    ]
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == 0
 
 
 def test_voice_duration_without_caller_keeps_usage_but_reports_incomplete_coverage(

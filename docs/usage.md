@@ -48,7 +48,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `memory_auto_flush` | Background memory auto-flush extraction |
 | `dynamic_workflow` | Embedded Dynamic Workflow participants |
 | `skill_learning` | Automatic [skill reviews](skills.md) |
-| `realtime_voice` | Speech-model tokens of a realtime voice call, one running total per call |
+| `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
 | `routing`, `room_topic`, `schedule_parse`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.

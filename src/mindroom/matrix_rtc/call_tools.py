@@ -25,7 +25,8 @@ from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from agno.metrics import ModelMetrics, RunMetrics
+from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
+from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -172,20 +173,29 @@ async def record_call_token_usage(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
 ) -> None:
-    """Upsert a realtime call's cumulative speech-model tokens for the caller."""
-    model = ModelMetrics(
-        id=usage.model,
-        provider="OpenAI",
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.input_tokens + usage.output_tokens,
-        cache_read_tokens=usage.cache_read_tokens,
-        cache_write_tokens=usage.cache_write_tokens,
-        audio_input_tokens=usage.audio_input_tokens,
-        audio_output_tokens=usage.audio_output_tokens,
-        audio_total_tokens=usage.audio_input_tokens + usage.audio_output_tokens,
-        reasoning_tokens=usage.reasoning_tokens,
-    )
+    """Upsert a realtime call's speech-model tokens for the caller, one request per response."""
+    messages = [
+        Message(
+            role="assistant",
+            created_at=int(response.created_at),
+            metrics=MessageMetrics(
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                total_tokens=response.input_tokens + response.output_tokens,
+                cache_read_tokens=response.cache_read_tokens,
+                cache_write_tokens=response.cache_write_tokens,
+                audio_input_tokens=response.audio_input_tokens,
+                audio_output_tokens=response.audio_output_tokens,
+                audio_total_tokens=response.audio_input_tokens + response.audio_output_tokens,
+                reasoning_tokens=response.reasoning_tokens,
+            ),
+            provider_data={"mindroom_model": {"id": usage.model, "provider": "OpenAI"}},
+        )
+        for response in usage.responses
+    ]
+    model = ModelMetrics(id=usage.model, provider="OpenAI")
+    for message in messages:
+        model.accumulate(ModelMetrics(**message.metrics.to_dict()))
     metrics = RunMetrics(
         input_tokens=model.input_tokens,
         output_tokens=model.output_tokens,
@@ -207,6 +217,7 @@ async def record_call_token_usage(
             model_provider="OpenAI",
             created_at=int(usage.created_at),
             metrics=metrics,
+            messages=messages,
         ).to_dict(),
         config=config,
         runtime_paths=runtime_paths,

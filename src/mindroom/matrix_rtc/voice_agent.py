@@ -377,11 +377,9 @@ class LiveVoiceUsage:
 
 
 @dataclass(frozen=True)
-class RealtimeCallUsage:
-    """Cumulative token usage of one realtime call's speech model."""
+class _RealtimeResponseUsage:
+    """Token usage of one realtime speech-model response."""
 
-    usage_id: str
-    model: str
     created_at: float
     input_tokens: int = 0
     output_tokens: int = 0
@@ -390,6 +388,16 @@ class RealtimeCallUsage:
     audio_input_tokens: int = 0
     audio_output_tokens: int = 0
     reasoning_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class RealtimeCallUsage:
+    """Every response's token usage so far in one realtime call."""
+
+    usage_id: str
+    model: str
+    created_at: float
+    responses: tuple[_RealtimeResponseUsage, ...]
 
 
 @dataclass(frozen=True)
@@ -606,22 +614,35 @@ class RealtimeVoiceBridge:
         created_at = time.time()
         self._record_realtime_usage = record_usage
 
+        totals = (0, 0, 0, 0, 0, 0, 0)
+        responses: list[_RealtimeResponseUsage] = []
+
         def _on_usage(event: SessionUsageUpdatedEvent) -> None:
+            nonlocal totals
             # Accept updates while the session drains at hang-up; teardown awaits their saves.
             llm_usage = [entry for entry in event.usage.model_usage if isinstance(entry, LLMModelUsage)]
             if not llm_usage:
                 return
+            # LiveKit reports running totals after each response, so the increase is that response's usage.
+            current = (
+                sum(entry.input_tokens for entry in llm_usage),
+                sum(entry.output_tokens for entry in llm_usage),
+                sum(entry.input_cached_tokens for entry in llm_usage),
+                sum(entry.input_cache_creation_tokens for entry in llm_usage),
+                sum(entry.input_audio_tokens for entry in llm_usage),
+                sum(entry.output_audio_tokens for entry in llm_usage),
+                sum(entry.output_reasoning_tokens for entry in llm_usage),
+            )
+            increase = [now - then for now, then in zip(current, totals, strict=True)]
+            totals = current
+            if not any(increase):
+                return
+            responses.append(_RealtimeResponseUsage(time.time(), *increase))
             self._realtime_usage = RealtimeCallUsage(
                 usage_id=usage_id,
                 model=model,
                 created_at=created_at,
-                input_tokens=sum(entry.input_tokens for entry in llm_usage),
-                output_tokens=sum(entry.output_tokens for entry in llm_usage),
-                cache_read_tokens=sum(entry.input_cached_tokens for entry in llm_usage),
-                cache_write_tokens=sum(entry.input_cache_creation_tokens for entry in llm_usage),
-                audio_input_tokens=sum(entry.input_audio_tokens for entry in llm_usage),
-                audio_output_tokens=sum(entry.output_audio_tokens for entry in llm_usage),
-                reasoning_tokens=sum(entry.output_reasoning_tokens for entry in llm_usage),
+                responses=tuple(responses),
             )
             self._schedule_session_event(self._save_realtime_usage(record_usage))
 
