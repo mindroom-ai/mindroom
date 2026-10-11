@@ -23,8 +23,9 @@ from mindroom.provider_tool_policy import provider_tools_disabled
 if TYPE_CHECKING:
     from typing import Any
 
+    from agno.metrics import MessageMetrics
     from agno.models.message import Message
-    from google.genai.types import ToolListUnion
+    from google.genai.types import GenerateContentResponseUsageMetadata, ToolListUnion
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
@@ -77,7 +78,7 @@ def _without_tool_selection(config: object, *, vertexai: bool) -> GenerateConten
 
 @dataclass
 class MindRoomGoogleGemini(Gemini):
-    """Gemini model that preserves provider call IDs across tool loops."""
+    """Gemini model that preserves provider call IDs across tool loops and counts thinking as output."""
 
     def get_request_params(
         self,
@@ -152,3 +153,21 @@ class MindRoomGoogleGemini(Gemini):
                         part.function_response.id = tool_response_id
 
         return formatted_messages, system_message
+
+    # AGNO_COMPAT: Gemini usage leaves thinking out of output tokens.
+    # Reason: Agno maps candidates_token_count to output and keeps thoughts_token_count only as reasoning.
+    # Google bills thinking as output, and every other provider reports reasoning inside output, so Gemini
+    # output and totals missed all thinking.
+    # Upstream issue: https://github.com/agno-agi/agno/issues/10763
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10764 counts thinking in output;
+    # https://github.com/agno-agi/agno/pull/10722 does too since commit 2232999, and also uses the provider total.
+    # Remove when: The pinned Agno release counts thinking in output while totalling input and output;
+    # PR #10722's provider total would also add tool-use prompt tokens, which MindRoom leaves uncounted.
+    # Coverage: tests/test_provider_usage_metrics.py::test_gemini_output_includes_thinking.
+    def _get_metrics(self, response_usage: GenerateContentResponseUsageMetadata) -> MessageMetrics:
+        metrics = super()._get_metrics(response_usage)
+        # Read the provider fields directly, so an upstream fix cannot count thinking twice.
+        metrics.reasoning_tokens = response_usage.thoughts_token_count or 0
+        metrics.output_tokens = (response_usage.candidates_token_count or 0) + metrics.reasoning_tokens
+        metrics.total_tokens = metrics.input_tokens + metrics.output_tokens
+        return metrics

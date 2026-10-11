@@ -56,45 +56,12 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [shell-guard-plugin](https://github.com/mindroom-ai/shell-guard-plugin) | Hooks | Blocks dangerous shell commands, such as `systemctl restart mindroom-chat`, through `tool:before_call` gating. |
 | [voice-enrich-plugin](https://github.com/mindroom-ai/voice-enrich-plugin) | Hooks | Warns the model about possible transcription errors in voice-transcribed messages. |
 | [location-enrich-plugin](https://github.com/mindroom-ai/location-enrich-plugin) | Hooks | Adds real-time GPS location from [Dawarich](https://dawarich.app/) to prompts, with place matching and movement classification. |
+| [response-audit-jev-plugin](https://github.com/mindroom-ai/response-audit-jev-plugin) | Hooks | Audits delivered answers with a [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) and asks the agent to verify facts that no lookup supported. |
 | [restart-resume-plugin](https://github.com/mindroom-ai/restart-resume-plugin) | Hooks | Re-activates threads tagged `pending-restart` after a bot restart. |
 | [thread-snooze-plugin](https://github.com/mindroom-ai/thread-snooze-plugin) | Hooks and tools | Temporarily resolves a thread and wakes it at a specified time. |
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Hooks and tools | Per-thread goals stored in Matrix room state that survive context compaction and restarts. |
 | [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
-
-## Research check plugin
-
-MindRoom ships the `research_check` plugin, which catches replies that state specific facts a person would act on without having looked them up, such as figures a company reported, what a document, law, or study says, or where a place is and when it is open.
-After each reply, a judgment backend reads the person's message, the tool calls made for that reply with shortened, redacted argument and result previews, and the reply itself.
-Opinions, descriptions of quality, and general suggestions do not count.
-When it finds claims that no lookup supported, the agent gets a visible follow-up in the same conversation asking it to verify each claim with its tools, correct anything that does not hold up, and name its sources.
-
-Enable it with its `python:` spec; nothing needs installing:
-
-```yaml
-plugins:
-  - path: python:mindroom.research_check
-    settings:
-      judgment:
-        provider: openai_decisions
-      agents: [assistant]
-```
-
-| Setting | Type | Default | Description |
-| --- | --- | --- | --- |
-| `judgment` | object | *required* | Backend that makes the decision, with the fields described under [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends) |
-| `instructions` | string | `""` | Extra guidance for the decision, such as which kinds of claims matter to you |
-| `agents` | list of strings | all agents | Agents whose replies are checked |
-
-- Only an agent's replies to messages people send are checked, and each gets at most one follow-up; team replies, scheduled tasks, external triggers, turns started by other agents, plugins, or automations, and the verification reply itself are not checked.
-- Files and images shared in the conversation count as the person's own information: the judge sees their names, so facts taken from them do not trigger a follow-up.
-- Agents with `show_tool_calls: false` are not checked, because their tool calls are not recorded with the reply.
-- Searches a model runs on the provider's side, such as OpenRouter web search or OpenAI search models, are not tool calls, so those replies look unresearched; leave such agents out of `agents`.
-- The check sees only the current reply's tool calls, so a reply that relies on research from an earlier message can still get a follow-up.
-- Each checked reply costs one judgment request; use `agents` to limit which agents are checked.
-- The follow-up asks an agent without tools that can look the claims up to say which claims remain unverified.
-- A reply gets no follow-up when the backend fails, times out, or has no credential, when the message and reply are too long for one judgment request, which can happen past about 8,000 characters, or when either contains a credential, which is never sent to the backend; a long tool-call list is shortened instead.
-- Invalid settings, or an `llm` judgment `model` that is not a configured alias, make every check fail with `Hook execution failed` in the logs for plugin `research_check`.
 
 ## Configure plugins
 

@@ -2,25 +2,29 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 type IndependentUsageKind = Literal[
+    "claude_agent",
     "compaction_summary",
     "memory_auto_flush",
     "dynamic_workflow",
     "live_voice",
+    "realtime_voice",
     "skill_learning",
     "routing",
     "room_topic",
     "schedule_parse",
+    "team_mode",
     "thread_summary",
     "voice_normalization",
     "voice_transcription",
 ]
 type UsageKind = Literal["run"] | IndependentUsageKind
+USAGE_KINDS: frozenset[str] = frozenset({"run", *get_args(IndependentUsageKind.__value__)})
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"

@@ -96,7 +96,6 @@ class DelegateTools(Toolkit):
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
         workspace_root: Path | None = None,
         persona_tools: tuple[str, ...] | None = None,
-        authored: bool = False,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
@@ -109,8 +108,6 @@ class DelegateTools(Toolkit):
         self._workspace_root = workspace_root
         # An authored subagent's own tools cap the copies it authors, on every channel.
         self._persona_tools = persona_tools
-        # An authored subagent must not see its configured role through its own target entry.
-        self._authored = authored
         # A caller that may run itself may also author that copy's prompt, tools, or profile.
         self._authoring = agent_name in delegate_to
 
@@ -138,9 +135,10 @@ class DelegateTools(Toolkit):
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
+        # The caller's own entry never repeats its configured role, which an authored copy must not see.
         lines = [
             f"{target_name}\n  - Yourself, run as a fresh copy."
-            if self._authored and target_name == self._agent_name
+            if target_name == self._agent_name
             else describe_agent(target_name, self._config)
             for target_name in self._delegate_to
         ]

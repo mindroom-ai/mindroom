@@ -958,7 +958,9 @@ path = "mindroom.helper_usage"
 depends_on = ["mindroom.agent_storage", "mindroom.constants", "mindroom.history.storage", "mindroom.logging_config", "mindroom.usage_storage"]
 visibility = [
     "mindroom.response_turn",
+    "mindroom.api.openai_compat",
     "mindroom.memory.auto_flush",
+    "mindroom.custom_tools.claude_agent",
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.approval_execution",
     "mindroom.teams",
@@ -1028,7 +1030,7 @@ visibility = ["mindroom.approval_events"]
 [[modules]]
 path = "mindroom.agno_compat_session_persistence"
 depends_on = ["mindroom.background_tasks"]
-visibility = ["mindroom.agent_storage", "mindroom.ai"]
+visibility = ["mindroom.agent_storage", "mindroom.ai", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.agno_compat_session_metrics"
@@ -1037,7 +1039,7 @@ visibility = ["mindroom.agent_storage"]
 
 [[modules]]
 path = "mindroom.agno_compat_run_messages"
-depends_on = ["mindroom.usage_storage"]
+depends_on = ["mindroom.agno_compat_claude", "mindroom.usage_storage"]
 visibility = ["mindroom.agent_storage"]
 
 [[modules]]
@@ -1637,6 +1639,7 @@ depends_on = [
     "mindroom.api.response_activity",
     "mindroom.constants",
     "mindroom.execution_preparation",
+    "mindroom.helper_usage",
     "mindroom.history.session_context",
     "mindroom.knowledge.utils",
     "mindroom.logging_config",
@@ -2799,6 +2802,7 @@ depends_on = [
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
+    "mindroom.agno_compat_session_persistence",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.reply_scope",
@@ -7657,7 +7661,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.agno_compat_claude"
 depends_on = ["mindroom.claude_wire_blocks", "mindroom.model_defaults"]
-visibility = ["mindroom.claude_compat", "mindroom.claude_prompt_cache"]
+visibility = ["mindroom.agno_compat_run_messages", "mindroom.claude_compat", "mindroom.claude_prompt_cache"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_claude"]
@@ -7977,16 +7981,6 @@ visibility = ["mindroom.response_runner"]
 path = "mindroom.routing_judgment"
 depends_on = ["mindroom.agent_descriptions", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
 visibility = ["mindroom.routing"]
-
-# The bundled research_check plugin is loaded from its directory by the plugin loader, never imported.
-[[modules]]
-path = "mindroom.research_check.hooks"
-depends_on = ["mindroom.agents", "mindroom.attachments", "mindroom.config.judgment", "mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.redaction", "mindroom.tool_system.events"]
-visibility = []
-
-[[interfaces]]
-from = ["mindroom.research_check.hooks"]
-expose = ["check_research"]
 
 [[modules]]
 path = "mindroom.tools.moviepy_video_tools"
