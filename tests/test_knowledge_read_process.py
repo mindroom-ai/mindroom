@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Event
 from typing import TYPE_CHECKING
@@ -27,7 +27,6 @@ from mindroom.knowledge.read_process import read_chroma
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.knowledge.read_proxy import ChromaReadProxy
 from mindroom.knowledge.utils import _MultiKnowledgeVectorDb
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -67,6 +66,11 @@ def capture_read_processes(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.P
 
     monkeypatch.setattr(subprocess, "Popen", capture_process)
     return processes
+
+
+def _assert_only_warm_reader_alive(processes: list[subprocess.Popen[bytes]]) -> None:
+    """Every child handed a read has been reaped; only the idle replacement remains."""
+    assert [process for process in processes if process.poll() is None] == [read_process._warm_reader]
 
 
 def test_probe_does_not_open_native_client_in_parent(
@@ -240,8 +244,8 @@ async def test_locked_database_does_not_freeze_parent_and_timeout_reaps_child(
             await task
         assert len(intervals) > 20
         assert max(intervals) < 0.25
-        assert len(processes) == 1
-        assert processes[0].poll() is not None
+        assert len(processes) == 2
+        _assert_only_warm_reader_alive(processes)
     finally:
         lock_owner.terminate()
         await asyncio.wait_for(lock_owner.wait(), timeout=5)
@@ -264,8 +268,8 @@ async def test_embedding_failure_reaps_started_child(
     proxy = ChromaReadProxy("published", str(published_index), FailingEmbedder())
     with pytest.raises(PermissionError, match="embedding credentials expired"):
         await proxy.async_search("alpha")
-    assert len(capture_read_processes) == 1
-    assert capture_read_processes[0].poll() is not None
+    assert len(capture_read_processes) == 2
+    _assert_only_warm_reader_alive(capture_read_processes)
 
 
 @pytest.mark.asyncio
@@ -294,7 +298,7 @@ async def test_async_embedding_overlaps_child_startup(
         release_embedding.set()
         documents = await task
     assert documents[0].id == "a"
-    assert capture_read_processes[0].poll() is not None
+    _assert_only_warm_reader_alive(capture_read_processes)
 
 
 @pytest.mark.asyncio
@@ -321,8 +325,8 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert capture_read_processes[-1].poll() is not None
-    assert len(capture_read_processes) == 5
+        _assert_only_warm_reader_alive(capture_read_processes)
+    assert len(capture_read_processes) == 6
     assert await ChromaReadProxy("published", str(published_index), _Embedder()).async_search("alpha")
 
 
@@ -340,8 +344,8 @@ async def test_stalled_embedding_deadline_reaps_child(
     for _ in range(5):
         with pytest.raises(TimeoutError, match="Knowledge read timed out"):
             await read_process.read_chroma_async(prepare_request, timeout=0.05)
-        assert capture_read_processes[-1].poll() is not None
-    assert len(capture_read_processes) == 5
+        _assert_only_warm_reader_alive(capture_read_processes)
+    assert len(capture_read_processes) == 6
 
 
 @pytest.mark.asyncio
@@ -369,8 +373,8 @@ async def test_cancelled_sync_embedder_fallback_reaps_child_before_provider_retu
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert len(capture_read_processes) == 1
-        assert capture_read_processes[0].poll() is not None
+        assert len(capture_read_processes) == 2
+        _assert_only_warm_reader_alive(capture_read_processes)
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -408,47 +412,6 @@ async def test_native_error_logs_redacted_child_diagnostics(
 
 
 @pytest.mark.asyncio
-async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Four blocked native reads must not let queued reads starve unrelated application work."""
-    release = Event()
-    active = [Event() for _ in range(4)]
-    started: list[int] = []
-
-    def blocked_child(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        slot = len(started)
-        started.append(slot)
-        active[slot].set()
-        assert release.wait(timeout=5)
-        return subprocess.CompletedProcess(command, 0, stdout=b'{"exists":true,"documents":[],"error_type":null}')
-
-    monkeypatch.setattr(subprocess, "run", blocked_child)
-    loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        loop.set_default_executor(executor)
-        tasks = [
-            asyncio.create_task(asyncio.to_thread(read_chroma, ReadRequest("unused", "published"))) for _ in range(6)
-        ]
-        try:
-            # Release only once the four reads hold every slot and the other two were refused.
-            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-                while not all(event.is_set() for event in active) or sum(task.done() for task in tasks) < 2:  # noqa: ASYNC110
-                    await asyncio.sleep(0.005)
-            assert (
-                await asyncio.wait_for(
-                    asyncio.to_thread(lambda: "unrelated work completed"),
-                    timeout=SETTLE_TIMEOUT_SECONDS,
-                )
-                == "unrelated work completed"
-            )
-        finally:
-            release.set()
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-    errors = [result for result in results if isinstance(result, RuntimeError)]
-    assert len(errors) == 2
-    assert all("Knowledge reader is busy" in str(error) for error in errors)
-
-
-@pytest.mark.asyncio
 async def test_concurrent_search_burst_preserves_results(published_index: Path) -> None:
     """More searches than reader slots still return each requested document and filter."""
     proxy = ChromaReadProxy("published", str(published_index), _Embedder())
@@ -468,3 +431,53 @@ async def test_concurrent_search_burst_preserves_results(published_index: Path) 
         )
         assert document.embedding == [1.0, 0.0]
         assert document.meta_data == {"team": "a", "similarity_score": 0.0, "distances": 0.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_read", [False, True])
+async def test_next_read_uses_warm_reader_and_replaces_it(
+    published_index: Path,
+    capture_read_processes: list[subprocess.Popen[bytes]],
+    async_read: bool,
+) -> None:
+    """A read hands its request to the child the previous read left warm, then warms the next one."""
+    request = ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
+
+    async def prepare_request() -> ReadRequest:
+        return request
+
+    async def search() -> list[str | None]:
+        result = (
+            await read_process.read_chroma_async(prepare_request)
+            if async_read
+            else await asyncio.to_thread(read_chroma, request)
+        )
+        return [document.id for document in result.documents]
+
+    assert await search() == ["a", "b"]
+    assert len(capture_read_processes) == 2
+    _assert_only_warm_reader_alive(capture_read_processes)
+    warm = read_process._warm_reader
+    assert warm is not None
+    assert await search() == ["a", "b"]
+    assert len(capture_read_processes) == 3, "The warm child must serve the read instead of a new child"
+    assert warm.returncode == 0
+    _assert_only_warm_reader_alive(capture_read_processes)
+
+
+def test_warm_reader_runs_outside_the_terminal_process_group() -> None:
+    """Ctrl+C in the terminal reaches MindRoom, not the idle reader it keeps warm."""
+    reader = read_process._spawn_reader()
+    try:
+        assert os.getsid(reader.pid) == reader.pid
+    finally:
+        reader.kill()
+        reader.wait()
+
+
+def test_idle_reader_exits_quietly_when_its_input_closes(capfd: pytest.CaptureFixture[str]) -> None:
+    """A warm child whose parent exits leaves without a result or traceback."""
+    reader = read_process._spawn_reader()
+    output, _ = reader.communicate(timeout=30)
+    assert (output, reader.returncode) == (b"", 0)
+    assert "Traceback" not in capfd.readouterr().err

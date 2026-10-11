@@ -6,9 +6,9 @@ import asyncio
 import ipaddress
 import json
 import sqlite3
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode
 
 from fastapi import HTTPException
 from mcp.server.auth.handlers.authorize import AuthorizationHandler
@@ -48,6 +48,7 @@ from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
 from mindroom.mcp_gateway.toolkits import drain_gateway_tool_cleanup
 from mindroom.mcp_gateway.tools import get_tool, invoke_tool, search_agents, search_tools
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode, GatewayPrincipal
+from mindroom.origins import parse_browser_origin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -95,27 +96,11 @@ def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:
         value = raw.strip()
         if not value:
             continue
-        parsed = urlsplit(value)
-        loopback = parsed.hostname == "localhost"
-        if parsed.hostname and not loopback:
-            with suppress(ValueError):
-                loopback = ipaddress.ip_address(parsed.hostname).is_loopback
-        if (
-            not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-            or "#" in value
-            or "?" in value
-            or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback))
-            or "*" in parsed.netloc
-        ):
+        try:
+            origins.append(parse_browser_origin(value))
+        except ValueError:
             msg = "MCP browser origins must be explicit HTTPS or loopback HTTP origins"
-            raise ValueError(msg)
-        _ = parsed.port
-        origins.append(f"{parsed.scheme}://{parsed.netloc}")
+            raise ValueError(msg) from None
     return tuple(dict.fromkeys(origins))
 
 

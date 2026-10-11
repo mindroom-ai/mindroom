@@ -29,6 +29,7 @@ Matrix sync callback
 | Module | Purpose |
 |--------|---------|
 | `bounded_bytes.py` | Shared asynchronous and synchronous byte collection that rejects overflowing chunks before buffering them |
+| `origins.py` | Shared browser-origin normalization and allowlist validation for dashboard auth, CORS, Connections same-origin checks, the Computers allowlist, and MCP gateway origins |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |

@@ -13,6 +13,7 @@ import aiohttp
 import pytest
 from livekit import rtc
 from livekit.plugins.openai.realtime import GPTLiveSession
+from structlog.testing import capture_logs
 
 from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
@@ -476,3 +477,43 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
         17.5 if service_closed else 12.5,
         service_closed,
     )
+
+
+@pytest.mark.asyncio
+async def test_live_sdk_times_delegation_stages_through_the_provider_ack(provider: _ProviderHTTP) -> None:
+    """Real SDK client and server events carry one delegation from creation to its commentary acknowledgement."""
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Delegate requests."),
+        model="gpt-live-1",
+        api_key="test-api-key",
+        voice="marin",
+        respond=AsyncMock(return_value=CallAgentResponse("Done.")),
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    ack = "session.commentary.appended"
+    acked = asyncio.Event()
+    with capture_logs() as logs:
+        try:
+            await bridge.start_agent(options)
+            await provider.socket.next_event("session.start")
+            provider.socket.feed(
+                {"type": "session.delegation.created", "delegation": {"id": "first", "target": "client"}},
+            )
+            append = await provider.socket.next_event("session.commentary.append")
+            session = cast("Agent", bridge._live_agent).duplex_session
+            # `emit` runs every listener before this waiter can resume, so MindRoom's listener has handled the acknowledgement.
+            session.on("openai_server_event_received", lambda event: acked.set() if event["type"] == ack else None)
+            provider.socket.feed({"type": ack, "client_event_id": append["event_id"]})
+            await asyncio.wait_for(acked.wait(), timeout=2)
+        finally:
+            await asyncio.wait_for(bridge.aclose(), timeout=3)
+
+    stages = [entry for entry in logs if entry["event"] == "call_delegation_stage"]
+    assert [(entry["delegation_id"], entry["stage"]) for entry in stages] == [
+        ("first", "created"),
+        ("first", "lock_acquired"),
+        ("first", "response_done"),
+        ("first", "commentary_appended"),
+        ("first", "commentary_acked"),
+    ]

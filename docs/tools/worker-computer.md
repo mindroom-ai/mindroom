@@ -102,8 +102,12 @@ Point `apiUrl` at the runtime that owns the agent's workers; a host that only se
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
 For the bundled MindRoom Chat iOS app, explicitly add `"capacitor://localhost"` alongside the trusted HTTPS web origins, for example `["https://chat.mindroom.chat", "capacitor://localhost"]`.
 Other custom-scheme origins and opaque `"null"` origins are refused.
+Internationalized domain names must be written in their `xn--` form, for example `https://xn--fa-hia.de`, because browsers send that form.
+Origins with non-ASCII hostnames are refused.
 The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
-Each entry must be a scheme and host with an optional port, with no path or wildcard, and HTTP is allowed only for `localhost` and literal loopback addresses.
+Each entry must be a scheme and host with an optional port, and no wildcard.
+An optional single trailing `/` is accepted, and any other path is invalid.
+HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](../authorization.md#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.

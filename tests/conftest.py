@@ -1,6 +1,7 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import asyncio
+import gc
 import os
 import re
 import shutil
@@ -50,6 +51,7 @@ import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.handled_turns as handled_turns_module
+import mindroom.knowledge.read_process as knowledge_read_process_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
@@ -3031,6 +3033,18 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
 
 
+@pytest.fixture(autouse=True)
+def _never_freeze_the_test_heap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep orchestrator initialization from freezing the pytest worker's heap.
+
+    Cycles among frozen objects are never collected, so every test that
+    initializes an orchestrator would pin its own fixtures, mocks, and
+    orchestrator for the rest of the worker's life.
+    `tests/test_heap_probe.py` covers the real freeze against a fake `gc`.
+    """
+    monkeypatch.setattr(gc, "freeze", lambda: None)
+
+
 @pytest.fixture(scope="session")
 def _worker_tmpdir_link_root() -> Generator[Path, None, None]:
     """Hold this session's worker TMPDIR links in one short directory removed at the end."""
@@ -3138,6 +3152,14 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
     approval_manager_module._MANAGER = None
     yield
     approval_manager_module._MANAGER = None
+
+
+@pytest.fixture(autouse=True)
+def _discard_warm_knowledge_reader() -> Generator[None, None, None]:
+    """Keep the idle knowledge reader child one test started, with its environment, out of the next test."""
+    knowledge_read_process_module._discard_warm_reader()
+    yield
+    knowledge_read_process_module._discard_warm_reader()
 
 
 @pytest.fixture(autouse=True)

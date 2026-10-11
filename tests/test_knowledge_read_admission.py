@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
+import signal
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-from threading import Barrier, BoundedSemaphore, Event, Lock, get_ident
+from threading import BoundedSemaphore, Event, Lock, get_ident
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,46 +27,71 @@ async def _wait_until(condition: Callable[[], bool]) -> None:
             await asyncio.sleep(0.001)
 
 
+def _wait_until_sync(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 3
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.001)
+
+
 async def _prepare_request() -> ReadRequest:
     return ReadRequest("unused", "published")
 
 
 class _Child:
-    """Gate successful work and reaping independently to expose early slot release."""
+    """Popen-shaped reader that gates its work and its reaping independently to expose early slot release."""
 
-    def __init__(self) -> None:
+    def __init__(self, siblings: list[_Child], work: Event | None = None) -> None:
+        self.siblings = siblings
         self.returncode: int | None = None
-        self.work = asyncio.Event()
-        self.reap = asyncio.Event()
+        self.served = Event()
+        self.work = work or Event()
+        self.reap = Event()
         self.reap.set()
-        self.killed = asyncio.Event()
-        self.reaped = False
+        self.killed = Event()
 
     def kill(self) -> None:
         self.killed.set()
-        self.returncode = -9
 
-    async def communicate(self, data: bytes | None = None) -> tuple[bytes, None]:
+    def communicate(self, data: bytes | None = None, timeout: float | None = None) -> tuple[bytes, None]:
+        assert timeout is None or timeout > 0
         if data is not None:
-            await self.work.wait()
-            self.returncode = 0
-        await self.reap.wait()
-        self.reaped = True
-        return _RESULT, None
+            self.served.set()
+            assert len(_unreaped(self.siblings)) <= 4, "More native reads than reader slots"
+            while not (self.work.wait(0.001) or self.killed.is_set()):
+                pass
+        return (b"" if self.killed.is_set() else _RESULT), None
+
+    def __enter__(self) -> _Child:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        assert self.reap.wait(5)
+        self.returncode = -signal.SIGKILL if self.killed.is_set() else 0
+
+
+def _serving(children: list[_Child]) -> list[_Child]:
+    return [child for child in children if child.served.is_set()]
+
+
+def _unreaped(children: list[_Child]) -> list[_Child]:
+    return [child for child in _serving(children) if child.returncode is None]
+
+
+def _spawner(children: list[_Child], work: Event | None = None) -> Callable[[], _Child]:
+    def spawn() -> _Child:
+        child = _Child(children, work)
+        children.append(child)
+        return child
+
+    return spawn
 
 
 @pytest.fixture
 def children(monkeypatch: pytest.MonkeyPatch) -> list[_Child]:
     """Replace only OS process creation; exercise real admission, deadline and cleanup."""
     processes: list[_Child] = []
-
-    async def spawn(*_args: object, **_kwargs: object) -> _Child:
-        child = _Child()
-        processes.append(child)
-        assert sum(not process.reaped for process in processes) <= 4
-        return child
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(read_process, "_spawn_reader", _spawner(processes))
     return processes
 
 
@@ -91,25 +117,26 @@ async def test_async_burst_drains_after_reaping_and_leaves_executor_available(ch
         asyncio.get_running_loop().set_default_executor(executor)
         tasks = [asyncio.create_task(read_process.read_chroma_async(prepare)) for _ in range(8)]
         try:
-            await _wait_until(lambda: prepared == 4)
+            await _wait_until(lambda: len(_serving(children)) == 4)
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "available"), 1) == "available"
-            assert len(children) == 4
+            assert prepared == 4
             assert not any(task.done() for task in tasks)
             with pytest.raises(RuntimeError, match="Knowledge reader is busy"):
                 read_process.read_chroma(ReadRequest("unused", "published"))
-            for child in children:
+            first = _serving(children)
+            for child in first:
                 child.reap.clear()
                 child.work.set()
             await asyncio.sleep(0.03)
-            assert len(children) == 4, "Completed work must retain capacity until reaped"
-            for child in children:
+            assert len(_serving(children)) == 4, "Completed work must retain capacity until reaped"
+            for child in first:
                 child.reap.set()
-            await _wait_until(lambda: len(children) == 8)
+            await _wait_until(lambda: len(_serving(children)) == 8)
             for child in children:
                 child.work.set()
             results = await asyncio.gather(*tasks)
             assert all(result.exists for result in results)
-            assert all(child.reaped for child in children)
+            assert all(child.returncode == 0 for child in _serving(children))
         finally:
             for child in children:
                 child.work.set()
@@ -171,11 +198,12 @@ async def test_admission_and_preparation_share_original_deadline(children: list[
         release_work = loop.call_later(0.65, release_preparation.set)
         try:
             await asyncio.wait_for(prepared.wait(), 1)
-            children[0].work.set()
             with pytest.raises(TimeoutError, match="Knowledge read timed out"):
                 await task
             assert not release_preparation.is_set()
-            assert children[0].reaped
+            [taken] = [child for child in children if child is not read_process._warm_reader]
+            assert taken.killed.is_set()
+            assert taken.returncode is not None
         finally:
             release_slot.cancel()
             release_work.cancel()
@@ -186,92 +214,51 @@ async def test_admission_and_preparation_share_original_deadline(children: list[
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("expire", [False, True])
-async def test_interrupted_startup_keeps_capacity_until_child_reaped(  # noqa: PLR0915 - Keep lifecycle ordering visible.
-    monkeypatch: pytest.MonkeyPatch,
-    expire: bool,
-) -> None:
-    """A canceled startup remains owned through repeated cancellation and delayed reaping."""
-    child = _Child()
-    child.reap.clear()
-    started = asyncio.Event()
-    finish_startup = asyncio.Event()
-    prepared = False
-    spawns = 0
+@pytest.mark.parametrize("async_read", [False, True])
+async def test_startup_failure_releases_capacity(monkeypatch: pytest.MonkeyPatch, async_read: bool) -> None:
+    """A failed spawn returns its original error and leaves all four slots reusable."""
 
-    async def spawn(*_args: object, **_kwargs: object) -> _Child:
-        nonlocal spawns
-        spawns += 1
-        if spawns == 1:
-            started.set()
-            await finish_startup.wait()
-            return child
-        replacement = _Child()
-        replacement.work.set()
-        return replacement
+    def spawn() -> _Child:
+        message = "synthetic spawn failure"
+        raise OSError(message)
 
-    async def prepare() -> ReadRequest:
-        nonlocal prepared
-        prepared = True
-        return await _prepare_request()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    with ExitStack() as holders:
-        for _ in range(3):
-            holders.enter_context(read_process._read_slot())
-        task = asyncio.create_task(read_process.read_chroma_async(prepare, timeout=0.03 if expire else 30))
-        replacement = None
-        try:
-            await started.wait()
-            if expire:
-                await _wait_until(lambda: task.cancelling() > 0)
-            else:
-                task.cancel()
-                await asyncio.sleep(0)
-                task.cancel()
-            await asyncio.sleep(0)
-            assert not task.done(), "Interrupted startup must settle before caller exits"
-            replacement = asyncio.create_task(read_process.read_chroma_async(_prepare_request))
-            finish_startup.set()
-            await asyncio.wait_for(child.killed.wait(), 1)
-            if not expire:
-                task.cancel()
-            await asyncio.sleep(0.03)
-            assert not task.done()
-            assert spawns == 1
-            assert not prepared
-            child.reap.set()
-            if expire:
-                with pytest.raises(TimeoutError, match="Knowledge read timed out"):
-                    await task
-            else:
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            assert (await replacement).exists
-            assert child.reaped
-        finally:
-            finish_startup.set()
-            child.reap.set()
-            task.cancel()
-            if replacement is not None:
-                replacement.cancel()
-                await asyncio.gather(replacement, return_exceptions=True)
-            await asyncio.gather(task, return_exceptions=True)
+    monkeypatch.setattr(read_process, "_spawn_reader", spawn)
+    read = (
+        read_process.read_chroma_async(_prepare_request)
+        if async_read
+        else asyncio.to_thread(read_process.read_chroma, ReadRequest("unused", "published"))
+    )
+    with pytest.raises(OSError, match="synthetic spawn failure"):
+        await read
     _assert_all_slots_available()
 
 
 @pytest.mark.asyncio
-async def test_startup_failure_releases_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed spawn returns its original error and leaves all four slots reusable."""
-
-    async def spawn(*_args: object, **_kwargs: object) -> _Child:
-        message = "synthetic spawn failure"
-        raise OSError(message)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    with pytest.raises(OSError, match="synthetic spawn failure"):
-        await read_process.read_chroma_async(_prepare_request)
-    _assert_all_slots_available()
+async def test_saturated_sync_reads_leave_executor_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Four blocked native reads must not let queued reads starve unrelated application work."""
+    release = Event()
+    children: list[_Child] = []
+    monkeypatch.setattr(read_process, "_spawn_reader", _spawner(children, release))
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        loop.set_default_executor(executor)
+        tasks = [
+            asyncio.create_task(asyncio.to_thread(read_process.read_chroma, ReadRequest("unused", "published")))
+            for _ in range(6)
+        ]
+        try:
+            # Wait for the two rejections too, so no read can start after the blocked ones finish.
+            await _wait_until(lambda: len(_serving(children)) == 4 and sum(task.done() for task in tasks) == 2)
+            assert (
+                await asyncio.wait_for(asyncio.to_thread(lambda: "unrelated work completed"), timeout=0.5)
+                == "unrelated work completed"
+            )
+        finally:
+            release.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+    errors = [result for result in results if isinstance(result, RuntimeError)]
+    assert len(errors) == 2
+    assert all("Knowledge reader is busy" in str(error) for error in errors)
 
 
 def test_sync_and_separate_async_loops_share_capacity(
@@ -279,7 +266,6 @@ def test_sync_and_separate_async_loops_share_capacity(
 ) -> None:
     """Two independent loops wait behind four sync readers and reuse one global limit."""
     release_sync = Event()
-    sync_started = Barrier(5)
     async_waiting = Event()
     waiting_threads: set[int] = set()
     children: list[_Child] = []
@@ -295,35 +281,23 @@ def test_sync_and_separate_async_loops_share_capacity(
                         async_waiting.set()
             return acquired
 
-    def sync_spawn(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        sync_started.wait(timeout=3)
-        assert release_sync.wait(3)
-        return subprocess.CompletedProcess(command, 0, stdout=_RESULT)
-
-    async def spawn(*_args: object, **_kwargs: object) -> _Child:
-        child = _Child()
-        child.work.set()
-        children.append(child)
-        return child
-
     async def read() -> bool:
         return (await read_process.read_chroma_async(_prepare_request)).exists
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(read_process, "_spawn_reader", _spawner(children, release_sync))
     monkeypatch.setattr(read_process, "_read_slots", ObservedSlots(4))
-    monkeypatch.setattr(subprocess, "run", sync_spawn)
     with ThreadPoolExecutor(max_workers=6) as executor:
         sync_reads = [executor.submit(read_process.read_chroma, ReadRequest("unused", "published")) for _ in range(4)]
         try:
-            sync_started.wait(timeout=3)
+            _wait_until_sync(lambda: len(_serving(children)) == 4)
             async_reads = [executor.submit(asyncio.run, read()) for _ in range(2)]
             assert async_waiting.wait(3)
-            assert children == [], "Neither independent loop may bypass occupied sync capacity"
+            assert len(_serving(children)) == 4, "Neither independent loop may bypass occupied sync capacity"
         finally:
             release_sync.set()
         assert all(future.result(timeout=3).exists for future in sync_reads)
         assert all(future.result(timeout=3) for future in async_reads)
-    assert len(children) == 2
-    assert all(child.reaped for child in children)
+    assert len(_serving(children)) == 6
+    assert all(child.returncode == 0 for child in _serving(children))
     assert asyncio.run(read())
     _assert_all_slots_available()
