@@ -13,7 +13,7 @@ from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-from mindroom.credentials import CredentialsManager  # noqa: TC001 - runtime constructor reflection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001 - runtime constructor reflection
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,

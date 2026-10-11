@@ -30,7 +30,7 @@ from agno.db.utils import deserialize_run, get_run_type
 from mindroom import agno_compat_sqlite
 from mindroom.agent_storage import delete_run_subtrees, runs_without
 from mindroom.history.archive_schema import archive_schema_sql, archive_table_names
-from mindroom.usage_storage import quote_identifier
+from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence

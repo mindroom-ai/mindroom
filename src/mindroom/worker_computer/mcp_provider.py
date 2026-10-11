@@ -13,11 +13,11 @@ from uuid import uuid4
 from mcp import StdioServerParameters
 from mcp.client.stdio import get_default_environment
 
-from mindroom.browser_profile import clear_stale_singleton_locks
+from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.browser.profile_locks import clear_stale_singleton_locks
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.media_delivery import image_result
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
-from mindroom.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.browser_bundle import (
     COMPUTER_BROWSER_EXECUTABLE,
     COMPUTER_BROWSER_GUARD,

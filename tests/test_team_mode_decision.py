@@ -153,7 +153,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_coordinate(self, mock_config):
         """Test AI correctly identifies coordination tasks (different subtasks)."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -176,7 +176,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_collaborate(self, mock_config):
         """Test AI correctly identifies collaboration tasks (same task for all)."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -199,7 +199,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_fallback_on_error(self, mock_config):
         """Test fallback to collaborate mode on AI error."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent to raise an error
             mock_agent = AsyncMock()
             mock_agent.arun.side_effect = Exception("AI service unavailable")
@@ -222,7 +222,7 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_unexpected_response(self, mock_config):
         """Test fallback when AI returns unexpected response type."""
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI agent response with wrong type
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -354,7 +354,7 @@ class TestIntegrationScenarios:
         assert result.outcome is TeamOutcome.TEAM
         assert set(_agent_names(result.eligible_members, mock_config)) == {"email", "phone"}
 
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI to recognize different subtasks
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -390,7 +390,7 @@ class TestIntegrationScenarios:
         assert result.outcome is TeamOutcome.TEAM
         assert set(_agent_names(result.eligible_members, mock_config)) == {"research", "analyst"}
 
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             # Mock the AI to recognize same task for all
             mock_agent = AsyncMock()
             mock_response = MagicMock()

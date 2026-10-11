@@ -14,7 +14,6 @@ from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import runs_without
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
@@ -36,6 +35,7 @@ from mindroom.history.types import (
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
+from mindroom.providers.claude_prompt_cache import as_anthropic_claude
 from mindroom.timing import timed
 from mindroom.token_budget import CompactionEstimateKind, compaction_estimate_kind, estimate_compaction_input_tokens
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings

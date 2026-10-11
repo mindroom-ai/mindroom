@@ -72,11 +72,11 @@ from mindroom.matrix_rtc.voice_agent import (
     VoiceAgentOptions,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
-from mindroom.model_loading import get_model_instance
+from mindroom.providers.model_loading import get_model_instance
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:

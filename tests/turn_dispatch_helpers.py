@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.coalescing_batch import PendingEvent, PreparedTurn, build_prepared_turn, requester_coalescing_key
+from mindroom.coalescing.batch import PendingEvent, PreparedTurn, build_prepared_turn, requester_coalescing_key
 from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,

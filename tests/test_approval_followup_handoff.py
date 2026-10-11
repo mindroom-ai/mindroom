@@ -32,7 +32,7 @@ from tests.response_runner_helpers import _bot, _plain_request, _target
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.approval_response import _ApprovalPausePlan
+    from mindroom.approval.response import _ApprovalPausePlan
     from mindroom.bot import AgentBot
     from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRequest, ResponseRunner, _EarlyPlaceholderState

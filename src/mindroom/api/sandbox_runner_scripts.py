@@ -32,7 +32,7 @@ from mindroom.script_runs.models import (
     script_worker_key_for_run,
     supervisor_handle_for_run,
 )
-from mindroom.shell_supervisor import (
+from mindroom.shell.supervisor import (
     ShellSupervisorStartupError,
     background_script_supervision_supported,
     check_command_via_supervisor,

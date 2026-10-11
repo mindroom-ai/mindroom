@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.approval_transport import _offload_oversized_full_arguments
+from mindroom.approval.transport import _offload_oversized_full_arguments
 from mindroom.matrix.large_messages import content_fits_normal_event
 
 
@@ -25,10 +25,10 @@ async def test_timed_card_offloads_complete_arguments_before_receipt_enrichment(
     assert content_fits_normal_event(content)
     upload = AsyncMock(return_value=("mxc://example.org/arguments", {"size": 53_000, "mimetype": "application/json"}))
     monkeypatch.setattr(
-        "mindroom.approval_transport.resolve_room_encryption_for_delivery",
+        "mindroom.approval.transport.resolve_room_encryption_for_delivery",
         AsyncMock(return_value=False),
     )
-    monkeypatch.setattr("mindroom.approval_transport.upload_json_sidecar", upload)
+    monkeypatch.setattr("mindroom.approval.transport.upload_json_sidecar", upload)
     client = MagicMock(spec=nio.AsyncClient)
 
     prepared = await _offload_oversized_full_arguments(client, "!room:example.org", content)

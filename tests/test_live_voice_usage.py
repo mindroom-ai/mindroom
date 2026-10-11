@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_tools import record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage_stats import collect_admin_usage, collect_private_usage
+from mindroom.usage.stats import collect_admin_usage, collect_private_usage
 from tests.conftest import test_runtime_paths
 from tests.test_request_usage import request_usage  # noqa: F401
 

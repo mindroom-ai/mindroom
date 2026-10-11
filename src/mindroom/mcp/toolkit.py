@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from agno.tools.function import ToolResult
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.mcp.manager import MCPServerManager
     from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog

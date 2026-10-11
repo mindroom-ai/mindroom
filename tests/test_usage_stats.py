@@ -21,11 +21,11 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage_stats import collect_admin_usage, collect_self_usage
-from mindroom.usage_stats_storage import (
+from mindroom.usage.legacy_usage_storage import migrate_usage_database
+from mindroom.usage.stats import collect_admin_usage, collect_self_usage
+from mindroom.usage.stats_storage import (
     UsageModelMetrics,
     UsageRunNode,
     UsageSessionRow,
@@ -360,8 +360,8 @@ def _wire(
     rows: dict[str, tuple[UsageSessionRow | UsageStorageDiagnostic, ...]],
     calls: list[tuple[str, str]] | None = None,
 ) -> None:
-    monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: sources)
-    monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: sources)
+    monkeypatch.setattr("mindroom.usage.stats.discover_self_usage_sources", lambda **_: sources)
+    monkeypatch.setattr("mindroom.usage.stats.discover_admin_usage_sources", lambda **_: sources)
 
     def iter_rows(
         source: UsageStorageSource,
@@ -372,7 +372,7 @@ def _wire(
             calls.append((source.path_label, mode))
         yield from rows.get(source.path_label, ())
 
-    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
+    monkeypatch.setattr("mindroom.usage.stats.iter_usage_storage_rows", iter_rows)
 
 
 @pytest.mark.parametrize("include_daily", [False, True])
@@ -962,7 +962,7 @@ def test_admin_resolves_repeated_requesters_once_per_report(tmp_path: Path, monk
         resolutions.append(user_id)
         return resolve_human_requester_alias(user_id, config, runtime_paths)
 
-    monkeypatch.setattr("mindroom.usage_stats.resolve_human_requester_alias", resolve)
+    monkeypatch.setattr("mindroom.usage.stats.resolve_human_requester_alias", resolve)
     first = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
     changed_config = _config()
     changed_config.authorization.aliases = {"@bob:example.test": ["@telegram-alice:example.test"]}

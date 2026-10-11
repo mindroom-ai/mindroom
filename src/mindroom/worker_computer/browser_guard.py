@@ -9,7 +9,7 @@ import json
 import secrets
 from typing import TYPE_CHECKING
 
-from mindroom.browser_fetch_guard import validate_browser_fetch_url
+from mindroom.browser.fetch_guard import validate_browser_fetch_url
 from mindroom.server_fetch_url import ServerFetchUrlError
 
 if TYPE_CHECKING:

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
+from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry

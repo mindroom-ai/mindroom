@@ -35,14 +35,11 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import create_session_storage, run_session_storage_operation, save_independent_usage
 from mindroom.agents import create_agent
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import (
     run_blocking_until_complete,
     run_coroutine_until_complete,
     wait_for_future_until_complete,
-)
-from mindroom.claude_prompt_cache import (
-    aclose_anthropic_async_client,
-    arefresh_session_backed_bedrock_async_client,
 )
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import (
@@ -57,8 +54,11 @@ from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_k
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.pre_model_preparation import prewarm_agent_model_client
+from mindroom.providers.claude_prompt_cache import (
+    aclose_anthropic_async_client,
+    arefresh_session_backed_bedrock_async_client,
+)
 from mindroom.session_ids import create_session_id
-from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,

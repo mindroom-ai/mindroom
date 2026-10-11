@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from mindroom.approval_manager import initialize_approval_store
+from mindroom.approval.manager import initialize_approval_store
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN

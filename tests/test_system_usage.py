@@ -19,9 +19,9 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.helper_usage import record_system_usage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage_stats import collect_admin_usage, collect_private_usage, collect_self_usage
-from mindroom.usage_stats_storage import discover_admin_usage_sources
-from mindroom.usage_storage import SYSTEM_USAGE_ENTITY, quote_identifier
+from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
+from mindroom.usage.stats_storage import discover_admin_usage_sources
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, quote_identifier
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:

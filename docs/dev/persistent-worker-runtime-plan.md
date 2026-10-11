@@ -578,7 +578,7 @@ The highest-value target is to make `shared`, `user_agent`, and unscoped dedicat
 - `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and the worker-path plumbing that must stay aligned with canonical agent-owned state and per-agent visibility rules.
 - `src/mindroom/tool_system/metadata.py` is the source of truth for per-tool default execution targets and for the built-in default worker-routing policy.
 - `src/mindroom/agents.py` already targets canonical agent-owned state and should stay aligned with the no-copy, workspace-relative contract.
-- `src/mindroom/credentials.py` is now scope-aware and remains the place where runtime credential ownership rules should continue to consolidate.
+- `src/mindroom/credentials/manager.py` is now scope-aware and remains the place where runtime credential ownership rules should continue to consolidate.
 - `src/mindroom/api/openai_compat.py` keeps enforcing conservative `/v1` scope eligibility and trusted requester identity rules.
 - `src/mindroom/api/sandbox_runner.py` is one of the main places that still needs tighter runtime filesystem visibility rules for agent-isolated scopes.
 - `src/mindroom/tool_system/sandbox_proxy.py` should resolve worker handles through the worker manager and stay free of provider-specific assumptions.

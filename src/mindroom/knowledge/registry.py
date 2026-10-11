@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 
-from mindroom.embedding_factory import create_configured_embedder, embedder_client_signature
+from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
     PublishedIndexState,
@@ -27,9 +27,9 @@ from mindroom.knowledge.indexing_config import (
     published_index_settings_compatible,
     storage_key_for_base,
 )
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
-from mindroom.strict_knowledge import StrictSearchKnowledge
 
 if TYPE_CHECKING:
     from collections.abc import Callable

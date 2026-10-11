@@ -33,17 +33,19 @@ from agno.tools.function import Function, FunctionCall, UserInputField
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
-from mindroom import approval_receipt, cli_approval_waits, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
+from mindroom import interactive, response_runner
 from mindroom import reply_lifecycle as rl
+from mindroom.agent_cli import cli_approval_waits
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import get_agent_session
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval import receipt as approval_receipt
+from mindroom.approval.response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -105,6 +107,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_scope import SpanHandle, current_span
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -153,7 +156,6 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
 )
-from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
@@ -1670,7 +1672,7 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
+            "mindroom.approval.response.approval_manager.get_approval_store",
             return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
@@ -1706,7 +1708,7 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
+            "mindroom.approval.response.approval_manager.get_approval_store",
             return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
@@ -1858,7 +1860,7 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
         is_visible_response=True,
     )
     with patch(
-        "mindroom.approval_response.approval_manager.get_approval_store",
+        "mindroom.approval.response.approval_manager.get_approval_store",
         return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
     ):
         await runner._settle_failed_approval_outcome(claimed, outcome)
@@ -2655,8 +2657,8 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
     )
     with (
         patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-cancel")),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
         patch.object(
             type(runner.deps.approval_store),
             "pause_for_approval",
@@ -2708,8 +2710,8 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
 
     with (
         patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-team-models")),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None) as (_edit_text, _send_text):
             await runner._suspend_for_approval(
@@ -2755,8 +2757,8 @@ async def test_approval_pause_keeps_the_reply_correlation_when_the_request_names
 
     with (
         patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-reply-correlation")),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None) as (_edit_text, _send_text):
             await runner._suspend_for_approval(
@@ -2866,13 +2868,13 @@ async def test_agent_continuation_executes_real_agno_confirmation(
             new_callable=AsyncMock,
             return_value=SimpleNamespace(knowledge=knowledge),
         ) as resolve_knowledge,
-        patch("mindroom.approval_execution.create_agent", return_value=agent) as create_agent,
+        patch("mindroom.approval.execution.create_agent", return_value=agent) as create_agent,
         patch.object(agent, "acontinue_run", new=continue_run),
-        patch("mindroom.approval_execution.typing_indicator", _noop_typing),
-        patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
-        patch("mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
-        patch("mindroom.approval_execution.install_approval_receipt_hooks") as install_receipt,
-        patch("mindroom.approval_execution.ai_runtime.register_queued_notice_storage") as register_notice,
+        patch("mindroom.approval.execution.typing_indicator", _noop_typing),
+        patch("mindroom.approval.execution.close_agent_runtime_state_dbs"),
+        patch("mindroom.approval.execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
+        patch("mindroom.approval.execution.install_approval_receipt_hooks") as install_receipt,
+        patch("mindroom.approval.execution.ai_runtime.register_queued_notice_storage") as register_notice,
         approval_receipt.approval_receipt_context("trusted approval receipt"),
     ):
         result = await runner._approval_execution.continue_run(
@@ -3041,8 +3043,8 @@ async def test_agent_continuation_runs_only_approved_calls(
             new_callable=AsyncMock,
             return_value=SimpleNamespace(knowledge=None),
         ),
-        patch("mindroom.approval_execution.create_agent", return_value=agent),
-        patch("mindroom.approval_execution.typing_indicator", _noop_typing),
+        patch("mindroom.approval.execution.create_agent", return_value=agent),
+        patch("mindroom.approval.execution.typing_indicator", _noop_typing),
         pytest.raises(RuntimeError, match=r"arguments|does not cover") if mutation else nullcontext(),
     ):
         await runner._approval_execution.continue_run(
@@ -3130,8 +3132,8 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
             new_callable=AsyncMock,
             return_value=SimpleNamespace(knowledge=MagicMock()),
         ),
-        patch("mindroom.approval_execution.create_agent", return_value=agent),
-        patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
+        patch("mindroom.approval.execution.create_agent", return_value=agent),
+        patch("mindroom.approval.execution.close_agent_runtime_state_dbs"),
         pytest.raises(RuntimeError, match="no longer match the approval continuation"),
     ):
         await runner._approval_execution.continue_run(
@@ -3184,13 +3186,13 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
             new_callable=AsyncMock,
             return_value=SimpleNamespace(knowledge=MagicMock()),
         ),
-        patch("mindroom.approval_execution.create_session_storage", return_value=storage),
-        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch("mindroom.approval.execution.create_session_storage", return_value=storage),
+        patch("mindroom.approval.execution.create_agent", return_value=agent),
         patch(
-            "mindroom.approval_execution.ai_runtime.install_queued_message_notice_hook",
+            "mindroom.approval.execution.ai_runtime.install_queued_message_notice_hook",
             side_effect=RuntimeError("hook setup failed"),
         ),
-        patch("mindroom.approval_execution.close_agent_runtime_state_dbs") as close_runtime,
+        patch("mindroom.approval.execution.close_agent_runtime_state_dbs") as close_runtime,
         pytest.raises(RuntimeError, match="hook setup failed"),
     ):
         await runner._approval_execution.continue_run(
@@ -3226,8 +3228,8 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         return False, 60.0
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", side_effect=resolve_approver),
-        patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate_policy),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", side_effect=resolve_approver),
+        patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate_policy),
     ):
         await runner._approval_responses.plan_pause(
             ((tool, "call-1", "dangerous", "general"),),
@@ -3265,7 +3267,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.approval_execution.create_agent", side_effect=create_from_live_config),
+        patch("mindroom.approval.execution.create_agent", side_effect=create_from_live_config),
         pytest.raises(RuntimeError, match="live config observed"),
     ):
         await runner._approval_execution.continue_run(
@@ -3288,8 +3290,8 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
     tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value=None),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value=None),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         plan = await runner._approval_responses.plan_pause(
             ((tool, "call-1", "dangerous", "general"),),
@@ -3311,11 +3313,11 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
 
     with (
         patch(
-            "mindroom.approval_response.resolve_tool_approval_approver",
+            "mindroom.approval.response.resolve_tool_approval_approver",
             return_value="@user:localhost",
         ),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(side_effect=[(True, 60.0), (False, 60.0)]),
         ),
     ):
@@ -3343,10 +3345,10 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
 
     with (
         patch(
-            "mindroom.approval_response.resolve_tool_approval_approver",
+            "mindroom.approval.response.resolve_tool_approval_approver",
             return_value="@user:localhost",
         ),
-        patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate),
+        patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate),
     ):
         plan = await runner._approval_responses.plan_pause(
             (
@@ -3371,7 +3373,7 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         reserve_and_publish=AsyncMock(return_value=True),
     )
     with patch(
-        "mindroom.approval_response.approval_manager.get_approval_store",
+        "mindroom.approval.response.approval_manager.get_approval_store",
         return_value=approval_store,
     ):
         await runner._approval_responses._publish_cards(
@@ -3397,11 +3399,11 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
 
     with (
         patch(
-            "mindroom.approval_response.resolve_tool_approval_approver",
+            "mindroom.approval.response.resolve_tool_approval_approver",
             return_value="@user:localhost",
         ),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
     ):
@@ -3425,7 +3427,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
         reserve_and_publish=AsyncMock(return_value=True),
     )
     with patch(
-        "mindroom.approval_response.approval_manager.get_approval_store",
+        "mindroom.approval.response.approval_manager.get_approval_store",
         return_value=approval_store,
     ):
         await runner._approval_responses._publish_cards(
@@ -3486,7 +3488,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     runner._approval_responses.retry_sources = retry_sources
 
     with patch(
-        "mindroom.approval_response.resolve_tool_approval_approver",
+        "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
         async with _in_reply_span(runner, request) as (edit_text, send_text):
@@ -3533,11 +3535,11 @@ async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_pat
 
     with (
         patch(
-            "mindroom.approval_response.resolve_tool_approval_approver",
+            "mindroom.approval.response.resolve_tool_approval_approver",
             return_value="@user:localhost",
         ),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(False, 60.0)),
         ),
     ):
@@ -3596,9 +3598,9 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
     runner.deps.runtime.config.agents[runner.deps.agent_name].show_tool_calls = reloaded_visibility
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
         patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
@@ -3670,9 +3672,9 @@ async def test_pause_republishes_the_acknowledged_interactive_body(tmp_path: Pat
     )
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
         patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
@@ -3724,9 +3726,9 @@ async def test_pause_publication_rejects_an_unanchored_agent_tool(tmp_path: Path
     edit_text = AsyncMock(return_value=True)
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
         patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
@@ -3788,9 +3790,9 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
     edit_text = AsyncMock(return_value=True)
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
         patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
@@ -4202,7 +4204,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
         with (
             patch.object(runner, "_continue_entity_call", new=continue_call),
             patch(
-                "mindroom.approval_response.approval_manager.get_approval_store",
+                "mindroom.approval.response.approval_manager.get_approval_store",
                 return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
             ),
         ):
@@ -4256,9 +4258,9 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
     runner._approval_responses.retry_sources = retry_sources
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value=None),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value=None),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
     ):
@@ -4356,12 +4358,12 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     target = _target(thread_id="$thread")
     with (
         patch(
-            "mindroom.approval_response.resolve_tool_approval_approver",
+            "mindroom.approval.response.resolve_tool_approval_approver",
             return_value="@user:localhost",
         ),
-        patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate),
+        patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate),
         patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
+            "mindroom.approval.response.approval_manager.get_approval_store",
             return_value=approval_store,
         ),
         _through_the_gateway(runner) as (edit_text, _send_text),
@@ -4480,7 +4482,7 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
     )
 
     with patch(
-        "mindroom.approval_response.resolve_tool_approval_approver",
+        "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
         plan = await runner._approval_responses.plan_pause(
@@ -4519,7 +4521,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
     )
 
     with patch(
-        "mindroom.approval_response.resolve_tool_approval_approver",
+        "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
         plan = await runner._approval_responses.plan_pause(
@@ -4572,7 +4574,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
     )
 
     with patch(
-        "mindroom.approval_response.resolve_tool_approval_approver",
+        "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
         plan = await runner._approval_responses.plan_pause(
@@ -4777,7 +4779,7 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
+            "mindroom.approval.response.approval_manager.get_approval_store",
             return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
         ),
     ):
@@ -5124,7 +5126,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(runner.deps.tool_runtime, "build_dispatch_context", side_effect=build_dispatch_context),
         patch(
-            "mindroom.approval_execution.AgentApprovalExecution.continue_run",
+            "mindroom.approval.execution.AgentApprovalExecution.continue_run",
             new=continue_run,
         ),
     ):
@@ -8013,8 +8015,8 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
         assert waiter.is_set()
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
         patch.object(runner._approval_responses, "publish_generation", new=publish),
         patch.object(runner, "_request_remains_authorized", new=AsyncMock(return_value=authorized)),
     ):
@@ -8078,8 +8080,8 @@ async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
         patch.object(runner._approval_responses, "publish_generation", new=publish),
         pytest.raises(RuntimeError, match="approval card send failed"),
     ):
@@ -8332,9 +8334,9 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
         patch.object(cli_approval_waits, "time", SimpleNamespace(time_ns=lambda: clock.now)),
         patch.object(asyncio, "timeout", observe_timeout),
         patch.object(type(store), "approval_continuation_for_source", read_source),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(live or not ready, 60.0)),
         ),
         patch.object(runner._approval_responses, "publish_generation", new=publish),
@@ -8507,8 +8509,8 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
             )
 
     with (
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
         patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
         pytest.raises(ResponsePausedForApproval) as raised,
     ):
@@ -8595,8 +8597,8 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         patch.object(type(runner._approval_execution), "continue_run", new=recover),
         patch.object(runner._approval_responses, "publish_generation", new=publish),
         patch.object(runner, "_request_remains_authorized", new=AsyncMock(return_value=True)),
-        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
         patch.object(
             DeliveryGateway,
             "deliver_final",
@@ -8846,7 +8848,7 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         with (
             patch.object(runner, "_continue_entity_call", new=continue_call),
             patch(
-                "mindroom.approval_response.approval_manager.get_approval_store",
+                "mindroom.approval.response.approval_manager.get_approval_store",
                 return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
             ),
         ):
@@ -8911,7 +8913,7 @@ async def _respond_with_skill_learning(
         tool_call_probability=0,
     )
     with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
         patch_response_runner_module(
             typing_indicator=_noop_typing,
             should_use_streaming=AsyncMock(return_value=streaming),
@@ -9014,7 +9016,7 @@ async def test_a_finished_response_tells_automations_its_source_events(tmp_path:
     )
     request = _plain_request(_target())
     with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
         patch_response_runner_module(
             typing_indicator=_noop_typing,
             should_use_streaming=AsyncMock(return_value=False),

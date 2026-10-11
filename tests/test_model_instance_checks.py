@@ -14,9 +14,9 @@ from importlib import import_module
 
 import pytest
 
-from mindroom.claude_prompt_cache import _ANTHROPIC_CLAUDE_CLASS
-from mindroom.model_instance_checks import isinstance_of_loaded
-from mindroom.openai_tool_search import _OPENAI_RESPONSES_CLASS
+from mindroom.providers.claude_prompt_cache import _ANTHROPIC_CLAUDE_CLASS
+from mindroom.providers.model_instance_checks import isinstance_of_loaded
+from mindroom.providers.openai_tool_search import _OPENAI_RESPONSES_CLASS
 from mindroom.thread_summary import _VERTEXAI_CLAUDE_CLASS
 
 _ALL_DECLARED_CLASS_PATHS = sorted(

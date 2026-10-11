@@ -10,13 +10,13 @@ from agno.exceptions import ContextWindowExceededError, ModelProviderError, Mode
 from agno.models.anthropic import Claude
 from agno.models.response import ModelResponse
 
-from mindroom import provider_stream_retry
 from mindroom.error_handling import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     IncompleteResponsesStreamError,
     ModelSafeguardRefusalError,
 )
-from mindroom.provider_stream_retry import install_provider_stream_retry_hook
+from mindroom.providers import stream_retry as provider_stream_retry
+from mindroom.providers.stream_retry import install_provider_stream_retry_hook
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator

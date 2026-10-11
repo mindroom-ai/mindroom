@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.models.response import ModelResponse
 
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

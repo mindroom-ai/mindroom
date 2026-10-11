@@ -1598,7 +1598,7 @@ The projection stores the Matrix content, which holds the reference and not the 
 Attach the resolved text to the visible revision as one nullable value, cleared whenever the revision changes: an edit, a redaction, or a membership epoch advance all invalidate it, and a value that outlived any of those would serve the wrong body.
 
 **Tool-approval card recovery.**
-`ApprovalManager._cached_trusted_pending_approval_for_card` in `src/mindroom/approval_manager.py` reads an arbitrary `io.mindroom.tool_approval` event and its edits from the cache to recover pending approval state after a restart.
+`ApprovalManager._cached_trusted_pending_approval_for_card` in `src/mindroom/approval/manager.py` reads an arbitrary `io.mindroom.tool_approval` event and its edits from the cache to recover pending approval state after a restart.
 Neither new owner can substitute for it: `visible_messages` models conversation messages, and the journal clears a settled event's payload on purpose.
 Give approvals their own small durable projection, owned by the approval subsystem, rather than widening either.
 
@@ -2030,7 +2030,7 @@ derive it today; `SendTextRequest` cannot.
 ### Do not route `send_text` wholesale
 
 `SendTextRequest` has callers that are not response turns at all:
-`visible_voice_echo.py`, `commands/config_confirmation.py`, `bot.py:424`,
+`voice/visible_voice_echo.py`, `commands/config_confirmation.py`, `bot.py:424`,
 `turn_controller.py:1682` and `:1768`,
 `visible_response_reconciliation.py:152`. Giving those a synthetic turn ID
 would put rows in the outbox that no recovery pass can reason about, and two
@@ -2320,7 +2320,7 @@ does not reach.
 
 What the log does show is where the turn stopped. The event reached
 `coalescing_gate_message_enqueued` and that line is the last
-`mindroom.coalescing` entry in the file. Every other enqueue in the same run is
+`mindroom.coalescing.gate` entry in the file. Every other enqueue in the same run is
 followed by `coalescing_gate_flush_started` within about a millisecond and then
 `flush_finished outcome=dispatched`. This one never gets a `flush_started` at
 all.
@@ -2340,7 +2340,7 @@ enqueue that did flush. And that same event fired
 with one `Received message` and one enqueue -- duplicate delivery across the
 restart.
 
-`src/mindroom/coalescing.py` and `src/mindroom/ingress_lanes.py` are where to
+`src/mindroom/coalescing/gate.py` and `src/mindroom/coalescing/ingress_lanes.py` are where to
 look. This is a real open defect, distinct from the livelock, and it is the
 reason the live proof cannot yet be called green.
 

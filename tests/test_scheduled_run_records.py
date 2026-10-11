@@ -10,12 +10,12 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom import scheduled_run_records
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.scheduled_run_records import (
+from mindroom.scheduling import scheduled_run_records
+from mindroom.scheduling.scheduled_run_records import (
     record_silent_schedule_result_if_needed,
     record_silent_schedule_started_if_needed,
 )

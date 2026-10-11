@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.constants import resolve_config_relative_path
-from mindroom.embedding_errors import classified_embedder_error
+from mindroom.embeddings.errors import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root

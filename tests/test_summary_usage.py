@@ -25,7 +25,7 @@ from mindroom.history.summary_call import _CompactionSummaryTimeoutError, genera
 from mindroom.history.types import HistoryScopeState
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from mindroom.usage_stats import collect_admin_usage, collect_self_usage
+from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingModel,

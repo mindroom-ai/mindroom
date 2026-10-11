@@ -21,7 +21,7 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_storage import runs_without, save_runs
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
-from mindroom.history_run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 

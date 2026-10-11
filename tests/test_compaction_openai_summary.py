@@ -15,7 +15,7 @@ from mindroom.history.summary_call import (
     CompactionSummaryOutputLimitError,
     generate_compaction_summary,
 )
-from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
+from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 
 pytestmark = pytest.mark.asyncio
 

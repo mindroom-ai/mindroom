@@ -27,8 +27,8 @@ from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.usage_stats import collect_admin_usage
-from mindroom.usage_storage import project_usage
+from mindroom.usage.stats import collect_admin_usage
+from mindroom.usage.storage import project_usage
 from tests.history_helpers import RecordingModel
 
 if TYPE_CHECKING:

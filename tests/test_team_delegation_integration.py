@@ -14,7 +14,8 @@ from agno.run.team import TeamRunOutput
 from agno.team import Team
 from agno.tools.function import Function
 
-from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.tool_approval import evaluate_tool_approval
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -22,7 +23,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.response_turn import ResponsePausedForApproval, apply_local_approval_decisions
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _team_approval_events, team_response, team_response_stream
-from mindroom.tool_approval import evaluate_tool_approval
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import make_turn_context, runtime_paths_for
@@ -83,7 +83,7 @@ async def test_real_streaming_team_preserves_child_approval_identity(
         ),
     }
     monkeypatch.setattr(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         lambda _config, _paths, name, **_kwargs: models[name],
     )
     orchestrator = MagicMock()

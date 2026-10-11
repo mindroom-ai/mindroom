@@ -10,9 +10,9 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom import constants as constants_mod
-from mindroom import credentials_sync as credentials_sync_mod
-from mindroom.credentials import CredentialsManager
-from mindroom.credentials_sync import (
+from mindroom.credentials import sync as credentials_sync_mod
+from mindroom.credentials.manager import CredentialsManager
+from mindroom.credentials.sync import (
     _EMBEDDER_CREDENTIAL_SERVICE,
     _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY,
     _ENV_TO_SERVICE_MAP,
@@ -23,7 +23,7 @@ from mindroom.credentials_sync import (
     get_secret_from_env,
     sync_env_to_credentials,
 )
-from mindroom.model_loading import missing_model_api_key_provider
+from mindroom.providers.model_loading import missing_model_api_key_provider
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, SHARED_CREDENTIALS_PATH_ENV
 from tests.conftest import load_config_yaml
 
