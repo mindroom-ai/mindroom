@@ -135,11 +135,6 @@ class _ClaudeTurn:
     result: ResultMessage | None = None
 
 
-def _started_by_claude_code(result: ResultMessage | None) -> bool:
-    """Return whether a turn answered something other than a prompt, such as a finished background task."""
-    return result is not None and result.origin is not None and result.origin["kind"] != "human"
-
-
 class _ClaudeSessionManager:
     """Process-wide manager for persistent ClaudeSDKClient sessions."""
 
@@ -643,13 +638,13 @@ class ClaudeAgentTools(Toolkit):
         normalized_resume = resume.strip() if isinstance(resume, str) else None
         response_text = ""
         tool_names: list[str] = []
-        turns: list[_ClaudeTurn] = []
+        turn = _ClaudeTurn()
         session_error: str | None = None
         async with session.lock:
             session.last_used_at = monotonic()
             try:
                 await session.client.query(trimmed_prompt)
-                response_text, tool_names, turns = await self._collect_response(session)
+                response_text, tool_names, turn = await self._collect_response(session)
                 session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
@@ -665,42 +660,37 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        for turn in turns:
-            try:
-                await _record_turn_usage(turn)
-            except Exception as error:
-                # Claude has already done the work, so a usage write failure must not hide its reply.
-                logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-        return self._format_response_output(response_text, tool_names, turns[-1].result)
+        try:
+            await _record_turn_usage(turn)
+        except Exception as error:
+            # Claude has already done the work, so a usage write failure must not hide its reply.
+            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
+        return self._format_response_output(response_text, tool_names, turn.result)
 
     async def _collect_response(
         self,
         session: _ClaudeSessionState,
-    ) -> tuple[str, list[str], list[_ClaudeTurn]]:
+    ) -> tuple[str, list[str], _ClaudeTurn]:
         text_parts: list[str] = []
         tool_names: list[str] = []
-        turns: list[_ClaudeTurn] = []
+        turn = _ClaudeTurn()
 
-        # Claude Code starts a turn itself when a background task finishes, so read on to this prompt's own result.
-        while not turns or _started_by_claude_code(turns[-1].result):
-            turn = _ClaudeTurn()
-            turns.append(turn)
-            async for message in session.client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    # Placeholder messages, such as a request that failed every retry, name no real model.
-                    if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
-                        # Parallel tool uses split one response into messages that share its id and usage.
-                        turn.responses.setdefault(message.message_id, message)
-                    for block in message.content:
-                        if isinstance(block, TextBlock) and block.text:
-                            text_parts.append(block.text)
-                        elif isinstance(block, ToolUseBlock):
-                            tool_names.append(block.name)
-                elif isinstance(message, ResultMessage):
-                    turn.result = message
-                    session.claude_session_id = message.session_id
+        async for message in session.client.receive_response():
+            if isinstance(message, AssistantMessage):
+                # Placeholder messages, such as a request that failed every retry, name no real model.
+                if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
+                    # Parallel tool uses split one response into messages that share its id and usage.
+                    turn.responses.setdefault(message.message_id, message)
+                for block in message.content:
+                    if isinstance(block, TextBlock) and block.text:
+                        text_parts.append(block.text)
+                    elif isinstance(block, ToolUseBlock):
+                        tool_names.append(block.name)
+            elif isinstance(message, ResultMessage):
+                turn.result = message
+                session.claude_session_id = message.session_id
 
-        return _response_text(text_parts, turns[-1].result), tool_names, turns
+        return _response_text(text_parts, turn.result), tool_names, turn
 
     def _format_response_output(
         self,

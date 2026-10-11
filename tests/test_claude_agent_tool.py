@@ -37,8 +37,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterator
     from pathlib import Path
 
-    from claude_agent_sdk.types import MessageOrigin
-
 
 @dataclass
 class _FakeClaudeSDKClient:
@@ -105,7 +103,7 @@ def _claude_response(
     )
 
 
-def _claude_result(output_tokens: int, *, origin: MessageOrigin | None = None) -> ResultMessage:
+def _claude_result(output_tokens: int) -> ResultMessage:
     """Return a turn's result, whose usage covers its main conversation and whose model usage is a running total."""
     return ResultMessage(
         subtype="success",
@@ -128,7 +126,6 @@ def _claude_result(output_tokens: int, *, origin: MessageOrigin | None = None) -
                 "maxOutputTokens": 64000,
             },
         },
-        origin=origin,
     )
 
 
@@ -1289,37 +1286,6 @@ async def test_claude_turn_that_switches_models_counts_each_model(
     assert rows == [
         ("@user:localhost", "claude-opus-5-5", 1000, 0, 4000, 0),
         ("@user:localhost", "claude-sonnet-5-5", 300, 150, 0, 0),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_claude_reply_skips_turns_claude_code_started_itself(
-    tmp_path: Path,
-    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A finished background task starts its own turn; the next prompt still gets and counts its own reply."""
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
-    turns = [
-        [_claude_response("claude-sonnet-5-5", "msg-1", 1000, text="Started a background search"), _claude_result(100)],
-        [
-            _claude_response("claude-sonnet-5-5", "msg-2", 400, text="The background search found the bug"),
-            _claude_result(50, origin={"kind": "task-notification"}),
-        ],
-        [_claude_response("claude-sonnet-5-5", "msg-3", 600), _claude_result(80)],
-        [_claude_response("claude-sonnet-5-5", "msg-4", 200, text="Tests pass"), _claude_result(20)],
-    ]
-    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
-
-    replies, rows = await _send_metered_turns(tmp_path, ["@alice:localhost", "@bob:localhost", "@carol:localhost"])
-
-    assert "The background search found the bug" in replies[1]
-    assert "Fixed it" in replies[1]
-    assert replies[2].startswith("Tests pass")
-    assert rows == [
-        ("@alice:localhost", "claude-sonnet-5-5", 1000, 100, 0, 0),
-        ("@bob:localhost", "claude-sonnet-5-5", 1000, 130, 0, 0),
-        ("@carol:localhost", "claude-sonnet-5-5", 200, 20, 0, 0),
     ]
 
 
