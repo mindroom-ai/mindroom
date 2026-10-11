@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.history.replay import compaction_summary_message, current_summary_text
 from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings
 
 if TYPE_CHECKING:
@@ -41,10 +42,9 @@ def configure_native_history(
         and hard_budget is not None
         and static_tokens < threshold < static_tokens + hard_budget
     )
-    summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
     model.configure_native_compaction(
         threshold=threshold if enabled else None,
-        history_generation=summary,
+        history_generation=_history_generation(session),
         allow_authored=enabled,
     )
     return model
@@ -62,14 +62,19 @@ def restore_native_history(
     latest = next((message for message in reversed(persisted_run.messages or []) if message.role == "assistant"), None)
     model.restore_portable_replay(latest)
     saved = recorded_native_settings(latest) if latest is not None else None
-    summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
     model.configure_native_compaction(
         threshold=saved.threshold if saved is not None else None,
-        history_generation=summary,
+        history_generation=_history_generation(session),
         allow_authored=saved is not None and saved.threshold is None,
     )
     if model.native_compaction is not None and saved is not None and model.native_compaction.route != saved.route:
         model.configure_native_compaction(threshold=None)
+
+
+def _history_generation(session: AgentSession | TeamSession | None) -> str:
+    """Bind checkpoints to the exact summary message their requests carried."""
+    summary = current_summary_text(session) if session is not None else None
+    return str(compaction_summary_message(summary, from_history=True).content) if summary is not None else ""
 
 
 def native_history_route(model: NativeCompactionModel | None) -> str | None:

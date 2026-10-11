@@ -25,6 +25,7 @@ from agno.team import _messages as team_messages
 from agno.team import _run as team_run
 from agno.utils.log import log_warning
 
+from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay
 from mindroom.history.replay import compaction_summary_message, current_summary_text, is_compaction_summary
 
@@ -141,7 +142,7 @@ def _prepare_history(
         replays_history = kwargs.get("add_history_to_context")
         if continuation and replays_history is None:
             replays_history = cast("Agent | Team", target).add_history_to_context
-        if replays_history:
+        if replays_history and not (continuation and system_message_embeds_summary(run_messages.messages)):
             _insert_session_summary(run_messages, session)
     return _strip_history_inline_media(run_messages)
 

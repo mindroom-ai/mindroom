@@ -2347,8 +2347,17 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.agno_compat_message_builder"
-depends_on = ["mindroom.history.message_content", "mindroom.history.replay"]
+depends_on = [
+    "mindroom.history.legacy_summary_system_prompt",
+    "mindroom.history.message_content",
+    "mindroom.history.replay",
+]
 visibility = ["mindroom.agents", "mindroom.teams"]
+
+[[modules]]
+path = "mindroom.history.legacy_summary_system_prompt"
+depends_on = []
+visibility = ["mindroom.history.agno_compat_message_builder"]
 
 [[modules]]
 path = "mindroom.history.compaction"
@@ -2400,7 +2409,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.native"
-depends_on = ["mindroom.native_compaction"]
+depends_on = ["mindroom.history.replay", "mindroom.native_compaction"]
 visibility = ["mindroom.approval_execution", "mindroom.history.runtime", "mindroom.teams", "mindroom.delegation.execution"]
 
 [[modules]]
@@ -7078,6 +7087,7 @@ visibility = [
     "mindroom.execution_preparation",
     "mindroom.history.agno_compat_message_builder",
     "mindroom.history.compaction",
+    "mindroom.history.native",
     "mindroom.history.runtime",
     "mindroom.history.summary_input",
 ]

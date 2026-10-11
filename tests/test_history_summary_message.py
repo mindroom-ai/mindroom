@@ -300,3 +300,37 @@ async def test_minimal_agent_request_starts_history_with_the_summary() -> None:
 
     assert run_messages.messages[0].content == "You are Helper (helper) in minimal mode."
     assert is_compaction_summary(run_messages.messages[1])
+
+
+_LEGACY_SYSTEM_PROMPT = (
+    "Be precise.\n\nHere is a brief summary of your previous interactions:\n\n"
+    "<summary_of_previous_interactions>\nOLD\n</summary_of_previous_interactions>\n\n"
+)
+
+
+@pytest.mark.parametrize("kind", ["agent", "team"])
+def test_resuming_a_pre_release_pause_keeps_its_single_summary(kind: str) -> None:
+    entity = _entity(kind)
+    paused_input = [
+        Message(role="system", content=_LEGACY_SYSTEM_PROMPT),
+        Message(role="user", content="current request"),
+    ]
+    if kind == "agent":
+        assert isinstance(entity, Agent)
+        run_messages = agent_messages.get_continue_run_messages(
+            entity,
+            input=paused_input,
+            session=_session(kind, _SUMMARY),
+            add_history_to_context=True,
+        )
+    else:
+        assert isinstance(entity, Team)
+        run_messages = team_run._get_continue_run_messages(
+            entity,
+            input=paused_input,
+            session=_session(kind, _SUMMARY),
+            add_history_to_context=True,
+        )
+
+    assert _summaries(run_messages.messages) == []
+    assert run_messages.messages[0].content == _LEGACY_SYSTEM_PROMPT

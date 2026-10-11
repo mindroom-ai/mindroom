@@ -28,7 +28,7 @@ from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history import archive
 from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.replay import estimate_prompt_visible_history_tokens
+from mindroom.history.replay import compaction_summary_message, estimate_prompt_visible_history_tokens
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
@@ -1003,3 +1003,41 @@ def test_restore_portable_policy_requires_latest_provenance(provider_data: dict[
     else:
         assert request["previous_response_id"] == "resp_latest"
         assert model._format_messages(messages) == [{"role": "user", "content": "Continue"}]
+
+
+@pytest.mark.parametrize("summary", ["S1", ""])
+def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summary: str) -> None:
+    """A checkpoint recorded while the summary lived in the system prompt is not reused once it is a message."""
+    config, _paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+    )
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(),
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    session = _session("session", summary=SessionSummary(summary=summary) if summary else None)
+    configured = configure_native_history(
+        MindRoomOpenAIResponses(id="gpt-6-astra", store=False),
+        plan=resolved.execution_plan,
+        history_settings=resolved.history_settings,
+        session=session,
+        allowed=True,
+    )
+
+    def route_for(history_generation: str) -> str:
+        model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+        model.configure_native_compaction(threshold=120000, history_generation=history_generation)
+        assert model.native_compaction is not None
+        return model.native_compaction.route
+
+    assert configured is not None
+    assert configured.native_compaction is not None
+    rendered = str(compaction_summary_message(summary, from_history=True).content) if summary else ""
+    assert configured.native_compaction.route == route_for(rendered)
+    if summary:
+        assert configured.native_compaction.route != route_for(summary)
