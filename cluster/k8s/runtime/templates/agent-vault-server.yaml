@@ -172,7 +172,9 @@ spec:
 {{- $squidProxyClients := and .Values.approvedEgress.enabled .Values.approvedEgress.parentProxy.enabled -}}
 {{- $workerProxyClients := and $workerClients (not .Values.approvedEgress.enabled) -}}
 {{- $accessGrantsJob := and $av.accessGrants.enabled (gt (len $av.accessGrants.grants) 0) -}}
-{{- $releaseApiClients := or $av.accessTool.enabled $av.bootstrap.enabled $accessGrantsJob -}}
+{{- /* The access tool and the agent repository broker client both call the vault API from the control plane. */ -}}
+{{- $controlPlaneApiClient := or $av.accessTool.enabled .Values.agentRepositories.enabled -}}
+{{- $releaseApiClients := or $controlPlaneApiClient $av.bootstrap.enabled $accessGrantsJob -}}
 {{- $workerEgressPolicy := include "mindroom-runtime.workerEgressPolicyEnabled" . }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -208,7 +210,7 @@ spec:
     {{- end }}
     {{- if $releaseApiClients }}
     - from:
-        {{- if $av.accessTool.enabled }}
+        {{- if $controlPlaneApiClient }}
         - podSelector:
             matchLabels:
               {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}

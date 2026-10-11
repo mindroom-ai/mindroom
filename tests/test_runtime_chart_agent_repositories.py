@@ -116,6 +116,23 @@ def test_enabled_agent_repositories_render_only_to_control_plane() -> None:
         assert "agent-repository-broker" not in {mount["name"] for mount in container.get("volumeMounts", [])}
 
 
+def test_chart_managed_agent_vault_admits_control_plane_broker_calls() -> None:
+    """A chart-managed broker must accept the control plane's repository ensure calls on its API port."""
+    docs = _render_runtime_chart(*_enabled_values(), "workers.kubernetes.agentVault.server.enabled=true")
+    policy = next(doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == "agent-vault")
+    control_plane = {
+        "podSelector": {
+            "matchLabels": {
+                "app.kubernetes.io/component": "runtime",
+                "app.kubernetes.io/instance": "mindroom-demo",
+                "app.kubernetes.io/name": "mindroom-runtime",
+            },
+        },
+    }
+
+    assert {"from": [control_plane], "ports": [{"protocol": "TCP", "port": 14321}]} in policy["spec"]["ingress"]
+
+
 def test_secret_reference_strings_remain_strings_after_render() -> None:
     """Boolean-like Secret names and keys must remain Kubernetes string fields."""
     pod_spec = _deployment(
