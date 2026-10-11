@@ -54,6 +54,8 @@ from mindroom.runtime_resolution import (
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.translation import resolve_tool_dialect, wire_function_name
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -104,11 +106,12 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
-    from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
+    from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess, ModelConfig
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.tool_dialects.types import ToolDialect
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
@@ -181,11 +184,13 @@ class _AgentToolAssembly:
             dict.fromkeys(deferred.domain_name for deferred in self.deferred_toolkits if deferred.wire_function_names),
         )
 
-    @property
-    def deferred_wire_tool_names(self) -> frozenset[str]:
-        """Return deferred wire names from the final projected toolkit surface."""
+    def deferred_wire_tool_names(self, dialect: ToolDialect) -> frozenset[str]:
+        """Return deferred names as *dialect* presents them on the wire, from the final projected toolkit surface."""
+        taken = {name for toolkit in self.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())}
         return frozenset(
-            function_name for deferred in self.deferred_toolkits for function_name in deferred.wire_function_names
+            wire_function_name(dialect, deferred.domain_name, function_name, taken)
+            for deferred in self.deferred_toolkits
+            for function_name in deferred.wire_function_names
         )
 
 
@@ -716,6 +721,41 @@ def _load_agent_model_instance(
     )
 
 
+def _prepare_agent_model(
+    agent_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    model_name: str,
+    runtime_model_config: ModelConfig | None,
+    tool_assembly: _AgentToolAssembly,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Model:
+    """Load an agent's model with what reshapes its requests: the call cap, deferred tool search, and its tool dialect."""
+    model = _load_agent_model_instance(
+        config,
+        runtime_paths,
+        model_name,
+        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+    )
+    install_model_call_cap(model, entity_name=agent_name)
+    tool_dialect = resolve_tool_dialect(runtime_model_config)
+    deferred_wire_tool_names = tool_assembly.deferred_wire_tool_names(tool_dialect)
+    if deferred_wire_tool_names:
+        # Each installer no-ops on the other provider family's model class.
+        install_claude_deferred_tool_search(model, deferred_tool_names=deferred_wire_tool_names)
+        install_openai_deferred_tool_search(model, deferred_tool_names=deferred_wire_tool_names)
+    install_tool_dialect(model, tool_dialect)
+    logger.info(
+        "create_agent",
+        agent=agent_name,
+        model_class=model.__class__.__name__,
+        model_id=model.id,
+        native_deferred_tools=sorted(deferred_wire_tool_names),
+        tool_dialect=tool_dialect.name,
+    )
+    return model
+
+
 @timed("system_prompt_assembly.agent_create.toolkit_build")
 def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     tool_name: str,
@@ -919,7 +959,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
-    return _build_registered_agent_tool(
+    toolkit = _build_registered_agent_tool(
         tool_name,
         runtime_paths,
         credentials_manager,
@@ -936,6 +976,14 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         execution_identity,
         runtime_overrides,
         config,
+    )
+    # Every consumer, including the MCP gateway and script grants, decides approval per function, so a function
+    # that does what a differently gated one does would let calls around the rules written for it.
+    return without_implied_exclusions(
+        toolkit,
+        removed=set(),
+        may_require_approval=partial(tool_may_require_approval, config),
+        registered_tool_name=tool_name,
     )
 
 
@@ -1313,6 +1361,39 @@ def apply_tool_approval_capability(
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
 
+def _function_names(toolkit: Toolkit) -> set[str]:
+    return {*toolkit.functions, *toolkit.async_functions}
+
+
+def without_implied_exclusions(
+    toolkit: Toolkit,
+    *,
+    removed: set[str],
+    may_require_approval: Callable[[str], bool],
+    registered_tool_name: str,
+) -> Toolkit | None:
+    """Hide a function that does what another does, such as apply_patch, when either is hidden or may need approval.
+
+    Approval rules are usually written for edit_file and write_file, so models edit with those whenever any of
+    them may need approval, even when an allowlist left them out. *removed* names functions this surface hid.
+    """
+    metadata = TOOL_METADATA.get(registered_tool_name)
+    present = _function_names(toolkit)
+    hidden = {
+        name
+        for key, names in (metadata.implied_exclusions or {} if metadata is not None else {}).items()
+        for name in names
+        if name in present and (key in removed or may_require_approval(key) or may_require_approval(name))
+    }
+    if not hidden:
+        return toolkit
+    toolkit.functions = {name: function for name, function in toolkit.functions.items() if name not in hidden}
+    toolkit.async_functions = {
+        name: function for name, function in toolkit.async_functions.items() if name not in hidden
+    }
+    return toolkit if toolkit.functions or toolkit.async_functions else None
+
+
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
 def _resolve_agent_dynamic_tool_selection(
     *,
@@ -1463,7 +1544,7 @@ def _keep_persona_functions(toolkit: Toolkit, tool_name: str, persona_tools: tup
             del functions[name]
 
 
-def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
+def set_toolkit_owner(toolkit: Toolkit, authored_name: str) -> None:
     """Attach the configured toolkit identity to its executable functions."""
     for function in (*toolkit.functions.values(), *toolkit.get_async_functions().values()):
         function.owning_toolkit = authored_name
@@ -1598,23 +1679,35 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 dynamic_tool_continuation=dynamic_tool_continuation,
                 persona=persona,
             )
-        if toolkit:
-            _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-            if persona_tools is not None:
-                # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
-                _keep_persona_functions(toolkit, tool_name, persona_tools)
-            # Function policies match on the owning toolkit, so stamp it before pruning.
-            _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
-            toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
-            if toolkit is not None and persona_tools is not None:
-                # Record what survives the caller's filters; approval capability below may still hide gated calls.
-                persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
+        if not toolkit:
+            return None
+        _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
+        if persona_tools is not None:
+            # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
+            _keep_persona_functions(toolkit, tool_name, persona_tools)
+        # A persona names what it keeps, so only the filters below can hide a function another one implies.
+        built = _function_names(toolkit)
+        # Function policies match on the owning toolkit, so stamp it before pruning.
+        set_toolkit_owner(toolkit, tool_entry.authored_name or tool_name)
+        toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+        if toolkit is not None and persona_tools is not None:
+            # Record what survives the caller's filters; approval capability below may still hide gated calls.
+            persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
         toolkit = apply_tool_approval_capability(
             toolkit,
             config,
             supports_native_tool_approval=supports_native_tool_approval,
             registered_tool_name=tool_name,
         )
+        if toolkit:
+            # A function the channel filter or approval pruning removed takes away what does the same, like
+            # apply_patch; build_agent_toolkit already hid what approval may gate.
+            toolkit = without_implied_exclusions(
+                toolkit,
+                removed=built - _function_names(toolkit),
+                may_require_approval=lambda _name: False,
+                registered_tool_name=tool_name,
+            )
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
             toolkit = attach_computer_announcement(
@@ -2075,23 +2168,14 @@ def create_agent(
     )
 
     # Create agent with defaults applied
-    model = _load_agent_model_instance(
+    model = _prepare_agent_model(
+        agent_name,
         config,
         runtime_paths,
         role_context.model_name,
-        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
-    )
-    install_model_call_cap(model, entity_name=agent_name)
-    if tool_assembly.deferred_wire_tool_names:
-        # Each installer no-ops on the other provider family's model class.
-        install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
-        install_openai_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
-    logger.info(
-        "create_agent",
-        agent=agent_name,
-        model_class=model.__class__.__name__,
-        model_id=model.id,
-        native_deferred_tools=sorted(tool_assembly.deferred_wire_tool_names),
+        runtime_model_config,
+        tool_assembly,
+        execution_identity,
     )
 
     workspace = agent_runtime.workspace
@@ -2264,5 +2348,7 @@ __all__ = [
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
     "resolve_runtime_worker_tools",
+    "set_toolkit_owner",
     "show_tool_calls_for_agent",
+    "without_implied_exclusions",
 ]

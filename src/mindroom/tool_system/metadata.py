@@ -614,11 +614,13 @@ def _apply_implicit_toolkit_filters(
     include_tools: list[str] | None,
     exclude_tools: list[str] | None,
     declared_functions: frozenset[str] = frozenset(),
+    implied_exclusions: dict[str, tuple[str, ...]] | None = None,
 ) -> None:
     """Apply Agno-equivalent filters after constructing a Toolkit subclass.
 
     Excluding a declared function that an option left disabled (such as chat_ui's show_canvas) is a
     no-op, so the exclusion cannot drop the whole toolkit.
+    Excluding a function also excludes the functions *implied_exclusions* lists for it.
     """
     if include_tools is None and exclude_tools is None:
         return
@@ -633,6 +635,9 @@ def _apply_implicit_toolkit_filters(
         msg = f"Excluded tool(s) not present in the toolkit: {', '.join(missing_excludes)}"
         raise ValueError(msg)
 
+    if exclude_tools is not None:
+        implied = [function for name in exclude_tools for function in (implied_exclusions or {}).get(name, ())]
+        exclude_tools = list(dict.fromkeys([*exclude_tools, *implied]))
     toolkit.include_tools = include_tools
     toolkit.exclude_tools = exclude_tools
     included_names = set(include_tools) if include_tools is not None else None
@@ -785,6 +790,7 @@ def _build_tool_instance(
         include_tools=include_tools,
         exclude_tools=exclude_tools,
         declared_functions=frozenset(metadata.function_names or ()),
+        implied_exclusions=metadata.implied_exclusions,
     )
     output_file_policy = (
         ToolOutputFilePolicy.from_runtime(
@@ -1499,6 +1505,7 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("worker_inert_agent_functions", None)
+        tool_dict.pop("implied_exclusions", None)
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)

@@ -40,6 +40,8 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_dialects.agno_compat_model import install_tool_dialect
+from mindroom.tool_dialects.claude import CLAUDE_DIALECT
 from tests.conftest import (
     FakeModel,
 )
@@ -414,6 +416,33 @@ def test_static_budgeting_and_metadata_reuse_one_tool_surface(monkeypatch: pytes
     assert get_tools_calls == 1
     assert first_estimate == re_estimate
     assert [payload["name"] for payload in payloads] == ["search_docs"]
+
+
+def test_tool_definition_payloads_follow_the_model_tool_dialect() -> None:
+    """Budgets and run metadata count the tools as the model's dialect presents them, not the canonical surface."""
+
+    def edit_file(path: str, old_text: str, new_text: str) -> str:
+        """Edit a file."""
+        return path + old_text + new_text
+
+    def write_file(path: str, content: str) -> str:
+        """Write a file."""
+        return path + content
+
+    def apply_patch(input: str) -> str:  # noqa: A002
+        """Apply a patch."""
+        return input
+
+    agent = _agent()
+    toolkit = Toolkit(name="coding", tools=[edit_file, write_file, apply_patch])
+    for function in (*toolkit.functions.values(), *toolkit.get_async_functions().values()):
+        function.owning_toolkit = "coding"
+    agent.tools = [toolkit]
+    install_tool_dialect(agent.model, CLAUDE_DIALECT)
+
+    payloads = agent_tool_definition_payloads_for_logging(agent)
+
+    assert sorted(payload["name"] for payload in payloads) == ["Edit", "Write"]
 
 
 def test_tool_definition_payloads_cached_equal_ordered_and_isolated() -> None:

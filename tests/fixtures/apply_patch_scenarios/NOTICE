@@ -1,0 +1,8 @@
+These scenario fixtures are copied unchanged from the OpenAI Codex repository,
+https://github.com/openai/codex, directory codex-rs/apply-patch/tests/fixtures/scenarios,
+at commit 7f2f4fd46e0f50798fd8d3436a8e14a5386d253b.
+
+Copyright 2025 OpenAI. Licensed under the Apache License, Version 2.0:
+https://www.apache.org/licenses/LICENSE-2.0
+
+Each scenario holds an input/ tree, a patch.txt, and the expected/ tree after applying the patch.

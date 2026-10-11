@@ -7,3 +7,5 @@ frontend/public/logo.svg linguist-generated=true
 macos/MindRoom/Sources/MindRoom/Resources/logo.svg linguist-generated=true
 docs/assets/logo.svg linguist-generated=true
 saas-platform/platform-frontend/public/res/branding/mindroom.svg linguist-generated=true
+# Patch scenarios pin exact line endings.
+tests/fixtures/apply_patch_scenarios/** -text

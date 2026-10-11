@@ -30,19 +30,21 @@ DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 MAX_BACKGROUNDED = 16
-_MAX_OUTPUT_LINES = 10_000
+MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
+# Waits stay inside the default 120-second worker proxy request budget with room for the supervisor relay.
+MAX_CHECK_WAIT_SECONDS = 60
 
 
 @dataclass
 class _OutputBuffer:
     """Bound shell output by both line count and encoded byte size."""
 
-    max_lines: int = _MAX_OUTPUT_LINES
+    max_lines: int = MAX_OUTPUT_LINES
     max_bytes: int = _MAX_OUTPUT_BYTES
     chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0
@@ -394,12 +396,12 @@ async def _background_process(
         with contextlib.suppress(asyncio.CancelledError):
             await monitor_task
         raise
+    started = "Started in the background" if timeout == 0 else f"Command timed out after {timeout}s. Still running"
     return ShellRunResult(
         message=(
-            f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
+            f"{started} (PID {process.pid}).\n"
             f"Handle: {handle}\n"
-            f"Use check_shell_command('{handle}') to poll or "
-            f"kill_shell_command('{handle}') to stop."
+            "Poll this handle for its output, or stop the command with it."
         ),
         handle=handle,
         output_file_handled=output_capture is not None,
@@ -442,6 +444,21 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     )
 
 
+async def wait_for_command(
+    registry: dict[str, ProcessRecord],
+    *,
+    namespace: str,
+    handle: str,
+    wait_seconds: float,
+) -> None:
+    """Wait up to *wait_seconds* (capped) for a background command in *registry* to finish."""
+    record = registry.get(handle)
+    if wait_seconds <= 0 or record is None or record.namespace != namespace or record._monitor_task is None:
+        return
+    # asyncio.wait neither cancels the monitor on timeout nor raises when the monitor is cancelled.
+    await asyncio.wait({record._monitor_task}, timeout=min(wait_seconds, MAX_CHECK_WAIT_SECONDS))
+
+
 def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str, force: bool = False) -> str:
     """Kill a backgrounded shell command tracked in *registry*."""
     record = registry.get(handle)
@@ -456,7 +473,7 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
         return f"Process {record.pid} already exited"
 
     action = "Force-killed" if force else "Terminated"
-    return f"{action} process {record.pid} ({sig_name} sent). Use check_shell_command('{handle}') to confirm exit."
+    return f"{action} process {record.pid} ({sig_name} sent). Poll its handle to confirm it exited."
 
 
 def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:

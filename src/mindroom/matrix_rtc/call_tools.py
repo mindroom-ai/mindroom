@@ -62,6 +62,7 @@ from mindroom.providers.claude_prompt_cache import (
     arefresh_session_backed_bedrock_async_client,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.tool_dialects.translation import presents, resolve_tool_dialect
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -683,26 +684,18 @@ async def build_call_tools(
         session_id=session_id,
         requester_id=requester_id,
     )
-    tools: list[Any] = []
-    visible_functions: list[Function | dict[Any, Any]] = []
-    for tool in effective_tools:
-        if not isinstance(tool, Function):
-            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
-            raise TypeError(msg)
-        if _function_requires_text_chat(tool, config):
-            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
-            continue
-        visible_functions.append(tool)
-        tools.append(
-            _wrap_agno_function(
-                tool,
-                context=context,
-                agent_name=agent_name,
-                config=config,
-                authorize_operation=authorize_operation,
-            ),
+    visible_functions = _realtime_visible_functions(effective_tools, agent_name=agent_name, config=config)
+    tools = [
+        _wrap_agno_function(
+            tool,
+            context=context,
+            agent_name=agent_name,
+            config=config,
+            authorize_operation=authorize_operation,
         )
-    instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
+        for tool in visible_functions
+    ]
+    instructions = await _render_system_prompt(agent, session, run_context, [*visible_functions])
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(
         tools=tuple(tools),
@@ -980,6 +973,27 @@ def _function_requires_async_execution(function: Function) -> bool:
         callback is not None and (iscoroutinefunction(callback) or isasyncgenfunction(callback))
         for callback in callbacks
     )
+
+
+def _realtime_visible_functions(
+    effective_tools: list[Function | dict[Any, Any]],
+    *,
+    agent_name: str,
+    config: Config,
+) -> list[Function]:
+    """Return the functions a realtime voice model may call."""
+    visible_functions: list[Function] = []
+    for tool in effective_tools:
+        if not isinstance(tool, Function):
+            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
+            raise TypeError(msg)
+        if _function_requires_text_chat(tool, config):
+            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
+            continue
+        # Realtime voice models see MindRoom's own tool names, so they get the default dialect's tool set.
+        if presents(resolve_tool_dialect(None), tool, effective_tools):
+            visible_functions.append(tool)
+    return visible_functions
 
 
 def _function_requires_text_chat(function: Function, config: Config) -> bool:

@@ -1635,6 +1635,26 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
     }
 
 
+@pytest.mark.parametrize("excluded", [["edit_file", "write_file"], ["write_file"]])
+def test_excluding_file_edits_also_excludes_apply_patch(tmp_path: Path, excluded: list[str]) -> None:
+    """A coding toolkit filtered down to read-only access gets no apply_patch to edit files with instead."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "coding",
+        runtime_paths,
+        tool_config_overrides={"exclude_tools": excluded},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert "apply_patch" not in {*tool.functions, *tool.async_functions}
+    assert "read_file" in tool.functions
+
+
 @pytest.mark.parametrize("tool_name", ["composio", "memory"])
 def test_non_toolkit_registration_rejects_universal_filters(tool_name: str) -> None:
     """Universal filters should not validate for non-Toolkit catalog entries."""

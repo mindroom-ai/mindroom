@@ -16,7 +16,9 @@ class ApprovalRuleConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    match: str = Field(description="Case-sensitive glob over exposed tool function names; the first matching rule wins")
+    match: str = Field(
+        description="Case-sensitive glob over MindRoom tool function names; the first matching rule wins",
+    )
     action: _ApprovalAction | None = Field(
         default=None,
         description="Fixed decision for matching calls; set exactly one of action or script",

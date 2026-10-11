@@ -165,11 +165,11 @@ async def test_background_shell_publishes_original_destination(shell_toolkit: To
     assert "Handle: shell:" in message
     assert not (tmp_path / "eventual.txt").exists()
     handle = message.split("Handle: ")[1].splitlines()[0]
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
+    check = shell_toolkit.async_functions["check_shell_command"].entrypoint
     assert check is not None
     async with asyncio.timeout(10):
         while True:
-            status = await asyncio.to_thread(check, handle)
+            status = await check(handle)
             if "saved_to_file" in status:
                 break
             await asyncio.sleep(0.02)
@@ -224,11 +224,11 @@ async def test_background_publication_rechecks_destination(shell_toolkit: Toolki
     parent.rmdir()
     parent.symlink_to(outside, target_is_directory=True)
     (tmp_path / "release").touch()
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
+    check = shell_toolkit.async_functions["check_shell_command"].entrypoint
     assert check is not None
     async with asyncio.timeout(10):
         while True:
-            status = await asyncio.to_thread(check, handle)
+            status = await check(handle)
             if '"status": "error"' in status:
                 break
             await asyncio.sleep(0.02)
@@ -282,13 +282,13 @@ async def test_killed_capture_preserves_existing_destination(shell_toolkit: Tool
         while not (tmp_path / "started").exists():  # noqa: ASYNC110
             await asyncio.sleep(0.01)
     kill = shell_toolkit.functions["kill_shell_command"].entrypoint
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
+    check = shell_toolkit.async_functions["check_shell_command"].entrypoint
     assert kill is not None
     assert check is not None
     await asyncio.to_thread(kill, handle)
     async with asyncio.timeout(10):
         while True:
-            status = await asyncio.to_thread(check, handle)
+            status = await check(handle)
             if "RUNNING" not in status:
                 break
             await asyncio.sleep(0.02)
@@ -577,10 +577,10 @@ async def test_inherited_pipe_cannot_publish_partial_capture(
             status = str(result.result)
             if wait_seconds == 0:
                 handle = status.split("Handle: ")[1].splitlines()[0]
-                check = shell_toolkit.functions["check_shell_command"].entrypoint
+                check = shell_toolkit.async_functions["check_shell_command"].entrypoint
                 assert check is not None
                 while True:
-                    status = await asyncio.to_thread(check, handle)
+                    status = await check(handle)
                     if "Status: RUNNING" not in status:
                         break
                     await asyncio.sleep(0.02)
@@ -609,11 +609,11 @@ async def test_background_capture_includes_descendant_output_within_grace(
         },
     ).aexecute()
     handle = str(result.result).split("Handle: ")[1].splitlines()[0]
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
+    check = shell_toolkit.async_functions["check_shell_command"].entrypoint
     assert check is not None
     async with asyncio.timeout(10):
         while True:
-            status = await asyncio.to_thread(check, handle)
+            status = await check(handle)
             if "Status: RUNNING" not in status:
                 break
             await asyncio.sleep(0.02)

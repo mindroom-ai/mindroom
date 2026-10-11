@@ -15,6 +15,7 @@ from __future__ import annotations
 import bisect
 import difflib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,13 +27,16 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.custom_tools.apply_patch import AddFile, DeleteFile, PatchError, PatchHunk, parse_patch, updated_contents
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
+    git_metadata_reason,
     is_within_base_dir,
     read_resolved_file,
+    remove_resolved_path,
     resolve_base_dir_path,
     resolve_tool_base_dir,
     split_search_pattern,
@@ -449,6 +453,18 @@ def _pagination_hint(start: int, end: int, total: int) -> str:
     return ""
 
 
+def _edit_match_error(match_count: int, *, replace_all: bool) -> str | None:
+    """Return the edit error for *match_count* matches, or None when the edit may proceed."""
+    if match_count == 0:
+        return "Error: the text to replace was not found in the file."
+    if match_count > 1 and not replace_all:
+        return (
+            f"Error: the text to replace matches {match_count} locations. "
+            "Provide more context to make the match unique, or set replace_all to replace every match."
+        )
+    return None
+
+
 def _list_directory(target: Path, limit: int) -> str:
     """List directory contents with directory indicators."""
     entries: list[str] = []
@@ -545,6 +561,19 @@ def _resolve_and_read(
         return f"Error reading file: {e}"
 
 
+def _names_one_entry(entry: Path, target: Path) -> bool:
+    """Return whether *target* spells *entry*'s own directory entry, as a case-only rename does on macOS.
+
+    Hard links share a file too, but under names that differ beyond case.
+    """
+    return (
+        entry.parent == target.parent
+        and entry.name.casefold() == target.name.casefold()
+        and target.exists()
+        and os.path.samestat(entry.lstat(), target.lstat())
+    )
+
+
 class CodingTools(Toolkit):
     """Ergonomic coding tools for LLM agents.
 
@@ -565,6 +594,7 @@ class CodingTools(Toolkit):
                 self.read_file,
                 self.edit_file,
                 self.write_file,
+                self.apply_patch,
                 self.grep,
                 self.find_files,
                 self.ls,
@@ -593,23 +623,25 @@ class CodingTools(Toolkit):
             return result
         return _format_read_output(result[1], offset, limit)
 
-    def edit_file(self, path: str, old_text: str, new_text: str) -> str:
+    def edit_file(self, path: str, old_text: str, new_text: str, replace_all: bool = False) -> str:
         """Replace a specific text occurrence in a file. Uses fuzzy matching to handle whitespace/Unicode differences.
 
-        The old_text must match exactly one location in the file. If it matches
-        zero or more than one location, an error is returned.
+        The old_text must match exactly one location in the file unless
+        replace_all is set. If it matches zero locations, or more than one
+        without replace_all, an error is returned.
 
         Args:
             path: File path (relative to working directory or absolute).
-            old_text: The text to find and replace. Must be unique in the file.
+            old_text: The text to find and replace. Must be unique in the file unless replace_all is set.
             new_text: The replacement text.
+            replace_all: Replace every occurrence of old_text instead of exactly one.
 
         Returns:
             A diff showing the change, or an error message.
 
         """
         if not old_text:
-            return "Error: old_text must be non-empty."
+            return "Error: the text to replace must not be empty."
 
         result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir, writable=True)
         if isinstance(result, str):
@@ -617,13 +649,12 @@ class CodingTools(Toolkit):
         resolved, content = result
 
         matches = _find_all_matches(content, old_text)
-        if len(matches) == 0:
-            return "Error: old_text not found in file."
-        if len(matches) > 1:
-            return f"Error: old_text matches {len(matches)} locations. Provide more context to make the match unique."
+        if (match_error := _edit_match_error(len(matches), replace_all=replace_all)) is not None:
+            return match_error
 
-        match = matches[0]
-        new_content = content[: match.start] + new_text + content[match.end :]
+        new_content = content
+        for match in reversed(matches):
+            new_content = new_content[: match.start] + new_text + new_content[match.end :]
 
         try:
             write_resolved_file(self.base_dir, resolved, new_content.encode("utf-8"))
@@ -631,8 +662,12 @@ class CodingTools(Toolkit):
             return f"Error writing file: {e}"
 
         diff = _make_diff(content, new_content)
-        fuzzy_note = " (fuzzy match: whitespace/Unicode normalized)" if match.was_fuzzy else ""
-        line_num = content[: match.start].count("\n") + 1
+        fuzzy_note = (
+            " (fuzzy match: whitespace/Unicode normalized)" if any(match.was_fuzzy for match in matches) else ""
+        )
+        if len(matches) > 1:
+            return f"Applied {len(matches)} edits{fuzzy_note}:\n\n{diff}"
+        line_num = content[: matches[0].start].count("\n") + 1
         return f"Applied edit at line {line_num}{fuzzy_note}:\n\n{diff}"
 
     def write_file(self, path: str, content: str) -> str:
@@ -661,6 +696,155 @@ class CodingTools(Toolkit):
         byte_count = len(content.encode("utf-8"))
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return f"Wrote {byte_count} bytes ({lines} lines) to {path}"
+
+    def apply_patch(self, input: str) -> str:  # noqa: A002 - Codex names the patch argument input
+        """Apply a patch in the apply_patch format, adding, updating, moving, and deleting files.
+
+        A patch starts with ``*** Begin Patch`` and ends with ``*** End Patch``. Between them, ``*** Add File: <path>``
+        is followed by the new lines, each prefixed with ``+``; ``*** Delete File: <path>`` stands alone; and
+        ``*** Update File: <path>``, optionally followed by ``*** Move to: <path>``, is followed by ``@@`` hunks whose
+        lines start with a space for context, ``-`` for removed, or ``+`` for added lines. Paths are relative to
+        the working directory, or absolute.
+        Every hunk is checked against the files before anything is written, so a patch that does not
+        apply changes nothing.
+
+        Args:
+            input: The whole patch, from ``*** Begin Patch`` to ``*** End Patch``.
+
+        Returns:
+            The added, modified, and deleted files, or an error message.
+
+        """
+        try:
+            hunks = parse_patch(input)
+        except PatchError as e:
+            return f"apply_patch verification failed: {e}"
+        if not hunks:
+            return "No files were modified."
+        try:
+            writes, summary = self._plan_patch(hunks)
+        except PatchError as e:
+            return f"apply_patch verification failed: {e}"
+        changed: list[str] = []
+        for resolved, payload in writes:
+            path = format_path_for_output(resolved, self.base_dir)
+            try:
+                if payload is None:
+                    remove_resolved_path(self.base_dir, resolved)
+                else:
+                    write_resolved_file(self.base_dir, resolved, payload)
+            except OSError as e:
+                lines = [f"Error applying patch to {path}: {e}"]
+                if changed:
+                    # The model must know what changed before resending the rest.
+                    lines += ["The patch already changed these files before the error:", *changed]
+                return "\n".join(lines)
+            changed.append(path)
+        return "\n".join(["Success. Updated the following files:", *summary])
+
+    def _plan_patch(self, hunks: list[PatchHunk]) -> tuple[list[tuple[Path, bytes | None]], list[str]]:
+        """Return the ordered writes (None deletes) and summary lines for *hunks*, checking every hunk first.
+
+        Like Codex's verification, every hunk applies to the files as they were before the patch, so
+        hunks must touch separate paths and the order of the writes cannot change the result.
+        """
+        claimed: list[tuple[str, Path]] = []
+        writes: list[tuple[Path, bytes | None]] = []
+        added: list[str] = []
+        modified: list[str] = []
+        deleted: list[str] = []
+        for hunk in hunks:
+            if isinstance(hunk, AddFile):
+                target = self._patch_path(hunk.path)
+                self._claim_patch_paths(claimed, hunk.path, [target])
+                self._check_patch_target(target, hunk.path)
+                writes.append((target, hunk.contents.encode("utf-8")))
+                added.append(f"A {hunk.path}")
+            elif isinstance(hunk, DeleteFile):
+                entry = self._patch_entry(hunk.path)
+                self._claim_patch_paths(claimed, hunk.path, [entry])
+                self._check_patch_source(entry, hunk.path, action="delete")
+                writes.append((entry, None))
+                deleted.append(f"D {hunk.path}")
+            else:
+                source = self._patch_path(hunk.path)
+                target = source if hunk.move_to is None else self._patch_path(hunk.move_to)
+                # A moved link goes away itself, like a deleted one, and its target stays.
+                entry = self._patch_entry(hunk.path) if hunk.move_to is not None else source
+                self._claim_patch_paths(claimed, hunk.path, [source, entry, target], hunk.move_to)
+                new_contents = updated_contents(self._patch_source(source, hunk.path), hunk.path, hunk.chunks)
+                self._check_patch_target(target, hunk.move_to or hunk.path)
+                writes.append((target, new_contents.encode("utf-8")))
+                if entry != target and not _names_one_entry(entry, target):
+                    writes.append((entry, None))
+                modified.append(f"M {hunk.move_to or hunk.path}")
+        return writes, [*added, *modified, *deleted]
+
+    def _claim_patch_paths(
+        self,
+        claimed: list[tuple[str, Path]],
+        path: str,
+        resolved: list[Path],
+        *spelled: str | None,
+    ) -> None:
+        """Refuse a hunk touching a path an earlier hunk touches, as spelled or as resolved, then record its paths."""
+        paths = [*resolved, *(self._spelled_patch_path(name) for name in (path, *spelled) if name is not None)]
+        for earlier, other in claimed:
+            if any(other == own or other in own.parents or own in other.parents for own in paths):
+                msg = (
+                    f"invalid patch: the hunks for {earlier} and {path} touch the same file or directory; "
+                    "put all changes to a file in one hunk, or send separate patches"
+                )
+                raise PatchError(msg)
+        claimed.extend((path, own) for own in paths)
+
+    def _spelled_patch_path(self, path: str) -> Path:
+        """Return *path* as written, made absolute with ``..`` folded, so aliases of one spelling compare equal."""
+        return Path(os.path.normpath(Path(path) if Path(path).is_absolute() else self.base_dir / path))
+
+    def _patch_path(self, path: str) -> Path:
+        try:
+            resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
+        except ValueError as e:
+            raise PatchError(str(e)) from e
+        if is_git_metadata_path(resolved):
+            raise PatchError(git_metadata_reason(path))
+        return resolved
+
+    def _patch_entry(self, path: str) -> Path:
+        """Return the entry a delete or move removes: a link itself, not its target, as in Codex."""
+        link = self._patch_path(str(Path(path).parent)) / Path(path).name
+        if link.is_symlink():
+            if is_git_metadata_path(link):
+                raise PatchError(git_metadata_reason(path))
+            return link
+        return self._patch_path(path)
+
+    def _check_patch_target(self, resolved: Path, path: str) -> None:
+        """Refuse a write that must fail, onto a directory or below a file."""
+        if resolved.is_dir():
+            msg = f"Failed to write file {path}: Is a directory"
+            raise PatchError(msg)
+        for parent in resolved.parents:
+            if parent.exists() and not parent.is_dir():
+                msg = f"Failed to write file {path}: {format_path_for_output(parent, self.base_dir)} is a file"
+                raise PatchError(msg)
+
+    def _check_patch_source(self, resolved: Path, path: str, *, action: str) -> None:
+        """Refuse a hunk whose file does not exist."""
+        if not resolved.is_file() and not (action == "delete" and resolved.is_symlink()):
+            reason = "Is a directory" if resolved.is_dir() else "No such file or directory"
+            msg = f"Failed to read file to {action} {path}: {reason}"
+            raise PatchError(msg)
+
+    def _patch_source(self, resolved: Path, path: str) -> str:
+        """Return the current text of a file an update changes."""
+        self._check_patch_source(resolved, path, action="update")
+        try:
+            return read_resolved_file(self.base_dir, resolved).decode("utf-8")
+        except (OSError, ValueError) as e:
+            msg = f"Failed to read file to update {path}: {e}"
+            raise PatchError(msg) from e
 
     def grep(
         self,
