@@ -208,8 +208,12 @@ class BudgetMonitor:
         caps = self.caps.entries()
         users = []
         for user_id in set(spend) | set(caps):
-            # Replies for agents and bridge bots are never swapped, so they have no budget to show.
-            if not is_human_requester_id(user_id, config, self.runtime_paths):
+            # Agents and bridge bots are never budgeted, and a cap stored under an ID that is now a
+            # bridge alias no longer applies, because replies resolve that ID to its canonical user.
+            if (
+                not is_human_requester_id(user_id, config, self.runtime_paths)
+                or resolve_human_requester_alias(user_id, config, self.runtime_paths) != user_id
+            ):
                 continue
             cap = caps.get(user_id)
             limit = _budget_limit_usd(config, cap)

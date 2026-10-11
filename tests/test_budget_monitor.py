@@ -357,6 +357,15 @@ async def test_status_lists_spenders_and_users_with_stored_caps(
     await monitor.stop()
 
 
+def test_status_hides_a_stored_cap_whose_id_became_an_alias(tmp_path: Path) -> None:
+    """A cap stored under an ID that is now a bridge alias no longer applies, so it is not listed."""
+    monitor, _current = _monitor(tmp_path, _config())
+    monitor.caps.set(ALICE_BRIDGE, 0, updated_by="test", now=OCTOBER)
+    monitor.caps.set(ALICE, 100, updated_by="test", now=OCTOBER)
+
+    assert [(user.user_id, user.limit_usd) for user in monitor.status().users] == [(ALICE, 100.0)]
+
+
 def test_status_before_first_scan_reports_current_month_without_spend(tmp_path: Path) -> None:
     monitor, _current = _monitor(tmp_path, _config())
 
