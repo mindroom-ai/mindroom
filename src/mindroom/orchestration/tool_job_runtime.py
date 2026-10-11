@@ -23,6 +23,7 @@ from mindroom.tool_jobs.completion import HoldKey, conversation_work
 from mindroom.tool_jobs.disabled import index_parked_work
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
+from mindroom.tool_jobs.publication import JobStatePublisher
 from mindroom.tool_jobs.runtime import (
     CONSUMED_RESULT_RETENTION,
     BackgroundJob,
@@ -100,6 +101,7 @@ class ToolJobRuntimeCoordinator:
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
+    _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
 
     async def initialize(self) -> None:
         """Pin execution mode, then build the job runtime or index parked ownership, before dispatch can start."""
@@ -331,8 +333,9 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked and stopped work, deny interrupted jobs' cards, and wake waiting replies; retry failures."""
+        """Stop revoked and stopped work, publish live jobs, deny interrupted jobs' cards, and wake waiting replies."""
         await self.runtime.cancel_revoked(denied=self._denied)
+        await self._publisher.publish(self.bot_provider, self.runtime.retained_jobs())
         for job_id in tuple(self.runtime.unsettled_approvals):
             await settle_job_approvals(self.runtime, job_id)
         await self._apply_job_stops()

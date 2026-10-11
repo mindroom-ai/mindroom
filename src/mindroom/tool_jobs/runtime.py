@@ -309,6 +309,10 @@ class ToolJobRuntime:
             msg = "Tool job runtime is closed." if self._closed else "Tool job runtime is shutting down."
             raise JobAccessError(msg)
 
+    def retained_jobs(self) -> tuple[BackgroundJob, ...]:
+        """Return every job this runtime retains, unfiltered by access, for the coordinator's own passes."""
+        return tuple(entry.job for entry in self._entries.values())
+
     def has_job(self, job_id: str) -> bool:
         """Recognize accepted ownership; access still requires an authorized lookup."""
         return job_id in self._entries

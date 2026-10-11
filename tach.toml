@@ -7875,6 +7875,7 @@ depends_on = [
     "mindroom.tool_system.call_record",
 ]
 visibility = [
+    "mindroom.tool_jobs.publication",
     "mindroom.approval.response",
     # The bot lets the job runtime apply a Stop its replies recorded at once.
     "mindroom.bot",
@@ -7923,6 +7924,7 @@ visibility = [
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
     "mindroom.tool_jobs.approvals",
+    "mindroom.tool_jobs.publication",
     "mindroom.approval.manager",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",
@@ -8240,6 +8242,15 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.agno_execution",
 ]
+
+[[modules]]
+path = "mindroom.tool_jobs.publication"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix.identity",
+    "mindroom.tool_jobs.runtime",
+]
+visibility = ["mindroom.orchestration.tool_job_runtime"]
 
 [[modules]]
 path = "mindroom.delegation.job_approvals"
