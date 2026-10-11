@@ -15,10 +15,10 @@ from rich.markup import escape
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
-from mindroom.credentials_sync import get_secret_from_env, sync_env_to_credentials
-from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
-from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
-from mindroom.embeddings import create_sentence_transformers_embedder
+from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
+from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
+from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
+from mindroom.embeddings.signatures import create_sentence_transformers_embedder
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
@@ -216,7 +216,7 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
     """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
     # model_loading pulls in the Agno runtime, which doctor only needs once a provider is checked.
-    from mindroom.model_loading import model_uses_own_credential  # noqa: PLC0415
+    from mindroom.providers.model_loading import model_uses_own_credential  # noqa: PLC0415
 
     try:
         return [
@@ -390,7 +390,7 @@ def _validate_vertexai_claude_connection(
     client_params = dict(extra_kwargs.get("client_params") or {})
     google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
     if "credentials" not in client_params and google_application_credentials is not None:
-        from mindroom.google_adc import load_google_application_credentials  # noqa: PLC0415
+        from mindroom.providers.google_adc import load_google_application_credentials  # noqa: PLC0415
 
         try:
             client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))

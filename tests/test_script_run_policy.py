@@ -10,6 +10,7 @@ import pytest
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
+from mindroom.approval.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -19,7 +20,6 @@ from mindroom.script_runs.policy import (
     resolve_current_script_tool,
     resolve_script_launch_grants,
 )
-from mindroom.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (

@@ -25,7 +25,7 @@ from mindroom.agents import create_agent
 from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.desktop.client import DesktopResponseRouter
 from mindroom.desktop.protocol import DesktopResponse

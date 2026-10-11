@@ -8,7 +8,7 @@ from agno.agent import Agent
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
+from mindroom.knowledge.source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
 from mindroom.tool_system.tool_hooks import prepend_function_tool_hook
 
 if TYPE_CHECKING:

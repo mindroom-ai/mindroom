@@ -15,7 +15,7 @@ from github.GithubRetry import GithubRetry
 from github.Requester import Requester
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.agno_compat_github_errors import (
     call_with_provider_failure_capture,
     install_provider_log_filter,

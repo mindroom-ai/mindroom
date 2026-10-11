@@ -11,7 +11,7 @@ import nio
 import pytest
 
 from mindroom import pending_event_worker
-from mindroom.coalescing import CoalescingGate
+from mindroom.coalescing.gate import CoalescingGate
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import ConversationResolver
@@ -20,7 +20,7 @@ from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, TurnRecordStore
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
-from mindroom.visible_voice_echo import (
+from mindroom.voice.visible_voice_echo import (
     VisibleVoiceEchoLifecycle,
     VisibleVoiceEchoRequest,
     _reset_visible_voice_echo_barriers,

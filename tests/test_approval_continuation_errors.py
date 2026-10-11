@@ -16,8 +16,8 @@ from agno.run.team import TeamRunOutput
 from agno.team import Team
 from agno.tools.function import Function
 
-from mindroom.approval_execution import _collect_agent_continuation
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.approval.execution import _collect_agent_continuation
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.teams import _collect_team_continuation, _TeamStreamPresentation
 from mindroom.tool_system.events import CollectedStreamPresentation
 

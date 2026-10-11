@@ -15,12 +15,12 @@ from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.session.agent import AgentSession
 
-from mindroom.approval_execution import _collect_agent_continuation
-from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
-from mindroom.approval_tools import approval_denial_context
+from mindroom.approval.execution import _collect_agent_continuation
+from mindroom.approval.response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.tool_owners import approval_denial_context
 from mindroom.event_journal import ApprovalCall
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import PausedAttempt
-from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot

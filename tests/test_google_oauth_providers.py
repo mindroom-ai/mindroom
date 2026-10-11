@@ -12,9 +12,9 @@ import httpx
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
-from mindroom import credentials as credentials_module
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials import manager as credentials_module
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.google import (
     _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY,
     _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS,
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
 
 GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"

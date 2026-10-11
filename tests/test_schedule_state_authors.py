@@ -11,9 +11,9 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import scheduling
 from mindroom.config.main import Config
-from mindroom.scheduling_executor import ScheduledWorkflowOutcome
+from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock
 from tests.scheduling_helpers import (
     SCHEDULE_WRITER_ID,
@@ -91,7 +91,7 @@ async def _run_once(
     runtime_paths: RuntimePaths,
 ) -> AsyncMock:
     with patch(
-        "mindroom.scheduling_executor.execute_scheduled_workflow",
+        "mindroom.scheduling.executor.execute_scheduled_workflow",
         new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
     ) as execute:
         await scheduling._run_once_task(
@@ -212,7 +212,10 @@ async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_pat
     client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
 
     # A failed read retries forever, so make it fail fast instead of hanging until the timeout.
-    with patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock(side_effect=AssertionError("task read failed"))):
+    with patch(
+        "mindroom.scheduling.tasks.asyncio.sleep",
+        new=AsyncMock(side_effect=AssertionError("task read failed")),
+    ):
         for _ in range(3):
             task = await scheduling._reconcile_runnable_task_retrying(
                 client,
@@ -288,10 +291,10 @@ async def test_superseded_bot_task_named_by_state_content_never_fires(tmp_path: 
     # The runner keeps retrying the refused read; stop it at its first retry wait.
     with (
         patch(
-            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute,
-        patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        patch("mindroom.scheduling.tasks.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
         pytest.raises(asyncio.CancelledError),
     ):
         await scheduling._run_once_task(

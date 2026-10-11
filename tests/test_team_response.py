@@ -44,8 +44,8 @@ from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
-from mindroom.approval_receipt import approval_receipt_context
-from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.approval.receipt import approval_receipt_context
+from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -70,13 +70,13 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import (
     CompletedApprovalRun,
     PausedAttempt,
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
-from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -4578,7 +4578,10 @@ def test_materialized_private_ad_hoc_team_uses_opened_scope_id() -> None:
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="fake-model", provider="fake"),
+        ),
     ):
         assert scope_context is not None
         team = build_materialized_team_instance(
@@ -4626,7 +4629,10 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             execution_identity=identity,
             create_session_if_missing=True,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="fake-model", provider="fake"),
+        ),
     ):
         assert scope_context is not None
         assert scope_context.session is not None
@@ -4666,7 +4672,10 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="fake-model", provider="fake"),
+        ),
     ):
         assert scope_context is not None
         second_team = build_materialized_team_instance(

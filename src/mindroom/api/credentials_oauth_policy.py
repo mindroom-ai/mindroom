@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException, Request
 
 from mindroom.api import config_lifecycle
-from mindroom.credential_policy import (
+from mindroom.credentials.policy import (
     OAUTH_CREDENTIAL_FIELDS,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     dashboard_may_edit_oauth_service,

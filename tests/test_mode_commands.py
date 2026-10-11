@@ -11,7 +11,8 @@ import nio
 import pytest
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents, minimal_mode_preflight
+from mindroom import agents
+from mindroom.agent_cli import minimal_mode_preflight
 from mindroom.agent_cli.shell_access import agent_cli_shell_env
 from mindroom.agent_modes import clear_agent_mode, resolve_agent_mode, set_agent_mode
 from mindroom.commands import mode_commands
@@ -19,7 +20,7 @@ from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, _CommandParser
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.constants import primary_records_dir
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address

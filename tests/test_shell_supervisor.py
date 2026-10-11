@@ -17,13 +17,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import shell_execution as shell_execution_module
-from mindroom import shell_supervisor
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.constants import resolve_runtime_paths
 from mindroom.script_runs import shim as script_run_shim
-from mindroom.shell_execution import run_command
-from mindroom.shell_supervisor import (
+from mindroom.shell import execution as shell_execution_module
+from mindroom.shell import supervisor as shell_supervisor
+from mindroom.shell.execution import run_command
+from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
     _ShellSupervisorManager,
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
-    from mindroom.shell_execution import ProcessRecord
+    from mindroom.shell.execution import ProcessRecord
 
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
@@ -1126,7 +1126,7 @@ async def test_orphaned_supervisor_exits_and_kills_children() -> None:
     # an orphan as soon as that parent exits.
     launcher = (
         "import pathlib, subprocess, sys, time\n"
-        "process = subprocess.Popen([sys.executable, '-m', 'mindroom.shell_supervisor', sys.argv[1]])\n"
+        "process = subprocess.Popen([sys.executable, '-m', 'mindroom.shell.supervisor', sys.argv[1]])\n"
         "pathlib.Path(sys.argv[2]).write_text(str(process.pid), encoding='utf-8')\n"
         "deadline = time.monotonic() + 20\n"
         "while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:\n"

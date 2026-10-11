@@ -31,7 +31,7 @@ import mindroom.knowledge.legacy_git_checkout as legacy_git_checkout_module
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 from mindroom import file_locks
 from mindroom.config.knowledge import KnowledgeGitConfig
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.knowledge.file_listing import knowledge_files_from_relative_paths
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider

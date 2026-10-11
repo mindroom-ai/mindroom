@@ -22,7 +22,7 @@ from mindroom.agent_storage import create_session_storage, save_runs
 from mindroom.event_journal import ApprovalCall
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_team_run
@@ -72,9 +72,9 @@ async def _resume_approval(
                 new_callable=AsyncMock,
                 return_value=SimpleNamespace(knowledge=None),
             ),
-            patch("mindroom.approval_execution.create_agent", return_value=actor),
-            patch("mindroom.approval_execution.typing_indicator", _noop_typing),
-            patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
+            patch("mindroom.approval.execution.create_agent", return_value=actor),
+            patch("mindroom.approval.execution.typing_indicator", _noop_typing),
+            patch("mindroom.approval.execution.close_agent_runtime_state_dbs"),
         ):
             result = await runner._approval_execution.continue_run(
                 continuation,

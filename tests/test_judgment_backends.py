@@ -13,17 +13,17 @@ from agno.metrics import MessageMetrics
 from agno.models.response import ModelResponse
 from groq import AsyncGroq
 
-from mindroom import model_loading
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
-from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.groq_model import MindRoomGroq
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.execution import SHARED_CAPACITY
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.judgment.typesafe import _PINNED_MODEL, SYSTEM_ONE
-from mindroom.provider_tool_policy import provider_tools_disabled
+from mindroom.providers import model_loading
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.groq_model import MindRoomGroq
+from mindroom.providers.tool_policy import provider_tools_disabled
 from tests.conftest import test_runtime_paths
 from tests.gemini_helpers import gemini_client, gemini_decision_response
 from tests.participation_helpers import ParticipationModel

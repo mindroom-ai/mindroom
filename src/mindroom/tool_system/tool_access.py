@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from mindroom.tool_schema_cache import cached_processed_schema
+from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

@@ -17,8 +17,8 @@ from mindroom.history.message_content import (
     project_history_media_for_replay,
     render_message_content,
 )
+from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
-from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
 from mindroom.token_budget import estimate_text_tokens, stable_serialize

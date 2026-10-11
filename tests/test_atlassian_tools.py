@@ -12,7 +12,7 @@ import httpx
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools import atlassian_client
 from mindroom.custom_tools.atlassian import AtlassianTools
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider

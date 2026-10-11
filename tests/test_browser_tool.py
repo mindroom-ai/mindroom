@@ -25,8 +25,8 @@ from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
 from structlog.testing import capture_logs
 
-from mindroom import browser_fetch_guard
 from mindroom.agents import build_agent_toolkit
+from mindroom.browser import fetch_guard as browser_fetch_guard
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (

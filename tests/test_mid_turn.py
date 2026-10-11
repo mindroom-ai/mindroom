@@ -16,18 +16,18 @@ from agno.tools.function import Function, ToolResult
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom import model_loading
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
+from mindroom.providers import model_loading
 from mindroom.response_lifecycle import _QueuedMessageState
 from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget

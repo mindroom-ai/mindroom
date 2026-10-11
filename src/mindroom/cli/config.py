@@ -591,7 +591,7 @@ def _prompt_provider_key(
     interactive: bool,
 ) -> str | None:
     """Ask a terminal for the preset's API key with hidden input; return None when none was typed or none is needed."""
-    from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
 
     label = _API_KEY_PRESET_LABELS.get(selected_preset)
     env_key = _preset_api_key_env(selected_preset)
@@ -957,7 +957,7 @@ def config_use_local_model(
 def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Return the providers with a model that has no credential of its own, so it needs the shared key."""
     # model_loading pulls in the Agno runtime, which CLI startup must not import.
-    from mindroom.model_loading import model_uses_own_credential  # noqa: PLC0415
+    from mindroom.providers.model_loading import model_uses_own_credential  # noqa: PLC0415
 
     try:
         return {
@@ -975,7 +975,7 @@ def _find_missing_env_keys(
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
-    from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
     shared_key_providers = _shared_key_providers(config, runtime_paths)

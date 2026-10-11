@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 from urllib.parse import urlencode
 
 from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
     OAuthCredentialBindingParseError,

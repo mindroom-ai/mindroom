@@ -10,7 +10,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPToolUnavailableError
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, hide_mcp_function_collisions
