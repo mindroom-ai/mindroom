@@ -1162,14 +1162,24 @@ class CallManager:
         """Post a cross-client Matrix notice explaining a silent call failure, once per logical call."""
         if message in logical_call.reported_failures:
             return
-        requester_id = logical_call.requester_id
+        # Claim before awaiting, so identical errors raised while this notice is sending post nothing more.
+        logical_call.reported_failures.add(message)
+        delivered = False
+        try:
+            delivered = await self._post_call_failure_notice(room_id, logical_call.requester_id, message)
+        finally:
+            if not delivered:
+                logical_call.reported_failures.discard(message)
+
+    async def _post_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> bool:
+        """Send one call failure notice and return whether Matrix accepted it."""
         try:
             async with admitted_response_decision(
                 self._response_admission_gate,
                 self._wait_for_admission_or_shutdown,
             ):
                 if not self._is_authorized_call_member(requester_id, room_id):
-                    return
+                    return False
                 try:
                     response = await send_room_event_result(
                         self._client,
@@ -1184,15 +1194,15 @@ class CallManager:
                     )
                 except _MATRIX_NETWORK_ERRORS as error:
                     logger.warning("call_failure_notice_send_failed", room_id=room_id, error=str(error))
-                    return
+                    return False
         except ResponseAdmissionRefusedError:
-            return
+            return False
         if not isinstance(response, nio.RoomSendResponse):
             error = response.message if isinstance(response, nio.RoomSendError) else "no Matrix response"
             logger.warning("call_failure_notice_send_failed", room_id=room_id, error=error)
-            return
-        logical_call.reported_failures.add(message)
+            return False
         logger.info("call_failure_notice_sent", room_id=room_id)
+        return True
 
     async def _handle_session_termination(
         self,

@@ -4459,6 +4459,36 @@ async def test_undelivered_failure_notice_is_posted_on_the_next_failure(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_identical_error_during_a_pending_notice_posts_nothing_more(tmp_path: Path) -> None:
+    """A provider retrying within one session repeats its error while the first notice is still sending."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    release = asyncio.Event()
+
+    async def slow_send(**_kwargs: object) -> nio.RoomSendResponse:
+        await release.wait()
+        return nio.RoomSendResponse("$notice", ROOM_ID)
+
+    client.room_send.side_effect = slow_send
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    options = bridge.agent_options
+    assert options is not None
+    assert options.on_session_error is not None
+
+    options.on_session_error("Voice call error: connection failed.")
+    await asyncio.sleep(0)
+    options.on_session_error("Voice call error: connection failed.")
+    release.set()
+    await asyncio.gather(*list(manager._background_tasks))
+
+    assert client.room_send.await_count == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path: Path) -> None:
     """A connected-but-broken voice provider cannot fail as silent audio."""
     client = _client()
