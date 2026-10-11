@@ -32,6 +32,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
+from mindroom.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.tool_call_budget import install_model_call_cap
 
 if TYPE_CHECKING:
@@ -122,7 +123,7 @@ def _review_tools(
         for tool in schemas
         if isinstance(tool, Function)
         and tool.name in entrypoints
-        and not (tool.requires_confirmation or tool.external_execution)
+        and not (tool.requires_confirmation or tool.approval_type == JOB_APPROVAL_TYPE or tool.external_execution)
     ]
 
     async def deny(**_arguments: object) -> str:
@@ -133,7 +134,8 @@ def _review_tools(
     for tool in schemas:
         if not isinstance(tool, Function):
             review_tools.append(tool)
-        elif tool.requires_confirmation or tool.external_execution:
+        elif tool.requires_confirmation or tool.approval_type == JOB_APPROVAL_TYPE or tool.external_execution:
+            # A gated call, whether it pauses its run or asks as its job, cannot be approved during a review.
             review_tools.append({"type": "function", "function": tool.to_dict()})
         else:
             entrypoint = entrypoints.get(tool.name, deny)

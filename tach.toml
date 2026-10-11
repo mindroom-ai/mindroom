@@ -1333,8 +1333,9 @@ visibility = [
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
     "mindroom.custom_tools.dynamic_workflow",
-    # Both tell a gated call that asks for its approval as its job from other calls.
+    # These tell a gated call that asks for its approval as its job from other calls.
     "mindroom.cli_shell_agent",
+    "mindroom.skill_learning.reviewer",
     "mindroom.tool_jobs.agno_execution",
 ]
 
@@ -8578,6 +8579,7 @@ visibility = [
 [[modules]]
 path = "mindroom.skill_learning.reviewer"
 depends_on = [
+    "mindroom.tool_approval",
     "mindroom.agent_storage",
     "mindroom.agno_compat_model_hooks",
     "mindroom.helper_usage",
