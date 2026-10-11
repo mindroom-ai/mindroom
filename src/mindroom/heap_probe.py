@@ -7,8 +7,8 @@ every object tracked by the garbage collector by type and logs the most common
 types, so successive records show which kinds of objects accumulate.
 
 Only GC-tracked containers are counted; strings, bytes, and numbers are not.
-Objects frozen once startup settles are left out of the histogram and only
-counted, so the types show what accumulated since then.
+Objects frozen at startup, before any bot exists, are left out of the
+histogram and only counted, so the types show what the runtime created.
 Each record also carries glibc's malloc totals and Python's allocated block
 count. Live malloc bytes are ``arena_in_use_bytes`` plus ``mmap_bytes``;
 Python's small-object arenas come straight from mmap, so malloc does not count
@@ -124,6 +124,23 @@ def _malloc_stats() -> dict[str, int] | None:
         "arena_free_bytes": info.fordblks,
         "mmap_bytes": info.hblkhd,
     }
+
+
+def freeze_startup_heap() -> None:
+    """Collect garbage, then exclude every surviving object from later collections, once per process.
+
+    Call audio is pumped on the event loop, and a full collection that walks every
+    imported module pauses agent speech for hundreds of milliseconds. Run this
+    before any bot exists, so runtime objects, including bots a config reload
+    replaces, stay collectable.
+    """
+    if gc.get_freeze_count():
+        return
+    started_at = time.monotonic()
+    gc.collect()
+    collect_ms = round((time.monotonic() - started_at) * 1000, 1)
+    gc.freeze()
+    logger.info("startup_heap_frozen", frozen_objects=gc.get_freeze_count(), collect_ms=collect_ms)
 
 
 def _log_heap_type_probe() -> None:

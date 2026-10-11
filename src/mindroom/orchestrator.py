@@ -40,7 +40,7 @@ from mindroom.entity_resolution import (
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.event_loop_stall import EventLoopStallDetector, start_event_loop_stall_detector
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
-from mindroom.heap_probe import start_heap_type_probe
+from mindroom.heap_probe import freeze_startup_heap, start_heap_type_probe
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
@@ -1400,6 +1400,7 @@ class _MultiAgentOrchestrator:
 
         config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
         await preload_matrix_call_dependencies(config)
+        freeze_startup_heap()
         hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
         entity_names = configured_entity_names(config)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)

@@ -1,6 +1,7 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import asyncio
+import gc
 import os
 import re
 import shutil
@@ -54,7 +55,6 @@ import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.scheduling as scheduling_module
-import mindroom.startup_maintenance as startup_maintenance_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
@@ -3013,13 +3013,13 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _never_freeze_the_test_heap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep finished startup maintenance from freezing the pytest worker's heap.
+    """Keep orchestrator initialization from freezing the pytest worker's heap.
 
-    Cycles among frozen objects are never collected, so every test that completes
-    startup maintenance would pin its own garbage for the rest of the session.
-    `tests/test_startup_maintenance.py` covers the real freeze against a fake `gc`.
+    Cycles among frozen objects are never collected, so the first test that
+    initializes an orchestrator would pin the garbage of every later test.
+    `tests/test_heap_probe.py` covers the real freeze against a fake `gc`.
     """
-    monkeypatch.setattr(startup_maintenance_module, "_freeze_startup_heap", lambda: None)
+    monkeypatch.setattr(gc, "freeze", lambda: None)
 
 
 @pytest.fixture(scope="session")

@@ -2725,7 +2725,7 @@ class TestMultiAgentOrchestrator:
         dependencies_available: bool,
         import_error: type[Exception] | None,
     ) -> None:
-        """Load the owned config and prepare optional call SDKs before creating bots."""
+        """Load the owned config, prepare optional call SDKs, and freeze the startup heap before creating bots."""
         config_path = tmp_path / "custom-config.yaml"
         mock_config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
         mock_config.calls.enabled = calls_enabled
@@ -2740,7 +2740,10 @@ class TestMultiAgentOrchestrator:
                     raise import_error(msg)
             return original_import(name, *args, **kwargs)
 
+        freezes: list[None] = []
+
         def create_bot(*_args: object) -> None:
+            assert freezes == [None]
             assert call_import_threads == (
                 [threading.main_thread()] if calls_enabled and dependencies_available else []
             )
@@ -2769,6 +2772,7 @@ class TestMultiAgentOrchestrator:
                 return_value=dependencies_available,
             ),
             patch("builtins.__import__", new=record_import),
+            patch("mindroom.orchestrator.freeze_startup_heap", side_effect=lambda: freezes.append(None)),
             capture_logs() as logs,
         ):
             orchestrator = _MultiAgentOrchestrator(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from structlog.testing import capture_logs
@@ -15,6 +16,7 @@ from mindroom.heap_probe import (
     _heap_probe_interval_seconds,
     _log_heap_type_probe,
     _run_heap_type_probe,
+    freeze_startup_heap,
     start_heap_type_probe,
 )
 
@@ -159,3 +161,31 @@ async def test_start_helper_returns_named_task_that_cancels_cleanly() -> None:
     assert _probe_logs(logs) == []
     [started] = [entry for entry in logs if entry["event"] == "heap_type_probe_started"]
     assert started["interval_seconds"] == 60.0
+
+
+def test_freeze_startup_heap_collects_then_freezes_and_logs_the_frozen_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Garbage is collected before the survivors are frozen, and one record reports both."""
+    frozen = [0]
+    gc_calls: list[str] = []
+
+    def freeze() -> None:
+        gc_calls.append("freeze")
+        frozen[0] = 469_281
+
+    fake_gc = SimpleNamespace(
+        collect=lambda: gc_calls.append("collect"),
+        freeze=freeze,
+        get_freeze_count=lambda: frozen[0],
+    )
+    monkeypatch.setattr(heap_probe, "gc", fake_gc)
+
+    with capture_logs() as logs:
+        freeze_startup_heap()
+        freeze_startup_heap()
+
+    assert gc_calls == ["collect", "freeze"]
+    [record] = [entry for entry in logs if entry["event"] == "startup_heap_frozen"]
+    assert record["frozen_objects"] == 469_281
+    assert record["collect_ms"] >= 0
