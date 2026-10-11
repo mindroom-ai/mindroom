@@ -673,7 +673,8 @@ class ClaudeAgentTools(Toolkit):
 
     async def _count_turn_usage(self, session: _ClaudeSessionState, result: ResultMessage) -> None:
         """Record a turn's increase in Claude Code's running totals for the requester who ran it."""
-        if result.model_usage is None:
+        # A crashed turn reports empty usage without clearing the conversation; a /clear resets the baseline itself.
+        if not result.model_usage:
             return
         totals = {
             model_id: (

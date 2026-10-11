@@ -101,6 +101,8 @@ def _model_usage(inputs: int, outputs: int, cache_reads: int, cache_writes: int)
 
 _CLEARED = {"cleared": True}
 _CLEARED_WITHOUT_USAGE = {"cleared": True, "usage": None}
+# A crashed turn reports an error result with empty usage, without resetting the conversation.
+_CRASHED = {"crashed": True}
 _TWO_MODEL_USAGE = {
     "claude-sonnet-5-5": _model_usage(1000, 200, 5000, 300),
     "claude-haiku-5-5": _model_usage(400, 50, 0, 0),
@@ -131,9 +133,12 @@ class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
             )
             self.claude_session_id = "claude-session-456"
             usage = {} if usage == _CLEARED else None
+        crashed = usage == _CRASHED
+        if crashed:
+            usage = {}
         yield AssistantMessage(content=[TextBlock(text="Fixed it")], model="claude-sonnet-5-5")
         yield ResultMessage(
-            subtype="success",
+            subtype="error_during_execution" if crashed else "success",
             duration_ms=1,
             duration_api_ms=1,
             is_error=False,
@@ -1438,3 +1443,28 @@ async def test_claude_session_resumed_after_a_clear_counts_only_new_usage(
     )
 
     assert rows == [("@alice:localhost", 1800, 310, 0)]
+
+
+@pytest.mark.asyncio
+async def test_crashed_claude_turn_keeps_the_counted_totals(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash reports empty usage without clearing the conversation, so resuming it subtracts its totals."""
+    rows = await _send_metered_turns(
+        tmp_path,
+        monkeypatch,
+        [
+            {"claude-sonnet-5-5": _model_usage(1000, 200, 0, 0)},
+            _CRASHED,
+            {"claude-sonnet-5-5": _model_usage(1500, 260, 0, 0)},
+        ],
+        [
+            ("@alice:localhost", "first", None),
+            ("@alice:localhost", "first", None),
+            ("@alice:localhost", "second", "claude-session-123"),
+        ],
+    )
+
+    assert rows == [("@alice:localhost", 1500, 260, 0)]
