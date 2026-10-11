@@ -902,8 +902,13 @@ class ToolJobRuntime:
         await asyncio.gather(*tasks, return_exceptions=True)
         reason = _interrupted_reason("shutdown")
         for entry in self._entries.values():
+            # A job its Stop cancelled before the shutdown ends cancelled, as its cleanup was told.
+            stopped = entry.control.cancelled and not entry.control.shutdown
             try:
-                await self._settle(entry, BackgroundOutcome("interrupted", reason))
+                await self._settle(
+                    entry,
+                    BackgroundOutcome("cancelled") if stopped else BackgroundOutcome("interrupted", reason),
+                )
             except Exception as error:
                 # A blocked native child stays unsettled for the next recovery; other jobs still settle.
                 failures.append(error)

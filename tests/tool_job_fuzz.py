@@ -375,7 +375,10 @@ class JobFuzzRunner:
 
     async def _restart(self, action: Action | None = None, job_id: str | None = None) -> None:
         """Shut down in order, optionally Stopping a job while shutdown drains, then recover."""
-        for owner in self.jobs:
+        for owner, model in self.jobs.items():
+            # A Stop saved before the shutdown, even one whose cancellation request was not, makes it a cancellation.
+            if model.stop_order is not None:
+                self._cause(owner, "cancel")
             self._cause(owner, "shutdown")
         faults = self._faults
         shutdown = asyncio.create_task(self.runtime.shutdown())

@@ -208,6 +208,16 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
             [Action("start", script=_PARKED, cleanup="classify"), Action("cancel"), Action("restart")],
             id="cleanup-sees-cancellation-before-shutdown",
         ),
+        pytest.param(
+            [
+                Action("start"),
+                Action("fail_write", skip=2),
+                Action("start", job=1, script=_PARKED, cleanup="classify"),
+                Action("stop", job=1),
+                Action("restart"),
+            ],
+            id="stop-whose-save-failed-then-restart",
+        ),
     ],
 )
 async def test_job_lifecycle_regressions(tmp_path: Path, actions: list[Action]) -> None:
