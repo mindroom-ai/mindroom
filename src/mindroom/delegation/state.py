@@ -51,7 +51,7 @@ class SubagentPersona:
         )
         # LEGACY_COMPAT: Authored subagent personas persisted without skills.
         # Legacy format: Persona snapshots in parent delegation state and subagent session records omitted skills; from v2026.10.236 every authored child ran without skills, while v2026.10.231 through v2026.10.235 still loaded caller skills without listing them, as functions for a child without a tool list and as documents for a minimal child.
-        # Last legacy release: v2026.10.243; replacement: the next release persists each persona's skills, null keeping every caller skill.
+        # Last legacy release: v2026.10.245; replacement: the next release persists each persona's skills, null keeping every caller skill.
         # Handling: An absent skills field reads as no skills, matching the latest legacy releases, so retained authored children and their follow-ups keep running without skills.
         # Coverage: tests/test_delegation_sessions.py::test_persona_snapshot_without_skills_reads_as_skill_less.
         skills = data.get("skills", ())
