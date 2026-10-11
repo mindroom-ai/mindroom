@@ -23,7 +23,7 @@ A pre-request hook on every model folds replayed history and the turn's model an
 - Tests run inside `nix-shell shell.nix` on this host: `uv run pytest tests/<file>.py -x -n 0 --no-cov -v`.
 - `tach.toml` updated in the task that adds an import edge; `uv run tach check --dependencies --interfaces` passes after every task.
 - Docs: one sentence per line; user docs change only in Task 8.
-- Never touch persona code (`_apply_persona`, `persona_hint`, `with_session_summary`); the persona PR owns it.
+- Never touch persona code (`_apply_persona`, `persona_hint`, `with_session_summary`); the persona PR (#2794) owns it.
 
 ## Review Focus
 

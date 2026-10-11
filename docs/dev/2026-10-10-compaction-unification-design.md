@@ -23,7 +23,7 @@ Success criteria:
 - It runs only before a reply (`history/runtime.py` `prepare_scope_history`), or after a `compact_context` request.
 - Agno renders `session.summary` inside the system prompt when `add_session_summary_to_context` is on (`agents.py` sets it to `persist_runtime_state`, `teams.py` to `True`), so every compaction rewrites the system prompt and loses the whole cached prefix.
 - A string `system_message` bypasses that builder, so minimal agents never see the summary in their prompt; it only exists in the on-demand `agent-context` document.
-  Authored subagents get it through the interim `with_session_summary` code from #2776, which the persona PR (brief `/work/handoffs/persona-prompt-builder-20261010/PROMPT.md`) deletes.
+  Authored subagents got it through the interim `with_session_summary` code from #2776, which #2794 deleted when it moved them onto the normal prompt builder.
 - Inside a turn, portable text compaction never runs; native routes compact provider-side, Vertex AI Claude drops the oldest replayed turns per request (`vertex_claude_compat.py` `_fit_request_messages`), which breaks the cache each time, and falls back from a native checkpoint to canonical history when the projected request does not fit; every other text route fails with a context-window error.
 - MindRoom never stores history copies in runs (`store_history_messages=False` for agents and teams), so an approval resume of a stored run re-fetches history from the session (`_build_continue_run_messages`, `input_has_history` is false), while a continuation handed the in-memory run (team delegation) keeps the history it was given, and MindRoom's builder patch (`history/agno_compat_message_builder.py`) already wraps both the new-run and the continuation builders.
   A paused run does keep its system message, which Agno reuses on resume.
@@ -156,7 +156,7 @@ A request without persisted replay (team members, `room_agent` workflow particip
 ### 9. Minimal authored subagents' context documents (question 9)
 
 With the summary in every agent's history, `agent-context` is no longer any agent's route to it.
-The persona PR owns whether minimal authored subagents keep the configured agent's `role`, `instructions`, and `agent-context` documents; this design recommends dropping them and needs nothing from that choice.
+#2794 owns whether minimal authored subagents keep the configured agent's `role`, `instructions`, and `agent-context` documents; this design recommends dropping them and needs nothing from that choice.
 
 ## Ownership and boundaries
 
@@ -217,4 +217,4 @@ A Claude text route (for example with an explicit `compaction.model`) also runs 
 
 - Fallback models (`FallbackConfig`) do not get the mid-turn hook; a fallback serves only after the primary fails.
 - Synchronous Agno response loops; MindRoom runs every agent and team asynchronously.
-- The persona PR's prompt-builder and skills changes.
+- The prompt-builder and skills changes of #2794.
