@@ -2543,7 +2543,6 @@ async def test_requestless_oauth_scope_does_not_block_unrelated_dynamic_tool_loa
         payload = json.loads(toolkit.load_tool("shell"))
     finally:
         await manager.shutdown()
-        bind_mcp_server_manager(None)
 
     assert payload["status"] == "loaded"
     assert payload["loaded_tools"] == ["shell"]
@@ -4773,7 +4772,6 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
             )
     finally:
         await manager.shutdown()
-        bind_mcp_server_manager(None)
 
     function_names = [
         function_name for tool in agent.tools for function_name in (*tool.get_functions(), *tool.get_async_functions())
@@ -5141,12 +5139,8 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
     ]
 
     bind_mcp_server_manager(manager)
-    try:
-        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-        payload = json.loads(dynamic_manager.load_tool("shell"))
-    finally:
-        bind_mcp_server_manager(None)
-
+    dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+    payload = json.loads(dynamic_manager.load_tool("shell"))
     assert payload["status"] == "function_name_collision"
     assert payload["collision_messages"] == [
         "MCP function name 'run_shell_command' collides with an existing MindRoom tool function",
@@ -5233,7 +5227,6 @@ async def test_dynamic_load_rejects_scoped_oauth_mcp_function_collision(
         payload = json.loads(dynamic_manager.load_tool("shell"))
     finally:
         await manager.shutdown()
-        bind_mcp_server_manager(None)
 
     assert payload["status"] == "function_name_collision"
     assert payload["collision_messages"] == [
@@ -5323,7 +5316,6 @@ async def test_oauth_mcp_catalog_projection_hides_session_loaded_function_collis
             )
     finally:
         await manager.shutdown()
-        bind_mcp_server_manager(None)
 
     loaded_mcp = next(tool for tool in loaded_agent.tools if tool.name == "mcp_demo")
     clean_mcp = next(tool for tool in clean_agent.tools if tool.name == "mcp_demo")
@@ -5375,12 +5367,8 @@ async def test_mcp_manager_uses_deferred_tool_overrides_for_load_time_collision_
     assert manager.function_name_collision_messages_for_loaded_tools("code", ["shell"]) == []
 
     bind_mcp_server_manager(manager)
-    try:
-        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-        payload = json.loads(dynamic_manager.load_tool("shell"))
-    finally:
-        bind_mcp_server_manager(None)
-
+    dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+    payload = json.loads(dynamic_manager.load_tool("shell"))
     assert payload["status"] == "loaded"
     assert payload["loaded_tools"] == ["shell"]
 
@@ -5422,12 +5410,8 @@ async def test_mcp_manager_uses_deferred_mcp_filters_for_load_time_collision_val
     assert manager.function_name_collision_messages_for_loaded_tools("code", ["mcp_demo"]) == []
 
     bind_mcp_server_manager(manager)
-    try:
-        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-        payload = json.loads(dynamic_manager.load_tool("mcp_demo"))
-    finally:
-        bind_mcp_server_manager(None)
-
+    dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+    payload = json.loads(dynamic_manager.load_tool("mcp_demo"))
     assert payload["status"] == "loaded"
     assert payload["loaded_tools"] == ["mcp_demo"]
 
@@ -5474,29 +5458,25 @@ async def test_dynamic_load_rejects_failed_deferred_non_oauth_mcp_server_before_
     assert manager.failed_server_ids() == {"demo"}
 
     bind_mcp_server_manager(manager)
-    try:
-        session_id = "failed-mcp-thread"
-        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id=session_id)
-        payload = json.loads(dynamic_manager.load_tool("mcp_demo"))
+    session_id = "failed-mcp-thread"
+    dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id=session_id)
+    payload = json.loads(dynamic_manager.load_tool("mcp_demo"))
 
-        assert payload["status"] == "tool_unavailable"
-        assert payload["loaded_tools"] == []
-        assert "MCP server 'demo' is unavailable" in payload["unavailable_messages"][0]
-        assert get_loaded_tools_for_session(agent_name="code", config=config, session_id=session_id) == []
+    assert payload["status"] == "tool_unavailable"
+    assert payload["loaded_tools"] == []
+    assert "MCP server 'demo' is unavailable" in payload["unavailable_messages"][0]
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id=session_id) == []
 
-        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
-            agent = create_agent(
-                "code",
-                config,
-                runtime_paths,
-                execution_identity=None,
-                session_id=session_id,
-                include_interactive_questions=False,
-            )
-    finally:
-        bind_mcp_server_manager(None)
-
+    model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            session_id=session_id,
+            include_interactive_questions=False,
+        )
     tool_names = [tool.name for tool in agent.tools]
     assert "mcp_demo" not in tool_names
     assert "dynamic_tools" in tool_names
@@ -5559,7 +5539,6 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
             )
     finally:
         await manager.shutdown()
-        bind_mcp_server_manager(None)
 
     assert not any(tool.name == "mcp_demo" for tool in agent.tools)
 
