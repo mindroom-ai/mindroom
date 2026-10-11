@@ -31,7 +31,10 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
+    completed_delegation_job,
     lookup,
+    pending_outcome,
+    pending_outcomes,
     start_job,
     tool_job_runtime,
     wait_for_status,
@@ -648,4 +651,30 @@ async def test_collect_returns_a_background_subagents_answer(tmp_path: Path) -> 
         assert "the child's answer" in str(response.tools[0].result)
     finally:
         storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> None:
+    """Transient ready-result claims cannot hide an unsaved outcome after release."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = completed_delegation_job().owner
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("failed", "tool failed")
+
+    try:
+        await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        waited = await runtime.wait("quiet", owner=owner, depth=0)
+        assert not pending_outcomes(runtime)
+        await runtime.release_wait("quiet", waited.claim)
+        released = pending_outcome(runtime, "quiet")
+        assert released is not None
+        assert released.result == "tool failed"
+        assert [job.job_id for job in pending_outcomes(runtime)] == ["quiet"]
+        waited = await runtime.wait("quiet", owner=owner, depth=0)
+        await runtime.acknowledge_wait("quiet", waited.claim)
+        assert pending_outcome(runtime, "quiet") is None
+        assert not pending_outcomes(runtime)
+    finally:
         await runtime.shutdown()

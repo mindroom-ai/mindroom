@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -13,22 +12,12 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ModelResponse
-from agno.run.agent import RunContentEvent, RunOutput
 from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.types import HistoryScope
-from mindroom.response_turn import (
-    AttemptResolved,
-    CompletedAttempt,
-    TurnRunState,
-    TurnSinks,
-    stream_response_turn,
-)
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
@@ -37,7 +26,6 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.test_response_turn import _AdapterLog, _continuation, _ctx, _streaming_adapter
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
@@ -50,9 +38,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
 
-    from mindroom.response_turn import DynamicContinuationRunState
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -291,183 +279,5 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
                 pending.cancel()
             if pending is not None:
                 await asyncio.gather(pending, return_exceptions=True)
-        storage.close()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("fails", [False, True], ids=["success", "tool-failure"])
-async def test_streaming_turn_consumes_completion_only_after_active_text_boundary(  # noqa: C901, PLR0915 - Real SDK stream lifecycle.
-    tmp_path: Path,
-    fails: bool,
-) -> None:
-    """A result completed mid-stream remains pending until the real response driver joins it."""
-    started, release = asyncio.Event(), asyncio.Event()
-    executions = 0
-
-    async def slow_tool() -> str:
-        nonlocal executions
-        executions += 1
-        started.set()
-        await release.wait()
-        if fails:
-            msg = "report generation failed"
-            raise RuntimeError(msg)
-        return "streamed report"
-
-    config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-        agents={"leader": AgentConfig(display_name="Leader")},
-    )
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
-    runtime = await tool_job_runtime(paths.storage_root)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    storage_file = str(tmp_path / "stream.db")
-
-    def storage_factory() -> SqliteDb:
-        return SqliteDb(db_file=storage_file)
-
-    model = _ActiveTextBarrierModel(
-        [
-            ModelResponse(tool_calls=[_call("slow_tool", "original-call", wait_timeout=0)]),
-            ModelResponse(content="Independent work done."),
-        ],
-    )
-    install_tool_job_execution(model)
-    storage = storage_factory()
-    actor = Agent(
-        id="leader",
-        model=model,
-        tools=[assembled_function(slow_tool), JobTools(paths, owner)],
-        db=storage,
-        telemetry=False,
-    )
-    scope = ScopeSessionContext(
-        HistoryScope(kind="agent", scope_id="leader"),
-        storage,
-        None,
-        session_id=context.session_id,
-        storage_factory=storage_factory,
-    )
-    responses: list[RunOutput] = []
-
-    async def attempt(
-        _run: TurnRunState,
-        state: DynamicContinuationRunState,
-    ) -> AsyncIterator[str | AttemptResolved]:
-        response = None
-        text_parts: list[str] = []
-        events = actor.arun(
-            state.active_prompt,
-            session_id=context.session_id,
-            user_id=owner.requester_id,
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        )
-        async for event in events:
-            if isinstance(event, RunContentEvent) and event.content:
-                text = str(event.content)
-                text_parts.append(text)
-                yield text
-            elif isinstance(event, RunOutput):
-                response = event
-        assert response is not None
-        responses.append(response)
-        text = "".join(text_parts) or str(response.content or "")
-        yield AttemptResolved(
-            CompletedAttempt(
-                response_text=text,
-                replayable_text=text,
-                has_visible_content=bool(text),
-                session_id=response.session_id,
-                attempt_run_id=response.run_id,
-            ),
-        )
-
-    chunks: list[object] = []
-
-    async def drive_stream() -> None:
-        async for chunk in stream_response_turn(
-            _ctx(
-                entity_label="leader",
-                session_id=context.session_id,
-                room_id=owner.room_id,
-                thread_id=owner.resolved_thread_id,
-                requester_id=owner.requester_id,
-                background_tool_jobs=True,
-            ),
-            _streaming_adapter(_AdapterLog(), attempt, open_scope=lambda: nullcontext(scope)),
-            TurnSinks(),
-            continuation=_continuation("Start the report"),
-        ):
-            chunks.append(chunk)  # noqa: PERF401 - Preserve incremental stream observation.
-
-    pending = None
-    try:
-        with tool_runtime_context(context):
-            pending = asyncio.create_task(drive_stream())
-            await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
-            await asyncio.wait_for(model.text_started.wait(), JOB_TEST_TIMEOUT)
-            jobs = await runtime.list_jobs(owner=owner, depth=0)
-            assert len(jobs) == 1
-            job_id = jobs[0].job_id
-            model.responses.extend(
-                [
-                    ModelResponse(
-                        tool_calls=[
-                            _call("job", "retrieve-call", action="wait", job_id=job_id, wait_timeout=0),
-                        ],
-                    ),
-                    ModelResponse(content="The completed work was observed."),
-                ],
-            )
-
-            release.set()
-            ready = await _wait_until_ready(runtime, job_id, owner=owner)
-            assert ready.status == ("failed" if fails else "completed")
-            assert not ready.consumed
-            assert len(pending_outcomes(runtime)) == 1
-
-            model.release_text.set()
-            await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
-
-        assert executions == 1
-        saved = await lookup(runtime, job_id, owner=owner, depth=0)
-        assert saved.consumed
-        assert pending_outcomes(runtime) == []
-        retrieval = next(
-            response
-            for response in responses
-            if response.tools and any(tool.tool_call_id == "retrieve-call" for tool in response.tools)
-        )
-        persisted = storage.get_run(retrieval.run_id)
-        assert persisted is not None
-        # The saved retrieval call, finished with a result, is the only consumption evidence.
-        assert any(
-            tool.tool_call_id == "retrieve-call" and tool.result is not None and not tool.is_paused
-            for tool in persisted.tools or []
-        )
-        retrieval_tool = next(tool for tool in retrieval.tools or [] if tool.tool_call_id == "retrieve-call")
-        if fails:
-            assert retrieval_tool.tool_call_error
-            assert "report generation failed" in str(retrieval_tool.result)
-            assert "report generation failed" in _provider_tool_content(model, "retrieve-call")
-        else:
-            assert retrieval_tool.result == "streamed report"
-            assert _provider_tool_content(model, "retrieve-call") == "streamed report"
-        visible = "".join(chunk for chunk in chunks if isinstance(chunk, str))
-        assert "Independent work done." in visible
-        assert "The completed work was observed." in visible
-    finally:
-        release.set()
-        model.release_text.set()
-        if pending is not None and not pending.done():
-            pending.cancel()
-        if pending is not None:
-            await asyncio.gather(pending, return_exceptions=True)
         storage.close()
         await runtime.shutdown()

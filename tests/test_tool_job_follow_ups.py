@@ -12,7 +12,8 @@ import pytest
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
-from mindroom.tool_jobs.completion import ConversationKey, join_conversation_jobs
+from mindroom.response_turn import CompletedAttempt, TurnSinks, run_blocking_response_turn
+from mindroom.tool_jobs.completion import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     FOLLOW_UP_LIMIT,
     follow_up_envelope,
@@ -24,9 +25,12 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_ru
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
-from tests.test_tool_job_reply_join import _job_context
+from tests.test_response_turn import _AdapterLog, _blocking_adapter
+from tests.test_response_turn import _continuation as _turn_continuation
+from tests.test_response_turn import _ctx as _turn_ctx
 from tests.tool_job_helpers import (
     completed_delegation_job,
+    job_context,
     job_coordinator,
     job_owner,
     start_job,
@@ -39,6 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent, PrincipalStore
+    from mindroom.response_turn import DynamicContinuationRunState, TurnRunState
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -364,7 +369,7 @@ async def test_a_reply_never_waits(tmp_path: Path) -> None:
     """A reply leaving running work behind ends normally: its span records no work to wait for."""
     owner = completed_delegation_job().owner
     runtime = await tool_job_runtime(tmp_path)
-    context = _job_context(tmp_path, owner)
+    context = job_context(tmp_path, owner)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
 
@@ -377,12 +382,53 @@ async def test_a_reply_never_waits(tmp_path: Path) -> None:
         handle = MagicMock(spec=SpanHandle)
         handle.leaves_work = None
         token = _current_slot.set(SpanSlot(handle=handle))
+
+        async def attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+            return CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True)
+
         try:
             with tool_runtime_context(context):
-                join = await join_conversation_jobs(set(), joins=0)
+                text = await run_blocking_response_turn(
+                    _turn_ctx(background_tool_jobs=True),
+                    _blocking_adapter(_AdapterLog(), attempt),
+                    TurnSinks(),
+                    continuation=_turn_continuation(),
+                )
         finally:
             _current_slot.reset(token)
-        assert join.prompt is None
+        assert text == "answer"
         assert handle.leaves_work is None
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_path: Path) -> None:
+    """A job that ended before the reply finished leaves the reply as it is; its follow-up reports it."""
+    owner = completed_delegation_job().owner
+    runtime = await tool_job_runtime(tmp_path)
+    context = job_context(tmp_path, owner)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    attempts = 0
+
+    async def attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        return CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True)
+
+    try:
+        await _ended(runtime, "ready", BackgroundOutcome("completed", "done"), owner=owner)
+        with tool_runtime_context(context):
+            text = await run_blocking_response_turn(
+                _turn_ctx(background_tool_jobs=True),
+                _blocking_adapter(_AdapterLog(), attempt),
+                TurnSinks(),
+                continuation=_turn_continuation(),
+            )
+        assert (text, attempts) == ("answer", 1)
+        await coordinator._admit_follow_ups(runtime)
+        bot.admit_job_follow_up.assert_awaited_once()
     finally:
         await runtime.shutdown()

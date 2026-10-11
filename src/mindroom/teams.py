@@ -120,7 +120,6 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.streaming import StreamingPresentation
 from mindroom.system_prompt import render_date_context
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -132,7 +131,6 @@ from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import join_approval_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.notices import append_turn_start_job_note
@@ -286,19 +284,6 @@ def strip_team_display(text: str) -> str:
     return text.removesuffix(_format_no_consensus_note()).rstrip()
 
 
-def _prefix_team_stream_chunk(
-    chunk: _TeamStreamChunk,
-    prefix: StreamingPresentation | None,
-) -> _TeamStreamChunk:
-    """Keep a joined reply's published document before replacement text; structured documents already include it."""
-    if prefix is None or not isinstance(chunk, str):
-        return chunk
-    return StructuredStreamChunk(
-        content=append_stream_text(prefix.response_text, chunk, separate=True),
-        tool_trace=list(deepcopy(prefix.tool_trace)),
-    )
-
-
 def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
     """Format a single team member's contribution.
 
@@ -408,15 +393,12 @@ class _TeamStreamPresentation:
     per_member: dict[str, str]
     consensus: str = ""
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
-    prefix_response_text: str = ""
-    prefix_tool_count: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Restore pending tool identity from the durable trace."""
-        self.tool_tracker.restore_pending(self.tool_trace[self.prefix_tool_count :])
-        self.tool_tracker.sync_visible_indices(self.tool_trace)
+        self.tool_tracker.restore_pending(self.tool_trace)
         self.separate_next_scopes = {
             pending.scope_key
             for pending in self.tool_tracker.pending_tools
@@ -435,7 +417,6 @@ class _TeamStreamPresentation:
         display_names: Sequence[str],
         *,
         show_tool_calls: bool,
-        prefix: StreamingPresentation | None = None,
     ) -> _TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
         frozen_config_names = list(config_names)
@@ -455,9 +436,6 @@ class _TeamStreamPresentation:
             display_names_by_id=dict(zip(ids, names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
-            prefix_response_text=prefix.response_text if prefix is not None else "",
-            prefix_tool_count=len(prefix.tool_trace) if prefix is not None else 0,
-            tool_trace=list(deepcopy(prefix.tool_trace)) if prefix is not None else [],
         )
 
     @classmethod
@@ -515,20 +493,13 @@ class _TeamStreamPresentation:
             msg = "Team continuation presentation snapshot is invalid"
             raise RuntimeError(msg)
         valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in restored_ids)}
-        consensus = state.get("consensus")
-        prefix_response_text = state.get("prefix_response_text", "")
-        prefix_tool_count = state.get("prefix_tool_count", 0)
-        if (
-            not isinstance(consensus, str)
-            or not isinstance(prefix_response_text, str)
-            or type(prefix_tool_count) is not int
-            or not 0 <= prefix_tool_count <= len(tool_trace)
-        ):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)
-        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace[prefix_tool_count:]):
+        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
             msg = "Team continuation durable tool scope is not a frozen presentation slot"
             raise RuntimeError(msg)
+        consensus = state.get("consensus")
+        if not isinstance(consensus, str):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)  # noqa: TRY004
         restored_separators = _restore_hidden_team_separators(
             state,
             valid_tool_scopes=valid_tool_scopes,
@@ -544,8 +515,6 @@ class _TeamStreamPresentation:
             per_member=per_member,
             consensus=consensus,
             tool_trace=list(deepcopy(tool_trace)),
-            prefix_response_text=prefix_response_text,
-            prefix_tool_count=prefix_tool_count,
         )
         restored.separate_next_scopes.update(restored_separators)
         return restored
@@ -566,9 +535,6 @@ class _TeamStreamPresentation:
             ],
             "consensus": self.consensus,
         }
-        if self.prefix_response_text or self.prefix_tool_count:
-            state["prefix_response_text"] = self.prefix_response_text
-            state["prefix_tool_count"] = self.prefix_tool_count
         if not self.show_tool_calls and self.separate_next_scopes:
             document_scopes = [*(f"agent:{member_id}" for member_id in self.member_ids), "team"]
             state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
@@ -634,10 +600,7 @@ class _TeamStreamPresentation:
             "team": len(self.member_ids),
         }
         old_indices = {id(trace_entry): index for index, trace_entry in enumerate(self.tool_trace, start=1)}
-        self.tool_trace[self.prefix_tool_count :] = sorted(
-            self.tool_trace[self.prefix_tool_count :],
-            key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"],
-        )
+        self.tool_trace.sort(key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"])
         index_map = {
             old_indices[id(trace_entry)]: new_index for new_index, trace_entry in enumerate(self.tool_trace, start=1)
         }
@@ -704,12 +667,7 @@ class _TeamStreamPresentation:
             per_member=self.per_member,
             consensus=self.consensus,
         )
-        body = "\n\n".join(parts)
-        if body and not self.prefix_response_text:
-            body = _format_team_header(self.display_names) + body
-        elif self.prefix_response_text:
-            body = body.lstrip("\n")
-        return append_stream_text(self.prefix_response_text, body, separate=True)
+        return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
 
 
 def _blocking_team_member_scope(
@@ -835,15 +793,9 @@ def _attach_team_pause_presentation(
     config_names: Sequence[str],
     display_names: Sequence[str],
     show_tool_calls: bool,
-    prefix: StreamingPresentation | None = None,
 ) -> PausedAttempt:
     """Render a blocking team pause into the same document used by continuation."""
-    presentation = _TeamStreamPresentation.new(
-        config_names,
-        display_names,
-        show_tool_calls=show_tool_calls,
-        prefix=prefix,
-    )
+    presentation = _TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
     scoped_tools: dict[tuple[str, str], ToolExecution] = {}
     _append_team_output_text(presentation, response, top_level=True)
     _collect_blocking_team_tools(presentation, response, scoped_tools)
@@ -916,12 +868,9 @@ def _format_terminal_team_response(
     response: TeamRunOutput | RunOutput,
     *,
     team_display_names: list[str],
-    include_header: bool = True,
 ) -> str:
     """Render the final user-visible text for one terminal team fallback output."""
-    header = _format_team_header(team_display_names) if include_header else ""
-    body = _team_response_text(response)
-    return header + (body if include_header else body.lstrip("\n"))
+    return _format_team_header(team_display_names) + _team_response_text(response)
 
 
 def _register_team_notice_storage(
@@ -2706,45 +2655,6 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-async def _retrieve_team_job_results(
-    previous: TeamRunOutput,
-    prompt: str,
-    *,
-    team: Team,
-    presentation: _TeamStreamPresentation,
-    session_id: str,
-    user_id: str,
-    configured_team_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
-    members: ResolvedExactTeamMembers,
-    progress: ProgressPublisher | None,
-) -> TeamRunOutput:
-    """Retrieve ready results through the reconstructed team's ordinary native stream."""
-    events = drive_delegation_stream(
-        team,
-        team.arun(
-            prompt,
-            session_id=session_id,
-            user_id=user_id,
-            metadata=deepcopy(previous.metadata),
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        ),
-        run_child=run_delegated_child_response,
-        agent_name=configured_team_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        refresh_scheduler=refresh_scheduler,
-        member_config_names=_delegation_member_names(members),
-    )
-    return await _collect_team_continuation(events, presentation, progress=progress)
-
-
 @partial(
     owned_tool_execution,
     enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
@@ -2900,26 +2810,6 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
                 continuation_stream,
                 presentation,
                 progress=progress,
-            )
-
-            continued = await join_approval_jobs(
-                continued,
-                agent_names=member_names,
-                is_complete=lambda result: result.status == RunStatus.completed,
-                continue_response=partial(
-                    _retrieve_team_job_results,
-                    team=team,
-                    presentation=presentation,
-                    session_id=session_id,
-                    user_id=user_id,
-                    configured_team_name=configured_team_name,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    refresh_scheduler=refresh_scheduler,
-                    members=members,
-                    progress=progress,
-                ),
             )
         paused = paused_attempt_from_response(
             continued,
@@ -3316,9 +3206,6 @@ async def team_response(  # noqa: C901, PLR0915
                 toolkit_owners=toolkit_owners_for_agents(attempt_agents),
             )
             if paused_attempt is not None:
-                # A pause after a job join keeps the text the reply already published; a blocking team's text shows
-                # no tool markers, so its earlier tools stay out of the pause's ordered presentation.
-                joined_output = StreamingPresentation(response_text=run.prior_response_text) if run.job_joins else None
                 return replace(
                     _attach_team_pause_presentation(
                         paused_attempt,
@@ -3326,7 +3213,6 @@ async def team_response(  # noqa: C901, PLR0915
                         config_names=attempt_members.requested_agent_names,
                         display_names=attempt_members.display_names,
                         show_tool_calls=show_tool_calls,
-                        prefix=joined_output,
                     ),
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
@@ -3409,11 +3295,7 @@ async def team_response(  # noqa: C901, PLR0915
                     and is_silent_schedule_no_report_response(raw_response_text)
                     and not _has_visible_team_member_output(response)
                 )
-                else _format_terminal_team_response(
-                    response,
-                    team_display_names=team_members.display_names,
-                    include_header=not run.prior_response_text,
-                )
+                else _format_terminal_team_response(response, team_display_names=team_members.display_names)
             )
         else:
             response_text = _format_team_header(team_members.display_names) + team_response_text
@@ -3639,18 +3521,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
         team_members=team_members,
         member_model_names=team_members.model_names,
     )
-    previous_presentation: StreamingPresentation | None = None
-    attempt_prefix: StreamingPresentation | None = None
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
-        nonlocal attempt_prefix
-        # Background joins continue the already-published document. A fresh
-        # tracker owns this attempt while the prior trace remains a frozen prefix.
-        attempt_prefix = previous_presentation if run.job_joins else None
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
             holder.member_model_names = dict.fromkeys(
                 requested_agent_names,
@@ -3726,7 +3602,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             attempt_config_names,
             attempt_display_names,
             show_tool_calls=show_tool_calls,
-            prefix=attempt_prefix,
         )
         attempt_member_ids = presentation.member_ids
         attempt_display_names_by_id = presentation.display_names_by_id
@@ -3951,8 +3826,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 response_text = _format_terminal_team_response(
                     event,
                     team_display_names=team_members.display_names,
-                    # A joined attempt continues the text its reply already headed.
-                    include_header=not run.job_joins,
                 )
                 event_has_visible = _has_visible_team_output(event)
                 if isinstance(event, RunOutput):
@@ -3965,26 +3838,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         ),
                     )
                     return
-                replayable_text = response_text if event_has_visible else ""
-                join_document = None
-                if emitted_output and ctx.background_tool_jobs:
-                    # A job-joined reply keeps the live document and its trace, which the prose-only terminal
-                    # rendering drops; the driver publishes it only once a join continues the reply.
-                    _append_team_output_text(
-                        presentation,
-                        event,
-                        top_level=True,
-                        skip_scopes={
-                            *(f"agent:{member}" for member, text in canonical_per_member.items() if text),
-                            *({"team"} if canonical_consensus else ()),
-                        },
-                    )
-                    _complete_terminal_team_tools(presentation, event)
-                    join_document = StructuredStreamChunk(
-                        content=presentation.render_body(),
-                        tool_trace=presentation.tool_trace.copy(),
-                        presentation_state=presentation.to_state(),
-                    )
                 # The driver emits response_text only after settling the
                 # attempt: a pre-settle yield would leak the fallback
                 # placeholder before an empty-run retry, or stale
@@ -3992,7 +3845,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 yield AttemptResolved(
                     CompletedAttempt(
                         response_text=response_text,
-                        replayable_text=replayable_text,
+                        replayable_text=response_text if event_has_visible else "",
                         has_visible_content=event_has_visible,
                         is_empty=(
                             event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
@@ -4005,7 +3858,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         tool_executions=tuple(event_tool_executions),
                         completed_tools=tuple(_extract_completed_team_tool_trace(event)),
                         metadata_content=event_metadata_content,
-                        join_document=join_document,
                     ),
                 )
                 return
@@ -4261,16 +4113,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     # its cleanup does not wait for event-loop async-generator finalization.
     async with aclosing(response_stream) as closing_stream:
         async for chunk in closing_stream:
-            published = _prefix_team_stream_chunk(chunk, attempt_prefix)
-            # Only a job join starts another attempt after the last published document.
-            if ctx.background_tool_jobs and isinstance(published, StructuredStreamChunk):
-                previous_presentation = StreamingPresentation(
-                    response_text=published.content,
-                    tool_trace=tuple(deepcopy(published.tool_trace or ())),
-                )
-            elif ctx.background_tool_jobs and isinstance(published, str):
-                previous_presentation = StreamingPresentation(response_text=published)
-            yield published
+            yield chunk
 
 
 __all__ = [

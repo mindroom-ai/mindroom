@@ -1,4 +1,4 @@
-"""The response boundary: continue a reply with ready job results, or report the work it leaves outstanding."""
+"""A conversation's background jobs: the key a reply finds them by, and those of them that ended."""
 
 from __future__ import annotations
 
@@ -14,13 +14,10 @@ from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
 
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
-
-# How many times one message may continue with ready job results, counted apart from dynamic tool continuations.
-_JOB_JOIN_LIMIT = 20
 
 _DELEGATED_CHILD: ContextVar[bool] = ContextVar("delegated_child_reply", default=False)
 
@@ -33,13 +30,6 @@ def delegated_child_context() -> Iterator[None]:
         yield
     finally:
         _DELEGATED_CHILD.reset(token)
-
-
-@dataclass(frozen=True)
-class _JobJoin:
-    """A reply's response boundary: the ready results it continues with, if any."""
-
-    prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,19 +65,14 @@ class ConversationKey:
 
 @dataclass(frozen=True)
 class _ConversationWork:
-    """The outstanding work of one key, and the ready outcomes of it a turn may retrieve now."""
+    """The outstanding work of one key, and the ended outcomes of it a turn may read now."""
 
     jobs: tuple[BackgroundJob, ...]
     ready: tuple[BackgroundJob, ...]
 
 
-async def conversation_work(
-    runtime: ToolJobRuntime,
-    key: ConversationKey,
-    *,
-    attempted: Collection[str] = (),
-) -> _ConversationWork:
-    """Return the outstanding work of ``key``, apart from outcomes a reply already asked for."""
+async def conversation_work(runtime: ToolJobRuntime, key: ConversationKey) -> _ConversationWork:
+    """Return the outstanding work of ``key``, and which of it ended and may be read now."""
     held = [
         (job, readable)
         for job, readable in await runtime.held_jobs(
@@ -97,7 +82,7 @@ async def conversation_work(
             requester_id=key.requester_id,
             source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else None,
         )
-        if job.owner.agent_name in key.participants and job.job_id not in attempted
+        if job.owner.agent_name in key.participants
     ]
     return _ConversationWork(
         jobs=tuple(job for job, _readable in held),
@@ -130,68 +115,3 @@ async def ended_jobs(runtime: ToolJobRuntime, key: ConversationKey) -> tuple[Bac
     """Return the ended, readable, unacknowledged jobs of ``key``, oldest first."""
     work = await conversation_work(runtime, key)
     return tuple(sorted(work.ready, key=lambda job: (job.created_at, job.job_id)))
-
-
-def _retrieval_calls(jobs: Sequence[BackgroundJob]) -> str:
-    calls = []
-    for job in jobs:
-        member = (
-            f" through member {job.owner.agent_name}"
-            if job.owner.transport_agent_name not in {None, job.owner.agent_name}
-            else ""
-        )
-        calls.append(f'job(action="wait", job_id="{job.job_id}", wait_timeout=0){member}')
-    return "; ".join(calls)
-
-
-def _completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
-    """Ask once for rich native result retrieval of work that is ready."""
-    return (
-        "Internal runtime update, not a new human request. Background work has finished. "
-        "Retrieve these stored outcomes once using the native job tool, then continue the conversation: "
-        + _retrieval_calls(jobs)
-    )
-
-
-async def join_conversation_jobs(
-    attempted: set[str],
-    *,
-    joins: int,
-    agent_names: Sequence[str] | None = None,
-    can_retrieve: bool = True,
-) -> _JobJoin:
-    """Continue this reply with ready results.
-
-    The reply retrieves its conversation's work, including work earlier replies started. Work it already asked to
-    retrieve is not asked for again. Work still running is left to its follow-up.
-    A reply that cannot retrieve results as an exact call of its own takes none: a minimal reply, whose CLI saves no
-    such call, and a voice turn, whose call session owns no conversation's results.
-    """
-    if not can_retrieve or (current := current_conversation(agent_names)) is None:
-        return _JobJoin()
-    runtime, key = current
-    work = await conversation_work(runtime, key, attempted=attempted)
-    if work.ready and joins < _JOB_JOIN_LIMIT:
-        attempted.update(job.job_id for job in work.ready)
-        return _JobJoin(prompt=_completion_prompt(work.ready))
-    # Work still running is reported by its follow-up once it ends; the reply never waits for it.
-    return _JobJoin()
-
-
-async def join_approval_jobs[RunT](
-    response: RunT,
-    *,
-    is_complete: Callable[[RunT], bool],
-    continue_response: Callable[[RunT, str], Awaitable[RunT]],
-    agent_names: Sequence[str] | None = None,
-) -> RunT:
-    """Continue a reconstructed approval run with ready results, at most `_JOB_JOIN_LIMIT` times."""
-    attempted: set[str] = set()
-    for joins in range(_JOB_JOIN_LIMIT + 1):
-        if not is_complete(response):
-            break
-        join = await join_conversation_jobs(attempted, joins=joins, agent_names=agent_names)
-        if join.prompt is None:
-            break
-        response = await continue_response(response, join.prompt)
-    return response

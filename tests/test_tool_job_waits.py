@@ -16,8 +16,8 @@ from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.completion import ConversationKey
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, notify_job_stops, register_background_runtime
-from tests.test_tool_job_reply_join import _job_context
 from tests.tool_job_helpers import (
+    job_context,
     job_coordinator,
     job_owner,
     start_job,
@@ -168,7 +168,7 @@ async def test_a_recorded_stop_reaches_its_work_before_the_job_runtime_applies_i
         await start_job(runtime, "other", tool_name="tool", depth=0, adapter={}, owner=elsewhere, operation=forever)
         assert not await runtime.stop_recorded("held")
 
-        context = _job_context(tmp_path, owner)
+        context = job_context(tmp_path, owner)
         pin_background_tool_jobs(context.config, context.runtime_paths)
         register_background_runtime(context.runtime_paths, runtime)
         runtime.changed.clear()

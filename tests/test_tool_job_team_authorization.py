@@ -17,7 +17,7 @@ from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn,
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
-from mindroom.tool_jobs.completion import join_conversation_jobs
+from mindroom.tool_jobs.completion import current_conversation, ended_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
@@ -127,7 +127,7 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
 
 @pytest.mark.asyncio
 async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_path: Path) -> None:
-    """An ordinary later turn must not receive an unusable other-member retrieval directive."""
+    """An ordinary later turn of the lead is not told of a member's job, which only a team reply can collect."""
     config = managed_team_config(tmp_path)
     paths = team_coordinator(tmp_path, config).runtime_paths
     owner = replace(completed_delegation_job().owner, agent_name="worker", transport_agent_name="lead")
@@ -148,10 +148,12 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_p
         waited = await runtime.wait("member", owner=owner, depth=0)
         await runtime.release_wait("member", waited.claim)
         with tool_runtime_context(context):
-            assert (await join_conversation_jobs(set(), joins=0)).prompt is None
-            joined = await join_conversation_jobs(set(), joins=0, agent_names=("lead", "worker"))
-            assert joined.prompt is not None
-            assert 'job_id="member"' in joined.prompt
+            agent_turn = current_conversation()
+            team_turn = current_conversation(("lead", "worker"))
+        assert agent_turn is not None
+        assert team_turn is not None
+        assert await ended_jobs(*agent_turn) == ()
+        assert [job.job_id for job in await ended_jobs(*team_turn)] == ["member"]
         assert pending_outcome(runtime, "member") is not None
     finally:
         await runtime.shutdown()
@@ -190,7 +192,9 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         assert pending_outcomes(runtime) == []
         assert pending_outcome(runtime, job.job_id) is None
         with tool_runtime_context(context):
-            assert (await join_conversation_jobs(set(), joins=0)).prompt is None
+            current = current_conversation()
+        assert current is not None
+        assert await ended_jobs(*current) == ()
         for control in (runtime.wait, runtime.cancel):
             with pytest.raises(JobAccessError):
                 await control(job.job_id, owner=owner, depth=0)

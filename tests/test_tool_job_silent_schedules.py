@@ -1,4 +1,4 @@
-"""Background continuations retain silent scheduling's existing delivery policy."""
+"""Background jobs keep silent scheduling's delivery policy."""
 
 from __future__ import annotations
 
@@ -19,20 +19,17 @@ from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import join_conversation_jobs
+from mindroom.tool_jobs.completion import current_conversation, ended_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from mindroom.tool_system.events import ToolTraceEntry, tool_markers_match_trace
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
@@ -51,6 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.tool_system.events import ToolTraceEntry
 
 
 @dataclass
@@ -68,9 +66,8 @@ async def _run_silent_turn(
     enabled: bool,
     collect_stream: bool,
     record_turn: bool = True,
-    quiet_job: bool = False,
 ) -> _SilentTurn:
-    """Run one silent scheduled agent turn; `quiet_job` leaves one finished job for the reply to join."""
+    """Run one silent scheduled agent turn."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
         agents={"leader": AgentConfig(display_name="Leader")},
@@ -140,19 +137,6 @@ async def _run_silent_turn(
         )
 
     try:
-        if quiet_job:
-            await start_job(
-                runtime,
-                "quiet",
-                tool_name="probe",
-                depth=0,
-                source_kind=SILENT_SCHEDULE_SOURCE_KIND,
-                adapter={},
-                owner=owner,
-                operation=operation,
-            )
-            ready = await runtime.wait("quiet", owner=owner, depth=0)
-            await runtime.release_wait("quiet", ready.claim)
         with (
             tool_runtime_context(context),
             patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
@@ -175,74 +159,6 @@ async def _run_silent_turn(
         storage.close()
 
 
-def _job_wait_call() -> ModelResponse:
-    return ModelResponse(tool_calls=[_call("job", "read", action="wait", job_id="quiet", wait_timeout=0)])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("collect_stream", [False, True])
-@pytest.mark.parametrize("record_turn", [False, True])
-@pytest.mark.parametrize(
-    ("first", "second", "expected"),
-    [
-        ("NO_REPLY", "NO_REPLY", "NO_REPLY"),
-        ("NO_REPLY", "New finding", "New finding"),
-        ("First finding", "NO_REPLY", "First finding"),
-        ("The report mentions NO_REPLY", "More findings", "The report mentions NO_REPLY\n\nMore findings"),
-    ],
-)
-async def test_silent_join_preserves_the_deliverable_report(
-    tmp_path: Path,
-    *,
-    enabled: bool,
-    collect_stream: bool,
-    record_turn: bool,
-    first: str,
-    second: str,
-    expected: str,
-) -> None:
-    """Quiet SDK replies preserve tool placement with managed joins enabled or disabled."""
-    turn = await _run_silent_turn(
-        tmp_path,
-        (
-            [
-                ModelResponse(tool_calls=[_call("probe_tool", "first-read")]),
-                ModelResponse(content=first),
-                _job_wait_call(),
-                ModelResponse(content=second),
-            ]
-            if enabled
-            else [ModelResponse(tool_calls=[_call("probe_tool", "read")]), ModelResponse(content=expected)]
-        ),
-        enabled=enabled,
-        collect_stream=collect_stream,
-        record_turn=record_turn,
-        quiet_job=enabled,
-    )
-    answer, trace = turn.answer, turn.trace
-    assert tool_markers_match_trace(answer, trace)
-    clean = strip_matching_visible_tool_markers(answer, trace).strip()
-    if expected == "NO_REPLY":
-        assert is_silent_schedule_no_report_response(clean)
-    else:
-        assert [line for line in clean.splitlines() if line.strip()] == [
-            line for line in expected.splitlines() if line.strip()
-        ]
-        assert not is_silent_schedule_no_report_response(clean)
-    assert [(tool.tool_name, tool.result_preview) for tool in trace] == [("probe_tool", "Job evidence")] + (
-        [("job", "Job evidence")] if enabled else []
-    )
-    if enabled and first == "First finding":
-        assert answer.index(first) < answer.index("`job`")
-    if enabled and collect_stream and second == "New finding":
-        assert answer.index("`job`") < answer.index(second)
-    assert turn.pending_outcomes == []
-    if turn.recorder is not None:
-        assert turn.recorder.outcome == "completed"
-        assert [tool.tool_name for tool in turn.recorder.completed_tools] == [tool.tool_name for tool in trace]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("collect_stream", [False, True])
 @pytest.mark.parametrize("final", ["NO_REPLY", "Finding", ""])
@@ -254,7 +170,7 @@ async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
     final: str,
     use_tool: bool,
 ) -> None:
-    """Enabling background jobs changes nothing for a quiet turn that never joins one."""
+    """Enabling background jobs changes nothing for a quiet turn that starts none."""
     tool_calls = [ModelResponse(tool_calls=[_call("probe_tool", "read")])] if use_tool else []
     observed = []
     for enabled in (False, True):
@@ -279,8 +195,8 @@ async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("silent", [False, True])
-async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path: Path, *, silent: bool) -> None:
-    """Automatic joining cannot publish a quiet result or silence an ordinary one."""
+async def test_quiet_and_visible_results_stay_with_their_own_replies(tmp_path: Path, *, silent: bool) -> None:
+    """A silent schedule's reply hears only of quiet results, and an ordinary reply only of visible ones."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     envelope = _plain_request(_target(thread_id="$thread")).response_envelope
@@ -315,10 +231,9 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
             waited = await runtime.wait(name, owner=owner, depth=0)
             await runtime.release_wait(name, waited.claim)
         with tool_runtime_context(context):
-            joined = await join_conversation_jobs(set(), joins=0)
-        assert joined.prompt is not None
-        assert f'job_id="{"quiet" if silent else "visible"}"' in joined.prompt
-        assert f'job_id="{"visible" if silent else "quiet"}"' not in joined.prompt
+            current = current_conversation()
+        assert current is not None
+        assert [job.job_id for job in await ended_jobs(*current)] == ["quiet" if silent else "visible"]
     finally:
         await runtime.shutdown()
 

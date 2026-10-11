@@ -35,6 +35,7 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -42,6 +43,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 # One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
@@ -434,3 +437,13 @@ def job_coordinator(tmp_path: Path, runtime: ToolJobRuntime, bot: MagicMock) -> 
     # The journal the runtime keeps its jobs in, which the replies share.
     coordinator._journal = tool_job_journal(tmp_path)
     return coordinator
+
+
+def job_context(tmp_path: Path, owner: ToolExecutionIdentity) -> ToolRuntimeContext:
+    """The tool runtime context of a reply in the conversation of ``owner``, on a managed team config."""
+    paths = test_runtime_paths(tmp_path)
+    return replace(
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+    )
