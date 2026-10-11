@@ -14,7 +14,6 @@ from agno.tools import Toolkit
 
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
-from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -912,24 +911,17 @@ def _participant_run_config(
     A participant may read the skills it names whenever its caller could without approval;
     reading or running a skill's scripts still needs an operator rule.
     """
-    config = build_automation_approval_config(
+    return build_automation_approval_config(
         context.config,
         function_owners=function_owners,
         preapproved_toolkits=allowed,
         never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+        auto_approved_functions=[
+            name
+            for name in SKILL_READ_FUNCTION_NAMES
+            if reads_skills and not tool_may_require_approval(context.config, name)
+        ],
     )
-    skill_reads = sorted(
-        name
-        for name in SKILL_READ_FUNCTION_NAMES
-        if reads_skills and not tool_may_require_approval(context.config, name)
-    )
-    if not skill_reads:
-        return config
-    rules = [
-        *config.tool_approval.rules,
-        *(ApprovalRuleConfig(match=name, action="auto_approve") for name in skill_reads),
-    ]
-    return config.model_copy(update={"tool_approval": config.tool_approval.model_copy(update={"rules": rules})})
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
