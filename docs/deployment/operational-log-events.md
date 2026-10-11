@@ -165,5 +165,6 @@ To find what grows the primary process's memory, set `MINDROOM_HEAP_PROBE_INTERV
 MindRoom then logs one `heap_type_probe` event per interval with the 25 most common object types and their counts, resident memory (`rss_bytes`), allocator totals (`arena_bytes`, `arena_in_use_bytes`, `arena_free_bytes`, `mmap_bytes`), and `python_allocated_blocks`.
 Resident memory that grows while `arena_in_use_bytes` plus `mmap_bytes` and `python_allocated_blocks` stay flat suggests freed memory the allocator keeps.
 Growth in those suggests live objects, which the type histogram may not show because it does not count strings, bytes, or numbers.
+The histogram leaves out the objects that exist once startup finishes and reports only their count as `frozen_objects`, so it shows what accumulated after startup.
 Each probe briefly pauses the event loop, so prefer intervals of several minutes on large processes.
 Unset or `0` disables the probe (the default), and any other value below `60` fails startup.

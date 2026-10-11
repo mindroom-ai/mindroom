@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -26,6 +28,21 @@ type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
+
+
+def _freeze_startup_heap() -> None:
+    """Collect garbage, then exclude every surviving object from later collections.
+
+    Call audio is pumped on the event loop, so a full collection that walks the
+    whole startup heap pauses agent speech for hundreds of milliseconds.
+    Reference counting still frees frozen objects; only cycles among them are
+    never collected.
+    """
+    started_at = time.monotonic()
+    gc.collect()
+    collect_ms = round((time.monotonic() - started_at) * 1000, 1)
+    gc.freeze()
+    logger.info("startup_heap_frozen", frozen_objects=gc.get_freeze_count(), collect_ms=collect_ms)
 
 
 @dataclass
@@ -82,6 +99,8 @@ class StartupMaintenanceController:
         )
         if runtime_support_ready:
             await self.mark_runtime_support_ready()
+        # This is the last startup step, so the long-lived runtime objects now exist.
+        _freeze_startup_heap()
 
     async def _run_phase(
         self,

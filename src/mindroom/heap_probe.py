@@ -7,6 +7,8 @@ every object tracked by the garbage collector by type and logs the most common
 types, so successive records show which kinds of objects accumulate.
 
 Only GC-tracked containers are counted; strings, bytes, and numbers are not.
+Objects frozen once startup settles are left out of the histogram and only
+counted, so the types show what accumulated since then.
 Each record also carries glibc's malloc totals and Python's allocated block
 count. Live malloc bytes are ``arena_in_use_bytes`` plus ``mmap_bytes``;
 Python's small-object arenas come straight from mmap, so malloc does not count
@@ -132,6 +134,7 @@ def _log_heap_type_probe() -> None:
     logger.info(
         "heap_type_probe",
         tracked_objects=counts.total(),
+        frozen_objects=gc.get_freeze_count(),
         top_types=[
             {"type": f"{object_type.__module__}.{object_type.__qualname__}", "count": count}
             for object_type, count in counts.most_common(_TOP_TYPE_COUNT)
