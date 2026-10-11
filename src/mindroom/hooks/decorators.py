@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from .types import EVENT_AGENT_STARTED, HookCallback, validate_event_name
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable
     from types import ModuleType
 
 
 _HOOK_METADATA_ATTR = "__mindroom_hook_metadata__"
+
+
+class _HookDecorator(Protocol):
+    """Mark one async callback as a hook and return it with its own signature."""
+
+    def __call__[C: Callable[..., Awaitable[object | None]]](self, callback: C, /) -> C:
+        """Attach hook metadata to ``callback``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +45,7 @@ def hook(
     agents: Iterable[str] | None = None,
     rooms: Iterable[str] | None = None,
     required: bool = False,
-) -> Callable[[HookCallback], HookCallback]:
+) -> _HookDecorator:
     """Annotate an async function as a MindRoom hook."""
     event_name = validate_event_name(event)
     if required and event_name != EVENT_AGENT_STARTED:
@@ -47,14 +54,16 @@ def hook(
     normalized_agents = tuple(agent.strip() for agent in agents or () if agent.strip()) or None
     normalized_rooms = tuple(room.strip() for room in rooms or () if room.strip()) or None
 
-    def decorator(callback: HookCallback) -> HookCallback:
-        if not inspect.iscoroutinefunction(callback):
+    def decorator[C: Callable[..., Awaitable[object | None]]](callback: C) -> C:
+        # Checked through Any so the coroutine-function narrowing does not replace the callback's own type.
+        function = cast("Any", callback)
+        if not inspect.iscoroutinefunction(function):
             msg = f"Hook callback {callback!r} must be async"
             raise TypeError(msg)
 
         metadata = _HookMetadata(
             event_name=event_name,
-            hook_name=name or cast("Any", callback).__name__,
+            hook_name=name or function.__name__,
             priority=priority,
             timeout_ms=timeout_ms,
             agents=normalized_agents,

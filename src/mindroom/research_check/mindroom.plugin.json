@@ -1,0 +1,4 @@
+{
+  "name": "research_check",
+  "hooks_module": "hooks.py"
+}
