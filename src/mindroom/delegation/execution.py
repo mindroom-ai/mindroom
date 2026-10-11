@@ -669,7 +669,6 @@ async def _background_child_outcome(
         _run_child,
         child,
         run_child=run_child,
-        config=config,
         runtime_paths=runtime_paths,
         caller_identity=owner,
         refresh_scheduler=refresh_scheduler,
@@ -678,7 +677,7 @@ async def _background_child_outcome(
     async with subagent_liveness(child, runtime_paths):
         primary_error: Exception | None = None
         try:
-            outcome = await run(decisions=None, denial_reasons=None, approval_calls=(), fresh=True)
+            outcome = await run(config=config, decisions=None, denial_reasons=None, approval_calls=(), fresh=True)
             while outcome.response.status == RunStatus.paused:
                 # The job, not a parent reply, asks for the child's approvals and resumes it with the decisions.
                 decisions, denial_reasons, calls = await request_child_approvals(
@@ -690,6 +689,9 @@ async def _background_child_outcome(
                     runtime_paths=runtime_paths,
                 )
                 outcome = await run(
+                    # A child resumes long after it started: it rebuilds under the policy current now, as its
+                    # approvals did, so a rule a reload added gates its later calls too.
+                    config=live_delegation_config(config),
                     decisions=decisions,
                     denial_reasons=denial_reasons,
                     approval_calls=calls,
