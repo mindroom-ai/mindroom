@@ -19,6 +19,7 @@ from agno.run.base import RunStatus
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, ToolResult
 
+from mindroom.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools
@@ -548,6 +549,17 @@ def test_wait_mode_classifies_every_call_from_current_policy(
     function = _bound(functions[case](), agent)
     with tool_runtime_context(context), job_control_context(JobControl()) if owned else nullcontext():
         assert wait_mode(function, depth=depth) == expected
+
+
+def test_a_call_a_cli_command_makes_runs_inline(tmp_path: Path) -> None:
+    """A CLI call returns to its shell command, whose saved result is the reply's, so it never becomes a job."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    function = _bound(assembled_function(_ordinary), Agent(id="leader"))
+    with tool_runtime_context(context):
+        assert wait_mode(function, depth=0) == "managed"
+        with inner_cli_dispatch():
+            assert wait_mode(function, depth=0) == "inline"
 
 
 @pytest.mark.asyncio

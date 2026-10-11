@@ -25,6 +25,7 @@ from agno.tools.function import FunctionCall, FunctionExecutionResult, ToolResul
 from agno.utils.timer import Timer
 from pydantic import BaseModel
 
+from mindroom.agno_compat_cli_checkpoint import cli_dispatch_active
 from mindroom.background_tasks import (
     run_blocking_until_complete,
     run_coroutine_until_complete,
@@ -207,7 +208,8 @@ def wait_mode(function: Function, *, depth: int) -> ToolWaitMode:
         or _holds_run_connection(function)
     ):
         return "native"
-    if job_owns_execution() or depth > 0 or function.stop_after_tool_call:
+    # A call a CLI command makes returns to that command, whose own result is what the reply saves.
+    if job_owns_execution() or depth > 0 or function.stop_after_tool_call or cli_dispatch_active():
         return "inline"
     return "managed"
 

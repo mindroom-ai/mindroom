@@ -7927,6 +7927,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.agno_execution"
 depends_on = [
+    "mindroom.agno_compat_cli_checkpoint",
     "mindroom.cancellation",
     "mindroom.custom_tools.job",
     "mindroom.tool_approval",
@@ -8073,6 +8074,7 @@ visibility = [
     "mindroom.cli_approval_recovery",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.cli_shell_agent",
+    "mindroom.tool_jobs.agno_execution",
 ]
 
 [[modules]]
