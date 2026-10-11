@@ -557,6 +557,106 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
 
 
 @pytest.mark.asyncio
+async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_call_would(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the decision still out after the approval wait, the parent's call returns the child's handle and goes on."""
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code", tools=["file"]),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+        ),
+        "code",
+        users=["@alice:example.org"],
+    )
+    config.background_tool_jobs.approval_wait_timeout = 0.05
+    identity = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "p")
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
+    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    bind_toolkit_authority(toolkit, authored_name="delegate")
+    storages = [create_session_storage("leader", config, paths, identity)]
+    side_effects: list[str] = []
+
+    async def write_report() -> str:
+        side_effects.append("written")
+        return "Report written"
+
+    async def run_child(child: DelegationChild, *, prompt: str, **_kwargs: object) -> str:
+        child_identity = replace(identity, agent_name="code", session_id=child.session_id)
+        storages.append(create_session_storage("code", config, paths, child_identity))
+        function = Function.from_callable(write_report)
+        function.requires_confirmation = True
+        function.owning_toolkit = "file"
+        agent = Agent(
+            name="code",
+            id="code",
+            db=storages[-1],
+            tools=[function],
+            model=DelegationModel(id="test", responses=[ModelResponse(tool_calls=[_call("write_report", "w")])]),
+        )
+        response = await agent.arun(
+            prompt,
+            session_id=child.session_id,
+            run_id=child.run_id,
+            user_id=identity.requester_id,
+        )
+        paused = paused_attempt_from_response(
+            response,
+            fallback_session_id=child.session_id,
+            fallback_run_id=child.run_id,
+            toolkit_owners=toolkit_owners_for_agents([agent]),
+        )
+        assert paused is not None
+        raise ResponsePausedForApproval(paused)
+
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("run_subagent", "first", task="Report", agent_name="code")]),
+            ModelResponse(content="Parent free"),
+        ],
+    )
+    install_tool_job_execution(model)
+    parent = Agent(name="leader", db=storages[0], tools=[toolkit], model=model)
+    try:
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+            response = await parent.arun("Delegate", session_id="p", user_id=identity.requester_id)
+            result = await asyncio.wait_for(
+                drive_delegations(
+                    parent,
+                    response,
+                    run_child=run_child,
+                    agent_name="leader",
+                    config=config,
+                    runtime_paths=paths,
+                    execution_identity=identity,
+                ),
+                JOB_TEST_TIMEOUT,
+            )
+        assert result.status == RunStatus.completed
+        first = next(message.content for message in result.messages if message.tool_call_id == "first")
+        handle = json.loads(first)
+        assert handle["status"] == "awaiting_approval"
+        assert cards.requested == [(_approval_run_id(handle["job_id"]), "w", "write_report")]
+        assert side_effects == []
+    finally:
+        await runtime.shutdown()
+        for storage in storages:
+            storage.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 async def test_human_followup_does_not_stop_next_provider_invocation(

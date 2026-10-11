@@ -30,13 +30,14 @@ from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
+    job_owner,
     saved_jobs,
     tool_job_runtime,
     wait_for_status,
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
 
     from mindroom.tool_approval import BackgroundScriptToolOrigin
-    from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
+    from mindroom.tool_jobs.runtime import BackgroundJob
 
 
 class _NativeTools(Toolkit):
@@ -467,3 +468,40 @@ async def test_retrieving_a_job_that_awaits_approval_waits_no_longer_than_its_ca
                 waited = await asyncio.wait_for(JobTools(run.paths, run.owner).job("wait", job_id), JOB_TEST_TIMEOUT)
         assert json.loads(waited)["status"] == "awaiting_approval"
         assert run.effects == []
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_asks_late_still_gets_the_whole_approval_wait(tmp_path: Path) -> None:
+    """The approval allowance counts from when the job asks, however long it worked before, and anew for each ask."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    loop = asyncio.get_running_loop()
+    asked: list[float] = []
+    decided, asked_again = asyncio.Event(), asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        # The job works longer than the allowance before it asks, then asks a second time once the first is decided.
+        await asyncio.sleep(0.3)
+        for _ in range(2):
+            await runtime.set_awaiting_approval("job-1", awaiting=True)
+            asked.append(loop.time())
+            if len(asked) == 2:
+                asked_again.set()
+            await decided.wait()
+            decided.clear()
+            await runtime.set_awaiting_approval("job-1", awaiting=False)
+        return BackgroundOutcome("completed", "ok")
+
+    try:
+        _, claim = await runtime.start("job-1", tool_name="t", depth=0, adapter={}, owner=owner, operation=operation)
+        waited = await runtime.wait("job-1", owner=owner, depth=0, claim=claim, approval_timeout=0.2)
+        assert waited.job.status == "awaiting_approval"
+        assert loop.time() - asked[0] >= 0.2
+        decided.set()
+        await asyncio.wait_for(asked_again.wait(), JOB_TEST_TIMEOUT)
+        waited = await runtime.wait("job-1", owner=owner, depth=0, approval_timeout=0.2)
+        assert waited.job.status == "awaiting_approval"
+        assert loop.time() - asked[1] >= 0.2
+    finally:
+        decided.set()
+        await runtime.shutdown()

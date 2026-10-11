@@ -559,12 +559,12 @@ class ToolJobRuntime:
     ) -> _JobWait:
         """Wait without cancelling execution, keeping or taking the outcome's claim unless another waiter has.
 
-        ``approval_timeout`` bounds only how long the wait lasts while the job awaits approval; ``timeout`` bounds it all.
+        ``approval_timeout`` bounds how long the wait lasts once the job awaits approval, from when this wait sees it
+        ask, however long the job ran before; ``timeout`` bounds it all.
         """
         timeout = validate_wait_timeout(timeout)
-        now = asyncio.get_running_loop().time()
-        deadline = None if timeout is None else now + timeout
-        approval_deadline = None if approval_timeout is None else now + approval_timeout
+        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+        approval_deadline: float | None = None
         retained = False
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
@@ -593,7 +593,11 @@ class ToolJobRuntime:
                         return _JobWait(snapshot, claim)
                     now = asyncio.get_running_loop().time()
                     remaining = None if deadline is None else deadline - now
-                    if entry.job.status == "awaiting_approval" and approval_deadline is not None:
+                    if entry.job.status != "awaiting_approval" or approval_timeout is None:
+                        approval_deadline = None
+                    else:
+                        # Each approval the job asks for gets the whole allowance.
+                        approval_deadline = now + approval_timeout if approval_deadline is None else approval_deadline
                         approval_remaining = approval_deadline - now
                         remaining = approval_remaining if remaining is None else min(remaining, approval_remaining)
                     if turn_queued.is_set() or (remaining is not None and remaining <= 0):
