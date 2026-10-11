@@ -46,6 +46,15 @@ A hard logout, a deleted server device, a changed returned identity, corrupt sto
 Clearing the journal or the crypto directory is not a supported repair, because a Nio 1.0 device session is bound to its journal.
 Preserve the failed deployment's state while recovering it, because pending input and attempted deliveries may still need reconciliation.
 
+### Rolling back
+
+Changing only the image back to an older release is unsafe once the new release has opened persistent storage, because older releases can write to upgraded crypto stores and do not reliably reject the newer records.
+Before upgrading, stop all primary, worker, script, and background writers and take one coordinated backup of configuration, credentials, workspaces, memories, the event journal, every Matrix device store and trust sidecar, continuity files, and session storage, including separately mounted session and state volumes.
+Verify that this backup can be restored before proceeding.
+To roll back, stop all writers and keep ingress closed, set the failed upgraded state aside, and restore the complete backup before starting the previous release.
+Restore the journal and device stores together, because each is upgraded separately and a device session is bound to its journal.
+Keep the set-aside upgraded state, because user work and tool actions after the upgrade may not exist in the restored backup.
+
 ## Private storage migration
 
 Private storage created by v2026.9.32 or earlier uses older requester directory names.
