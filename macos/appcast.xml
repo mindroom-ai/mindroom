@@ -5,6 +5,32 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.10.236</title>
+            <pubDate>Sun, 11 Oct 2026 02:40:42 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1975</sparkle:version>
+            <sparkle:shortVersionString>2026.10.236</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.10.236
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [refactor(personas): build authored subagents through the normal prompt builder (#2794)](https://github.com/mindroom-ai/mindroom/commit/b2f6b8ff6) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.10.236/MindRoom.zip" length="72130208" type="application/octet-stream" sparkle:edSignature="6mtZ3eGvcpCcAYEGyUlKZwztl6v+fCuk00qM+iL7YXDKsahdzhwsPzIvdnngwLFjIGmSsBZO7CWql/K6B34JAw=="/>
+        </item>
+        <item>
             <title>2026.10.201</title>
             <pubDate>Wed, 07 Oct 2026 03:48:33 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
