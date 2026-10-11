@@ -94,8 +94,14 @@ def classify_compaction_decision(  # noqa: PLR0911
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
     current_history_tokens: int | None,
+    allow_native_compaction: bool = True,
 ) -> CompactionDecision:
-    """Classify compaction as none or required before the next reply."""
+    """Classify compaction as none or required before the next reply.
+
+    Between the trigger and hard budgets, native provider compaction owns the
+    history, so a run that disallows it (a scheduled run with a history limit)
+    compacts at the trigger budget instead.
+    """
     resolved_trigger_budget = plan.replay_budget_tokens
     resolved_hard_budget = plan.hard_replay_budget_tokens
 
@@ -160,6 +166,15 @@ def classify_compaction_decision(  # noqa: PLR0911
             trigger_budget_tokens=resolved_trigger_budget,
             hard_budget_tokens=resolved_hard_budget,
             fitted_replay_tokens=resolved_hard_budget,
+        )
+    if not allow_native_compaction:
+        return CompactionDecision(
+            mode="required",
+            reason="over_trigger_native_disabled",
+            current_history_tokens=current_history_tokens,
+            trigger_budget_tokens=resolved_trigger_budget,
+            hard_budget_tokens=resolved_hard_budget,
+            fitted_replay_tokens=resolved_trigger_budget,
         )
     return CompactionDecision(
         mode="none",

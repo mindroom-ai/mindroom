@@ -359,6 +359,7 @@ async def prepare_scope_history(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
+        allow_native_compaction=allow_native_compaction,
     )
     logger.info(
         "History preparation check",
@@ -400,6 +401,12 @@ async def prepare_scope_history(
             )
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
+        # Compaction skips history that already fits its budget, so a trigger-level pass targets the trigger.
+        compaction_budget = (
+            execution_plan.replay_budget_tokens
+            if compaction_decision.reason == "over_trigger_native_disabled"
+            else execution_plan.hard_replay_budget_tokens
+        )
         compaction_result = await _run_scope_compaction_with_lifecycle(
             mode="manual" if state.force_compact_before_next_run else "auto",
             storage=scope_context.storage,
@@ -407,7 +414,7 @@ async def prepare_scope_history(
             scope=scope_context.scope,
             state=state,
             resolved_inputs=resolved_inputs,
-            history_budget=execution_plan.hard_replay_budget_tokens,
+            history_budget=compaction_budget,
             current_history_tokens=current_history_tokens,
             runs_before=len(visible_runs),
             replay_model=native_model,
