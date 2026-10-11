@@ -39,6 +39,7 @@ from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: T
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.automations import Automation  # noqa: TC001
+from mindroom.config.budgets import BudgetsConfig  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
@@ -461,6 +462,7 @@ class Config(BaseModel):
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     personal_rooms: PersonalRoomsConfig | None = Field(default=None, description="Optional native personal agent rooms")
+    budgets: BudgetsConfig | None = Field(default=None, description="Optional per-user monthly spending budgets")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
     event_journal: EventJournalConfig = Field(
@@ -533,6 +535,14 @@ class Config(BaseModel):
             return
         if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
             raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def validate_budgets(self) -> Config:
+        """Require a configured fallback model for budgets."""
+        if self.budgets is not None and self.budgets.fallback_model not in self.models:
+            msg = f"Unknown budgets fallback_model: {self.budgets.fallback_model!r}"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def validate_personal_rooms(self) -> Config:

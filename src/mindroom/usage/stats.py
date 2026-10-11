@@ -876,8 +876,12 @@ def collect_admin_usage(
     runtime_paths: RuntimePaths,
     include_daily: bool = False,
     include_requests: bool = False,
+    since: float | None = None,
 ) -> UsageReport:
-    """Collect retained session aggregates across configured agents and stored teams."""
+    """Collect retained session aggregates across configured agents and stored teams.
+
+    ``since`` limits the report to runs created at or after that epoch time, without session totals.
+    """
     return _collect_usage(
         sources=discover_admin_usage_sources(config=config, runtime_paths=runtime_paths),
         config=config,
@@ -887,6 +891,7 @@ def collect_admin_usage(
         expected_requester=None,
         include_daily=include_daily,
         include_requests=include_requests,
+        since=since,
     )
 
 
@@ -900,6 +905,7 @@ def _collect_usage(
     expected_requester: str | None,
     include_daily: bool,
     include_requests: bool = False,
+    since: float | None = None,
 ) -> UsageReport:
     @cache
     def canonical_requester(requester_id: str) -> str:
@@ -926,8 +932,8 @@ def _collect_usage(
         scanned_sources.add(source.path_label)
         if source.scope == "private_agent":
             private_usage.sources.add(source.path_label)
-        mode = "runs" if scope == "self" and not source.requester_isolated else "both"
-        for item in iter_usage_storage_rows(source, mode=mode):
+        mode = "runs" if since is not None or (scope == "self" and not source.requester_isolated) else "both"
+        for item in iter_usage_storage_rows(source, mode=mode, since=since):
             if isinstance(item, UsageStorageDiagnostic):
                 voice_unavailable.add(item.path_label)
                 usage.unavailable_sources.add(item.path_label)

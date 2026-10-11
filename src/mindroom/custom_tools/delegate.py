@@ -27,7 +27,7 @@ from mindroom.delegation.personas import (
 )
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
 )
@@ -365,6 +365,7 @@ class DelegateTools(Toolkit):
             config=config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
+            budget_monitor=current_budget_monitor(),
             model=model,
             agent_mode=agent_mode,
             previous=continuation,
