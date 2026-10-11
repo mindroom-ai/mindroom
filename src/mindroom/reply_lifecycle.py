@@ -1689,7 +1689,8 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
             # The restored answer stands, but nothing answers sources the user deleted.
             settle = SettleSources(regeneration.span_id, answered=False)
             effects = (settle,) if regeneration is waiting else (CancelSpan(regeneration.span_id), settle)
-            return _restored(reply, regeneration, kept, now_ns, *effects)
+            # As a Stop would, the deletion cancels the background work the reply started, the regeneration's too.
+            return _restored(reply, regeneration, kept, now_ns, *effects, StopJobs(reply.reply_id))
     # The span ends here, so a resume or an in-place wait starts no tool and writes no note before its cancel lands.
     updated, spans = _end_running(reply, current, SpanOutcome.CANCELLED)
     cancel = () if current is None else (CancelSpan(current.span_id),)

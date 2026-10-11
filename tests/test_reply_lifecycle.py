@@ -1444,6 +1444,8 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert kept.reply.presentation == "answer"
     assert kept.reply.redaction_pending == ()
     assert CancelSpan("span-2") in kept.effects
+    # The deletion cancels the background work the reply started, the regeneration's included.
+    assert rl.StopJobs(kept.reply.reply_id) in kept.effects
     assert _span_after(kept, "span-2").outcome is SpanOutcome.RESTORED
     # Written ahead, so Matrix may show it though no confirmation says so yet.
     shown = replace(regeneration.reply, reply_sequence=regeneration.reply.reply_sequence + 1)
@@ -1464,8 +1466,8 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert after_restart.reply is not None
     assert after_restart.reply.state is ReplyState.COMPLETED
     assert after_restart.reply.redaction_pending == ()
-    # The answer stands, but nothing answers the deleted message's edit.
-    assert after_restart.effects == (SettleSources("span-2", answered=False),)
+    # The answer stands, but nothing answers the deleted message's edit, and its work is cancelled.
+    assert after_restart.effects == (SettleSources("span-2", answered=False), rl.StopJobs(after_restart.reply.reply_id))
 
 
 def _regeneration_that_showed_partial_text() -> tuple[Reply, Span]:
