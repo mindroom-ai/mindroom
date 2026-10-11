@@ -17,12 +17,14 @@ from agno.session.agent import AgentSession
 from anthropic import AsyncAnthropic
 
 from mindroom.agent_storage import create_state_storage
+from mindroom.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.provider_media_fallback import install_provider_media_fallback
 from mindroom.provider_stream_retry import install_provider_stream_retry_hook
+from mindroom.usage_storage import project_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -136,6 +138,55 @@ async def test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start(tmp
             "cache_read_tokens": 48000,
             "cache_write_tokens": 800,
         }
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_hard_stopped_claude_reply_keeps_the_usage_reported_at_stream_start(tmp_path: Path) -> None:
+    """MindRoom's Stop cancels the reply task while it waits for Claude's next chunk."""
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    held = _HeldStream()
+    started = asyncio.Event()
+    try:
+        agent = _agent(
+            storage,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
+            tmp_path / "logs",
+        )
+        async with drain_agent_cancellation(agent, "run") as bind:
+
+            async def consume() -> None:
+                with bind():
+                    events = agent.arun("Check status", run_id="run", session_id="session", stream=True)
+                while True:
+                    with bind():
+                        event = await anext(events)
+                    if isinstance(event, RunContentEvent) and event.content:
+                        started.set()
+
+            task = asyncio.create_task(consume())
+            async with asyncio.timeout(5):
+                await started.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        await held.closed.wait()
+
+        assert _session_usage(storage) == {
+            "input_tokens": 1200,
+            "output_tokens": 1,
+            "cache_read_tokens": 48000,
+            "cache_write_tokens": 800,
+        }
+        session = storage.get_session("session", session_type=SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        requests = project_usage(session.runs[-1].to_dict())["requests"]
+        assert [
+            (request["metrics"]["input_tokens"], request["metrics"]["cache_read_tokens"]) for request in requests
+        ] == [
+            (1200, 48000),
+        ]
     finally:
         storage.close()
 

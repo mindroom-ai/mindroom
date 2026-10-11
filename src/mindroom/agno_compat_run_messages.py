@@ -58,17 +58,30 @@ _ACTIVE_REQUESTS: dict[int, _ModelRequest] = {}
 # cancellation or error persistence, including consumer closure between chunks.
 # Coverage: tests/test_openai_responses_stream.py::test_received_request_usage_survives_abandoned_stream;
 # tests/test_openai_responses_stream.py::test_received_request_usage_survives_cancel_request.
+def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None) -> MessageMetrics | None:
+    """Return an interrupted Claude request's start usage when it received no other usage."""
+    if not isinstance(request.model, ClaudeProviderSDKCompat):
+        return None
+    if received is not None and has_token_usage(received.to_dict()):
+        return None
+    # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
+    return take_unfinished_stream_usage()
+
+
+def _settle_claude_start_usage(request: _ModelRequest) -> None:
+    """Give an interrupted Claude request its start usage before Agno counts the request on unwind."""
+    start = _claude_start_usage(request, request.assistant_message.metrics)
+    if start is not None:
+        request.assistant_message.metrics = start
+
+
 def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
     request = _ACTIVE_REQUESTS.pop(id(run_response), None)
     if request is None:
         return
     settled = request.assistant_message.model_copy()
     received = request.stream_data.response_metrics
-    if isinstance(request.model, ClaudeProviderSDKCompat) and not has_token_usage(
-        received.to_dict() if received is not None else {},
-    ):
-        # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
-        received = take_unfinished_stream_usage() or received
+    received = _claude_start_usage(request, received) or received
     # Reuse provider accounting, including counters retained from failed attempts.
     request.model._populate_assistant_message_from_stream_data(settled, MessageData(response_metrics=received))
     # Late finalization of the abandoned stream must not count this request again.
@@ -209,6 +222,7 @@ def _with_metered_messages(
             )
         except BaseException:
             if _finish_request(request):
+                _settle_claude_start_usage(request)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
@@ -248,6 +262,7 @@ def _with_metered_messages_async(
                 yield response
         except BaseException:
             if _finish_request(request):
+                _settle_claude_start_usage(request)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
