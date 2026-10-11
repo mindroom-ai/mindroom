@@ -2883,6 +2883,7 @@ A `fallback_model` that resolves to the same provider and model ID as the summar
 
 Text compaction needs more than 2,000 tokens of summary input after `reserve_tokens` and prompt overhead are subtracted from the summary model's `context_window`.
 With the default `reserve_tokens`, a summary model with a context window of roughly 10,000 tokens or less cannot compact; lower `reserve_tokens` to make it work.
+On Claude summary models, text compaction asks for each merged summary to stay under half of the model's `max_tokens` output limit, condensing older detail to make room, so raise `max_tokens` in the summary model's `extra_kwargs` to keep a longer summary.
 
 ### Compacted history and redaction
 
