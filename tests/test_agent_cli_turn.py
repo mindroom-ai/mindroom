@@ -723,8 +723,9 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off", ws="none"))
     server_task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
-        while not server.started:
-            await asyncio.sleep(0.01)
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not server.started:
+                await asyncio.sleep(0.01)
 
         async def bash(command: str) -> str:
             return command
@@ -976,8 +977,9 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
         )
         await started.wait()
         request_task_cancel(task, process_shutdown=True)
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            with pytest.raises(asyncio.CancelledError):
+        # The deadline sits inside the raises check, or its own cancellation would pass for the task's.
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await task
     assert cleaned.is_set()
     assert shutdown_seen == [True]
