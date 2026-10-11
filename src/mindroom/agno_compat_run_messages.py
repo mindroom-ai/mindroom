@@ -58,23 +58,6 @@ _ACTIVE_REQUESTS: dict[int, _ModelRequest] = {}
 # cancellation or error persistence, including consumer closure between chunks.
 # Coverage: tests/test_openai_responses_stream.py::test_received_request_usage_survives_abandoned_stream;
 # tests/test_openai_responses_stream.py::test_received_request_usage_survives_cancel_request.
-def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None) -> MessageMetrics | None:
-    """Return an interrupted Claude request's start usage when it received no other usage."""
-    if not isinstance(request.model, ClaudeProviderSDKCompat):
-        return None
-    if received is not None and has_token_usage(received.to_dict()):
-        return None
-    # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
-    return request.model.take_unfinished_stream_usage()
-
-
-def _settle_claude_start_usage(request: _ModelRequest) -> None:
-    """Give an interrupted Claude request its start usage before Agno counts the request on unwind."""
-    start = _claude_start_usage(request, request.assistant_message.metrics)
-    if start is not None:
-        request.assistant_message.metrics = start
-
-
 def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
     request = _ACTIVE_REQUESTS.pop(id(run_response), None)
     if request is None:
@@ -95,6 +78,24 @@ def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
         request.model.model_type,
         run_response.metrics,
     )
+
+
+# Claude start usage: see the AGNO_COMPAT marker for Claude stream usage in agno_compat_claude.py.
+def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None) -> MessageMetrics | None:
+    """Return an interrupted Claude request's start usage when it received no other usage."""
+    if not isinstance(request.model, ClaudeProviderSDKCompat):
+        return None
+    if received is not None and has_token_usage(received.to_dict()):
+        return None
+    # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
+    return request.model.take_unfinished_stream_usage()
+
+
+def _settle_claude_start_usage(request: _ModelRequest) -> None:
+    """Give an interrupted Claude request its start usage before Agno counts the request on unwind."""
+    start = _claude_start_usage(request, request.assistant_message.metrics)
+    if start is not None:
+        request.assistant_message.metrics = start
 
 
 # AGNO_COMPAT: Terminal cleanup retains stale checkpoint or continuation messages.
