@@ -3015,8 +3015,9 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
 def _never_freeze_the_test_heap(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep orchestrator initialization from freezing the pytest worker's heap.
 
-    Cycles among frozen objects are never collected, so the first test that
-    initializes an orchestrator would pin the garbage of every later test.
+    Cycles among frozen objects are never collected, so every test that
+    initializes an orchestrator would pin its own fixtures, mocks, and
+    orchestrator for the rest of the worker's life.
     `tests/test_heap_probe.py` covers the real freeze against a fake `gc`.
     """
     monkeypatch.setattr(gc, "freeze", lambda: None)
