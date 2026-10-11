@@ -18,15 +18,17 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import reply_lifecycle as rl
+from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
+from mindroom.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
-from mindroom.approval_execution import AgentApprovalExecution
-from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
-from mindroom.approval_response import (
+from mindroom.approval.execution import AgentApprovalExecution
+from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
+from mindroom.approval.response import (
     ApprovalResponseCoordinator,
     continuation_target,
     identify_approval_tools,
@@ -35,7 +37,7 @@ from mindroom.approval_response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
-from mindroom.cli_approval_waits import CliApprovalWaits
+from mindroom.budgets.monitor import budget_model
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -131,7 +133,7 @@ from mindroom.runtime_shutdown import (
     ResponseShutdownTimeoutError,
     RuntimeShutdownIntent,
 )
-from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
+from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -145,6 +147,7 @@ from mindroom.streaming import (
 )
 from mindroom.teams import (
     TeamMode,
+    TeamTurnModelSelection,
     continue_paused_team_run,
     resolve_team_turn_models,
     select_model_for_team,
@@ -1446,16 +1449,32 @@ class ResponseRunner:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
-            notify_response_finished=self._automation_notifier(request.sources.logical_source_event_ids),
+            notify_response_finished=self._response_finished_notifier(request.sources.logical_source_event_ids),
             persist_response_event_id=persist_response_event_id,
         )
 
-    def _automation_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
-        """Return the callback that lets an automation verify the run its prompt started."""
+    def _budgeted_model(self, request: ResponseRequest, model_name: str) -> str:
+        """Return the model this request's requester may use under their budget."""
+        orchestrator = self.deps.runtime.orchestrator
+        return budget_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            orchestrator.budgets if orchestrator is not None else None,
+            request.response_envelope.requester_id,
+            model_name,
+        )
+
+    def _response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
+        """Return the callback that lets automations verify their runs and budgets count the new spend."""
         orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
             return None
-        return lambda: orchestrator.automations.response_finished(source_event_ids)
+
+        def notify() -> None:
+            orchestrator.budgets.response_finished()
+            orchestrator.automations.response_finished(source_event_ids)
+
+        return notify
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -2437,7 +2456,7 @@ class ResponseRunner:
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
             # A continuation keeps its turn's source events, so a run paused for approval is verified when it ends.
-            notify_response_finished=self._automation_notifier(continuation.sources.logical_source_event_ids),
+            notify_response_finished=self._response_finished_notifier(continuation.sources.logical_source_event_ids),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )
 
@@ -4491,6 +4510,17 @@ class ResponseRunner:
                 active_model_name=request.scheduled_model,
             )
         )
+        if turn_models is not None:
+            budgeted = {
+                model_name: self._budgeted_model(request, model_name)
+                for model_name in {turn_models.team_model_name, *turn_models.member_model_names.values()}
+            }
+            turn_models = TeamTurnModelSelection(
+                team_model_name=budgeted[turn_models.team_model_name],
+                member_model_names={
+                    member: budgeted[model_name] for member, model_name in turn_models.member_model_names.items()
+                },
+            )
         request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -4683,6 +4713,8 @@ class ResponseRunner:
             )
 
         async def persist_interrupted_team_turn() -> None:
+            # Agno saves the stopped team run in the background; this turn's record must land after it.
+            await drain_cancelled_team_save(team_turn_recorder.run_id or response_run_id)
             await self._persist_interrupted_recorder_off_loop(
                 recorder=team_turn_recorder,
                 session_scope=session_scope,
@@ -5059,6 +5091,7 @@ class ResponseRunner:
                 thread_id=response_thread_id,
                 runtime_paths=self.deps.runtime_paths,
             ).model_name
+        active_model_name = self._budgeted_model(request, active_model_name)
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,

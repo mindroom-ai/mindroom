@@ -20,16 +20,19 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
-from mindroom.approval_manager import initialize_approval_store
-from mindroom.approval_recovery import ApprovalRecovery
-from mindroom.approval_transport import ApprovalMatrixTransport
+from mindroom.approval.manager import initialize_approval_store
+from mindroom.approval.recovery import ApprovalRecovery
+from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
+from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
-from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
+from mindroom.embeddings.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
     MissingManagedEntityAccountError,
@@ -40,7 +43,7 @@ from mindroom.entity_resolution import (
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.event_loop_stall import EventLoopStallDetector, start_event_loop_stall_detector
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
-from mindroom.heap_probe import start_heap_type_probe
+from mindroom.heap_probe import freeze_startup_heap, start_heap_type_probe
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
@@ -54,10 +57,7 @@ from mindroom.hooks import (
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
-from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.legacy_state_root_records import migrate_state_root_records
-from mindroom.legacy_tool_credentials import migrate_tool_credential_defaults
-from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
@@ -84,6 +84,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
@@ -101,11 +102,10 @@ from mindroom.runtime_state import (
     set_runtime_ready,
     set_runtime_starting,
 )
-from mindroom.scheduling_executor import set_scheduling_hook_registry
+from mindroom.scheduling.executor import set_scheduling_hook_registry
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
-from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
@@ -115,6 +115,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.usage.legacy_usage_storage import migrate_usage_storage
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
@@ -126,8 +127,8 @@ from mindroom.workers.runtime import (
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
-from .credentials_sync import sync_env_to_credentials
-from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
+from .credentials.sync import sync_env_to_credentials
+from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
@@ -167,7 +168,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
@@ -412,6 +413,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _skill_reviews: SkillReviewRunner = field(init=False, repr=False)
     _automations: AutomationRunner = field(init=False, repr=False)
+    _budgets: BudgetMonitor = field(init=False, repr=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
@@ -477,6 +479,7 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             definition_provider=lambda name: self.hook_registry.automations.get(name),
         )
+        self._budgets = BudgetMonitor(runtime_paths=self.runtime_paths, config_provider=lambda: self.config)
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -575,6 +578,11 @@ class _MultiAgentOrchestrator:
     def automations(self) -> AutomationRunner:
         """Return the orchestrator-owned runner of automations."""
         return self._automations
+
+    @property
+    def budgets(self) -> BudgetMonitor:
+        """Return the orchestrator-owned monitor of per-user spending budgets."""
+        return self._budgets
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""
@@ -1047,6 +1055,7 @@ class _MultiAgentOrchestrator:
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
         self._automations.start()
+        self._budgets.sync()
         self._thread_export_runner.start()
         if self.running:
             # Startup queues its own pass once the bots are up; a reload
@@ -1399,7 +1408,8 @@ class _MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
-        preload_matrix_call_dependencies(config)
+        await preload_matrix_call_dependencies(config)
+        freeze_startup_heap()
         hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
         entity_names = configured_entity_names(config)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
@@ -2459,6 +2469,7 @@ class _MultiAgentOrchestrator:
         await _run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
         await _run_shutdown_step("skill_reviews", self._skill_reviews.stop())
         await _run_shutdown_step("automations", self._automations.stop())
+        await _run_shutdown_step("budgets", self._budgets.stop())
         await _run_shutdown_step("knowledge_source_watchers", self._knowledge_source_watcher.shutdown())
         await _run_shutdown_step("knowledge_refresh", self._knowledge_refresh_scheduler.shutdown())
         await _run_shutdown_step("bot_start_tasks", self._cancel_bot_start_tasks())
@@ -2659,6 +2670,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_cli_registry: TurnToolRegistry | None = None,
+    budget_monitor: BudgetMonitor | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
@@ -2675,6 +2687,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     api_state.active_calls = active_calls
     api_state.active_script_runs = script_runtime.active_runs if script_runtime is not None else None
     api_state.config_reload_status = config_reload_status
+    api_state.budget_monitor = budget_monitor
     if agent_reply_memberships is not None:
         api_state.agent_reply_memberships = agent_reply_memberships
     if script_runtime is not None:
@@ -2720,6 +2733,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
         api_state.active_calls = None
         api_state.active_script_runs = None
         api_state.config_reload_status = None
+        api_state.budget_monitor = None
         api_state.agent_reply_memberships = AgentReplyMembershipIndex()
         if script_runtime is not None:
             await script_runtime.unbind_api()
@@ -3154,6 +3168,7 @@ async def _run_runtime(  # noqa: PLR0915
                     config_reload_status=lambda: orchestrator.config_reload.status,
                     agent_reply_memberships=orchestrator.agent_reply_memberships,
                     agent_cli_registry=orchestrator.agent_cli_registry,
+                    budget_monitor=orchestrator.budgets,
                 ),
                 name="api_server",
             )

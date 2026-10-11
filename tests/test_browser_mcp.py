@@ -55,7 +55,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     # Bootstrap the optional tool registry only for this materialization test.
     import mindroom.tools  # noqa: PLC0415, F401 - normal registry bootstrap
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
-    from mindroom.credentials import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
     from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
     from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
         ToolExecutionIdentity,

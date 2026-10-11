@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def _provider_reports_cache_tokens_outside_input(
+def provider_reports_cache_tokens_outside_input(
     *,
     provider: str | None,
     configured_provider: str | None,
@@ -32,7 +32,7 @@ def context_input_tokens_from_counts(
     """Return full request-context tokens from provider usage counters."""
     if input_tokens is None:
         return None
-    if not _provider_reports_cache_tokens_outside_input(
+    if not provider_reports_cache_tokens_outside_input(
         provider=provider,
         configured_provider=configured_provider,
         model_id=model_id,

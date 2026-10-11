@@ -13,8 +13,8 @@ from agno.knowledge.knowledge import Knowledge
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.source_descriptions import KnowledgeWithSourceDescriptions
 from mindroom.knowledge.utils import _MultiKnowledgeVectorDb, knowledge_runtime_identity
-from mindroom.knowledge_source_descriptions import KnowledgeWithSourceDescriptions
 from tests.bot_helpers import (
     AgentBotTestBase,
     _AsyncStubVectorDb,

@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import (

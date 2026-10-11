@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity

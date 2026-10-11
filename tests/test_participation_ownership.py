@@ -19,15 +19,15 @@ from agno.utils.models.claude import format_messages
 from anthropic.types import Message as AnthropicMessage
 
 from mindroom.agno_participation import participation_model
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
-from mindroom.claude_prompt_cache import (
+from mindroom.hooks.enrichment import render_transient_context
+from mindroom.participation import ParticipationGate
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.claude_prompt_cache import (
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
     prepare_claude_request_kwargs,
 )
-from mindroom.hooks.enrichment import render_transient_context
-from mindroom.participation import ParticipationGate
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

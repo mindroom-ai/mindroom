@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from mindroom import voice_handler
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
+from mindroom.voice import handler as voice_handler
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:

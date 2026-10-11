@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.automations.runner import AutomationRunner
     from mindroom.bot import AgentBot, TeamBot
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -63,6 +64,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def automations(self) -> AutomationRunner: ...  # noqa: D102
+
+    @property
+    def budgets(self) -> BudgetMonitor: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102

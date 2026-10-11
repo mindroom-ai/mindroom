@@ -33,6 +33,7 @@
 - [Thread Exports](https://docs.mindroom.chat/thread-exports/)
 - [Bug Reports](https://docs.mindroom.chat/bug-reports/)
 - [Usage Tracking](https://docs.mindroom.chat/usage/)
+- [Budgets](https://docs.mindroom.chat/budgets/)
 - [Matrix Integration](https://docs.mindroom.chat/matrix/)
 - [Rooms & Spaces](https://docs.mindroom.chat/rooms/)
 - [Personal Rooms](https://docs.mindroom.chat/personal-rooms/)

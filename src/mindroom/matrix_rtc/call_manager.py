@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -29,7 +29,7 @@ from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.voice import normalize_speech_base_url
-from mindroom.credentials_sync import get_api_key_for_service
+from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
@@ -58,6 +58,7 @@ from mindroom.matrix_rtc.call_tools import (
     CallAgentTooling,
     build_call_tools,
     matrix_message_available_during_call,
+    record_call_token_usage,
     record_call_voice_usage,
 )
 from mindroom.matrix_rtc.call_writeback import format_call_writeback, post_call_writeback
@@ -90,7 +91,7 @@ from mindroom.response_admission import (
     admitted_response_decision,
 )
 from mindroom.session_ids import create_session_id
-from mindroom.token_budget import approximate_o200k_tokens
+from mindroom.token_budget import approximate_o200k_tokens, o200k_encoding
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -126,6 +127,8 @@ _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TY
 _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
+# A voice session that stays up this long proves the call works, so its failure retries from the first delay.
+_STABLE_CALL_SESSION_MS = 60_000
 _RECONCILE_MIN_INTERVAL_S = 1.0
 # Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
 _ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
@@ -213,6 +216,10 @@ class _LogicalCallState:
     requester_id: str
     agent_session_id: str
     join_blocked: bool = False
+    #: Sessions that failed since the call last had a stable one; keeps rejoins backing off.
+    failed_sessions: int = 0
+    session_started_ms: int = 0
+    reported_failures: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -237,13 +244,16 @@ def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") ->
     return "\n\n".join(part for part in parts if part)
 
 
-def preload_matrix_call_dependencies(config: Config) -> None:
-    """Load optional call SDKs before bots start syncing."""
+async def preload_matrix_call_dependencies(config: Config) -> None:
+    """Load optional call SDKs and the call token encoder before bots start syncing."""
     if not config.calls.enabled or not matrix_calls_dependencies_available():
         return
-    # LiveKit registers plugins on the main thread, so this import must not be offloaded.
     try:
+        # LiveKit registers plugins on the main thread, so this import must not be offloaded.
         from livekit.plugins import openai  # noqa: F401, PLC0415
+
+        # Call setup counts tokens; building the encoder on the loop would stall call audio.
+        await asyncio.to_thread(o200k_encoding)
     except Exception:
         logger.warning("calls_dependency_preload_failed", exc_info=True)
 
@@ -974,7 +984,7 @@ class CallManager:
             room=room,
             bridge=bridge,
             backend=backend,
-            requester_id=members[0].user_id,
+            logical_call=logical_call,
             origin_context=origin_context,
         )
         try:
@@ -1002,7 +1012,7 @@ class CallManager:
                     ),
                     on_failure=lambda message: self._send_call_failure_notice(
                         room_id,
-                        requester_id,
+                        logical_call,
                         message,
                     ),
                 ),
@@ -1022,6 +1032,7 @@ class CallManager:
             await self._stop_session(session)
             return "skip"
         self._sessions[room_id] = session
+        logical_call.session_started_ms = self._clock_ms()
         self._replay_pending_keys(room_id, session)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
         return "joined"
@@ -1144,22 +1155,35 @@ class CallManager:
         task = asyncio.create_task(self._handle_session_termination(room, bridge, retryable=retryable))
         self._track_background_task(task, event="call_session_termination_failed", room_id=room.room_id)
 
-    def _schedule_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> None:
+    def _schedule_call_failure_notice(self, room_id: str, logical_call: _LogicalCallState, message: str) -> None:
         """Publish an asynchronous diagnostic without blocking SDK callbacks."""
         if self._shutting_down:
             return
-        task = asyncio.create_task(self._send_call_failure_notice(room_id, requester_id, message))
+        task = asyncio.create_task(self._send_call_failure_notice(room_id, logical_call, message))
         self._track_background_task(task, event="call_failure_notice_failed", room_id=room_id)
 
-    async def _send_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> None:
-        """Post a cross-client Matrix notice explaining a silent call failure."""
+    async def _send_call_failure_notice(self, room_id: str, logical_call: _LogicalCallState, message: str) -> None:
+        """Post a cross-client Matrix notice explaining a silent call failure, once per logical call."""
+        if message in logical_call.reported_failures:
+            return
+        # Claim before awaiting, so identical errors raised while this notice is sending post nothing more.
+        logical_call.reported_failures.add(message)
+        delivered = False
+        try:
+            delivered = await self._post_call_failure_notice(room_id, logical_call.requester_id, message)
+        finally:
+            if not delivered:
+                logical_call.reported_failures.discard(message)
+
+    async def _post_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> bool:
+        """Send one call failure notice and return whether Matrix accepted it."""
         try:
             async with admitted_response_decision(
                 self._response_admission_gate,
                 self._wait_for_admission_or_shutdown,
             ):
                 if not self._is_authorized_call_member(requester_id, room_id):
-                    return
+                    return False
                 try:
                     response = await send_room_event_result(
                         self._client,
@@ -1174,14 +1198,15 @@ class CallManager:
                     )
                 except _MATRIX_NETWORK_ERRORS as error:
                     logger.warning("call_failure_notice_send_failed", room_id=room_id, error=str(error))
-                    return
+                    return False
         except ResponseAdmissionRefusedError:
-            return
+            return False
         if not isinstance(response, nio.RoomSendResponse):
             error = response.message if isinstance(response, nio.RoomSendError) else "no Matrix response"
             logger.warning("call_failure_notice_send_failed", room_id=room_id, error=error)
-            return
+            return False
         logger.info("call_failure_notice_sent", room_id=room_id)
+        return True
 
     async def _handle_session_termination(
         self,
@@ -1197,14 +1222,21 @@ class CallManager:
                 return
             self._clear_reconcile_retry(room.room_id)
             logical_call = self._logical_calls.get(room.room_id)
+            stable = False
             if logical_call is not None:
                 logical_call.join_blocked = True
+                stable = self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS
             await self._stop_session(session, event="call_failed_session_stop_failed")
             if self._sessions.get(room.room_id) is session:
                 self._sessions.pop(room.room_id, None)
             if retryable and not self._shutting_down:
                 if logical_call is not None:
                     logical_call.join_blocked = False
+                    if stable:
+                        logical_call.failed_sessions = 0
+                    # Resume this call's backoff, so a provider that fails every session cannot rejoin every second.
+                    self._retry_attempts[room.room_id] = logical_call.failed_sessions
+                    logical_call.failed_sessions += 1
                 self._schedule_reconcile_retry(room)
 
     def _observe_background_task(self, event: str, room_id: str, task: asyncio.Task[None]) -> None:
@@ -1456,7 +1488,7 @@ class CallManager:
         room: nio.MatrixRoom,
         bridge: VoiceBridgeLike,
         backend: _ResolvedVoiceBackend,
-        requester_id: str,
+        logical_call: _LogicalCallState,
         origin_context: CallOriginContext | None = None,
     ) -> CallVoiceAgentOptions:
         """Build selected-backend options with shared transcript hooks."""
@@ -1465,7 +1497,7 @@ class CallManager:
             self._schedule_session_termination(room, bridge, retryable=retryable)
 
         def on_session_error(message: str) -> None:
-            self._schedule_call_failure_notice(room.room_id, requester_id, message)
+            self._schedule_call_failure_notice(room.room_id, logical_call, message)
 
         if self._call_config.backend == "realtime":
             realtime_config = cast("RealtimeCallProfile", self._call_config)
@@ -1483,6 +1515,12 @@ class CallManager:
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,
                 on_session_error=on_session_error,
+                record_usage=partial(
+                    record_call_token_usage,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                ),
             )
         if self._call_config.backend == "live":
             live_config = cast("LiveCallProfile", self._call_config)

@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 _CRITIC = """---
 description: Finds the three biggest risks.
 tools: [file]
+skills: [triage]
 model: haiku
 mode: minimal
 ---
@@ -65,7 +66,7 @@ def _function(name: str, toolkit: str | None) -> Function:
 def test_inline_persona_keeps_prompt_bytes() -> None:
     """Braces and trailing whitespace survive validation and serialization unchanged."""
     prompt = "Use {braces} and {{x}}\n"
-    persona = inline_persona(prompt, ["file"])
+    persona = inline_persona(prompt, ["file"], None)
     assert persona == SubagentPersona(source_kind="inline", source_name="", system_prompt=prompt, tools=("file",))
     assert SubagentPersona.from_dict(json.loads(json.dumps(asdict(persona)))) == persona
 
@@ -84,17 +85,17 @@ def test_inline_persona_keeps_prompt_bytes() -> None:
 def test_inline_persona_rejects_empty_oversized_and_wrong_types(system_prompt: object, tools: object) -> None:
     """Invalid prompts and tool lists raise a user-facing persona error."""
     with pytest.raises(PersonaError):
-        inline_persona(system_prompt, tools)
+        inline_persona(system_prompt, tools, None)
 
 
 def test_inline_persona_accepts_prompt_at_size_limit() -> None:
     """A prompt of exactly 64 KiB is accepted."""
-    assert len(inline_persona("x" * (64 * 1024), None).system_prompt) == 64 * 1024
+    assert len(inline_persona("x" * (64 * 1024), None, None).system_prompt) == 64 * 1024
 
 
 def test_empty_tool_list_means_no_tools() -> None:
     """An explicit empty tool list keeps no tools instead of falling back to all of them."""
-    persona = inline_persona("P", [])
+    persona = inline_persona("P", [], None)
     assert persona.tools == ()
     assert not persona_allows((), "file", "read_file")
     _, disabled = persona_tool_policy(persona.tools, lambda: ["file", "shell"], None, frozenset())
@@ -112,6 +113,7 @@ def test_parse_profile_reads_frontmatter_and_body() -> None:
             source_name="critic",
             system_prompt="You are a hostile reviewer.\nReturn three risks.",
             tools=("file",),
+            skills=("triage",),
         ),
         model="haiku",
         mode="minimal",
@@ -122,6 +124,7 @@ def test_parse_profile_defaults_optional_fields() -> None:
     """A profile with only a description keeps every caller tool and normal model and mode selection."""
     profile = _parse_profile("plain", "---\ndescription: Plain.\n---\nBe brief.\n")
     assert profile.persona.tools is None
+    assert profile.persona.skills is None
     assert profile.model is None
     assert profile.mode is None
 
@@ -250,11 +253,13 @@ def _resolve(workspace: Path, **arguments: object) -> PersonaRequest | str:
         "agent_name": "leader",
         "system_prompt": None,
         "tools": None,
+        "skills": None,
         "profile": None,
         "model": None,
         "minimal": False,
         "workspace_root": workspace,
         "available_toolkits": lambda: ["file", "shell"],
+        "available_skills": lambda: ["research", "writing"],
     }
     return resolve_persona_request(**{**defaults, **arguments})
 
@@ -280,8 +285,8 @@ def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_pa
     """A model that fills every optional argument with empty values starts a plain copy, or runs its profile."""
     _profile_file(tmp_path, "critic.md", "---\ndescription: Critic.\ntools: [file]\n---\nCritic prompt.\n")
 
-    plain = _resolve(tmp_path, system_prompt="", tools=[], profile="")
-    profiled = _resolve(tmp_path, system_prompt="", tools=[], profile="critic")
+    plain = _resolve(tmp_path, system_prompt="", tools=[], skills=[], profile="")
+    profiled = _resolve(tmp_path, system_prompt="", tools=[], skills=[], profile="critic")
 
     assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
     assert isinstance(profiled, PersonaRequest)
@@ -393,6 +398,7 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
     assert visible(_function("read_file", "file"))
     assert not visible(_function("write_file", "file"))
     assert not visible(_function("generated", None))
+    assert visible(_function("get_skill_instructions", None))
     assert disabled == frozenset({"memory", "shell", "dynamic_tools"})
     assert persona_tool_policy(None, lambda: ["file"], caller_filter, frozenset()) == (caller_filter, frozenset())
 
@@ -429,10 +435,114 @@ def test_mcp_function_entries_are_not_checked_against_bridge_metadata(monkeypatc
 
 def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path) -> None:
     """A copy without tools inherits its parent's cap minus delegate at the maximum depth, and refuses any other loss."""
-    at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=("delegate", "file"), available_toolkits=lambda: ["file"])
-    lost_file = _resolve(tmp_path, system_prompt="Q", cap=("delegate", "file"), available_toolkits=lambda: ["delegate"])
+    cap = inline_persona("P", ["delegate", "file"], None)
+    at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: ["file"])
+    lost_file = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: ["delegate"])
 
     assert isinstance(at_max_depth, PersonaRequest)
     assert at_max_depth.persona is not None
     assert at_max_depth.persona.tools == ("file",)
-    assert lost_file == "Cannot delegate: unknown tool 'file'. Your tools: delegate, file."
+    assert lost_file == "Cannot delegate: unknown tool 'file'. Your tools: delegate."
+
+
+def test_inline_persona_reads_skills() -> None:
+    """Skills are optional, deduplicated names, and an empty list means no skills."""
+    assert inline_persona("P", None, None).skills is None
+    assert inline_persona("P", None, [" research ", "research", "writing"]).skills == ("research", "writing")
+    assert inline_persona("P", None, []).skills == ()
+    for skills in ("research", [""], [1]):
+        with pytest.raises(PersonaError, match="skills must be a list of skill names"):
+            inline_persona("P", None, skills)
+
+
+def test_authored_skills_must_be_caller_skills(tmp_path: Path) -> None:
+    """A skill the caller lacks is refused, and the caller's skills are read only when the persona names some."""
+
+    def unread() -> list[str]:
+        pytest.fail("the caller's skills were read for a persona naming none")
+
+    subset = _resolve(tmp_path, system_prompt="P", skills=["writing"])
+    unknown = _resolve(tmp_path, system_prompt="P", skills=["coding"])
+
+    assert isinstance(subset, PersonaRequest)
+    assert subset.persona is not None
+    assert subset.persona.skills == ("writing",)
+    assert unknown == "Cannot delegate: unknown skill 'coding'. Your skills: research, writing."
+    assert isinstance(_resolve(tmp_path, system_prompt="P", available_skills=unread), PersonaRequest)
+    assert isinstance(_resolve(tmp_path, system_prompt="P", skills=[], available_skills=unread), PersonaRequest)
+
+
+def test_profile_cannot_combine_with_inline_skills(tmp_path: Path) -> None:
+    """A profile carries its own skills, so inline skills beside it are refused."""
+    _profile_file(tmp_path, "plain.md", "---\ndescription: D\n---\nBe careful.\n")
+
+    refused = _resolve(tmp_path, profile="plain", skills=["research"])
+
+    assert refused == "Cannot delegate: pass either profile or system_prompt, tools, and skills, not both."
+
+
+def test_copy_without_skills_inherits_its_parents_skills(tmp_path: Path) -> None:
+    """An authored subagent's skills cap the copies it authors, and a copy without skills inherits them."""
+    cap = inline_persona("P", None, ["research"])
+
+    inherited = _resolve(tmp_path, system_prompt="Q", cap=cap)
+    widened = _resolve(tmp_path, system_prompt="Q", skills=["writing"], cap=cap)
+    plain = _resolve(tmp_path, cap=cap)
+
+    assert isinstance(inherited, PersonaRequest)
+    assert inherited.persona is not None
+    assert (inherited.persona.tools, inherited.persona.skills) == (None, ("research",))
+    assert widened == "Cannot delegate: unknown skill 'writing'. Your skills: research."
+    assert isinstance(plain, str)
+    assert "pass system_prompt or profile" in plain
+
+
+def test_unrestricted_authored_subagent_may_start_a_configured_copy(tmp_path: Path) -> None:
+    """An authored subagent that keeps every caller tool and skill may still start a configured copy."""
+    plain = _resolve(tmp_path, cap=inline_persona("P", None, None))
+
+    assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
+
+
+def test_persona_naming_tools_but_no_skills_gets_none(tmp_path: Path) -> None:
+    """Skills follow an explicit tool list, as knowledge search does: naming tools without skills leaves none."""
+
+    def unread() -> list[str]:
+        pytest.fail("the caller's skills were read for a persona naming none")
+
+    named_tools = _resolve(tmp_path, system_prompt="P", tools=["file"], available_skills=unread)
+    neither = _resolve(tmp_path, system_prompt="P", available_skills=unread)
+    copy_with_tools = _resolve(
+        tmp_path,
+        system_prompt="Q",
+        tools=["file"],
+        cap=inline_persona("P", None, ["research"]),
+        available_skills=unread,
+    )
+
+    for request, skills in ((named_tools, ()), (neither, None), (copy_with_tools, ())):
+        assert isinstance(request, PersonaRequest)
+        assert request.persona is not None
+        assert request.persona.skills == skills
+
+
+def test_inherited_skills_keep_only_those_the_caller_still_has(tmp_path: Path) -> None:
+    """A copy that inherits skills drops one its caller lost, as a follow-up would, while naming that skill refuses."""
+    cap = inline_persona("P", None, ["research", "retired"])
+
+    inherited = _resolve(tmp_path, system_prompt="Q", cap=cap)
+    named = _resolve(tmp_path, system_prompt="Q", skills=["retired"], cap=cap)
+
+    assert isinstance(inherited, PersonaRequest)
+    assert inherited.persona is not None
+    assert inherited.persona.skills == ("research",)
+    assert named == "Cannot delegate: unknown skill 'retired'. Your skills: research."
+
+
+def test_cap_from_a_parent_listing_only_tools_admits_no_skills(tmp_path: Path) -> None:
+    """A parent that lists tools but no skills keeps none, so a copy it authors cannot name any."""
+    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+
+    refused = _resolve(tmp_path, system_prompt="Q", skills=["research"], cap=cap)
+
+    assert refused == "Cannot delegate: unknown skill 'research'. Your skills: none."

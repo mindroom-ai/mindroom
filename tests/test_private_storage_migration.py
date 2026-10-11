@@ -25,7 +25,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadEx
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, resolve_session_state_root
 from mindroom.file_locks import file_lock_is_held
-from mindroom.private_instance_identity_store import (
+from mindroom.private_storage.private_instance_identity_store import (
     ensure_private_instance_identity,
     load_private_instance_identity,
     private_instances_for_agent,
@@ -90,7 +90,7 @@ def _forget_receipt(paths: RuntimePaths) -> None:
 
 async def _start_leaving_invalid(paths: RuntimePaths, *entries: Path) -> None:
     """Start once: each invalid entry stays in place with a warning, and startup still completes and writes its receipt."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     with capture_logs() as logs:
         await migration.migrate_private_storage(paths)
     assert set(_left_errors(logs)) == {str(entry.parent.resolve() / entry.name) for entry in entries}
@@ -141,7 +141,7 @@ async def test_startup_moves_every_owner_and_preserves_contents(tmp_path: Path, 
     ]
     primary = [_files(source) for source in sources]
     secondary = [_files(resolve_session_state_root(source, paths)) for source in sources]
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     await migration.migrate_private_storage(paths)
     targets = [
         private_instance_scope_root_path(paths.storage_root, current) for _old, _requester, current, *_ in fixtures
@@ -195,7 +195,7 @@ async def test_startup_preserves_recordless_scopes_without_adopting_them(
     worker_scope: WorkerScope,
 ) -> None:
     """Legacy unclaimed data cannot stop startup or gain a guessed requester identity."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path, separate=separate)
     old = _seed(paths, old_key, _REQUESTER)
     (old / _RECORD).unlink()
@@ -228,7 +228,7 @@ async def test_startup_preserves_recordless_scopes_without_adopting_them(
 @pytest.mark.asyncio
 async def test_empty_recordless_primary_warns_for_retained_session_history(tmp_path: Path) -> None:
     """Operators must hear about retained data even when only its session mirror is populated."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     primary = private_instance_scope_root_path(paths.storage_root, _OLD)
     primary.mkdir(parents=True)
@@ -249,7 +249,7 @@ async def test_empty_recordless_primary_warns_for_retained_session_history(tmp_p
 @pytest.mark.asyncio
 async def test_every_filesystem_mutation_boundary_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Crashes around actual fsync, replace, rename and unlink never lose scope contents."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     observed: list[str] = []
     originals = {name: getattr(os, name) for name in ("fsync", "replace", "rename", "unlink", "symlink")}
 
@@ -310,7 +310,7 @@ async def test_preflight_leaves_conflicts_before_any_move(
     conflict: str,
 ) -> None:
     """A conflicting entry is left untouched without moving its scope or stopping verified ones."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     target = private_instance_scope_root_path(paths.storage_root, _NEW)
@@ -359,7 +359,7 @@ async def test_current_and_fresh_startup_skip_workers_and_contents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Legitimate new traffic never causes a completed scope to be migrated again."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     preflight = importlib.import_module("mindroom.workers.storage_preflight")
     paths = _paths(tmp_path)
     _seed(paths, _OLD, _REQUESTER)
@@ -388,7 +388,7 @@ async def test_current_and_fresh_startup_skip_workers_and_contents(
 @pytest.mark.parametrize("plant", ["file", "record", "intent", "link"])
 async def test_entries_planted_after_the_receipt_are_never_read(tmp_path: Path, plant: str) -> None:
     """Sandbox runners write private_instances, so a completed migration never scans it again."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     await migration.migrate_private_storage(paths)
@@ -458,7 +458,7 @@ async def test_first_start_leaves_planted_entries_and_writes_its_receipt(tmp_pat
 
 
 async def _interrupt_after_session_move(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> Path:
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     rename = Path.rename
 
     def interrupt(source: Path, target: Path) -> Path:
@@ -484,7 +484,7 @@ async def test_recovery_never_trusts_missing_or_unrelated_evidence(
     damage: str,
 ) -> None:
     """An intent authorizes only its exact roots, original directories and saved owner."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     _seed(paths, _OLD, _REQUESTER)
     source = await _interrupt_after_session_move(paths, monkeypatch)
@@ -524,7 +524,7 @@ async def test_recovery_never_trusts_missing_or_unrelated_evidence(
 @pytest.mark.asyncio
 async def test_recovery_accepts_remount_with_same_inodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Kernel device identifiers may change across mounts without invalidating durable intent."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     _seed(paths, _OLD, _REQUESTER)
     source = await _interrupt_after_session_move(paths, monkeypatch)
@@ -553,7 +553,7 @@ async def test_recovery_accepts_remount_with_same_inodes(tmp_path: Path, monkeyp
 @pytest.mark.parametrize("kind", ["absolute_old", "absolute_new", "relative_escape", "safe_absolute", "safe_relative"])
 async def test_relocation_checks_links_without_rewriting_them(tmp_path: Path, kind: str) -> None:
     """Historical aliases keep opaque link targets unchanged, including absolute references."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     link = source / "link"
@@ -576,7 +576,7 @@ async def test_cancellation_keeps_locks_until_blocking_migration_drains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancelled admission cannot release volume locks while the worker thread still moves state."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     preflight = importlib.import_module("mindroom.workers.storage_preflight")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
@@ -646,7 +646,7 @@ async def test_nested_mounts_fail_before_any_move(
     location: str,
 ) -> None:
     """Scope, nested-directory and namespace mount boundaries cannot be moved by startup."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     mounted = {
@@ -675,7 +675,7 @@ async def test_nested_mounts_fail_before_any_move(
 @pytest.mark.asyncio
 async def test_previously_colliding_requesters_keep_distinct_state(tmp_path: Path) -> None:
     """A colon-bearing owner and its underscore lookalike remain isolated after startup."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     first = _seed(paths, _OLD, _REQUESTER)
     second = _seed(paths, "v1:default:user:@alice_example.org", "@alice_example.org")
@@ -693,7 +693,7 @@ async def test_previously_colliding_requesters_keep_distinct_state(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_missing_configured_session_volume_blocks_startup(tmp_path: Path) -> None:
     """A typo or missing mounted session volume must not silently discard the mirror."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     paths = replace(paths, process_env={"MINDROOM_SESSION_STORAGE_PATH": str(tmp_path / "missing")})
@@ -723,7 +723,7 @@ async def test_worker_preflight_failure_preserves_original_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Storage is untouched when managed workers cannot be proven absent."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     preflight = importlib.import_module("mindroom.workers.storage_preflight")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
@@ -744,7 +744,7 @@ async def test_worker_preflight_failure_preserves_original_layout(
 @pytest.mark.asyncio
 async def test_recovery_rejects_boolean_owner_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Intent recovery must retain the strict owner schema used for fresh discovery."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     _seed(paths, _OLD, _REQUESTER)
     source = await _interrupt_after_session_move(paths, monkeypatch)
@@ -761,7 +761,7 @@ async def test_recovery_rejects_boolean_owner_version(tmp_path: Path, monkeypatc
 @pytest.mark.asyncio
 async def test_unreadable_pending_tree_stops_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The non-Linux mount scan fails closed when directory metadata is unreadable."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     monkeypatch.setattr(migration.sys, "platform", "darwin")
@@ -786,7 +786,7 @@ async def test_abrupt_process_exit_leaves_harmless_partial_temporary(
     reserved: str,
 ) -> None:
     """Real process death bypasses durable-writer cleanup; partial temporaries stay opaque on retry."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     program = textwrap.dedent("""
@@ -796,7 +796,7 @@ async def test_abrupt_process_exit_leaves_harmless_partial_temporary(
         import sys
         from pathlib import Path
         from mindroom.constants import resolve_runtime_paths
-        from mindroom.legacy_private_storage import migrate_private_storage
+        from mindroom.private_storage.legacy_private_storage import migrate_private_storage
         paths = resolve_runtime_paths(
             config_path=Path(sys.argv[1]), storage_path=Path(sys.argv[2]),
             process_env={"MINDROOM_SESSION_STORAGE_PATH": sys.argv[3]},
@@ -844,7 +844,7 @@ async def test_abrupt_process_exit_leaves_harmless_partial_temporary(
 @pytest.mark.parametrize("scope", ["user", "user_agent"])
 async def test_current_runtime_export_and_mounts_find_migrated_contents(tmp_path: Path, scope: str) -> None:
     """Normal consumers resolve moved owner data through unchanged current-key paths."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     old_key = _OLD if scope == "user" else "v1:default:user_agent:@alice:example.org:writer"
     source = _seed(paths, old_key, _REQUESTER)
@@ -940,7 +940,7 @@ async def test_retry_durably_publishes_existing_intent_before_any_move(
     retry_sync_fails: bool,
 ) -> None:
     """A visible intent left by failed directory fsync must become durable before recovery renames."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     mirror = resolve_session_state_root(source, paths)
@@ -999,7 +999,7 @@ async def test_retry_durably_publishes_existing_intent_before_any_move(
 @pytest.mark.parametrize("indirect", [False, True])
 async def test_relative_link_chain_keeps_old_absolute_paths(tmp_path: Path, indirect: bool) -> None:
     """Links through external directories can still return to retained historical names."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     other = _seed(paths, "v1:default:user:@bob:example.org", "@bob:example.org")
@@ -1024,7 +1024,7 @@ async def test_relative_link_chain_keeps_old_absolute_paths(tmp_path: Path, indi
 @pytest.mark.parametrize("kind", ["contained_chain", "dangling", "cycle"])
 async def test_relative_link_chain_policy(tmp_path: Path, kind: str) -> None:
     """Contained, dangling and cyclic workspace links remain opaque and unchanged."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     targets = {"contained_chain": "writer/workspace", "dangling": "missing", "cycle": "link"}
@@ -1042,7 +1042,7 @@ async def test_relative_link_chain_policy(tmp_path: Path, kind: str) -> None:
 @pytest.mark.parametrize("separate", [False, True])
 async def test_historical_absolute_shebang_survives_migration(tmp_path: Path, separate: bool) -> None:
     """Executable bytes and both absolute names remain usable after relocation."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path, separate=separate)
     old = _seed(paths, _OLD, _REQUESTER)
     command = old / "writer/workspace/example-cli"
@@ -1080,7 +1080,7 @@ async def test_linux_bind_mounts_fail_before_moves(
     escaped: bool,
 ) -> None:
     """The mount table detects same-device binds, including kernel-escaped mountpoints."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     base = tmp_path / "space tab\t slash\\" if escaped else tmp_path
     base.mkdir(exist_ok=True)
     paths = _paths(base)
@@ -1119,7 +1119,7 @@ async def test_linux_unavailable_mount_table_fails_closed(
     table: str | None,
 ) -> None:
     """Missing or malformed Linux mount evidence cannot authorize a rename."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     original = Path.read_text
@@ -1146,7 +1146,7 @@ async def test_linux_reads_mount_table_once_without_walking_workspaces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Configured volume mounts are allowed and preflight work is bounded by mount count."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     roots = [paths.storage_root, resolve_session_state_root(paths.storage_root, paths)]
@@ -1175,7 +1175,7 @@ async def test_linux_reads_mount_table_once_without_walking_workspaces(
 @pytest.mark.parametrize("damage", ["foreign", "missing", "chain", "absolute", "owner", "mirror", "orphan_mirror"])
 async def test_completed_aliases_reject_tampering(tmp_path: Path, damage: str) -> None:
     """Completed aliases are accepted only at their exact owner-bound primary and mirror names."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     old = _seed(paths, _OLD, _REQUESTER)
     old_mirror = resolve_session_state_root(old, paths)
@@ -1213,7 +1213,7 @@ async def test_completed_aliases_reject_tampering(tmp_path: Path, damage: str) -
 @pytest.mark.asyncio
 async def test_current_scope_without_alias_is_not_given_historical_provenance(tmp_path: Path) -> None:
     """A current owner record alone cannot authorize creating an old path."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     current = _seed(paths, _NEW, _REQUESTER)
     await migration.migrate_private_storage(paths)
@@ -1225,7 +1225,7 @@ async def test_current_scope_without_alias_is_not_given_historical_provenance(tm
 @pytest.mark.asyncio
 async def test_empty_orphan_session_placeholder_remains_tolerated(tmp_path: Path) -> None:
     """Empty real placeholders keep prior startup tolerance without gaining alias authority."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     old = _seed(paths, _OLD, _REQUESTER)
     mirror = resolve_session_state_root(old, paths)
@@ -1243,7 +1243,7 @@ async def test_empty_orphan_session_placeholder_remains_tolerated(tmp_path: Path
 @pytest.mark.asyncio
 async def test_later_session_data_gets_no_guessed_alias(tmp_path: Path) -> None:
     """A mirror absent at migration may later hold legitimate current-key data."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     old = _seed(paths, _OLD, _REQUESTER)
     old_mirror = resolve_session_state_root(old, paths)
@@ -1271,7 +1271,7 @@ async def test_recovery_aliases_require_recorded_publication_state(
     damage: str,
 ) -> None:
     """An exact link target cannot excuse a wrong owner or impossible publication order."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     old = _seed(paths, _OLD, _REQUESTER)
     old_mirror = resolve_session_state_root(old, paths)
@@ -1312,7 +1312,7 @@ async def test_recovery_aliases_require_recorded_publication_state(
 @pytest.mark.asyncio
 async def test_alias_publication_does_not_overwrite_new_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A namespace conflict appearing after preflight remains intact with recovery evidence."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path, separate=False)
     old = _seed(paths, _OLD, _REQUESTER)
     original = os.symlink
@@ -1339,7 +1339,7 @@ async def test_separate_volumes_may_use_distinct_devices(
     platform: str,
 ) -> None:
     """Each scope rename stays on its own device; workspace symlinks are never traversed."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
+    migration = importlib.import_module("mindroom.private_storage.legacy_private_storage")
     paths = _paths(tmp_path)
     old = _seed(paths, _OLD, _REQUESTER)
     old_mirror = resolve_session_state_root(old, paths)

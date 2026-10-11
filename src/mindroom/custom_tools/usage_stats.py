@@ -16,7 +16,7 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
-from mindroom.usage_stats import collect_admin_usage, collect_private_usage, collect_self_usage
+from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

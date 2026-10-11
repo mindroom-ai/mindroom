@@ -31,7 +31,7 @@ from mindroom.constants import (
     sandbox_startup_manifest_path,
     startup_manifest_sha256,
 )
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (

@@ -104,6 +104,42 @@ async def test_transcript_writes_turns_incrementally(tmp_path: Path) -> None:
     assert len(transcript.spoken_turns) == 2
 
 
+@pytest.mark.asyncio
+async def test_same_speaker_fragments_continue_one_transcript_line(tmp_path: Path) -> None:
+    """Speech the provider splits mid-sentence reads as one line per speaker turn, written as it arrives."""
+    transcript = _transcript(tmp_path, _config(memory_backend="none"))
+    transcript.record("user", " Wait")
+    await transcript._flush()
+    assert transcript.path.read_text().endswith("**user**: Wait")
+
+    transcript.record("user", ", can you check")
+    transcript.record("user", ". Can you check whether  the bakery\nopens early tomorrow?")
+    transcript.record("assistant", "Let me look that up.")
+    transcript.record("assistant", " one moment")
+    transcript.record_tool_use(["web"])
+    transcript.record("assistant", "It opens at seven.")
+    transcript.record("user", "Great")
+    transcript.record("user", "!")
+    await transcript.finalize(config=_config(memory_backend="none"), runtime_paths=test_runtime_paths(tmp_path))
+
+    content = transcript.path.read_text()
+    assert content.endswith("**user**: Great!\n")
+    entries = [line.split("` ", 1)[1] for line in content.splitlines() if line.startswith("- `")]
+    assert entries == [
+        "**user**: Wait, can you check. Can you check whether the bakery opens early tomorrow?",
+        "**assistant**: Let me look that up. one moment",
+        "_tools used: web_",
+        "**assistant**: It opens at seven.",
+        "**user**: Great!",
+    ]
+    assert transcript.spoken_turns == (
+        ("user", "Wait, can you check. Can you check whether the bakery opens early tomorrow?"),
+        ("assistant", "Let me look that up. one moment"),
+        ("assistant", "It opens at seven."),
+        ("user", "Great!"),
+    )
+
+
 def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:
     """Spoken turns exclude tool-use rounds and blank text, and are stripped."""
     transcript = _transcript(tmp_path)

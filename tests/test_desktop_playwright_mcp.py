@@ -342,8 +342,8 @@ async def test_timed_out_screenshot_is_removed_after_late_mcp_completion(
             return _text_result("captured")
 
     monkeypatch.setattr("mindroom.desktop.playwright_mcp.shutil.which", lambda _command: "/usr/bin/npx")
-    monkeypatch.setattr("mindroom.playwright_mcp_session.stdio_client", lambda _parameters: FakeStdio())
-    monkeypatch.setattr("mindroom.playwright_mcp_session.ClientSession", FakeSession)
+    monkeypatch.setattr("mindroom.browser.playwright_mcp_session.stdio_client", lambda _parameters: FakeStdio())
+    monkeypatch.setattr("mindroom.browser.playwright_mcp_session.ClientSession", FakeSession)
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
     provider._call_timeout_seconds = 0.01
     await provider.execute("start", {})
@@ -456,7 +456,7 @@ async def test_mcp_startup_failure_reaches_first_queued_call_immediately(
     """A child-process startup failure must not strand the first request until its timeout."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path, call_timeout_seconds=5)
     monkeypatch.setattr(
-        "mindroom.playwright_mcp_session.stdio_client",
+        "mindroom.browser.playwright_mcp_session.stdio_client",
         lambda _parameters: _FailingStdioContext(),
     )
 

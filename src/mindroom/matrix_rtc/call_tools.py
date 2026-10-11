@@ -22,9 +22,11 @@ import functools
 import json
 from dataclasses import dataclass, field, replace
 from inspect import isasyncgenfunction, iscoroutinefunction
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
+from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -35,15 +37,13 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import create_session_storage, run_session_storage_operation, save_independent_usage
 from mindroom.agents import create_agent
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import (
     run_blocking_until_complete,
     run_coroutine_until_complete,
     wait_for_future_until_complete,
 )
-from mindroom.claude_prompt_cache import (
-    aclose_anthropic_async_client,
-    arefresh_session_backed_bedrock_async_client,
-)
+from mindroom.budgets.monitor import budget_model
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
@@ -57,8 +57,11 @@ from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_k
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.pre_model_preparation import prewarm_agent_model_client
+from mindroom.providers.claude_prompt_cache import (
+    aclose_anthropic_async_client,
+    arefresh_session_backed_bedrock_async_client,
+)
 from mindroom.session_ids import create_session_id
-from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -76,7 +79,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage
+    from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -104,14 +107,17 @@ class CallAgentResponse:
     turn_id: str | None = None
 
 
-async def record_call_voice_usage(
-    usage: LiveVoiceUsage,
+async def _save_call_usage(
     *,
+    kind: Literal["live_voice", "realtime_voice"],
+    usage_id: str,
+    created_at: float,
+    run: dict[str, object],
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
 ) -> None:
-    """Upsert billed voice duration in the same caller-owned ledger as its delegate."""
+    """Upsert one call's billed usage in the same caller-owned ledger as its delegate."""
     agent_name = execution_identity.agent_name
     session_id = execution_identity.session_id
     if agent_name is None or session_id is None:
@@ -122,23 +128,101 @@ async def record_call_voice_usage(
         functools.partial(
             save_independent_usage,
             session_id=session_id,
-            usage_id=f"live_voice:{usage.provider_session_id}",
-            kind="live_voice",
+            usage_id=f"{kind}:{usage_id}",
+            kind=kind,
             requester_id=execution_identity.requester_id,
             initial_session=AgnoAgentSession(
                 session_id=session_id,
                 agent_id=agent_name,
-                created_at=int(usage.created_at),
-                updated_at=int(usage.created_at),
+                created_at=int(created_at),
+                updated_at=int(created_at),
             ),
-            run={
-                "model_provider": "OpenAI",
-                "model": usage.model,
-                "created_at": usage.created_at,
-                "voice_seconds": usage.duration_seconds,
-                "voice_finalized": usage.finalized,
-            },
+            run=run,
         ),
+    )
+
+
+async def record_call_voice_usage(
+    usage: LiveVoiceUsage,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    """Upsert billed GPT-Live voice duration for the caller."""
+    await _save_call_usage(
+        kind="live_voice",
+        usage_id=usage.provider_session_id,
+        created_at=usage.created_at,
+        run={
+            "model_provider": "OpenAI",
+            "model": usage.model,
+            "created_at": usage.created_at,
+            "voice_seconds": usage.duration_seconds,
+            "voice_finalized": usage.finalized,
+        },
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+
+
+async def record_call_token_usage(
+    usage: RealtimeCallUsage,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    """Upsert a realtime call's speech-model tokens for the caller, one request per response."""
+    messages = [
+        Message(
+            role="assistant",
+            created_at=int(response.created_at),
+            metrics=MessageMetrics(
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                total_tokens=response.input_tokens + response.output_tokens,
+                cache_read_tokens=response.cache_read_tokens,
+                cache_write_tokens=response.cache_write_tokens,
+                audio_input_tokens=response.audio_input_tokens,
+                audio_output_tokens=response.audio_output_tokens,
+                audio_total_tokens=response.audio_input_tokens + response.audio_output_tokens,
+                reasoning_tokens=response.reasoning_tokens,
+            ),
+            provider_data={"mindroom_model": {"id": usage.model, "provider": "OpenAI"}},
+        )
+        for response in usage.responses
+    ]
+    model = ModelMetrics(id=usage.model, provider="OpenAI")
+    for message in messages:
+        model.accumulate(ModelMetrics(**message.metrics.to_dict()))
+    metrics = RunMetrics(
+        input_tokens=model.input_tokens,
+        output_tokens=model.output_tokens,
+        total_tokens=model.total_tokens,
+        cache_read_tokens=model.cache_read_tokens,
+        cache_write_tokens=model.cache_write_tokens,
+        audio_input_tokens=model.audio_input_tokens,
+        audio_output_tokens=model.audio_output_tokens,
+        audio_total_tokens=model.audio_total_tokens,
+        reasoning_tokens=model.reasoning_tokens,
+        details={"model": [model]},
+    )
+    await _save_call_usage(
+        kind="realtime_voice",
+        usage_id=usage.usage_id,
+        created_at=usage.created_at,
+        run=RunOutput(
+            model=usage.model,
+            model_provider="OpenAI",
+            created_at=int(usage.created_at),
+            metrics=metrics,
+            messages=messages,
+        ).to_dict(),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
     )
 
 
@@ -302,6 +386,7 @@ class _CallAgentCache:
             knowledge=resolution.knowledge,
             knowledge_identity=knowledge_runtime_identity(resolution.knowledge),
             refresh_scheduler=scheduler,
+            active_model_name=self.active_model_name,
             operation=render,
         )
 
@@ -311,18 +396,21 @@ class _CallAgentCache:
         knowledge: KnowledgeProtocol | None,
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
+        active_model_name: str | None,
         operation: Callable[[AgnoAgent], Awaitable[str]],
     ) -> str:
-        """Run one turn, rebuilding only when call dependencies change identity."""
+        """Run one turn, rebuilding only when call dependencies or the turn's model change."""
         async with self.lock:
             reusing_agent = self._can_reuse_agent(
                 knowledge_identity=knowledge_identity,
                 refresh_scheduler=refresh_scheduler,
+                active_model_name=active_model_name,
             )
             agent = await self._get_agent(
                 knowledge=knowledge,
                 knowledge_identity=knowledge_identity,
                 refresh_scheduler=refresh_scheduler,
+                active_model_name=active_model_name,
             )
             if reusing_agent:
                 await arefresh_session_backed_bedrock_async_client(agent.model)
@@ -333,12 +421,14 @@ class _CallAgentCache:
         *,
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
+        active_model_name: str | None,
     ) -> bool:
         """Return whether the cached agent matches this turn's dependencies."""
         return (
             self.agent is not None
             and self.knowledge_identity == knowledge_identity
             and self.refresh_scheduler is refresh_scheduler
+            and self.active_model_name == active_model_name
         )
 
     async def aclose(self) -> None:
@@ -368,10 +458,12 @@ class _CallAgentCache:
         knowledge: KnowledgeProtocol | None,
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
+        active_model_name: str | None,
     ) -> AgnoAgent:
         if self._can_reuse_agent(
             knowledge_identity=knowledge_identity,
             refresh_scheduler=refresh_scheduler,
+            active_model_name=active_model_name,
         ):
             assert self.agent is not None
             return self.agent
@@ -380,6 +472,7 @@ class _CallAgentCache:
             self.knowledge_identity = ()
             self.refresh_scheduler = None
             await self._close_agent(agent)
+        self.active_model_name = active_model_name
         build_task = asyncio.create_task(
             asyncio.to_thread(
                 self._build_agent,
@@ -484,8 +577,18 @@ async def build_call_tools(
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
+    requested_model_name = active_model_name
+    if enable_responder and active_model_name is not None:
+        active_model_name = budget_model(
+            config,
+            runtime_paths,
+            context.budget_monitor,
+            requester_id,
+            active_model_name,
+        )
     context = replace(
         context,
+        active_model_name=active_model_name,
         tool_function_filter=functools.partial(
             _function_available_during_call,
             config=config,
@@ -535,7 +638,7 @@ async def build_call_tools(
             voice_enrichment_items=voice_enrichment_items,
             response_tracker=response_tracker,
             agent_cache=agent_cache,
-            active_model_name=active_model_name,
+            active_model_name=requested_model_name,
             authorize_operation=authorize_operation,
             reconcile_spoken_response=reconcile_spoken_response,
         )
@@ -715,6 +818,10 @@ async def _run_authorized_call_agent(
     """Run one admitted call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
 
+    if active_model_name is not None:
+        # Spend can cross the cap during a call, so each reply checks the budget again.
+        active_model_name = budget_model(config, runtime_paths, context.budget_monitor, requester_id, active_model_name)
+        context = replace(context, active_model_name=active_model_name)
     recorder = TurnRecorder(user_message=transcript)
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     try:
@@ -781,6 +888,7 @@ async def _run_authorized_call_agent(
             knowledge=knowledge_resolution.knowledge,
             knowledge_identity=knowledge_runtime_identity(knowledge_resolution.knowledge),
             refresh_scheduler=refresh_scheduler,
+            active_model_name=active_model_name,
             operation=_run_with_agent,
         )
     except asyncio.CancelledError:

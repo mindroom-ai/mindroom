@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Literal
 
 import pytest
 
-from mindroom.approval_manager import ApprovalManager
+from mindroom.approval.manager import ApprovalManager
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import (
     ApprovalCardReservation,
@@ -21,7 +22,6 @@ from mindroom.event_journal import (
 )
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from mindroom.tool_approval import BackgroundScriptToolOrigin
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_script_run_manager import _context as _manager_context

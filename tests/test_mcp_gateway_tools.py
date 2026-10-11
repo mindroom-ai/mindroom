@@ -20,7 +20,7 @@ from mindroom.api.connection_agents import resolve_connection_agent, resolve_con
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager

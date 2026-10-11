@@ -19,7 +19,7 @@ from e2b.sandbox_sync.commands.command_handle import CommandHandle
 from e2b_code_interpreter.models import Execution, Result
 
 import mindroom.custom_tools.e2b as e2b_module
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tool_system.metadata import get_tool_by_name

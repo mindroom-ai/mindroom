@@ -70,6 +70,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
+| `budgets` | Per-user monthly spending caps and the fallback model | [Budgets](https://docs.mindroom.chat/budgets/) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync) |
 | `event_journal` | Storage for the Matrix event journal | [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal) |
@@ -193,7 +194,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 | `MINDROOM_CONFIG_TEMPLATE` | File copied to the config path when `config.yaml` does not exist, used by Docker images to seed config | _(unset)_ |
 | `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Key for encrypted-at-rest credential files (see [Credential Storage Encryption](https://docs.mindroom.chat/oauth-framework/#credential-storage-encryption)) | _(unset)_ |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`); `mindroom run --log-level` takes precedence | `INFO` |
-| `MINDROOM_LOGGER_LEVELS` | Comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,nio:WARNING` | _(unset)_ |
+| `MINDROOM_LOGGER_LEVELS` | Comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,nio:WARNING`; MindRoom logger names are module paths, so `mindroom.scheduling:DEBUG` covers one package and `mindroom.coalescing.ingress_lanes:DEBUG` one module | _(unset)_ |
 | `MINDROOM_LOG_FORMAT` | `text` for readable logs or `json` for structured logs | `text` |
 | `NO_COLOR` | Any nonempty value disables console colors and styled tracebacks; installed background services set this to `1` | _(unset)_ |
 

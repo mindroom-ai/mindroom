@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sys
+import threading
 import time
 from datetime import timedelta
-from types import MethodType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,6 +40,7 @@ from mindroom.matrix_rtc.call_manager import (
     _build_call_instructions,
     _build_live_instructions,
     maybe_build_call_manager,
+    preload_matrix_call_dependencies,
 )
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
@@ -68,15 +71,17 @@ from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceBridge,
     LiveVoiceAgentOptions,
     LiveVoiceUsage,
+    RealtimeCallUsage,
     RealtimeVoiceBridge,
     VoiceAgentOptions,
+    _RealtimeResponseUsage,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
-from mindroom.model_loading import get_model_instance
+from mindroom.providers.model_loading import get_model_instance
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -2367,6 +2372,27 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
     assert manager is None
 
 
+@pytest.mark.asyncio
+async def test_preload_builds_the_token_encoder_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup builds the call token encoder in a worker thread, and only when calls are enabled."""
+    livekit_plugins = ModuleType("livekit.plugins")
+    livekit_plugins.openai = ModuleType("livekit.plugins.openai")
+    monkeypatch.setitem(sys.modules, "livekit.plugins", livekit_plugins)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: True)
+    encoder_threads: list[int] = []
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.o200k_encoding",
+        lambda: encoder_threads.append(threading.get_ident()),
+    )
+
+    await preload_matrix_call_dependencies(_config(enabled=False))
+    assert encoder_threads == []
+
+    await preload_matrix_call_dependencies(_config())
+    assert len(encoder_threads) == 1
+    assert encoder_threads[0] != threading.get_ident()
+
+
 def test_voice_backend_availability_requires_runtime_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2511,6 +2537,12 @@ async def test_realtime_call_instructions_include_validated_origin_brief(
     assert build_context.call_args.kwargs["user_id"] == "@alice:example.org"
     assert build_context.call_args.kwargs["agent_name"] == "helper"
     assert client.room_get_state.await_count == 1
+    record_usage = bridge.agent_options.record_usage
+    assert record_usage is not None
+    response = _RealtimeResponseUsage(1_700_000_010, input_tokens=900, output_tokens=300)
+    await record_usage(RealtimeCallUsage("call-1", "gpt-realtime-2.1", 1_700_000_000, (response,)))
+    report = collect_admin_usage(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
+    assert [(row.user_id, row.totals.total_tokens) for row in report.user_breakdown] == [("@alice:example.org", 1200)]
     await manager.shutdown()
 
 
@@ -4138,7 +4170,7 @@ async def test_shutdown_drains_retry_during_reconciliation(
 @pytest.mark.asyncio
 async def test_call_member_expiry_reconciles_without_a_new_event(tmp_path: Path) -> None:
     """An expired membership cannot keep a media session alive indefinitely."""
-    clock_values = iter((1_000, 1_000, 1_001))
+    clock_values = iter((1_000, 1_000, 1_000, 1_001))
     call_event = _remote_member_event(created_ts=1_000, expires_ms=1)
     client = _client()
     client.room_get_state.return_value = _state_response(call_event)
@@ -4332,6 +4364,162 @@ async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
     await manager.shutdown()
 
 
+def _record_retry_delays(manager: CallManager) -> list[float]:
+    """Record each scheduled reconcile retry delay, then run the retry without waiting."""
+    delays: list[float] = []
+    retry_reconcile = manager._retry_reconcile
+
+    async def record_retry(room: nio.MatrixRoom, delay_s: float) -> None:
+        delays.append(delay_s)
+        await retry_reconcile(room, 0)
+
+    manager._retry_reconcile = record_retry  # type: ignore[method-assign]
+    return delays
+
+
+async def _fail_active_session(manager: CallManager, bridge: FakeBridge, notice: str) -> None:
+    """Fail the joined voice session retryably, then settle its teardown and rejoin."""
+    assert ROOM_ID in manager._sessions
+    options = bridge.agent_options
+    assert options is not None
+    assert options.on_session_error is not None
+    assert options.on_session_terminated is not None
+    options.on_session_error(notice)
+    options.on_session_terminated(True)
+    while tasks := (*manager._background_tasks, *manager._retry_tasks.values()):
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_repeated_session_failures_back_off_and_notify_once_per_call(tmp_path: Path) -> None:
+    """A provider that fails every session cannot make the agent rejoin and post notices every second."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    delays = _record_retry_delays(manager)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    for _ in range(5):
+        await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+
+    assert delays == [1.0, 5.0, 30.0, 60.0, 60.0]
+    assert client.room_send.await_count == 1
+
+    client.room_get_state.return_value = _state_response()
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+
+    assert delays[-1] == 1.0
+    assert client.room_send.await_count == 2
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_session_failure_after_stable_session_retries_quickly(tmp_path: Path) -> None:
+    """A one-off failure after the call has worked for a while still rejoins after the first delay."""
+    now_ms = [int(time.time() * 1000)]
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
+    delays = _record_retry_delays(manager)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+    await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+    now_ms[0] += 60_000
+    await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+
+    assert delays == [1.0, 5.0, 1.0]
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_slow_teardown_does_not_count_as_a_stable_session(tmp_path: Path) -> None:
+    """Time spent stopping a failed session is not time the call worked."""
+    now_ms = [int(time.time() * 1000)]
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
+    delays = _record_retry_delays(manager)
+    stop_session = manager._stop_session
+
+    async def slow_stop(session: CallSession, **kwargs: str) -> None:
+        now_ms[0] += 60_000
+        await stop_session(session, **kwargs)
+
+    manager._stop_session = slow_stop  # type: ignore[method-assign]
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    for _ in range(3):
+        await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+
+    assert delays == [1.0, 5.0, 30.0]
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_undelivered_failure_notice_is_posted_on_the_next_failure(tmp_path: Path) -> None:
+    """A notice that Matrix rejected is not counted as reported for the call."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.side_effect = [
+        nio.RoomSendError("M_UNKNOWN: temporarily unavailable"),
+        nio.RoomSendResponse("$notice", ROOM_ID),
+    ]
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    _record_retry_delays(manager)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    for _ in range(3):
+        await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
+
+    assert client.room_send.await_count == 2
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_identical_error_during_a_pending_notice_posts_nothing_more(tmp_path: Path) -> None:
+    """A provider retrying within one session repeats its error while the first notice is still sending."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    release = asyncio.Event()
+
+    async def slow_send(**_kwargs: object) -> nio.RoomSendResponse:
+        await release.wait()
+        return nio.RoomSendResponse("$notice", ROOM_ID)
+
+    client.room_send.side_effect = slow_send
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    options = bridge.agent_options
+    assert options is not None
+    assert options.on_session_error is not None
+
+    options.on_session_error("Voice call error: connection failed.")
+    await asyncio.sleep(0)
+    options.on_session_error("Voice call error: connection failed.")
+    release.set()
+    await asyncio.gather(*list(manager._background_tasks))
+
+    assert client.room_send.await_count == 1
+    await manager.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path: Path) -> None:
     """A connected-but-broken voice provider cannot fail as silent audio."""
@@ -4406,7 +4594,11 @@ async def test_voice_runtime_error_does_not_report_success_without_delivery(tmp_
         patch("mindroom.matrix_rtc.call_manager.send_room_event_result", new=AsyncMock(return_value=None)),
         patch("mindroom.matrix_rtc.call_manager.logger.warning") as warning,
     ):
-        await manager._send_call_failure_notice(ROOM_ID, "@alice:example.org", "Voice call failed.")
+        await manager._send_call_failure_notice(
+            ROOM_ID,
+            manager._start_logical_call(ROOM_ID, "@alice:example.org"),
+            "Voice call failed.",
+        )
 
     warning.assert_called_once_with(
         "call_failure_notice_send_failed",

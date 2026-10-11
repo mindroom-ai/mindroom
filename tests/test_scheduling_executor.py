@@ -24,12 +24,12 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.message_target import MessageTarget
-from mindroom.scheduling import ScheduledWorkflow
-from mindroom.scheduling_executor import (
+from mindroom.scheduling.executor import (
     execute_scheduled_workflow,
     send_scheduled_failure_notice,
     set_scheduling_hook_registry,
 )
+from mindroom.scheduling.tasks import ScheduledWorkflow
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,

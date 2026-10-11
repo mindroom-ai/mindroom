@@ -25,7 +25,7 @@ from mindroom.entity_resolution import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.requester_identity import is_human_requester_id
-from mindroom.scheduling import get_pending_schedule_thread_ids_for_room
+from mindroom.scheduling.tasks import get_pending_schedule_thread_ids_for_room
 
 if TYPE_CHECKING:
     from collections.abc import Callable

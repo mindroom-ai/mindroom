@@ -18,6 +18,7 @@ import { UnconfiguredRooms } from "@/components/UnconfiguredRooms/UnconfiguredRo
 import { SyncStatus } from "@/components/SyncStatus/SyncStatus";
 import { Dashboard } from "@/components/Dashboard/Dashboard";
 import { Usage } from "@/components/Usage/Usage";
+import { Budgets } from "@/components/Budgets/Budgets";
 import { Skills } from "@/components/Skills/Skills";
 import { Settings } from "@/components/Settings/Settings";
 import { Schedules } from "@/components/Schedules/Schedules";
@@ -486,6 +487,14 @@ function AppContent() {
                 className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
               >
                 <Usage />
+              </RoutePanel>
+
+              <RoutePanel
+                active={currentTab === "budgets"}
+                label="Budgets"
+                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+              >
+                <Budgets />
               </RoutePanel>
 
               <RoutePanel

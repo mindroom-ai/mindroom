@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from agno.tools import Toolkit
 
-from mindroom.credentials import CredentialsManager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials.manager import CredentialsManager, load_scoped_credentials, save_scoped_credentials
 from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError

@@ -35,11 +35,12 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
-from mindroom.approval_manager import (
+from mindroom.approval.manager import (
     _ApprovalStartupSweep,
     get_approval_store,
     initialize_approval_store,
 )
+from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
@@ -52,7 +53,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.heap_probe import start_heap_type_probe
 from mindroom.hooks import (
@@ -94,7 +95,6 @@ from mindroom.runtime_state import (
     set_runtime_ready,
 )
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
-from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.bot_helpers import (
@@ -754,10 +754,12 @@ class TestAgentBot(AgentBotTestBase):
                 agent_reply_memberships=memberships,
                 config_reload_status=reload_status,
                 shutdown_requested=shutdown_requested,
+                budget_monitor=MagicMock(),
             )
 
         assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is not memberships
         assert api_config_lifecycle.app_state(api_main.app).config_reload_status is None
+        assert api_config_lifecycle.app_state(api_main.app).budget_monitor is None
 
     @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
@@ -1227,8 +1229,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
+            budget_monitor: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
+            assert budget_monitor is mock_orchestrator.budgets
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1318,8 +1322,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
+            budget_monitor: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
+            assert budget_monitor is mock_orchestrator.budgets
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1399,8 +1405,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
+            budget_monitor: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
+            assert budget_monitor is mock_orchestrator.budgets
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -2725,7 +2733,7 @@ class TestMultiAgentOrchestrator:
         dependencies_available: bool,
         import_error: type[Exception] | None,
     ) -> None:
-        """Load the owned config and prepare optional call SDKs before creating bots."""
+        """Load the owned config, prepare optional call SDKs, and freeze the startup heap before creating bots."""
         config_path = tmp_path / "custom-config.yaml"
         mock_config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
         mock_config.calls.enabled = calls_enabled
@@ -2740,7 +2748,10 @@ class TestMultiAgentOrchestrator:
                     raise import_error(msg)
             return original_import(name, *args, **kwargs)
 
+        freezes: list[None] = []
+
         def create_bot(*_args: object) -> None:
+            assert freezes == [None]
             assert call_import_threads == (
                 [threading.main_thread()] if calls_enabled and dependencies_available else []
             )
@@ -2769,6 +2780,7 @@ class TestMultiAgentOrchestrator:
                 return_value=dependencies_available,
             ),
             patch("builtins.__import__", new=record_import),
+            patch("mindroom.orchestrator.freeze_startup_heap", side_effect=lambda: freezes.append(None)),
             capture_logs() as logs,
         ):
             orchestrator = _MultiAgentOrchestrator(
@@ -3178,7 +3190,7 @@ class TestMultiAgentOrchestrator:
             _ApprovalStartupSweep(discarded=1, failed=0),
         ]
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
             _mock_approval_recovery(orchestrator, side_effect=sweeps) as recover_approval_cards_on_startup,
         ):
             orchestrator._approval_recovery.reset_startup_cleanup_gate()
@@ -3216,8 +3228,8 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION", 3),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION", 3),
             _mock_approval_recovery(
                 orchestrator,
                 return_value=_ApprovalStartupSweep(discarded=0, failed=1),
@@ -3289,7 +3301,7 @@ class TestMultiAgentOrchestrator:
             return _ApprovalStartupSweep(discarded=0, failed=1)
 
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
             _mock_approval_recovery(orchestrator, side_effect=_never_finishes) as recover_approval_cards_on_startup,
         ):
             recovery.reset_startup_cleanup_gate()
@@ -3359,7 +3371,7 @@ class TestMultiAgentOrchestrator:
             return _ApprovalStartupSweep(discarded=0, failed=1)
 
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
             _mock_approval_recovery(orchestrator, side_effect=_sweep),
         ):
             recovery.reset_startup_cleanup_gate()

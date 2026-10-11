@@ -12,8 +12,10 @@ import nio
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.budgets.monitor import budget_model
+from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store,
@@ -26,7 +28,9 @@ from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn
 from mindroom.delegation.personas import (
     PersonaError,
     PersonaRequest,
+    caller_skill_names,
     caller_toolkit_names,
+    capped_persona_skills,
     declared_function_names,
     inline_persona,
     load_profile,
@@ -47,7 +51,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
@@ -56,8 +59,11 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agno.agent import Agent
 
     from mindroom.agent_modes import AgentMode
@@ -113,8 +119,9 @@ _TOOL_DESCRIPTIONS = {
         "Create a Dynamic Workflow from a declarative workflow spec. "
         f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
         "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
-        "saved as subagents/<name>.md in your workspace, plus tools, model, and mode. A participant gets only "
-        "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs. "
+        "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
+        "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
+        "and only the skills it names from your own. "
         "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
         "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
         "without tools."
@@ -553,7 +560,7 @@ async def _aexecute_room_agent_participant(
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
-    active_model_name = _runtime_model_name(context, agent_name)
+    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
     session_id = f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
     participant_context = replace(
         context,
@@ -651,7 +658,12 @@ async def _aexecute_subagent_participant(
     _reject_unapproved_participant_tools(context, persona.tools or (), allowed=allowed)
     if participant_id not in state.function_owners:
         state.function_owners[participant_id] = await _participant_function_owners(context, persona)
-    approval_config = _participant_run_config(context, state.function_owners[participant_id], allowed=allowed)
+    approval_config = _participant_run_config(
+        context,
+        state.function_owners[participant_id],
+        allowed=allowed,
+        reads_skills=bool(persona.skills),
+    )
     owner = build_execution_identity_from_runtime_context(context)
     child = prepare_child_turn(
         context.agent_name,
@@ -661,6 +673,7 @@ async def _aexecute_subagent_participant(
         config=context.config,
         runtime_paths=context.runtime_paths,
         depth=0,
+        budget_monitor=context.budget_monitor,
         model=request.model,
         agent_mode=request.agent_mode,
         previous=previous,
@@ -767,10 +780,10 @@ def _reject_unapproved_participant_tools(
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
-    """Return the calling authored subagent's tools that a participant may also use, if the caller is one."""
-    if context.persona_tools is None:
+    """Return the calling authored subagent's tools that a participant may also use, if the caller lists them."""
+    if context.persona is None or context.persona.tools is None:
         return None
-    return tuple(entry for entry in context.persona_tools if entry.partition(".")[0] not in _WORKFLOW_RESTRICTED_TOOLS)
+    return tuple(entry for entry in context.persona.tools if entry.partition(".")[0] not in _WORKFLOW_RESTRICTED_TOOLS)
 
 
 def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
@@ -782,27 +795,31 @@ def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
     ]
 
 
+def _caller_workspace_root(context: ToolRuntimeContext) -> Path | None:
+    workspace = resolve_agent_runtime(
+        context.agent_name,
+        context.config,
+        context.runtime_paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+    ).workspace
+    return workspace.root if workspace is not None else None
+
+
 def _participant_request(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     *,
     workflow_id: str,
 ) -> PersonaRequest:
-    """Resolve one participant's persona, model, and mode; it uses only the tools it names."""
+    """Resolve one participant's persona, model, and mode; it uses only the tools and skills it names."""
     participant_id = _required_participant_text(participant, "id")
     source_name = f"{workflow_id}/{participant_id}"
     available = _participant_available_toolkits(context)
     cap = _participant_cap(context)
     try:
         if participant.get("profile") is not None:
-            workspace = resolve_agent_runtime(
-                context.agent_name,
-                context.config,
-                context.runtime_paths,
-                execution_identity=build_execution_identity_from_runtime_context(context),
-            ).workspace
             profile = load_profile(
-                workspace.root if workspace is not None else None,
+                _caller_workspace_root(context),
                 _required_participant_text(participant, "profile"),
             )
             persona = replace(profile.persona, source_kind="workflow", source_name=source_name)
@@ -811,6 +828,7 @@ def _participant_request(
             persona = inline_persona(
                 participant.get("system_prompt"),
                 participant.get("tools"),
+                participant.get("skills"),
                 source_kind="workflow",
                 source_name=source_name,
             )
@@ -818,6 +836,16 @@ def _participant_request(
             mode = cast("AgentMode", participant.get("mode") or "standard")
         persona = replace(persona, tools=persona.tools or ())
         validate_persona_tools(persona.tools, available, cap)
+        persona = capped_persona_skills(
+            persona,
+            lambda: caller_skill_names(
+                context.agent_name,
+                context.config,
+                context.runtime_paths,
+                _caller_workspace_root(context),
+            ),
+            context.persona.kept_skills if context.persona is not None else None,
+        )
         require_minimal_shell(persona, mode)
     except PersonaError as exc:
         raise DynamicWorkflowError(str(exc)) from exc
@@ -878,13 +906,23 @@ def _participant_run_config(
     function_owners: Mapping[str, frozenset[str]],
     *,
     allowed: frozenset[str],
+    reads_skills: bool,
 ) -> Config:
-    """Return the participant policy: approval by default, with the caller's allowed tools pre-approved."""
+    """Return the participant policy: approval by default, with the caller's allowed tools pre-approved.
+
+    A participant may read the skills it names whenever its caller could without approval;
+    reading or running a skill's scripts still needs an operator rule.
+    """
     return build_automation_approval_config(
         context.config,
         function_owners=function_owners,
         preapproved_toolkits=allowed,
         never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+        auto_approved_functions=[
+            name
+            for name in SKILL_READ_FUNCTION_NAMES
+            if reads_skills and not tool_may_require_approval(context.config, name)
+        ],
     )
 
 
@@ -990,7 +1028,10 @@ def _validate_workflow_policy_for_context(
     if tool_names:
         ensure_tool_registry_loaded(context.runtime_paths, context.config)
         _reject_unavailable_workflow_tools(tool_names)
-    permission_models = _workflow_permission_model_refs(context, permissions.get("models") or [])
+    permission_models = _with_budget_substitutes(
+        context,
+        _workflow_permission_model_refs(context, permissions.get("models") or []),
+    )
     requests: dict[str, PersonaRequest] = {}
     for participant in participants:
         if participant["kind"] == "room_agent":
@@ -1012,6 +1053,27 @@ def _validate_workflow_policy_for_context(
             )
             raise DynamicWorkflowError(msg)
     return requests
+
+
+def _budgeted_model(context: ToolRuntimeContext, model_name: str, *, log_fallback: bool = True) -> str:
+    return budget_model(
+        context.config,
+        context.runtime_paths,
+        context.budget_monitor,
+        context.requester_id,
+        model_name,
+        log_fallback=log_fallback,
+    )
+
+
+def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
+    """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
+    substitutes = {
+        _budgeted_model(context, model_name, log_fallback=False)
+        for model_name in context.config.models
+        if not _model_refs(context, model_name).isdisjoint(model_refs)
+    }
+    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
 
 
 def _runtime_model_name(context: ToolRuntimeContext, agent_name: str) -> str:

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 import mindroom.constants as constants_mod
-import mindroom.credentials as credentials_module
+import mindroom.credentials.manager as credentials_module
 from mindroom.api.credentials import _DashboardCredentialAccess
 from mindroom.api.credentials_oauth_policy import OAuthCredentialServices
 from mindroom.api.credentials_target import (
@@ -21,7 +21,7 @@ from mindroom.api.credentials_target import (
     save_credentials_for_target,
 )
 from mindroom.api.integrations import _save_spotify_credentials
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     CredentialsManager,
     WorkerCredentialPathError,
     _merge_credential_layers,

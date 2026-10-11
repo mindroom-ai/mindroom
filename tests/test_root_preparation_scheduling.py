@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import nio
 import pytest
 
-from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.matrix.conversation_reads import ThreadReadMode
 from tests.conftest import make_pending_event

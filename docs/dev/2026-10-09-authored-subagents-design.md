@@ -49,8 +49,9 @@ Tool approval rules apply to the child exactly as they apply to the caller, beca
 | Profile | File `subagents/<name>.md` in the caller's workspace, run with `run_subagent(profile="<name>")` | Same as inline, and only for the workspace's own agent |
 | Workflow participant | A `subagent` participant in a Dynamic Workflow spec, inline or by `profile` | A caller with the `dynamic_workflow` tool |
 
-Authoring is self-only: `system_prompt`, `tools`, and `profile` are rejected when `agent_name` names another agent, because an authored prompt over another agent would hand the caller that agent's tools.
-An authored subagent's own tools cap the copies it authors: their tools must lie within its tools, a copy without `tools` inherits them, and it cannot start an unauthored copy of the caller with every caller tool.
+Authoring is self-only: `system_prompt`, `tools`, `skills`, and `profile` are rejected when `agent_name` names another agent, because an authored prompt over another agent would hand the caller that agent's tools.
+An authored subagent's own tools and skills cap the copies it authors: their tools and skills must lie within its own, a copy without `tools` inherits its tools, a copy without `tools` or `skills` also inherits the skills its caller still has, and while it lists either it cannot start an unauthored copy of the caller.
+A persona's `skills` names a subset of the caller's skills; omitted, it follows the tool list as knowledge search does, so a persona that names tools gets only the skills it names and one that names neither keeps every caller skill.
 The cap comes from the running child's frozen persona, so restarts and approval resumes keep it.
 Persona entries match concrete toolkit names, so a toolkit reached through a preset or as an implied tool is selected by its own name, and preset names never count as toolkits.
 
@@ -123,8 +124,8 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 `create_agent` accepts an optional persona and builds the child's prompt from it:
 
 - The child's system message is built by Agno's normal prompt builder, like every agent's: the persona's `system_prompt` is Agno's `description`, so it leads, and `resolve_in_context` is off so braces in the prompt are never treated as session-state variables.
-- The prompt replaces the agent's identity: MindRoom's identity block, the configured role and instructions, personality and context files, and the skills listing are left out.
-- Runtime guidance stays true to what the child can call: no skill-authoring note (it has no skills), and with a `tools` list no knowledge-search or deferred-loading guidance, since `search_knowledge_base` and `dynamic_tools` are then unavailable; file-mode knowledge guidance stays, because file tools read those bases.
+- The prompt replaces the agent's identity: MindRoom's identity block, the configured role and instructions, and personality and context files are left out; the skills listing shows only the skills the persona keeps.
+- Runtime guidance stays true to what the child can call: no skill-authoring note, since writing workspace skills belongs to the configured agent, and with a `tools` list no knowledge-search or deferred-loading guidance, since `search_knowledge_base` and `dynamic_tools` are then unavailable; file-mode knowledge guidance stays, because file tools read those bases.
 - The runtime sections every agent gets still follow: the tool execution environment, MindRoom's runtime notes, the date context, toolkit instructions, and the session summary.
 - Tool schemas still reach the model through the provider's tool API, so the child sees every function in its tool subset with its normal description.
 - The persona's `tools` compose with the existing `tool_function_filter` through each function's owning toolkit.
@@ -226,7 +227,7 @@ The primary reads profiles only through no-follow confinement with the count and
 - `src/mindroom/delegation/direct.py`: the shared reserve, start, run, and settle sequence for one child turn inside a caller's tool call.
 - `src/mindroom/custom_tools/delegate.py` and `src/mindroom/delegation/execution.py`: persona parameters and resolution on both delegation paths.
 - `src/mindroom/delegation/state.py`, `sessions.py`, `lifecycle.py`, and `audit.py`: persona snapshot, grant-aware authorization, and record fields.
-- `src/mindroom/agents.py` and `src/mindroom/minimal_agent.py`: accept a persona and apply it in a private helper beside `create_agent`.
+- `src/mindroom/agents.py` and `src/mindroom/agent_cli/minimal_agent.py`: accept a persona and apply it in a private helper beside `create_agent`.
 - `src/mindroom/custom_tools/dynamic_workflow.py`, `src/mindroom/dynamic_workflows/validation.py`, and `src/mindroom/dynamic_workflows/store.py`: new participant schema, lifecycle-based execution, and migration call.
 - `src/mindroom/dynamic_workflows/legacy_participants.py`: the read-time conversion of legacy participants.
 - `tach.toml`: any new dependency from `dynamic_workflows` or `custom_tools.dynamic_workflow` onto `delegation`.

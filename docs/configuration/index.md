@@ -74,6 +74,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
+| `budgets` | Per-user monthly spending caps and the fallback model | [Budgets](../budgets.md) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](../matrix.md#matrix-sync) |
 | `event_journal` | Storage for the Matrix event journal | [Event Journal](../deployment/storage.md#event-journal) |
@@ -197,7 +198,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 | `MINDROOM_CONFIG_TEMPLATE` | File copied to the config path when `config.yaml` does not exist, used by Docker images to seed config | _(unset)_ |
 | `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Key for encrypted-at-rest credential files (see [Credential Storage Encryption](../oauth-framework.md#credential-storage-encryption)) | _(unset)_ |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`); `mindroom run --log-level` takes precedence | `INFO` |
-| `MINDROOM_LOGGER_LEVELS` | Comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,nio:WARNING` | _(unset)_ |
+| `MINDROOM_LOGGER_LEVELS` | Comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,nio:WARNING`; MindRoom logger names are module paths, so `mindroom.scheduling:DEBUG` covers one package and `mindroom.coalescing.ingress_lanes:DEBUG` one module | _(unset)_ |
 | `MINDROOM_LOG_FORMAT` | `text` for readable logs or `json` for structured logs | `text` |
 | `NO_COLOR` | Any nonempty value disables console colors and styled tracebacks; installed background services set this to `1` | _(unset)_ |
 

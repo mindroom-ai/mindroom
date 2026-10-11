@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import Literal
 
-    from mindroom.history_recovery import (
+    from mindroom.event_journal.history_recovery import (
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )

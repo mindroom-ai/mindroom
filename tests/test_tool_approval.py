@@ -14,16 +14,29 @@ import nio
 import pytest
 from pydantic import ValidationError
 
-from mindroom import approval_manager, approval_transport, redaction
-from mindroom.approval_events import PendingApproval, parse_approval_datetime
-from mindroom.approval_manager import (
+from mindroom import redaction
+from mindroom.approval import manager as approval_manager
+from mindroom.approval import transport as approval_transport
+from mindroom.approval.events import PendingApproval, parse_approval_datetime
+from mindroom.approval.manager import (
     ApprovalManager,
     _ApprovalStartupSweep,
     _build_event_arguments,
     get_approval_store,
     initialize_approval_store,
 )
-from mindroom.approval_recovery import ApprovalRecovery
+from mindroom.approval.recovery import ApprovalRecovery
+from mindroom.approval.tool_approval import (
+    ApprovalActionResult,
+    MatrixApprovalAction,
+    ToolApprovalScriptError,
+    ToolApprovalTransportError,
+    evaluate_tool_approval,
+    handle_matrix_approval_action,
+    resolve_tool_approval_approver,
+    shutdown_approval_runtime,
+    tool_may_require_approval,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
@@ -53,17 +66,6 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_approval import (
-    ApprovalActionResult,
-    MatrixApprovalAction,
-    ToolApprovalScriptError,
-    ToolApprovalTransportError,
-    evaluate_tool_approval,
-    handle_matrix_approval_action,
-    resolve_tool_approval_approver,
-    shutdown_approval_runtime,
-    tool_may_require_approval,
-)
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -454,7 +456,7 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
     before_consume = AsyncMock()
 
     try:
-        with patch("mindroom.approval_manager.logger.warning") as warning:
+        with patch("mindroom.approval.manager.logger.warning") as warning:
             result = await manager.handle_card_response(
                 room_id="!room:localhost",
                 sender_id="@approver:localhost",
@@ -507,7 +509,7 @@ async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path
 
     try:
         with (
-            patch("mindroom.approval_manager.logger.warning") as warning,
+            patch("mindroom.approval.manager.logger.warning") as warning,
             pytest.raises(ToolApprovalTransportError, match="not ready"),
         ):
             await manager.handle_card_response(
@@ -560,7 +562,7 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
     before_consume = AsyncMock()
 
     try:
-        with patch("mindroom.approval_manager.logger.warning") as warning:
+        with patch("mindroom.approval.manager.logger.warning") as warning:
             result = await manager.handle_card_response(
                 room_id="!room:localhost",
                 sender_id="@approver:localhost",
@@ -621,7 +623,7 @@ async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Pat
 
     try:
         with (
-            patch("mindroom.approval_manager.logger.warning") as warning,
+            patch("mindroom.approval.manager.logger.warning") as warning,
             pytest.raises(ToolApprovalTransportError, match="could not verify"),
         ):
             await manager.handle_card_response(
@@ -839,7 +841,7 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
         with (
             patch.object(manager, "_trusted_pending_from_card_event", return_value=MagicMock()),
             patch.object(manager, "_worker", return_value=worker),
-            patch("mindroom.approval_manager.logger.warning") as warning,
+            patch("mindroom.approval.manager.logger.warning") as warning,
         ):
             assert await manager._expire_stored(room_id, stored) is False
 
@@ -948,7 +950,7 @@ async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred
     try:
         with (
             patch.object(manager, "_worker", return_value=worker),
-            patch("mindroom.approval_manager.logger.warning") as warning,
+            patch("mindroom.approval.manager.logger.warning") as warning,
         ):
             assert not await manager._record_and_flush_resolution(
                 pending,
@@ -1068,7 +1070,7 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages() -> None:
     )
 
     with (
-        patch("mindroom.approval_recovery._UNAVAILABLE_OWNER_SCAN_LIMIT", 2),
+        patch("mindroom.approval.recovery._UNAVAILABLE_OWNER_SCAN_LIMIT", 2),
         patch.object(recovery, "_discard_unavailable", new=AsyncMock(return_value=True)) as discard,
     ):
         assert await recovery._reconcile_unavailable_owner_pages(None)

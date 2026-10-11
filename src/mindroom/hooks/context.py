@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
-    from mindroom.scheduling import ScheduledWorkflow
+    from mindroom.scheduling.tasks import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_origin import TurnOrigin
 
