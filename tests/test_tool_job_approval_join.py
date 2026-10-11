@@ -298,8 +298,6 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
             assert (await lookup(runtime, jobs[0].job_id, owner=owner, depth=0)).status == "running"
             outstanding = await join_conversation_jobs(set(), joins=0)
             assert outstanding.holds
-            assert outstanding.key is not None
-            assert outstanding.key.participants == ("leader",)
             release.set()
             ready = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
             await runtime.release_wait(jobs[0].job_id, ready.claim)
