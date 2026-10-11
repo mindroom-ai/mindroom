@@ -537,3 +537,12 @@ def test_inherited_skills_keep_only_those_the_caller_still_has(tmp_path: Path) -
     assert inherited.persona is not None
     assert inherited.persona.skills == ("research",)
     assert named == "Cannot delegate: unknown skill 'retired'. Your skills: research."
+
+
+def test_cap_from_a_parent_listing_only_tools_admits_no_skills(tmp_path: Path) -> None:
+    """A parent that lists tools but no skills keeps none, so a copy it authors cannot name any."""
+    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+
+    refused = _resolve(tmp_path, system_prompt="Q", skills=["research"], cap=cap)
+
+    assert refused == "Cannot delegate: unknown skill 'research'. Your skills: none."

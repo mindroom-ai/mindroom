@@ -474,7 +474,7 @@ def _capped_persona(
     depth inherits the cap's tools without ``delegate``; any other inherited tool the caller lost still refuses.
     """
     # Skills resolve first, while persona.tools still says whether the author named tools.
-    persona = capped_persona_skills(persona, available_skills, cap.skills if cap is not None else None)
+    persona = capped_persona_skills(persona, available_skills, cap.kept_skills if cap is not None else None)
     cap_tools = cap.tools if cap is not None else None
     if persona.tools is None and cap_tools is not None:
         keep_delegate = "delegate" in available_toolkits

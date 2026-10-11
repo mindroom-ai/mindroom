@@ -842,7 +842,7 @@ def _participant_request(
                 context.runtime_paths,
                 _caller_workspace_root(context),
             ),
-            context.persona.skills if context.persona is not None else None,
+            context.persona.kept_skills if context.persona is not None else None,
         )
         require_minimal_shell(persona, mode)
     except PersonaError as exc:
