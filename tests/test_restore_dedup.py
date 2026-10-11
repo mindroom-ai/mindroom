@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import nio
 import pytest
 
-from mindroom import scheduling
-from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow, restore_scheduled_tasks
+from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.tasks import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow, restore_scheduled_tasks
 from tests.scheduling_helpers import schedule_runtime_paths
 
 if TYPE_CHECKING:

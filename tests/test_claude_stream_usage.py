@@ -18,13 +18,13 @@ from anthropic import AsyncAnthropic
 
 from mindroom.agent_storage import create_state_storage
 from mindroom.agno_compat_session_persistence import drain_agent_cancellation
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
-from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import install_llm_request_logging
-from mindroom.provider_media_fallback import install_provider_media_fallback
-from mindroom.provider_stream_retry import install_provider_stream_retry_hook
-from mindroom.usage_storage import project_usage
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
+from mindroom.providers.media_fallback import install_provider_media_fallback
+from mindroom.providers.stream_retry import install_provider_stream_retry_hook
+from mindroom.usage.storage import project_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -262,7 +262,7 @@ async def test_claude_stream_still_retries_an_overload_after_it_starts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stream that has only started is retried after an overload, and the retry's usage counts once."""
-    monkeypatch.setattr("mindroom.provider_stream_retry._retry_delay_seconds", lambda _attempt: 0)
+    monkeypatch.setattr("mindroom.providers.stream_retry._retry_delay_seconds", lambda _attempt: 0)
     storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
     overloaded = _start_and_text() + _event("error", error={"type": "overloaded_error", "message": "Overloaded"})
     completed = _start_and_text("Ready") + _event("content_block_stop", index=0)

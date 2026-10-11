@@ -29,7 +29,11 @@ from mindroom.constants import (
     serialize_runtime_paths,
     write_startup_manifest,
 )
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.credentials.manager import (
+    CredentialsManager,
+    get_runtime_credentials_manager,
+    sync_shared_credentials_to_worker,
+)
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import (

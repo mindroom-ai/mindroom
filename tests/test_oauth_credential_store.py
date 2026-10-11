@@ -21,7 +21,7 @@ import pytest
 import mindroom.durable_write as durable_write_module
 import mindroom.oauth.credential_store as credential_store_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
 from mindroom.oauth.credential_store import (
     _oauth_credential_database_path,

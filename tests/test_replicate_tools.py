@@ -15,7 +15,7 @@ from agno.tools.function import ToolResult
 
 import mindroom.tools.replicate  # noqa: F401  # register the real tool factory
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.metadata import get_tool_by_name
 
 if TYPE_CHECKING:

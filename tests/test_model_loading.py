@@ -12,13 +12,13 @@ from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
 from pydantic import ValidationError
 
-from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.error_handling import ModelSafeguardRefusalError
-from mindroom.model_loading import get_model_instance, missing_model_api_key_provider
-from mindroom.openai_models import (
+from mindroom.providers.azure_openai_model import MindRoomAzureOpenAI
+from mindroom.providers.model_loading import get_model_instance, missing_model_api_key_provider
+from mindroom.providers.openai_models import (
     MindRoomDeepSeek,
     MindRoomLlamaCpp,
     MindRoomOpenAIChat,
@@ -26,7 +26,7 @@ from mindroom.openai_models import (
     MindRoomOpenAIResponses,
     MindRoomOpenRouter,
 )
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -680,7 +680,7 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
         test_runtime_paths(tmp_path),
     )
 
-    with patch("mindroom.model_loading.install_llm_request_logging") as install_logging:
+    with patch("mindroom.providers.model_loading.install_llm_request_logging") as install_logging:
         model = get_model_instance(config, runtime_paths_for(config), "default")
 
     install_logging.assert_called_once()

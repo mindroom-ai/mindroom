@@ -13,8 +13,8 @@ from unittest.mock import Mock
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import legacy_usage_storage
 from mindroom.constants import resolve_runtime_paths
+from mindroom.usage import legacy_usage_storage
 from tests.conftest import create_agno_2_sessions_db
 
 if TYPE_CHECKING:

@@ -12,7 +12,7 @@ import pytest
 from httpx import Response
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail
 from mindroom.server_fetch_url import ServerFetchUrlError

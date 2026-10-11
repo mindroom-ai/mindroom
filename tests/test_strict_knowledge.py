@@ -8,7 +8,7 @@ import pytest
 from agno.knowledge.content import Content
 from agno.knowledge.document import Document
 
-from mindroom.strict_knowledge import StrictInsertKnowledge, StrictSearchKnowledge
+from mindroom.knowledge.strict_knowledge import StrictInsertKnowledge, StrictSearchKnowledge
 
 
 class _FailingVectorDb:

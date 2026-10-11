@@ -16,7 +16,7 @@ from googleapiclient.errors import HttpError
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.config.main import Config
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_tasks import GoogleTasksTools
 from mindroom.oauth.google import GOOGLE_IDENTITY_SCOPES
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider

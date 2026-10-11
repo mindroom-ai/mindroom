@@ -18,8 +18,8 @@ from mindroom.agent_storage import (
 )
 from mindroom.constants import prompt_roles_for_history_storage, resolve_session_state_root
 from mindroom.history.storage import new_scope_session
+from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
-from mindroom.team_scope import ad_hoc_team_scope_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

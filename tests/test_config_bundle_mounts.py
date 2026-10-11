@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.config_bundle import install_config_bundle
+from mindroom.config.bundle import install_config_bundle
 
 
 def _enter_mount_namespace(nodeid: str) -> bool:

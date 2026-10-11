@@ -12,7 +12,7 @@ import httpx
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools import atlassian_client
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target

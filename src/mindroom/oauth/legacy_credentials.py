@@ -22,8 +22,8 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.credential_policy import is_oauth_token_service
-from mindroom.credentials import scoped_credentials_path
+from mindroom.credentials.manager import scoped_credentials_path
+from mindroom.credentials.policy import is_oauth_token_service
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:

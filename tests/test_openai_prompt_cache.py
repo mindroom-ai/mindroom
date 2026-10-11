@@ -10,8 +10,8 @@ import pytest
 from agno.models.message import Message
 from openai import AsyncOpenAI, OpenAI
 
-from mindroom.codex_model import CodexResponses
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.codex_model import CodexResponses
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.system_prompt import render_session_context
 
 

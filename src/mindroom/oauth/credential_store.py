@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from cryptography.exceptions import InvalidTag
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.credentials import scoped_credentials_path
+from mindroom.credentials.manager import scoped_credentials_path
 from mindroom.durable_write import fsync_directory_durable
 from mindroom.oauth import legacy_credentials
 from mindroom.oauth.providers import OAuthProviderError

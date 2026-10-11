@@ -17,19 +17,19 @@ from agno.run.agent import RunOutput
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.entity_resolution import resolve_room_scoped_model_override
-from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
-from mindroom.openai_models import MindRoomOpenAIResponses, MindRoomOpenRouter
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.openai_models import MindRoomOpenAIResponses, MindRoomOpenRouter
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _THREAD_SUMMARY_MAX_LENGTH,
@@ -2382,7 +2382,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="🧵 ISSUE-133 prompt preserved")
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=mock_model),
             patch("mindroom.thread_summary.Agent") as mock_agent_cls,
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)) as mock_run,
         ):
@@ -2443,7 +2443,7 @@ class TestGenerateSummary:
         )
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=mock_model),
             patch("mindroom.thread_summary.Agent") as agent_class,
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)) as run,
         ):
@@ -2472,7 +2472,7 @@ class TestGenerateSummary:
         mock_response = RunOutput(content=_ThreadSummary(summary="🧵 Missing tags"))
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=_TemperatureAwareModel()),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=_TemperatureAwareModel()),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
         ):
@@ -2499,7 +2499,7 @@ class TestGenerateSummary:
         )
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=_TemperatureAwareModel()),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=_TemperatureAwareModel()),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
         ):
@@ -2522,7 +2522,7 @@ class TestGenerateSummary:
         )
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=_TemperatureAwareModel()),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=_TemperatureAwareModel()),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
         ):
@@ -2544,7 +2544,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="🧪 ISSUE-148 matrix cache invalidate-and-refetch live test")
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=mock_model),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
         ):
@@ -2683,7 +2683,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="🧵 Room-specific summary model")
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=mock_model) as mock_get_model,
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=mock_model) as mock_get_model,
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
         ):
@@ -2702,7 +2702,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="🧪 ISSUE-149 provider default summary")
 
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=mock_model),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
         ):
@@ -2733,7 +2733,7 @@ class TestGenerateSummary:
         try:
             with (
                 caplog.at_level("WARNING", logger="mindroom.thread_summary"),
-                patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+                patch("mindroom.providers.model_loading.get_model_instance", return_value=mock_model),
                 patch("mindroom.thread_summary.Agent"),
                 patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
             ):
@@ -2773,7 +2773,7 @@ class TestGenerateSummary:
         try:
             with (
                 caplog.at_level("WARNING", logger="mindroom.thread_summary"),
-                patch("mindroom.model_loading.get_model_instance", return_value=mock_model),
+                patch("mindroom.providers.model_loading.get_model_instance", return_value=mock_model),
                 patch("mindroom.thread_summary.Agent"),
                 patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
             ):
@@ -2810,7 +2810,7 @@ class TestGenerateSummary:
         mock_response.content = _ThreadSummary(summary="\U0001f527 Auth deployment discussed and approved")
 
         with (
-            patch("mindroom.model_loading.get_model_instance"),
+            patch("mindroom.providers.model_loading.get_model_instance"),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", return_value=mock_response),
         ):
@@ -2827,7 +2827,7 @@ class TestGenerateSummary:
         mock_response.content = None
 
         with (
-            patch("mindroom.model_loading.get_model_instance"),
+            patch("mindroom.providers.model_loading.get_model_instance"),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", return_value=mock_response),
         ):
@@ -2843,7 +2843,7 @@ class TestGenerateSummary:
         mock_response = RunOutput(content={"summary": "unvalidated"})
 
         with (
-            patch("mindroom.model_loading.get_model_instance"),
+            patch("mindroom.providers.model_loading.get_model_instance"),
             patch("mindroom.thread_summary.Agent"),
             patch("mindroom.thread_summary.cached_agent_run", return_value=mock_response),
         ):

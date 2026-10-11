@@ -9,7 +9,7 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.embedder_health import (
+from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
     capture_embedder_health_recorder,
 )

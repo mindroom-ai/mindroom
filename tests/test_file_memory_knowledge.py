@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.file_memory_knowledge import (
+from mindroom.knowledge.file_memory_knowledge import (
     resolve_agent_file_memory_knowledge,
     resolve_file_memory_knowledge,
 )
@@ -108,7 +108,7 @@ def test_agent_resolver_returns_none_for_non_agent_before_runtime_resolution(
     def fail_runtime_resolution(*_args: object, **_kwargs: object) -> object:
         pytest.fail("Non-agent names must return before runtime resolution")
 
-    monkeypatch.setattr("mindroom.file_memory_knowledge.resolve_agent_runtime", fail_runtime_resolution)
+    monkeypatch.setattr("mindroom.knowledge.file_memory_knowledge.resolve_agent_runtime", fail_runtime_resolution)
 
     assert (
         resolve_agent_file_memory_knowledge(

@@ -11,11 +11,11 @@ import pytest
 from agno.tools.function import Function
 from pydantic import BaseModel
 
-import mindroom.tool_schema_cache as schema_cache
+import mindroom.tool_system.tool_schema_cache as schema_cache
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_schema_cache import cached_processed_schema, clear_tool_schema_cache
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.tool_schema_cache import cached_processed_schema, clear_tool_schema_cache
 
 if TYPE_CHECKING:
     from pathlib import Path

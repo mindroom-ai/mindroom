@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import agents, ai
+from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
-from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.history.session_context import close_agent_runtime_state_dbs

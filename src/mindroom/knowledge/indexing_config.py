@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, cast
 
-from mindroom.embeddings import effective_knowledge_embedder_signature
+from mindroom.embeddings.signatures import effective_knowledge_embedder_signature
 from mindroom.knowledge.legacy_metadata import normalize_legacy_indexing_settings
 from mindroom.knowledge.redaction import credential_free_url_identity
 

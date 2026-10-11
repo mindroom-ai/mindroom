@@ -14,8 +14,8 @@ from nio import TimelineEventProvenance
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
-from mindroom.matrix_delivery import MatrixDeliveryWorker
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ACCOUNT as ACCOUNT_ID
 from tests.test_durable_ingestion_admission import ROOM as ROOM_ID

@@ -19,11 +19,12 @@ from agno.models.openai import OpenAIChat
 from agno.run.agent import RunCompletedEvent, RunErrorEvent
 from openai import AsyncOpenAI
 
-from mindroom import model_loading, provider_stream_retry
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.model_loading import get_model_instance
-from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
+from mindroom.providers import model_loading
+from mindroom.providers import stream_retry as provider_stream_retry
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:

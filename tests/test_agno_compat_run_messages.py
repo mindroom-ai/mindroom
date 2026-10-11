@@ -23,15 +23,15 @@ from agno.session.agent import AgentSession
 from agno.team import _run as team_run
 from agno.tools.function import Function
 
-from mindroom import model_loading
 from mindroom.agent_storage import create_state_storage
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.usage_stats import collect_admin_usage
-from mindroom.usage_storage import project_usage
+from mindroom.providers import model_loading
+from mindroom.usage.stats import collect_admin_usage
+from mindroom.usage.storage import project_usage
 from tests.history_helpers import RecordingModel
 from tests.identity_helpers import persist_entity_accounts
 

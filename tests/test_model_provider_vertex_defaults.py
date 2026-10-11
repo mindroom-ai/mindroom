@@ -13,8 +13,8 @@ import yaml
 from mindroom.cli.config import _model_template_block, _write_env_file
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.model_loading import get_model_instance
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 
 if TYPE_CHECKING:
     from pathlib import Path

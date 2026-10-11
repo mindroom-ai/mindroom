@@ -11,11 +11,11 @@ from agno.models.fallback import FallbackConfig, acall_model_with_fallback
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 
-from mindroom import approval_receipt
-from mindroom.approval_receipt import build_approval_receipt
+from mindroom.approval import receipt as approval_receipt
+from mindroom.approval.receipt import build_approval_receipt
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
-from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from tests.history_helpers import RecordingModel
 
 
