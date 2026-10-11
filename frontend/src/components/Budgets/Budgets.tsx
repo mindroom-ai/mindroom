@@ -218,7 +218,11 @@ function CapInput({
   const [text, setText] = useState(shown);
   // The field is read-only while saving, so a later edit cannot be overwritten by this save.
   const [saving, setSaving] = useState(false);
-  useEffect(() => setText(shown), [shown]);
+  // A refresh shows a newer saved cap only once the field is no longer being edited.
+  const [editing, setEditing] = useState(false);
+  useEffect(() => {
+    if (!editing && !saving) setText(shown);
+  }, [shown, editing, saving]);
   const invalid = parseUsd(text) === null;
   const save = async () => {
     const parsed = parseUsd(text);
@@ -242,7 +246,11 @@ function CapInput({
       readOnly={saving}
       className="w-40 aria-invalid:border-destructive"
       onChange={(event) => setText(event.target.value)}
-      onBlur={() => void save()}
+      onFocus={() => setEditing(true)}
+      onBlur={() => {
+        setEditing(false);
+        void save();
+      }}
       onKeyDown={(event) => {
         if (event.key === "Enter") void save();
       }}
@@ -570,16 +578,18 @@ export function Budgets() {
   const { config, isDirty, isLoading, saveConfig, updateConfigValue } =
     useConfigStore();
   const { toast } = useToast();
-  const queryClient = useQueryClient();
+  const budgets = config?.budgets ?? null;
+  // Saved budgets reach the runtime with its next config reload, a few seconds after Save.
+  const savedOn = budgets != null && !isDirty;
   const query = useQuery({
     queryKey: ["budgets"],
     queryFn: ({ signal }) => fetchBudgets(signal),
     retry: false,
-    refetchInterval: 60_000,
+    refetchInterval: ({ state }) =>
+      savedOn && state.data?.enabled === false ? 1_000 : 60_000,
     refetchOnWindowFocus: false,
   });
   const status = query.data?.enabled === true ? query.data : undefined;
-  const budgets = config?.budgets ?? null;
 
   const handleSave = async () => {
     const result = await saveConfig();
@@ -595,7 +605,6 @@ export function Budgets() {
       title: "Budgets Saved",
       description: "New caps and prices apply from the next spend refresh.",
     });
-    void queryClient.invalidateQueries({ queryKey: ["budgets"] });
   };
 
   return (
@@ -630,13 +639,15 @@ export function Budgets() {
             updateConfigValue={updateConfigValue}
           />
           {budgets != null &&
-            // The server accepts per-user caps only once budgets are saved on.
-            (isDirty && query.data?.enabled === false ? (
+            // The server accepts per-user caps only once its running config has budgets on.
+            (query.data?.enabled === false ? (
               <Card>
                 <CardHeader>
                   <CardTitle>Users</CardTitle>
                   <CardDescription>
-                    Save to turn on budgets, then set per-user caps here.
+                    {savedOn
+                      ? "Turning on budgets…"
+                      : "Save to turn on budgets, then set per-user caps here."}
                   </CardDescription>
                 </CardHeader>
               </Card>
