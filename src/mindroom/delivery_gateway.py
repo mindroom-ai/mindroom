@@ -428,7 +428,6 @@ class ResponseHookService:
         response_text: str,
         response_event_id: str,
         delivery_kind: Literal["sent", "edited"],
-        tool_trace: Sequence[ToolTraceEntry],
         continue_on_cancelled: bool = False,
     ) -> None:
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
@@ -441,7 +440,6 @@ class ResponseHookService:
                 delivery_kind=delivery_kind,
                 response_kind=identity.response_kind,
                 envelope=identity.response_envelope,
-                tool_trace=deepcopy(tuple(tool_trace)),
             ),
         )
         await emit(
