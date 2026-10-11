@@ -21,6 +21,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.models import ModelConfig
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
 from mindroom.history.archive import archive_runs
 from mindroom.history.session_context import open_resolved_scope_session_context
@@ -172,6 +173,20 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
     assert content.count("<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>") == 1
 
 
+def test_persona_with_tools_hides_generated_functions_from_the_agent(tmp_path: Path) -> None:
+    """An explicit tool list hides functions with no owning toolkit, which the configured agent offers."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    generated = Function(name="generated")
+    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
+
+    authored = _child(runtime, ["file"])
+
+    assert configured.tool_function_filter is not None
+    assert configured.tool_function_filter(generated)
+    assert authored.tool_function_filter is not None
+    assert not authored.tool_function_filter(generated)
+
+
 def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
     """Only the named toolkit's functions are offered; an unnamed caller toolkit offers none."""
     runtime = _runtime(tmp_path, tools=["file", "shell"])
@@ -265,23 +280,14 @@ def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path)
     assert "Yourself, run as a fresh copy." in documents
 
 
-def test_configured_minimal_agent_keeps_its_own_delegate_description(tmp_path: Path) -> None:
-    """Only an authored copy hides its configured role; a configured agent's delegate guidance is unchanged."""
-    runtime = _runtime(tmp_path, tools=["shell", "delegate"], delegate_to=["helper"])
+def test_delegate_lists_its_caller_as_a_fresh_copy(tmp_path: Path) -> None:
+    """Every caller's own delegate entry reads as a fresh copy and never repeats its configured role."""
+    runtime = _runtime(tmp_path)
 
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        None,
-        persist_runtime_state=False,
-        agent_mode="minimal",
-    )
+    toolkit = DelegateTools("helper", ["helper"], runtime.runtime_paths, runtime.config)
 
-    assert isinstance(agent, MinimalAgent)
-    documents = "\n".join(agent.context_documents.values())
-    assert "Yourself, run as a fresh copy." not in documents
-    assert "- Configured role" in documents
+    assert "helper\n  - Yourself, run as a fresh copy." in str(toolkit.instructions)
+    assert "Configured role" not in str(toolkit.instructions)
 
 
 def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(tmp_path: Path) -> None:
