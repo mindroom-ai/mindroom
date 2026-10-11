@@ -45,6 +45,7 @@ from mindroom.delivery_gateway import (
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import DepartureSource, EventClass, EventKind, InboundEvent, TerminalTurnWrite
+from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
@@ -56,11 +57,12 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome, TurnHandoff
 from mindroom.message_target import MessageTarget
-from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
-from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_presentation import AGENT_PLACEHOLDER, NoteKind, Presentation, Segment, note_segment
+from mindroom.reply_scope import ReplyRuntime, initial_write
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.streaming import ProgressState
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     FakeOutbox,
@@ -3897,6 +3899,104 @@ async def test_a_wait_that_is_the_first_message_is_shown_by_the_replys_create(
     assert reply.state is rl.ReplyState.WAITING
     assert reply.event_id == "$reply"
     assert await alice.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL) is None
+
+
+@pytest.mark.asyncio
+async def test_a_wait_after_a_placeholder_whose_send_failed_edits_that_create(
+    tmp_path: Path,
+    alice: PrincipalStore,
+) -> None:
+    """A placeholder recorded but not confirmed is the reply's create, so the wait edits it and the answer shows."""
+    gateway = _gateway(tmp_path, alice)
+    gateway.deps.response_hooks._apply_before_response = (
+        TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+    )
+    created = DeliveredMatrixEvent("$reply", {"body": "created"})
+    async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+        # The placeholder's create was recorded, but its send's outcome is unknown.
+        placeholder = initial_write(handle, Presentation(placeholder=AGENT_PLACEHOLDER), placeholder_only=True)
+        enqueued = await alice.enqueue_reply_row(
+            ReplyRowRequest(
+                reply_id=handle.reply_id,
+                span_id=handle.span_id,
+                decide=placeholder.decide,
+                placeholder_only=True,
+                stage=rl.WriteStage.INITIAL,
+            ),
+            PreparedReplyRow(payload={"msgtype": "m.text", "body": AGENT_PLACEHOLDER}),
+        )
+        assert enqueued is not None
+        handle.note(enqueued.applied)
+        handle.leaves_work = _HOLD_KEY
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=created)) as send:
+            await gateway.deliver_final(TestTurnDeliveryGoesThroughTheOutbox._final_request("the answer"))
+
+    bodies = [call.args[2]["body"] for call in send.await_args_list]
+    assert bodies[-1] == "* the answer\n\n⏳ Waiting for background work…"
+    reply = await alice.replies.load(handle.reply_id)
+    assert reply is not None
+    assert reply.state is rl.ReplyState.WAITING
+    assert reply.event_id == "$reply"
+
+
+@pytest.mark.parametrize("placeholder", [False, True])
+async def test_a_streamed_wait_creates_the_reply_only_while_nothing_was_recorded(
+    tmp_path: Path,
+    alice: PrincipalStore,
+    placeholder: bool,
+) -> None:
+    """A streamed wait creates the reply showing it, or edits a placeholder recorded before whose send failed."""
+    gateway = _gateway(tmp_path, alice)
+    created = DeliveredMatrixEvent("$reply", {"body": "created"})
+    content = {"msgtype": "m.text", "body": "the answer", "io.mindroom.stream_status": "completed"}
+    progress = ProgressState(text="the answer", tool_trace=(), presentation_state=None, placeholder_only=False)
+    async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+        if placeholder:
+            write = initial_write(handle, Presentation(placeholder=AGENT_PLACEHOLDER), placeholder_only=True)
+            enqueued = await alice.enqueue_reply_row(
+                ReplyRowRequest(
+                    reply_id=handle.reply_id,
+                    span_id=handle.span_id,
+                    decide=write.decide,
+                    placeholder_only=True,
+                    stage=rl.WriteStage.INITIAL,
+                ),
+                PreparedReplyRow(payload={"msgtype": "m.text", "body": AGENT_PLACEHOLDER}),
+            )
+            assert enqueued is not None
+            handle.note(enqueued.applied)
+        handle.leaves_work = _HOLD_KEY
+        hooks = gateway._reply_stream_hooks(handle, MessageTarget.resolve(_ROOM_ID, None, "$cause", room_mode=True))
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=created)) as send:
+            await hooks["terminal_send"](MagicMock(), _ROOM_ID, content, "the answer", progress=progress)
+
+    bodies = [call.args[2]["body"] for call in send.await_args_list]
+    expected = "the answer\n\n⏳ Waiting for background work…"
+    assert bodies[-1] == (f"* {expected}" if placeholder else expected)
+    reply = await alice.replies.load(handle.reply_id)
+    assert reply is not None
+    assert reply.state is rl.ReplyState.WAITING
+
+
+@pytest.mark.asyncio
+async def test_a_wait_whose_create_send_failed_still_waits(tmp_path: Path, alice: PrincipalStore) -> None:
+    """The create's row stays recorded for the outbox to deliver, so the reply waits instead of failing."""
+    gateway = _gateway(tmp_path, alice)
+    gateway.deps.response_hooks._apply_before_response = (
+        TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+    )
+    with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
+        async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+            handle.leaves_work = _HOLD_KEY
+            outcome = await gateway.deliver_final(TestTurnDeliveryGoesThroughTheOutbox._final_request("the answer"))
+
+    assert outcome.terminal_status != "error"
+    reply = await alice.replies.load(handle.reply_id)
+    assert reply is not None
+    assert reply.state is rl.ReplyState.WAITING
+    create = await alice.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.INITIAL)
+    assert create is not None
+    assert create.payload["body"] == "the answer\n\n⏳ Waiting for background work…"
 
 
 @pytest.mark.asyncio

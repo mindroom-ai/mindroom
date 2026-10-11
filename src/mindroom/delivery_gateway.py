@@ -301,11 +301,18 @@ def _with_note(shown: Presentation, note: Segment) -> Presentation:
     return with_trailing_note(shown, note)
 
 
-def _answer_write(handle: SpanHandle, shown: Presentation, *, waits_for: str | None, creates: bool) -> ReplyWrite:
-    """Return the row a span's answer writes: its terminal row, or its wait for the background work it leaves.
+async def _span_recorded_a_row(handle: SpanHandle) -> bool:
+    """Return whether the reply recorded a row since the span claimed it, which the outbox delivers despite a failed send.
 
-    A wait that is the reply's first visible message is shown by the reply's create, as a pause is.
+    A wait is shown by the reply's create, as a pause is, only while nothing was recorded; after a placeholder whose
+    send failed, the wait edits that pending create, as an answer does.
     """
+    reply = await handle.runtime.store.replies.load(handle.reply_id)
+    return reply is not None and reply.reply_sequence > handle.span.base_sequence
+
+
+def _answer_write(handle: SpanHandle, shown: Presentation, *, waits_for: str | None, creates: bool) -> ReplyWrite:
+    """Return the row a span's answer writes: its terminal row, or its wait for the background work it leaves."""
     if waits_for is None:
         return terminal_write(handle, shown, state=ReplyState.COMPLETED)
     if creates:
@@ -1921,7 +1928,8 @@ class DeliveryGateway:
             tuple(draft.tool_trace or ()),
             trailing_note=None if waits_for is None else note_segment(NoteKind.JOB_WAIT),
         )
-        reply_write = _answer_write(handle, shown, waits_for=waits_for, creates=edited_event_id is None)
+        creates = waits_for is not None and edited_event_id is None and not await _span_recorded_a_row(handle)
+        reply_write = _answer_write(handle, shown, waits_for=waits_for, creates=creates)
         # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
         shown_text, _shown_trace = _reply_body(display_text, draft.tool_trace, reply_write.shown)
         delivery_result: dict[str, object] | None = None
@@ -1950,7 +1958,9 @@ class DeliveryGateway:
             )
         except ReplyWriteRefusedError as refused:
             return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
-        if waits_for is not None and edited_event_id is None and event_id is not None:
+        if creates:
+            assert waits_for is not None
+            # The create's row stays recorded even when its send failed, so the reply waits either way.
             waited = await handle.runtime.decide(handle, wait_decision(handle, shown, hold_key=waits_for))
             if not waited.transition.applied:
                 refused = ReplyWriteRefusedError(waited.transition)
@@ -2363,8 +2373,9 @@ class DeliveryGateway:
                 new_text=None,
                 retry_sync_recovery=retry_sync_recovery,
             )
-            if delivered is None:
+            if delivered is None and not await _span_recorded_a_row(handle):
                 return None
+            # The create's row stays recorded even when its send failed, so the reply waits either way.
             waited = await handle.runtime.decide(handle, wait_decision(handle, waiting, hold_key=hold))
             if not waited.transition.applied and waited.transition.outcome is ReplyOutcome.RECOMPUTE:
                 # A Stop committed while the wait was sent; the span's Stop path writes the reply from here.
@@ -2383,7 +2394,15 @@ class DeliveryGateway:
             # A create sends its content as rendered; only an edit names its new text.
             del client, room_id, display_text
             if (hold := waits_for(content)) is not None:
-                return await wait_shown_by_create(content, progress, hold, retry_sync_recovery=retry_sync_recovery)
+                if not await _span_recorded_a_row(handle):
+                    return await wait_shown_by_create(content, progress, hold, retry_sync_recovery=retry_sync_recovery)
+                # A placeholder whose send failed is still the reply's create, so the wait edits it.
+                return await deliver(
+                    lambda: terminal(content, progress, waits_for=hold),
+                    content=_waiting_content(content, placeholder_only=progress.placeholder_only),
+                    new_text=None,
+                    retry_sync_recovery=retry_sync_recovery,
+                )
             if answered_nothing(content, progress):
                 return None
             return await deliver(
