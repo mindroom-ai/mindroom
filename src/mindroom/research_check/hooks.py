@@ -96,8 +96,8 @@ def _research_check_messages(
             break
         lines.append(line)
     tools = "\n".join(["Tool calls made for this reply:", *lines]) if lines else "Tool calls made for this reply: none"
-    # Tool previews are not essential evidence, so redact them instead of refusing the whole request; the joined
-    # text is redacted once because some credential patterns span a line break.
+    # Unlike the message and reply, a partly redacted preview can still be judged, so redact it instead of refusing
+    # the whole request; the joined text is redacted once because some credential patterns span a line break.
     tools = redact_sensitive_text(tools)
     return (
         JudgmentMessage("user", body),
@@ -118,11 +118,13 @@ async def check_research(ctx: AfterResponseContext) -> None:
     result = ctx.result
     envelope = result.envelope
     # Only an agent's reply to a person's own request: never this plugin's follow-ups, other agents, automations,
-    # schedules, or webhooks. Team replies and hidden tool calls carry no tool trace, so the judge would see no lookups.
+    # schedules, or webhooks. Team replies and hidden tool calls carry no tool trace, and attached files reach the
+    # model without a tool call, so in each case the judge would see no lookups.
     if (
         result.response_kind != "ai"
         or not envelope.origin.may_answer_interactive_prompt
         or not show_tool_calls_for_agent(ctx.config, envelope.agent_name)
+        or envelope.attachment_ids
     ):
         return
     settings = ResearchCheckSettings.model_validate(ctx.settings)

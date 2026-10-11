@@ -233,6 +233,7 @@ async def test_false_abstain_and_failure_send_nothing(
         {"envelope": _dispatched_envelope("scheduled")},
         {"envelope": _dispatched_envelope("external_trigger")},
         {"response_kind": "team"},
+        {"envelope": _envelope(body="Q3-results.pdf", attachment_ids=("att_q3",))},
         {"settings": _SETTINGS | {"agents": ["other"]}},
     ],
     ids=[
@@ -241,6 +242,7 @@ async def test_false_abstain_and_failure_send_nothing(
         "scheduled",
         "external-trigger",
         "team-reply",
+        "attached-file",
         "filtered-agent",
     ],
 )
