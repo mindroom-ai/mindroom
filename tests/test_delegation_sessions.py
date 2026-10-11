@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -20,7 +21,7 @@ from mindroom.delegation.sessions import (
     subagent_liveness,
     update_subagent_turn,
 )
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.delegation_helpers import _runtime_paths
@@ -29,6 +30,8 @@ from tests.test_delegation_direct_audit import _identity
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
 
 @pytest.mark.asyncio
 async def test_handle_reservations_are_scoped_and_reject_overlapping_followups(tmp_path: Path) -> None:
@@ -36,23 +39,8 @@ async def test_handle_reservations_are_scoped_and_reject_overlapping_followups(t
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
     owner = _identity()
-    subagent_id = uuid4().hex
-    child = DelegationChild(
-        delegation_id=subagent_id,
-        subagent_id=subagent_id,
-        parent_tool_call_id="call",
-        caller_agent_name="leader",
-        child_agent_name="leader",
-        task="First task",
-        session_id=f"delegate:leader:leader:{subagent_id}",
-        run_id=uuid4().hex,
-        model_name="default",
-        depth=1,
-        execution_identity=serialize_tool_execution_identity(
-            replace(owner, session_id=f"delegate:leader:leader:{subagent_id}"),
-        ),
-        storage_bindings=freeze_delegation_storage(config, ("leader",)),
-    )
+    child = _self_child(config, owner, task="First task")
+    subagent_id = child.delegation_id
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
     child.status = "completed"
     child.result = "First answer"
@@ -126,23 +114,8 @@ async def test_liveness_distinguishes_active_from_abandoned_turn(tmp_path: Path)
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     owner = _identity()
-    subagent_id = uuid4().hex
-    child = DelegationChild(
-        delegation_id=subagent_id,
-        subagent_id=subagent_id,
-        parent_tool_call_id="call",
-        caller_agent_name="leader",
-        child_agent_name="leader",
-        task="First task",
-        session_id=f"delegate:leader:leader:{subagent_id}",
-        run_id=uuid4().hex,
-        model_name="default",
-        depth=1,
-        execution_identity=serialize_tool_execution_identity(
-            replace(owner, session_id=f"delegate:leader:leader:{subagent_id}"),
-        ),
-        storage_bindings=freeze_delegation_storage(config, ("leader",)),
-    )
+    child = _self_child(config, owner, task="First task")
+    subagent_id = child.delegation_id
     options = {"owner": owner, "config": config, "runtime_paths": paths, "depth": 0}
     async with subagent_liveness(child, paths):
         await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
@@ -167,3 +140,79 @@ async def test_liveness_distinguishes_active_from_abandoned_turn(tmp_path: Path)
     del config.agents["leader"]
     with pytest.raises(SubagentSessionError, match="no longer configured"):
         await load_subagent(subagent_id, **options)
+
+
+def _self_child(
+    config: Config,
+    owner: ToolExecutionIdentity,
+    persona: SubagentPersona | None = None,
+    *,
+    task: str = "Review the plan",
+) -> DelegationChild:
+    """A fresh child of ``leader`` running itself."""
+    subagent_id = uuid4().hex
+    session_id = f"delegate:leader:leader:{subagent_id}"
+    return DelegationChild(
+        delegation_id=subagent_id,
+        subagent_id=subagent_id,
+        parent_tool_call_id="call",
+        caller_agent_name="leader",
+        child_agent_name="leader",
+        task=task,
+        session_id=session_id,
+        run_id=uuid4().hex,
+        model_name="default",
+        depth=1,
+        execution_identity=serialize_tool_execution_identity(replace(owner, session_id=session_id)),
+        storage_bindings=freeze_delegation_storage(config, ("leader",)),
+        persona=persona,
+    )
+
+
+@pytest.mark.asyncio
+async def test_persona_round_trips_through_session_record(tmp_path: Path) -> None:
+    """A retained handle rebuilds the exact authored persona after a reload."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    persona = SubagentPersona(
+        source_kind="profile",
+        source_name="critic",
+        system_prompt="You are a critic {x}.",
+        tools=("file",),
+    )
+    child = _self_child(config, owner, persona)
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    child.status = "completed"
+    await update_subagent_turn(child, paths)
+
+    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+
+    assert restored.persona == persona
+    assert restored == child
+    assert DelegationState.from_metadata(
+        {DELEGATION_STATE_KEY: DelegationState(children=[child]).to_dict()},
+    ).children == [
+        child,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_child_snapshot_without_persona_reads_as_configured_child(tmp_path: Path) -> None:
+    """A session record or parent run state written before personas existed reads as a configured-agent child."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    child = _self_child(config, owner, None)
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
+    payload = json.loads(record.read_text())
+    del payload["child"]["persona"]
+    record.write_text(json.dumps(payload))
+
+    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+    parent_state = DelegationState.from_metadata({DELEGATION_STATE_KEY: {"children": [payload["child"]]}})
+
+    assert restored.persona is None
+    assert restored.child_agent_name == "leader"
+    assert parent_state.children == [child]

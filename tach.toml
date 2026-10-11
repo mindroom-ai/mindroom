@@ -445,6 +445,7 @@ visibility = [
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
     "mindroom.api.agent_cli",
+    "mindroom.delegation.personas",
     "mindroom.minimal_agent",
     "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
@@ -791,9 +792,10 @@ visibility = [
     "mindroom.approval_execution",
     "mindroom.response_runner",
     "mindroom.teams",
-    "mindroom.custom_tools.delegate",
+    "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.cli_approval_waits",
+    "mindroom.custom_tools.dynamic_workflow",
 ]
 
 [[modules]]
@@ -842,7 +844,9 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.mcp.registry",
     "mindroom.cli_shell_agent",
+    "mindroom.delegation.personas",
     "mindroom.path_confinement",
     "mindroom.minimal_agent",
     "mindroom.tool_system.agent_tool_calls",
@@ -854,6 +858,7 @@ depends_on = [
     "mindroom.credentials",
     "mindroom.custom_tools.computer_announcement",
     "mindroom.custom_tools.delegate",
+    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.custom_tools.job",
     "mindroom.custom_tools.memory",
     "mindroom.delegation.lifecycle",
@@ -1326,6 +1331,7 @@ visibility = [
     "mindroom.scheduling",
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
+    "mindroom.custom_tools.dynamic_workflow",
     # Both tell a gated call that asks for its approval as its job from other calls.
     "mindroom.cli_shell_agent",
     "mindroom.tool_jobs.agno_execution",
@@ -1461,18 +1467,42 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.delegation.direct",
+    "mindroom.delegation.personas",
+    "mindroom.delegation.sessions",
     "mindroom.agent_descriptions",
-    "mindroom.ai",
-    "mindroom.logging_config",
     "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
-    "mindroom.response_turn",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
     "mindroom.delegation.sessions",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.dynamic_workflow"
+depends_on = [
+    "mindroom.agents",
+    "mindroom.authorization",
+    "mindroom.credentials",
+    "mindroom.custom_tools.dynamic_workflow_context",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.custom_tools.toolkit_functions",
+    "mindroom.delegation.direct",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.personas",
+    "mindroom.delegation.sessions",
+    "mindroom.dynamic_workflows",
+    "mindroom.entity_resolution",
+    "mindroom.helper_usage",
+    "mindroom.response_turn",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_approval",
+    "mindroom.tool_system",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -7010,6 +7040,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.error_handling",
@@ -7039,6 +7070,18 @@ depends_on = [
     "mindroom.tool_jobs.wait_timeout",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.delegation.personas"
+depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.dynamic_toolkits",
+    "mindroom.delegation.state",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.skills",
 ]
 
 [[modules]]
@@ -7215,8 +7258,19 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.delegation.direct"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.sessions",
+    "mindroom.logging_config",
+    "mindroom.response_turn",
+]
+
+[[modules]]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
+    "mindroom.delegation.personas",
     "mindroom.error_handling",
     "mindroom.delegation.audit",
     "mindroom.delegation.records",
@@ -7230,6 +7284,8 @@ visibility = [
     "mindroom.ai",
     "mindroom.agents",
     "mindroom.custom_tools.delegate",
+    "mindroom.custom_tools.dynamic_workflow",
+    "mindroom.delegation.direct",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
     "mindroom.tool_system.dynamic_toolkits",

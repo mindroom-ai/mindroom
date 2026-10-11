@@ -48,11 +48,13 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     managed: bool,
     parallel: bool,
 ) -> None:
-    """Real ephemeral participants retain all calculator results in one managed workflow."""
+    """Real subagent participants retain all calculator results in one managed workflow."""
     context = _make_context(tmp_path)
     context.config.background_tool_jobs.enabled = managed
+    # A participant can use only tools its caller has.
     context.config.agents["general"].tools = [
         ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
+        ToolConfigEntry(name="calculator"),
     ]
     runtime = await tool_job_runtime(context.runtime_paths.storage_root)
     if managed:
@@ -67,7 +69,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
         ],
     )
     monkeypatch.setattr(
-        "mindroom.custom_tools.dynamic_workflow.model_loading.get_model_instance",
+        "mindroom.model_loading.get_model_instance",
         lambda *_args, **_kwargs: child_model,
     )
     outer = DelegationModel(id="test")
@@ -79,7 +81,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     function._agent = Agent(id="general", telemetry=False)
     function._run_context = RunContext(run_id="root", session_id=context.session_id, session_state={})
     spec = _workflow_spec(
-        participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": ["calculator"]}],
+        participants=[{"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["calculator"]}],
         permissions={"models": ["claude-sonnet-5"], "tools": ["calculator"]},
     )
     try:
@@ -101,15 +103,17 @@ async def test_workflow_participant_runs_multiple_sync_tools(
 
 
 @pytest.mark.asyncio
-async def test_workflow_participant_tools_run_under_the_enclosing_grant(
+async def test_workflow_participant_tools_run_under_their_own_grants(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Participant tools carry no grant of their own, so they are checked as the enclosing call with its arguments."""
+    """A participant is a subagent built with its own grants, so each of its calls is checked as itself."""
     context = _make_context(tmp_path)
     context.config.background_tool_jobs.enabled = True
+    # A participant can use only tools its caller has.
     context.config.agents["general"].tools = [
         ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
+        ToolConfigEntry(name="calculator"),
     ]
     checked: list[tuple[str, dict[str, object]]] = []
 
@@ -131,7 +135,7 @@ async def test_workflow_participant_tools_run_under_the_enclosing_grant(
         ],
     )
     monkeypatch.setattr(
-        "mindroom.custom_tools.dynamic_workflow.model_loading.get_model_instance",
+        "mindroom.model_loading.get_model_instance",
         lambda *_args, **_kwargs: child_model,
     )
     outer = DelegationModel(id="test")
@@ -146,7 +150,7 @@ async def test_workflow_participant_tools_run_under_the_enclosing_grant(
     function._run_context = RunContext(run_id="root", session_id=context.session_id, session_state={})
     arguments = {"workflow_id": "competitor-research-report", "input": {"topic": "test"}}
     spec = _workflow_spec(
-        participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": ["calculator"]}],
+        participants=[{"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["calculator"]}],
         permissions={"models": ["claude-sonnet-5"], "tools": ["calculator"]},
     )
     try:
@@ -156,8 +160,10 @@ async def test_workflow_participant_tools_run_under_the_enclosing_grant(
                 await outer.arun_function_call(FunctionCall(function=function, call_id="outer", arguments=arguments))
         outputs = [message.content for message in child_model.seen_messages if message.role == "tool"]
         assert [json.loads(output)["result"] for output in outputs] == [3, 12]
-        assert checked
-        assert all(check == ("run_workflow", arguments) for check in checked)
+        assert {check[0] for check in checked} == {"run_workflow", "add", "multiply"}
+        assert ("run_workflow", arguments) in checked
+        assert ("add", {"a": 1, "b": 2}) in checked
+        assert ("multiply", {"a": 3, "b": 4}) in checked
     finally:
         await runtime.shutdown()
 

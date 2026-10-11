@@ -21,11 +21,18 @@ from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
 from mindroom.custom_tools.job import JobTools
+from mindroom.delegation.personas import (
+    caller_toolkit_names,
+    persona_allows,
+    persona_tool_policy,
+    require_built_persona_tools,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
+from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import hide_mcp_function_collisions
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
@@ -96,6 +103,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
     from mindroom.credentials import CredentialsManager
+    from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
@@ -628,15 +636,17 @@ def _log_toolkits_without_unique_model_functions(
             seen_function_names.update(function_names)
 
 
-def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> None:
-    """Project MCP functions against the exact session-local tool surface."""
-    for server_id, function_names in hide_mcp_function_collisions(toolkits).items():
+def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> dict[str, tuple[str, ...]]:
+    """Project MCP functions against the exact session-local tool surface, returning those hidden per tool."""
+    hidden = hide_mcp_function_collisions(toolkits)
+    for server_id, function_names in hidden.items():
         logger.warning(
             "Hiding colliding MCP functions from session tool surface",
             agent=agent_name,
             server_id=server_id,
             function_names=list(function_names),
         )
+    return {mcp_tool_name(server_id): function_names for server_id, function_names in hidden.items()}
 
 
 class _MatrixRoomRuntimeToolCollisionError(ValueError):
@@ -724,8 +734,12 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
+    persona_tools: tuple[str, ...] | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
+
+    ``persona_tools`` holds an authored subagent's tools; its ``delegate`` toolkit
+    keeps the copies it authors within them.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
@@ -804,6 +818,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
+                workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+                persona_tools=persona_tools,
             ),
         )
 
@@ -1226,16 +1242,11 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prepare_toolkit_functions(
-    toolkit: Toolkit | None,
+def _prune_toolkit_functions(
+    toolkit: Toolkit,
     tool_function_filter: Callable[[Function], bool] | None,
-    *,
-    tool_name: str,
 ) -> Toolkit | None:
-    """Reject reserved collisions, apply channel policy, and drop empty toolkits."""
-    if toolkit is None:
-        return None
-    _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
+    """Apply the final function policy and discard toolkits with no callable surface."""
     if tool_function_filter is not None:
         toolkit.functions = {
             name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
@@ -1441,11 +1452,33 @@ def _generated_function_visible(
     )
 
 
+def _apply_persona(agent: Agent, persona: SubagentPersona) -> None:
+    """Present the authored prompt verbatim, without MindRoom framing or session-state substitution."""
+    agent.system_message = persona.system_prompt
+    agent.resolve_in_context = False
+    if isinstance(agent, MinimalAgent):
+        agent.bootstrap_message = persona.system_prompt
+        agent.persona_hint = True
+
+
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
-def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools share one construction path
+def _keep_persona_functions(toolkit: Toolkit, tool_name: str, persona_tools: tuple[str, ...]) -> None:
+    """Drop the functions of one concrete toolkit that an authored persona does not name."""
+    for functions in (toolkit.functions, toolkit.async_functions):
+        for name in [name for name in functions if not persona_allows(persona_tools, tool_name, name)]:
+            del functions[name]
+
+
+def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
+    """Attach the configured toolkit identity to its executable functions."""
+    for function in (*toolkit.functions.values(), *toolkit.get_async_functions().values()):
+        function.owning_toolkit = authored_name
+
+
+def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and deferred tools share one construction path
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
@@ -1465,6 +1498,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     eager_deferred_tools: bool,
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
+    persona_tools: tuple[str, ...] | None = None,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     approvals_as_jobs = (
@@ -1553,6 +1587,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     local_tool_names: list[str] = []
     worker_routed_tool_names: list[str] = []
     deferred_toolkits: list[_NativeDeferredToolkit] = []
+    persona_built: dict[str, frozenset[str]] = {}
 
     def build_entry(tool_entry: EffectiveToolConfig) -> Toolkit | None:
         tool_name = tool_entry.name
@@ -1572,8 +1607,19 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=dynamic_tool_continuation,
+                persona_tools=persona_tools,
             )
-        toolkit = _prepare_toolkit_functions(toolkit, tool_function_filter, tool_name=tool_name)
+        if toolkit:
+            _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
+            if persona_tools is not None:
+                # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
+                _keep_persona_functions(toolkit, tool_name, persona_tools)
+            # Function policies match on the owning toolkit, so stamp it before pruning.
+            _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
+            toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            if toolkit is not None and persona_tools is not None:
+                # Record what survives the caller's filters; approval capability below may still hide gated calls.
+                persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
         toolkit = apply_tool_approval_capability(
             toolkit,
             config,
@@ -1668,6 +1714,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     )
     if controls is not None:
         tools.append(prepend_tool_hook_bridge(controls, tool_hook_bridge))
+    hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
+    if persona_tools is not None:
+        require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,
@@ -1855,6 +1904,21 @@ def _build_agent_instructions(
     return instructions
 
 
+def _install_background_jobs(
+    agent: Agent,
+    agent_name: str,
+    model: Model,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    depth: int,
+) -> None:
+    """Let the agent's calls run as background jobs when the instance runs them, granted as the agent is now."""
+    if background_tool_jobs_enabled(config, runtime_paths):
+        bind_actor_authority(agent, authority_snapshot(config, agent_name))
+        install_tool_job_execution(model, agent.fallback_config, depth=depth)
+
+
 @timed("system_prompt_assembly.agent_create")
 def create_agent(
     agent_name: str,
@@ -1881,6 +1945,7 @@ def create_agent(
     required_tool_names: tuple[str, ...] = (),
     agent_mode: AgentMode = "standard",
     agent_cli_in_shell: bool = False,
+    persona: SubagentPersona | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1926,6 +1991,7 @@ def create_agent(
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
+        persona: Authored subagent presentation: its whole system prompt and optional tool subset.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -1954,8 +2020,12 @@ def create_agent(
     # Gate on this agent's resolved runtime model (thread overrides and team
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
+    # An explicit persona tool list is small and must be present from the first request,
+    # so every toolkit it names, deferred ones and preset members included, loads eagerly.
+    persona_tools = persona.tools if persona is not None else None
     native_deferred_tools = (
         agent_mode == "standard"
+        and persona_tools is None
         and runtime_model_config is not None
         and (
             native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
@@ -1971,6 +2041,12 @@ def create_agent(
         )
     )
 
+    tool_function_filter, disabled_tool_names = persona_tool_policy(
+        persona_tools,
+        lambda: caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth),
+        tool_function_filter,
+        disabled_tool_names,
+    )
     tool_assembly = _assemble_agent_toolkits(
         agent_name,
         config,
@@ -1987,11 +2063,11 @@ def create_agent(
         dynamic_tool_continuation=dynamic_tool_continuation,
         supports_native_tool_approval=supports_native_tool_approval,
         native_deferred_tools=native_deferred_tools,
-        eager_deferred_tools=eager_deferred_tools,
+        eager_deferred_tools=eager_deferred_tools or persona_tools is not None,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
+        persona_tools=persona_tools,
     )
-    _hide_session_mcp_function_collisions(tool_assembly.tools, agent_name=agent_name)
     storage = _open_agent_session_storage(
         agent_name,
         agent_runtime,
@@ -2005,7 +2081,7 @@ def create_agent(
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and persona is None and _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -2128,7 +2204,9 @@ def create_agent(
             ),
         ),
         db=storage,
-        learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if persist_runtime_state else False,
+        learning=_resolve_agent_learning(agent_config, defaults, learning_storage)
+        if persist_runtime_state and persona is None
+        else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
@@ -2179,11 +2257,11 @@ def create_agent(
         )
         agent.delegation_depth = delegation_depth
         agent.refresh_scheduler = refresh_scheduler
+    if persona is not None:
+        _apply_persona(agent, persona)
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
-    if background_tool_jobs_enabled(config, runtime_paths):
-        bind_actor_authority(agent, authority_snapshot(config, agent_name))
-        install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
+    _install_background_jobs(agent, agent_name, model, config, runtime_paths, depth=delegation_depth)
 
     logger.info(
         "Created agent",
