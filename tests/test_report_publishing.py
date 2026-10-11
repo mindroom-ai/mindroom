@@ -52,8 +52,8 @@ def _workflow_spec() -> dict[str, object]:
         "participants": [
             {
                 "id": "writer",
-                "kind": "ephemeral_agent",
-                "name": "Report Writer",
+                "kind": "subagent",
+                "system_prompt": "You write cited reports.",
                 "model": "claude-sonnet-5",
                 "tools": [],
             },

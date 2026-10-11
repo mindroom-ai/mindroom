@@ -593,6 +593,8 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
     agents = response.json()["agents"]
     assert [agent["agent_name"] for agent in agents] == expected
     assert all(agent["is_shared"] == (agent["agent_name"] != "personal") for agent in agents)
+    # These shared agents have no per-user scope or MCP opt-in, so only the personal agent reaches the gateway.
+    assert all(agent["mcp_available"] == (agent["agent_name"] == "personal") for agent in agents)
 
 
 def test_agent_user_sees_shared_connection_without_management(shared_portal: dict[str, Any]) -> None:
@@ -604,6 +606,7 @@ def test_agent_user_sees_shared_connection_without_management(shared_portal: dic
     response = client.get("/api/connections", headers=headers["bob"])
     research = next(agent for agent in response.json()["agents"] if agent["agent_name"] == "research")
     assert research["can_use"] is True
+    assert research["mcp_available"] is False
     assert research["services"][0]["can_manage"] is False
     base = "/api/connections/agents/research/google_drive"
     connect = client.post(f"{base}/connect", headers=headers["alice"], json={})

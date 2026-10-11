@@ -27,13 +27,18 @@ from mindroom.thread_export.storage import (
     write_room_index,
     write_thread_payload,
 )
+from mindroom.thread_summary import current_thread_summary_from_history
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.projected_history import ProjectedThreadReader
+
+type _CurrentSummary = Callable[[str, str, Sequence[ResolvedVisibleMessage]], str | None]
 
 
 logger = get_logger(__name__)
@@ -65,7 +70,7 @@ async def _fetch_thread_payload(
     room: ThreadExportRoom,
     thread_id: str,
     *,
-    trusted_sender_ids: frozenset[str],
+    current_summary: _CurrentSummary,
 ) -> dict[str, object]:
     """Fetch and build one thread payload independently of export destinations."""
     messages = await fetch_projected_thread_history(
@@ -78,7 +83,7 @@ async def _fetch_thread_payload(
         thread_id=thread_id,
         messages=messages,
         exported_at=datetime.now(UTC),
-        trusted_sender_ids=trusted_sender_ids,
+        summary=current_summary(room.room_id, thread_id, messages),
     )
 
 
@@ -122,7 +127,7 @@ async def _write_thread_to_targets(
     reader: ProjectedThreadReader,
     room: ThreadExportRoom,
     thread_id: str,
-    trusted_sender_ids: frozenset[str],
+    current_summary: _CurrentSummary,
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
 ) -> None:
@@ -132,7 +137,7 @@ async def _write_thread_to_targets(
             reader,
             room,
             thread_id,
-            trusted_sender_ids=trusted_sender_ids,
+            current_summary=current_summary,
         )
     except Exception as exc:
         for accumulator in accumulators:
@@ -215,6 +220,8 @@ async def export_threads_for_targets_for_client(
     reader: ProjectedThreadReader,
     config: Config,
     runtime_paths: RuntimePaths,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
     rooms: Sequence[ThreadExportRoom],
     targets: Sequence[ThreadExportTarget],
     max_thread_roots: int = 2000,
@@ -223,8 +230,25 @@ async def export_threads_for_targets_for_client(
 
     ``client`` answers only what the projection cannot: which threads a room
     has, and who is currently joined to it. Thread bodies come from ``reader``.
+    Each thread's summary is the one ``entity_name`` would list for it, under
+    the same trust and pin rules as thread listings.
     """
     trusted_sender_ids = trusted_sender_ids_for_export(config, runtime_paths)
+
+    def current_summary(room_id: str, thread_id: str, messages: Sequence[ResolvedVisibleMessage]) -> str | None:
+        current = current_thread_summary_from_history(
+            client,
+            room_id,
+            thread_id,
+            messages,
+            config=config,
+            runtime_paths=runtime_paths,
+            entity_name=entity_name,
+            membership_index=membership_index,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+        return None if current is None else current.summary
+
     accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
 
     for room in rooms:
@@ -255,7 +279,7 @@ async def export_threads_for_targets_for_client(
             room=room,
             thread_ids=thread_ids,
             truncated=truncated,
-            trusted_sender_ids=trusted_sender_ids,
+            current_summary=current_summary,
             authorized=authorized,
         )
 
@@ -268,7 +292,7 @@ async def _export_enumerated_room_threads(
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
     truncated: bool,
-    trusted_sender_ids: frozenset[str],
+    current_summary: _CurrentSummary,
     authorized: Sequence[ThreadExportAccumulator],
 ) -> None:
     """Export one enumerated room's threads to every authorized accumulator."""
@@ -279,7 +303,7 @@ async def _export_enumerated_room_threads(
             reader=reader,
             room=room,
             thread_id=thread_id,
-            trusted_sender_ids=trusted_sender_ids,
+            current_summary=current_summary,
             accumulators=authorized,
             changed_accumulator_ids=changed_accumulator_ids,
         )

@@ -337,6 +337,7 @@ def _native_dispatch_builder(
     paused: threading.Event,
     release: threading.Event,
     events: list[str],
+    agent: str = "personal",
 ) -> Callable[..., Toolkit]:
     def pause(at: str) -> None:
         if phase != at:
@@ -348,7 +349,7 @@ def _native_dispatch_builder(
         identity = get_tool_execution_identity()
         assert identity is not None
         assert identity.requester_id == "@alice:example.org"
-        assert identity.agent_name == "personal"
+        assert identity.agent_name == agent
         events.append("body")
         return "account-result"
 

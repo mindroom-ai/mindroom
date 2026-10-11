@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
@@ -11,7 +12,11 @@ import nio
 import pytest
 import yaml
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.message_target import MessageTarget
 from mindroom.thread_export import ThreadExportTarget
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
@@ -21,8 +26,18 @@ from mindroom.thread_export.models import (
     ThreadExportRoom as _ThreadExportRoom,
 )
 from mindroom.thread_export.selection import export_rooms as _export_rooms
-from mindroom.thread_export.storage import write_room_index, write_thread_payload
-from tests.conftest import runtime_paths_for
+from mindroom.thread_export.storage import exported_content, write_room_index, write_thread_payload
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.access_schema_support import membership_config
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    serve_conversation_reader,
+)
+from tests.test_matrix_room_tool import _MOCK_TARGET, _edited, _summary_notice, _thread_event, _thread_message
 from tests.thread_export_helpers import (
     mark_thread_export_root,
 )
@@ -58,6 +73,8 @@ async def _export_threads_for_client(
         reader=Mock(),
         config=config,
         runtime_paths=runtime_paths,
+        entity_name=ROUTER_AGENT_NAME,
+        membership_index=AgentReplyMembershipIndex(),
         rooms=rooms,
         targets=(
             ThreadExportTarget(
@@ -194,7 +211,12 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
                 thread_id="$t1:localhost",
                 content={
                     "msgtype": "m.notice",
-                    "io.mindroom.thread_summary": {"version": 1, "summary": "Deploy pipeline fix"},
+                    "io.mindroom.thread_summary": {
+                        "version": 1,
+                        "summary": "Deploy pipeline fix",
+                        "generated_at": "2023-11-14T22:13:22+00:00",
+                        "model": "summary-model",
+                    },
                 },
             ),
             ResolvedVisibleMessage.synthetic(
@@ -259,6 +281,104 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
     assert older["message_count"] == 3
     assert older["participants"] == ["@agent_general:localhost", "@alice:localhost"]
     assert older["summary"] == "Deploy pipeline fix"
+
+
+_TALENT_ID = "@mindroom_talent:localhost"
+_OWNER_ID = "@owner:example.com"
+_SUMMARY_ROOM_ID = "!room:x"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize(
+    ("summaries", "expected_summary"),
+    [
+        pytest.param(
+            [_summary_notice("$auto", "Automatic title", 3000, sender=_TALENT_ID)],
+            "Automatic title",
+            id="automatic",
+        ),
+        pytest.param(
+            [
+                _summary_notice("$auto", "Automatic title", 3000, sender=_TALENT_ID),
+                _summary_notice("$person", "Person title", 4000, model="manual", pinned=True, sender=_OWNER_ID),
+            ],
+            "Person title",
+            id="person-set-title-after-ai-summary",
+        ),
+        pytest.param(
+            [
+                _edited(
+                    _summary_notice("$manual", "Manual title", 3000, model="manual", pinned=True, sender=_TALENT_ID),
+                    _summary_notice(
+                        "$manual-edit",
+                        "Edited title",
+                        5000,
+                        model="manual",
+                        pinned=True,
+                        sender=_TALENT_ID,
+                    ),
+                ),
+                _summary_notice("$auto", "Automatic title", 4000, sender=_TALENT_ID),
+            ],
+            "Edited title",
+            id="summary-edited-after-a-later-summary",
+        ),
+    ],
+)
+async def test_export_summary_matches_the_thread_listing(
+    tmp_path: Path,
+    summaries: list[ResolvedVisibleMessage],
+    expected_summary: str,
+) -> None:
+    """A thread file carries the summary `matrix_room` lists for the thread, person-set and edited titles included."""
+    config = membership_config(tmp_path, access={"users": [_OWNER_ID]})
+    ctx = make_test_tool_runtime_context(
+        agent_name="talent",
+        target=MessageTarget.resolve(room_id=_SUMMARY_ROOM_ID, thread_id="$thread1", reply_to_event_id=None),
+        requester_id=_OWNER_ID,
+        client=make_matrix_client_mock(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        room=None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+    history = [_thread_message("$thread1", "Thread root", 1000), *summaries]
+    serve_conversation_reader(ctx.conversation_reader, history, room_id=_SUMMARY_ROOM_ID, thread_id="$thread1")
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([_thread_event("$thread1")], None)):
+        listing = json.loads(await MatrixRoomTools().matrix_room(action="threads", include_summaries=True))
+
+    exported_history = copy.deepcopy(history)
+    for message in exported_history:
+        message.content = exported_content(message)
+    output_dir = tmp_path / "exports"
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$thread1"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(return_value=exported_history),
+        ),
+    ):
+        accumulators = await _export_threads_for_targets_for_client(
+            client=ctx.client,
+            reader=Mock(),
+            config=ctx.config,
+            runtime_paths=ctx.runtime_paths,
+            entity_name="talent",
+            membership_index=ctx.require_agent_reply_memberships(),
+            rooms=(_ThreadExportRoom(key="room", room_id=_SUMMARY_ROOM_ID, alias="", name=""),),
+            targets=(ThreadExportTarget(output_dir=output_dir),),
+        )
+
+    assert accumulators[0].stats().failures == 0
+    exported = yaml.safe_load((output_dir / "room" / f"{quote('$thread1', safe='')}.yaml").read_text(encoding="utf-8"))
+    assert listing["threads"][0]["summary"] == expected_summary
+    assert exported["thread"]["summary"] == expected_summary
 
 
 @pytest.mark.asyncio
@@ -605,6 +725,8 @@ async def test_multi_target_export_fetches_each_thread_once(tmp_path: Path) -> N
             reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
+            entity_name=ROUTER_AGENT_NAME,
+            membership_index=AgentReplyMembershipIndex(),
             rooms=_export_rooms(runtime_paths, "lobby"),
             targets=targets,
         )
@@ -895,6 +1017,8 @@ async def test_admitted_empty_root_handles_retraction_and_zero_thread_export_wit
             reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
+            entity_name=ROUTER_AGENT_NAME,
+            membership_index=AgentReplyMembershipIndex(),
             rooms=rooms,
             targets=(
                 ThreadExportTarget(
@@ -963,6 +1087,8 @@ async def test_room_removal_failure_is_scoped_to_the_rejected_target(
             reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
+            entity_name=ROUTER_AGENT_NAME,
+            membership_index=AgentReplyMembershipIndex(),
             rooms=(room,),
             targets=(rejected_target, healthy_target),
         )
@@ -1045,6 +1171,8 @@ async def test_target_membership_and_invited_room_setting_are_both_enforced(tmp_
             reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
+            entity_name=ROUTER_AGENT_NAME,
+            membership_index=AgentReplyMembershipIndex(),
             rooms=rooms,
             targets=targets,
         )
@@ -1091,6 +1219,8 @@ async def test_target_requires_every_configured_room_member(tmp_path: Path) -> N
             reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
+            entity_name=ROUTER_AGENT_NAME,
+            membership_index=AgentReplyMembershipIndex(),
             rooms=rooms,
             targets=(
                 ThreadExportTarget(
@@ -1135,6 +1265,8 @@ async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tm
             reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
+            entity_name=ROUTER_AGENT_NAME,
+            membership_index=AgentReplyMembershipIndex(),
             rooms=_export_rooms(runtime_paths, None),
             targets=(
                 ThreadExportTarget(

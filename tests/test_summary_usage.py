@@ -15,6 +15,7 @@ from agno.models.response import ModelResponse
 from sqlalchemy import create_engine, event
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.history.compaction import (
     SummaryModel,
     _generate_compaction_summary_with_retry,
@@ -23,7 +24,11 @@ from mindroom.history.compaction import (
 from mindroom.history.storage import record_summary_usage
 from mindroom.history.summary_call import _CompactionSummaryTimeoutError, generate_compaction_summary
 from mindroom.history.types import HistoryScopeState
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    detached_requester_context,
+    tool_runtime_context,
+)
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from tests.history_helpers import (
@@ -172,6 +177,56 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
         # Repeated exports and session upserts cannot add the same summary twice.
         storage.upsert_session(session)
         assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
+    """An OpenAI-compatible request has no Matrix conversation, so its summary is charged to the API requester."""
+    session = _session("session", runs=[_completed_run("original")])
+    config, paths, storage, scope, _context = _forced_compaction_context(tmp_path, session=session)
+    model = _SummaryModel(
+        id="summary-model",
+        provider="test-provider",
+        responses=[
+            ModelResponse(
+                content="A complete summary.",
+                response_usage=MessageMetrics(input_tokens=100, output_tokens=10, total_tokens=110),
+            ),
+        ],
+    )
+    authority = DetachedRequesterContext(
+        requester_id="@api:localhost",
+        config=config,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: config,
+    )
+    try:
+        with detached_requester_context(authority):
+            assert (
+                await compact_scope_history(
+                    storage=storage,
+                    session=session,
+                    scope=scope,
+                    state=HistoryScopeState(force_compact_before_next_run=True),
+                    history_settings=_ALL_HISTORY_SETTINGS,
+                    available_history_budget=None,
+                    summary_model=SummaryModel(model=model, name="summary", input_budget_tokens=10_000),
+                    replay_window_tokens=None,
+                    threshold_tokens=None,
+                    summary_prompt="Summarize.",
+                    summary_timeout_seconds=10,
+                )
+                is not None
+            )
+
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert report.request_breakdown is not None
+        assert [(request.kind, request.user_id) for request in report.request_breakdown] == [
+            ("compaction_summary", "@api:localhost"),
+        ]
     finally:
         storage.close()
 

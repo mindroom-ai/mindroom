@@ -82,6 +82,7 @@ async def start_child_record(
             parent_delegation_id=parent_delegation_id,
             subagent_id=child.subagent_id,
             previous_delegation_id=child.previous_delegation_id,
+            persona=child.persona,
         ),
         caller_execution_identity=caller_execution_identity,
         child_execution_identity=child_identity,

@@ -19,6 +19,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.delegation.state import SubagentPersona
 from mindroom.redaction import REDACTED
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
@@ -567,6 +568,7 @@ async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path:
     assert run["status"] == "completed"
     assert run["output"] == content
     assert content in (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
+    assert "## System prompt" not in (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -613,6 +615,7 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
         "source_thread_id": "$thread",
         "model_name": "test-model",
         "task": "Investigate the failure",
+        "persona": None,
         "status": "running",
         "started_at": run["started_at"],
         "updated_at": run["updated_at"],
@@ -1178,3 +1181,32 @@ async def test_self_delegation_creates_one_transcript_and_minimal_receipt(tmp_pa
         "updated_at",
         "finished_at",
     }
+
+
+@pytest.mark.asyncio
+async def test_run_json_records_persona_digest_and_transcript_shows_redacted_prompt(tmp_path: Path) -> None:
+    """An authored child's record names its persona, its prompt digest, and the prompt with secrets redacted."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    secret = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+    prompt = f"You are a critic. Use key {secret} only for lookups."
+    persona = SubagentPersona(source_kind="profile", source_name="critic", system_prompt=prompt, tools=("file",))
+
+    handle = await owner.start(
+        _metadata(module, persona=persona),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+        delegation_id="delegation-persona",
+    )
+    await owner.finish(handle, status="completed", output="Done")
+
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert run["persona"]["source_kind"] == "profile"
+    assert run["persona"]["source_name"] == "critic"
+    assert run["persona"]["tools"] == ["file"]
+    assert run["persona"]["system_prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    transcript = (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
+    assert "## System prompt" in transcript
+    assert "You are a critic." in transcript
+    assert secret not in transcript
+    assert secret not in json.dumps(run)

@@ -38,7 +38,11 @@ from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, Comp
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.token_budget import CompactionEstimateKind, compaction_estimate_kind, estimate_compaction_input_tokens
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
+from mindroom.tool_system.runtime_context import (
+    get_detached_requester_context,
+    get_tool_runtime_context,
+    resolve_tool_runtime_hook_bindings,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -342,12 +346,13 @@ async def _rewrite_working_session_for_compaction(
     total_compacted_run_count = 0
     compacted_messages: list[Message] = []
     pending_selected_run_ids = set(selected_run_ids)
-    runtime_context = get_tool_runtime_context()
+    # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
+    requester_context = get_tool_runtime_context() or get_detached_requester_context()
     on_response = partial(
         record_summary_usage,
         storage=storage,
         session_id=session_id,
-        requester_id=runtime_context.requester_id if runtime_context is not None else None,
+        requester_id=requester_context.requester_id if requester_context is not None else None,
     )
 
     while pending_selected_run_ids:
