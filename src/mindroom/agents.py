@@ -1806,13 +1806,11 @@ def _build_agent_instructions(
     loaded_tools: tuple[str, ...],
     native_deferred_tool_names: tuple[str, ...],
     all_deferred_tools_eager: bool,
-    persona_tools: tuple[str, ...] | None,
     authored: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance.
 
-    An ``authored`` subagent gets no skills, and one with ``persona_tools`` has no knowledge search,
-    so neither gets guidance for them.
+    An ``authored`` subagent gets no skills, so it gets no skill-authoring guidance.
     """
     instructions = list(configured_instructions)
 
@@ -1842,11 +1840,12 @@ def _build_agent_instructions(
 
     if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
+        # A conditional expression keeps this builder within the complexity limit.
         instructions.extend(() if authored else (config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),))
 
     file_mode_knowledge_instruction = (
         None
-        if disable_runtime_capabilities or persona_tools is not None
+        if disable_runtime_capabilities
         else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
     )
     if file_mode_knowledge_instruction is not None:
@@ -1978,6 +1977,7 @@ def create_agent(
     # An explicit persona tool list is small and must be present from the first request,
     # so every toolkit it names, deferred ones and preset members included, loads eagerly.
     persona_tools = persona.tools if persona is not None else None
+    eager_deferred_tools = eager_deferred_tools or persona_tools is not None
     native_deferred_tools = (
         agent_mode == "standard"
         and persona_tools is None
@@ -2018,7 +2018,7 @@ def create_agent(
         dynamic_tool_continuation=dynamic_tool_continuation,
         supports_native_tool_approval=supports_native_tool_approval,
         native_deferred_tools=native_deferred_tools,
-        eager_deferred_tools=eager_deferred_tools or persona_tools is not None,
+        eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
         persona_tools=persona_tools,
@@ -2109,9 +2109,7 @@ def create_agent(
         hidden_toolkits=tool_assembly.hidden_toolkits,
         loaded_tools=tool_assembly.loaded_tools,
         native_deferred_tool_names=tool_assembly.deferred_tool_names,
-        # An explicit persona tool list loads every toolkit it names, so no deferred-loading guidance applies.
-        all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools or persona_tools is not None,
-        persona_tools=persona_tools,
+        all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools,
         authored=persona is not None,
     )
 

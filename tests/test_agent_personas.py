@@ -28,6 +28,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import seed_session
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_dynamic_toolkits import _base_config_data, _validated_config
@@ -296,8 +297,8 @@ def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_persona_with_tools_never_advertises_unreachable_knowledge_or_skills(tmp_path: Path) -> None:
-    """A tool list hides knowledge search and skills, so the prompt never points at them."""
+async def test_persona_with_tools_never_advertises_knowledge_search(tmp_path: Path) -> None:
+    """A tool list hides knowledge search, so the prompt never points at it."""
     runtime = _runtime(tmp_path, tools=["file"])
     agent = _child(runtime, ["file"], knowledge=Knowledge(name="docs"))
     session = AgentSession(session_id="session-1")
@@ -308,7 +309,34 @@ async def test_persona_with_tools_never_advertises_unreachable_knowledge_or_skil
     assert message is not None
     content = str(message.content)
     assert "search_knowledge_base" not in content
-    assert "skills/<skill-name>/" not in content
+
+
+async def _system_prompt(agent: Agent) -> str:
+    session = AgentSession(session_id="session-1")
+    tools = await agent.aget_tools(RunOutput(run_id="run-1"), _run_context(), session)
+    message = await agent.aget_system_message(session, _run_context(), [t for t in tools if isinstance(t, Function)])
+    assert message is not None
+    return str(message.content)
+
+
+@pytest.mark.asyncio
+async def test_persona_gets_no_skills_or_skill_authoring_note(tmp_path: Path) -> None:
+    """A configured agent lists its workspace skills and the authoring note; an authored subagent gets neither."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    skill = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "scripted"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: scripted\ndescription: Scripted skill\n---\n\nSKILL BODY\n")
+    options = {"persist_runtime_state": False}
+
+    configured = await _system_prompt(
+        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+    )
+    authored = await _system_prompt(_child(runtime, None, execution_identity=identity))
+
+    for marker in ("skills/<skill-name>/", "scripted"):
+        assert marker in configured
+        assert marker not in authored
 
 
 def test_persona_with_tools_gets_no_deferred_loading_guidance(tmp_path: Path) -> None:
@@ -472,6 +500,7 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persona=None,
     )
     assert standard.system_message is None
+    assert standard.description is None
     assert standard.resolve_in_context
     assert isinstance(minimal, MinimalAgent)
     assert minimal.system_message.startswith("You are Helper (helper) in minimal mode.")
