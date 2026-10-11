@@ -598,10 +598,12 @@ async def test_exact_call_reattachment_rejects_changed_arguments(tmp_path: Path)
                     FunctionCall(function=function, call_id="same-call", arguments={"value": "first"}),
                 )
                 assert first[3].result == again[3].result == "first"
-                with pytest.raises(ValueError, match="not available"):
-                    await model.arun_function_call(
-                        FunctionCall(function=function, call_id="same-call", arguments={"value": "changed"}),
-                    )
+                # The refused call fails as a call; the reply's run goes on.
+                changed = await model.arun_function_call(
+                    FunctionCall(function=function, call_id="same-call", arguments={"value": "changed"}),
+                )
+                assert changed[0] is False
+                assert "not available" in str(changed[2].error)
         assert invocations == ["first"]
     finally:
         await runtime.shutdown()
