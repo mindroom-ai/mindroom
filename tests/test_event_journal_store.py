@@ -7044,6 +7044,30 @@ class TestApprovalContinuations:
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
 
+    async def test_chained_generation_never_downgrades_background_job_ownership(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An ordinary later pause cannot erase feature ownership from an earlier generation."""
+        await self.admit_sources(alice)
+        continuation = replace(self.continuation(), requires_background_tool_jobs=True)
+        await paused_for_approval(alice, continuation)
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+
+        advanced = await advance_continuation(
+            alice,
+            "approval-1",
+            claimant_generation=claimed.generation,
+            run_id="run-2",
+            session_id="session-1",
+            calls=(),
+            requires_background_tool_jobs=False,
+        )
+
+        assert advanced is not None
+        assert advanced.requires_background_tool_jobs is True
+
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
         self,
         alice: PrincipalStore,

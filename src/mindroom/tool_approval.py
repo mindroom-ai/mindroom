@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "JOB_APPROVAL_TYPE",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "BackgroundScriptToolOrigin",
@@ -65,6 +66,8 @@ __all__ = [
 
 # Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
+# A policy-gated call whose approval is the first phase of the background job it runs as, instead of a paused run.
+JOB_APPROVAL_TYPE = "mindroom_job"
 # The terminal card edit carries the reason twice, and nio encrypts it as ASCII-escaped JSON that base64 grows by 4/3.
 # Escaping turns one emoji into 12 bytes, so the reply is bounded by escaped size to keep the edit below the event limit.
 _MAX_RESOLUTION_REASON_JSON_BYTES = 2000

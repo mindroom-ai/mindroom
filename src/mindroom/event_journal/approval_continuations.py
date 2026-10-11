@@ -197,6 +197,7 @@ class ApprovalContinuation:
     team_member_model_names: tuple[tuple[str, str], ...] = ()
     team_mode: str | None = None
     request_body: str = ""
+    requires_background_tool_jobs: bool = False
     attachment_ids: tuple[str, ...] = ()
     mentioned_agents: tuple[str, ...] = ()
     hook_source: str | None = None
@@ -247,6 +248,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "team_member_model_names": [list(item) for item in continuation.team_member_model_names],
         "team_mode": continuation.team_mode,
         "request_body": continuation.request_body,
+        "requires_background_tool_jobs": continuation.requires_background_tool_jobs,
         "attachment_ids": list(continuation.attachment_ids),
         "mentioned_agents": list(continuation.mentioned_agents),
         "hook_source": continuation.hook_source,
@@ -382,6 +384,15 @@ def _from_rows(
         history_scope=HistoryScope.from_metadata(stored["history_scope"]),
         origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
         memory_prompt=cast("str | None", stored["memory_prompt"]),
+        # LEGACY_COMPAT: Approval continuations without the background-job flag.
+        # Legacy format: a stored continuation context without the requires_background_tool_jobs key.
+        # Last legacy release: v2026.10.236; replacement: the unreleased background tool jobs write the key in every
+        # continuation context.
+        # Handling: a missing key reads as false, which every continuation of those releases was, since none of them
+        # could start background work; disabled-mode startup leaves such an approval to its ordinary recovery.
+        # Coverage:
+        # tests/test_background_tool_jobs_config.py::test_disabled_startup_parks_only_explicitly_marked_approvals.
+        requires_background_tool_jobs=stored.get("requires_background_tool_jobs", False) is True,
         memory_thread_history=tuple(
             ApprovalMemoryTurn(
                 sender=cast("str", turn["sender"]),
@@ -622,6 +633,7 @@ class ApprovalAdvance:
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None
     cli_call: dict[str, object] | None = None
     continuation_count: int | None = None
+    requires_background_tool_jobs: bool = False
 
     def apply(self, transaction: Transaction, principal_id: str) -> ApprovalContinuation | None:
         """Replace the claimed generation with this next exact Agno pause."""
@@ -648,6 +660,7 @@ class ApprovalAdvance:
                 if self.delegation_storage_bindings is None
                 else self.delegation_storage_bindings
             ),
+            requires_background_tool_jobs=current.requires_background_tool_jobs or self.requires_background_tool_jobs,
             state=state,
             runtime_generation=publication_owner,
             failure_reason=None,

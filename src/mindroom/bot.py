@@ -154,6 +154,9 @@ from .scheduling import (
     set_scheduled_task_runner_owner,
 )
 from .startup_errors import PermanentStartupError
+from .tool_jobs.disabled import event_is_parked
+from .tool_jobs.runtime import notify_job_stops
+from .tool_jobs.wakes import wake_event
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -645,6 +648,8 @@ class AgentBot:
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
             hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
             approval_ended=lambda ended: self._approval_ended(ended),
+            settle_debt=self._settle_reply_debt_later,
+            jobs_stopped=lambda: notify_job_stops(self.runtime_paths),
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
@@ -711,12 +716,14 @@ class AgentBot:
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
                 on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
+                event_is_parked=lambda event: event_is_parked(self.config, self.runtime_paths, self.agent_name, event),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)
                 ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
                 replies_ended=self._replies_ended,
+                on_job_wake=lambda event: self._response_runner.handoff_job_wake(event),
             ),
             room_for_id=self._room_for_journal_event,
             schedule_trigger_sender_is_managed=lambda sender: (
@@ -1125,6 +1132,13 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    async def admit_job_wake(self, reply: Reply, wake_id: str) -> None:
+        """Admit a wake for one of this bot's waiting replies, and wake the journal worker that runs it."""
+        await self.journal_principal().admit(
+            wake_event(reply, wake_id, sender_id=self.matrix_id.full_id, now_ms=int(time.time() * 1000)),
+        )
+        self._journal_dispatcher.wake()
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
         """Wake response-local CLI waits, then release unowned sources to the journal."""

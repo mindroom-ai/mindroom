@@ -234,9 +234,9 @@ class EditRegenerator:
         if prompt is None:
             # A sibling's text is no longer known: nothing regenerates from a partial turn.
             return None
-        if reply.current_span_id is not None or reply.approval_id is not None:
-            # The answer still runs or waits for an approval: the edit stops it, which cancels that approval,
-            # and the regeneration takes its place.
+        if reply.current_span_id is not None or reply.approval_id is not None or reply.state is ReplyState.WAITING:
+            # The answer still runs, or waits for an approval or background work: the edit stops it, which cancels
+            # that approval or work, and the regeneration takes its place.
             await self.deps.stop_reply(reply, await self.deps.receipt_order())
         request = self._request(
             room,

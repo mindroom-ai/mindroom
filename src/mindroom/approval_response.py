@@ -29,7 +29,9 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.events import tool_markers_match_trace
+from mindroom.turn_origin import TurnIntent
 
 
 def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
@@ -181,12 +183,79 @@ def continuation_target(
     reply_to_event_id: str | None = None,
 ) -> MessageTarget:
     """Return the canonical Matrix conversation target for one continuation."""
+    if continuation.origin.intent is TurnIntent.JOB_WAKE and reply_to_event_id in continuation.source_event_ids:
+        # A wake is a runtime source, not a Matrix event to reply to.
+        reply_to_event_id = None
     return MessageTarget(
         room_id=continuation.room_id,
         source_thread_id=continuation.thread_id,
         resolved_thread_id=continuation.thread_id,
         reply_to_event_id=reply_to_event_id,
         session_id=continuation.session_id,
+    )
+
+
+async def plan_approval_calls(
+    identified: tuple[tuple[ToolExecution, str, str, str], ...],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    toolkit_owners: Mapping[tuple[str, str], str | None],
+) -> _ApprovalPausePlan:
+    """Evaluate policy once and normalize exact calls with integer deadlines."""
+    approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
+    decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
+    for tool, tool_call_id, tool_name, invoking_agent in identified:
+        requires_approval, timeout_seconds = await evaluate_tool_approval(
+            config,
+            runtime_paths,
+            tool_name,
+            dict(tool.tool_args or {}),
+            invoking_agent,
+        )
+        tool_authored_confirmation = (
+            tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
+        )
+        requires_approval = requires_approval or tool_authored_confirmation
+        decisions[tool_call_id] = (
+            None
+            if requires_approval and approver_id is not None
+            else ContinuationDecision.DENIED
+            if requires_approval
+            else ContinuationDecision.APPROVED,
+            timeout_seconds,
+            requires_approval,
+        )
+    now = datetime.now(UTC)
+    calls = tuple(
+        ApprovalCall(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            invoking_agent=invoking_agent,
+            toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
+            arguments_digest=approval_arguments_digest(tool.tool_args),
+            expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
+            decision=decisions[tool_call_id][0],
+            reason=(
+                "No approval recipient is configured; the tool was denied safely."
+                if decisions[tool_call_id][0] is ContinuationDecision.DENIED
+                else None
+            ),
+            human_approval_required=decisions[tool_call_id][2],
+        )
+        for tool, tool_call_id, tool_name, invoking_agent in identified
+    )
+    if any(call.toolkit_name is None for call in calls):
+        msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
+        raise RuntimeError(msg)
+    gated_calls = tuple(call for call in calls if call.decision is None)
+    return _ApprovalPausePlan(
+        tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
+        calls=calls,
+        waiting_text=(
+            "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls) if gated_calls else None
+        ),
     )
 
 
@@ -203,71 +272,6 @@ class ApprovalResponseCoordinator:
     finish_approval: Callable[[str], Awaitable[bool]]
     # Releases an interrupted run, with the generation it observed: replay continues its reply, or a Stop ends it.
     release_approval: Callable[[str, int], Awaitable[bool]]
-
-    async def plan_pause(
-        self,
-        identified: tuple[tuple[ToolExecution, str, str, str], ...],
-        *,
-        requester_id: str,
-        toolkit_owners: Mapping[tuple[str, str], str | None],
-    ) -> _ApprovalPausePlan:
-        """Evaluate policy once and normalize exact calls with integer deadlines."""
-        config = self.config()
-        approver_id = resolve_tool_approval_approver(config, self.runtime_paths, requester_id)
-        decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
-        for tool, tool_call_id, tool_name, invoking_agent in identified:
-            requires_approval, timeout_seconds = await evaluate_tool_approval(
-                config,
-                self.runtime_paths,
-                tool_name,
-                dict(tool.tool_args or {}),
-                invoking_agent,
-            )
-            tool_authored_confirmation = (
-                tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
-            )
-            requires_approval = requires_approval or tool_authored_confirmation
-            decisions[tool_call_id] = (
-                None
-                if requires_approval and approver_id is not None
-                else ContinuationDecision.DENIED
-                if requires_approval
-                else ContinuationDecision.APPROVED,
-                timeout_seconds,
-                requires_approval,
-            )
-        now = datetime.now(UTC)
-        calls = tuple(
-            ApprovalCall(
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                invoking_agent=invoking_agent,
-                toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
-                arguments_digest=approval_arguments_digest(tool.tool_args),
-                expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
-                decision=decisions[tool_call_id][0],
-                reason=(
-                    "No approval recipient is configured; the tool was denied safely."
-                    if decisions[tool_call_id][0] is ContinuationDecision.DENIED
-                    else None
-                ),
-                human_approval_required=decisions[tool_call_id][2],
-            )
-            for tool, tool_call_id, tool_name, invoking_agent in identified
-        )
-        if any(call.toolkit_name is None for call in calls):
-            msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
-            raise RuntimeError(msg)
-        gated_calls = tuple(call for call in calls if call.decision is None)
-        return _ApprovalPausePlan(
-            tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
-            calls=calls,
-            waiting_text=(
-                "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls)
-                if gated_calls
-                else None
-            ),
-        )
 
     async def _publish_cards(
         self,
@@ -352,6 +356,22 @@ class ApprovalResponseCoordinator:
         if continuation.state == "ready":
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
+    def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
+        """Recognize a paused call that can resume only through the job runtime."""
+        if any(call.toolkit_name == "job" for call in calls):
+            return True
+        config = self.config()
+        if not background_tool_jobs_enabled(config, self.runtime_paths):
+            return False
+        budgeted = {tool.tool_call_id for tool in paused.tools if "wait_timeout" in (tool.tool_args or {})}
+        # A budget on a managed toolkit is framework metadata; on an excluded toolkit it is the tool's own argument.
+        return any(
+            call.tool_call_id in budgeted
+            and call.toolkit_name is not None
+            and not toolkit_is_background_excluded(call.toolkit_name, config, self.runtime_paths)
+            for call in calls
+        )
+
     async def advance_pause(
         self,
         current: ApprovalContinuation,
@@ -368,8 +388,10 @@ class ApprovalResponseCoordinator:
         """
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
-        plan = await self.plan_pause(
+        plan = await plan_approval_calls(
             identified,
+            config=self.config(),
+            runtime_paths=self.runtime_paths,
             requester_id=current.requester_id,
             toolkit_owners=paused.toolkit_owners,
         )
@@ -383,6 +405,7 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
+            requires_background_tool_jobs=self.requires_background_jobs(paused, plan.calls),
             runtime_model_name=paused.runtime_model_name,
             continuation_count=max(current.continuation_count, paused.continuation_count),
             delegation_storage_bindings=paused.delegation_storage_bindings,

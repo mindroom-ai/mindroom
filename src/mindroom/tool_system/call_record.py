@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
 
 
 class _ToolCallRecorder(Protocol):
@@ -24,6 +24,10 @@ class _ToolCallRecorder(Protocol):
         """Record that a call returned, or raised ``result``; never raises, since the call already ran."""
         ...
 
+    async def admits(self) -> bool:
+        """Return whether the work still lets a tool start, as recording a call's start checks."""
+        ...
+
 
 _recorder: ContextVar[_ToolCallRecorder | None] = ContextVar("mindroom_tool_call_recorder", default=None)
 
@@ -37,6 +41,42 @@ def tool_call_recorder() -> _ToolCallRecorder | None:
 def recording_tool_calls(recorder: _ToolCallRecorder) -> Iterator[None]:
     """Record every tool call made in this context, child tasks included."""
     token = _recorder.set(recorder)
+    try:
+        yield
+    finally:
+        _recorder.reset(token)
+
+
+async def record_call(tool_name: str, args: Mapping[str, object]) -> Callable[[object], Awaitable[None]]:
+    """Record a call whose tool then runs outside this work's recording, as a background job does; return its finish.
+
+    The work's record then names the call, and, as for any recorded call, a Stop committed first raises
+    ``asyncio.CancelledError`` here so the call never starts.
+    """
+    recorder = _recorder.get()
+    record_id = None if recorder is None else await recorder.started(tool_name, args)
+
+    async def finished(result: object) -> None:
+        if recorder is not None and record_id is not None:
+            await recorder.finished(record_id, tool_name, args, result)
+
+    return finished
+
+
+async def admits_tool_start() -> bool:
+    """Return whether the work the current task runs tools for still lets a tool start; unrecorded work always does.
+
+    A background job's call asks again once its job is admitted: a Stop or deletion that committed after the call's
+    recorded start, but before its job was saved, found no job to cancel.
+    """
+    recorder = _recorder.get()
+    return recorder is None or await recorder.admits()
+
+
+@contextmanager
+def without_tool_call_recording() -> Iterator[None]:
+    """Run tools outside the work that started them, as a background job does: the job keeps its own outcome."""
+    token = _recorder.set(None)
     try:
         yield
     finally:

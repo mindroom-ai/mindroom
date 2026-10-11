@@ -14,6 +14,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
@@ -25,6 +26,7 @@ from mindroom.event_journal import (
     postgres_backend,
     sqlite_backend,
 )
+from mindroom.response_sources import ResponseSources
 from tests.conftest import postgres_journal_schema_url
 from tests.test_event_journal_store import admit, message
 
@@ -380,3 +382,121 @@ async def test_outbox_upgrade_keeps_rows_and_admits_edit_stage(legacy_database: 
         legacy_database.execute(
             "UPDATE matrix_delivery_outbox SET stage = 'bogus' WHERE stage = 'final'",
         )
+
+
+# The reply tables as v2026.10.228 through v2026.10.236 created them.
+_PRE_WAIT_REPLY_MESSAGES = """
+CREATE TABLE reply_messages (
+    principal_id TEXT NOT NULL,
+    reply_id TEXT NOT NULL,
+    entity_name TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    thread_id TEXT,
+    membership_epoch BIGINT NOT NULL,
+    event_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'completed', 'cancelled', 'failed', 'gone')),
+    current_span_id TEXT,
+    last_span_id TEXT NOT NULL,
+    presentation_json TEXT NOT NULL,
+    possibly_shown_json TEXT,
+    confirmed_seq BIGINT,
+    revision BIGINT NOT NULL,
+    placeholder_only BOOLEAN NOT NULL,
+    stop_receipt_order BIGINT,
+    stop_applied_receipt_order BIGINT,
+    stop_button_event_id TEXT,
+    redaction_pending_json TEXT,
+    owed_write_json TEXT,
+    reply_sequence BIGINT NOT NULL,
+    created_at_ns BIGINT NOT NULL,
+    updated_at_ns BIGINT NOT NULL,
+    PRIMARY KEY (principal_id, reply_id),
+    UNIQUE (principal_id, event_id)
+)
+"""
+_PRE_WAKE_REPLY_SPANS = """
+CREATE TABLE reply_spans (
+    principal_id TEXT NOT NULL,
+    span_id TEXT NOT NULL,
+    reply_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('turn', 'replay', 'approval_resume', 'regeneration')),
+    delivery_id TEXT NOT NULL,
+    approval_id TEXT,
+    bot_generation TEXT NOT NULL,
+    base_sequence BIGINT NOT NULL,
+    rollback_json TEXT,
+    outcome TEXT CHECK (outcome IN (
+        'completed', 'paused', 'cancelled', 'failed',
+        'suppressed', 'restored', 'released', 'superseded', 'lost')),
+    claimed_at_ns BIGINT NOT NULL,
+    PRIMARY KEY (principal_id, span_id)
+)
+"""
+_PRE_WAIT_REPLY_COLUMNS = (
+    "principal_id, reply_id, entity_name, room_id, thread_id, membership_epoch, event_id, state, current_span_id, "
+    "last_span_id, presentation_json, possibly_shown_json, confirmed_seq, revision, placeholder_only, "
+    "stop_receipt_order, stop_applied_receipt_order, stop_button_event_id, redaction_pending_json, owed_write_json, "
+    "reply_sequence, created_at_ns, updated_at_ns"
+)
+_PRE_WAKE_SPAN_COLUMNS = (
+    "principal_id, span_id, reply_id, kind, delivery_id, approval_id, bot_generation, base_sequence, rollback_json, "
+    "outcome, claimed_at_ns"
+)
+
+
+@pytest.mark.asyncio
+async def test_reply_upgrade_keeps_rows_and_admits_waiting_and_wake(legacy_database: _LegacyDatabase) -> None:
+    """Reply tables from before background-work waits keep every row and accept waiting replies and wake spans."""
+    store = legacy_database.open()
+    principal = store.principal("agent@alice")
+    request = rl.ClaimRequest(
+        span_id="span-1",
+        delivery_id="$source",
+        sources=ResponseSources(pending_event_ids=("$source",), logical_source_event_ids=("$source",)),
+        bot_generation="gen-1",
+        now_ns=10,
+        new_reply_id="reply-1",
+        entity_name="agent",
+        room_id="!room:example.org",
+        thread_id=None,
+        membership_epoch=0,
+        empty_presentation="{}",
+    )
+    await admit(principal, "$source")
+    claimed = (await principal.replies.claim(request)).transition
+    assert claimed.reply is not None
+    await store.close()
+    for table, ddl, columns in (
+        ("reply_messages", _PRE_WAIT_REPLY_MESSAGES, _PRE_WAIT_REPLY_COLUMNS),
+        ("reply_spans", _PRE_WAKE_REPLY_SPANS, _PRE_WAKE_SPAN_COLUMNS),
+    ):
+        legacy_database.execute(
+            f"ALTER TABLE {table} RENAME TO {table}_current;"  # noqa: S608 - fixed test DDL
+            f"DROP INDEX IF EXISTS reply_messages_waiting;"
+            f"{ddl};"
+            f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_current;"
+            f"DROP TABLE {table}_current;",
+        )
+
+    for _ in range(2):
+        store = legacy_database.open()
+        try:
+            reply = await store.principal("agent@alice").replies.load("reply-1")
+        finally:
+            await store.close()
+        assert reply == claimed.reply
+    legacy_database.execute("UPDATE reply_messages SET state = 'waiting', hold_key = 'key' WHERE reply_id = 'reply-1'")
+    legacy_database.execute("UPDATE reply_spans SET kind = 'wake' WHERE span_id = 'span-1'")
+    indexes = (
+        legacy_database.query("SELECT indexname FROM pg_indexes WHERE tablename = 'reply_messages'")
+        if legacy_database.postgres
+        else legacy_database.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'reply_messages'",
+        )
+    )
+    assert ("reply_messages_waiting",) in indexes
+    assert ("reply_messages_room",) in indexes
+    with pytest.raises((sqlite3.IntegrityError, psycopg.errors.CheckViolation)):
+        legacy_database.execute("UPDATE reply_messages SET state = 'bogus' WHERE reply_id = 'reply-1'")
+    with pytest.raises((sqlite3.IntegrityError, psycopg.errors.CheckViolation)):
+        legacy_database.execute("UPDATE reply_spans SET kind = 'bogus' WHERE span_id = 'span-1'")

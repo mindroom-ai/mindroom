@@ -531,7 +531,10 @@ def test_stopped_cancels_with_the_shown_content() -> None:
     """A Stop reaching the running span ends it cancelled with a terminal row."""
     reply, span = _turn()
     stop = rl.stop(reply, span, StopFacts(receipt_order=3, span_live=True), now_ns=NOW)
-    assert stop.effects == (CancelSpan(span.span_id, by_stop=True),)
+    assert stop.effects == (
+        rl.StopJobs("reply-1"),
+        CancelSpan(span.span_id, by_stop=True),
+    )
     assert stop.reply is not None
     transition = rl.stopped(stop.reply, span, _write(stop.reply, ReplyState.CANCELLED), now_ns=NOW)
     assert transition.reply is not None
@@ -644,7 +647,10 @@ def test_a_stop_with_no_span_running_restores_a_regeneration_that_wrote_nothing(
     assert transition.reply.presentation == "old"
     assert transition.reply.owed_write is None
     assert not transition.reply.unapplied_stop
-    assert transition.effects == (SettleSources("span-2"),)
+    assert transition.effects == (
+        rl.StopJobs("reply-1"),
+        SettleSources("span-2"),
+    )
 
 
 def test_a_restart_applies_a_stop_its_regeneration_never_saw_as_a_live_stop_would() -> None:
@@ -1007,6 +1013,7 @@ def test_a_resume_that_waited_in_place_stays_stoppable_through_its_approval() ->
         now_ns=NOW,
     )
     assert stop.effects == (
+        rl.StopJobs("reply-1"),
         FenceApproval("approval-1", "cancelled_by_user"),
         CancelSpan(resume.claimed.span_id, by_stop=True),
     )
@@ -1031,7 +1038,10 @@ def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
     """A Stop on a paused reply requests approval failure; the settlement ends the reply."""
     reply, _span, _transition = _paused()
     stop = rl.stop(reply, None, StopFacts(receipt_order=4, span_live=False), now_ns=NOW)
-    assert stop.effects == (FenceApproval("approval-1", "cancelled_by_user"),)
+    assert stop.effects == (
+        rl.StopJobs("reply-1"),
+        FenceApproval("approval-1", "cancelled_by_user"),
+    )
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.PAUSED
     settled = rl.approval_settled(
@@ -1236,7 +1246,10 @@ def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None
     assert cancelled.reply is not None
     ended = _span_after(cancelled, resume.claimed.span_id)
     again = rl.stop(cancelled.reply, ended, StopFacts(receipt_order=6, span_live=False), now_ns=NOW)
-    assert again.effects == (FenceApproval("approval-1", "cancelled_by_user"),)
+    assert again.effects == (
+        rl.StopJobs("reply-1"),
+        FenceApproval("approval-1", "cancelled_by_user"),
+    )
     assert again.reply is not None
     assert again.reply.state is ReplyState.ACTIVE
 
@@ -1343,7 +1356,10 @@ def test_stop_without_a_live_span_cancels_directly_and_owes_a_note() -> None:
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.CANCELLED
     assert stop.reply.owed_write == rl.OwedWrite(span.span_id, rl.NoteKind.CANCELLED)
-    assert stop.effects == (SettleSources(span.span_id),)
+    assert stop.effects == (
+        rl.StopJobs("reply-1"),
+        SettleSources(span.span_id),
+    )
     flushed = rl.flush_owed_write(
         stop.reply,
         span,
@@ -1428,6 +1444,8 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert kept.reply.presentation == "answer"
     assert kept.reply.redaction_pending == ()
     assert CancelSpan("span-2") in kept.effects
+    # The deletion cancels the background work the reply started, the regeneration's included.
+    assert rl.StopJobs(kept.reply.reply_id) in kept.effects
     assert _span_after(kept, "span-2").outcome is SpanOutcome.RESTORED
     # Written ahead, so Matrix may show it though no confirmation says so yet.
     shown = replace(regeneration.reply, reply_sequence=regeneration.reply.reply_sequence + 1)
@@ -1448,8 +1466,8 @@ def test_deleting_sources_during_a_regeneration_keeps_the_earlier_answer() -> No
     assert after_restart.reply is not None
     assert after_restart.reply.state is ReplyState.COMPLETED
     assert after_restart.reply.redaction_pending == ()
-    # The answer stands, but nothing answers the deleted message's edit.
-    assert after_restart.effects == (SettleSources("span-2", answered=False),)
+    # The answer stands, but nothing answers the deleted message's edit, and its work is cancelled.
+    assert after_restart.effects == (SettleSources("span-2", answered=False), rl.StopJobs(after_restart.reply.reply_id))
 
 
 def _regeneration_that_showed_partial_text() -> tuple[Reply, Span]:
@@ -1521,7 +1539,7 @@ def test_deleting_the_sources_of_a_held_reply_cancels_its_approval_and_keeps_a_f
     the sources the approval holds.
     """
     reply, span, transition = _paused()
-    cancel = (FenceApproval("approval-1", "cancelled_by_user"),)
+    cancel = (FenceApproval("approval-1", "cancelled_by_user"), rl.StopJobs(reply.reply_id))
     settling = replace(reply, state=ReplyState.ACTIVE, current_span_id=None)
     assert settling.approval_id is not None
     for held in (reply, settling):
@@ -1562,14 +1580,14 @@ def test_deleting_the_message_of_a_reply_running_for_its_approval_ends_that_span
 
 
 def test_departure_ends_replies_without_touching_matrix() -> None:
-    """A departed room's replies end gone, cancel their spans, and drop pending redactions."""
+    """A departed room's replies end gone, cancel their spans and background work, and drop pending redactions."""
     reply, span = _turn()
     reply = replace(reply, redaction_pending=("$x",), stop_button_event_id="$button")
     transition = rl.departed(reply, span, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.GONE
     assert transition.reply.redaction_pending == ()
-    assert transition.effects == (CancelSpan(span.span_id),)
+    assert transition.effects == (CancelSpan(span.span_id), rl.StopJobs(reply.reply_id))
     assert _span_after(transition, span.span_id).outcome is SpanOutcome.RELEASED
 
 
@@ -2050,7 +2068,10 @@ def test_stop_after_restart_during_an_approval_resume_fences_the_approval() -> N
     assert resume.claimed is not None
     stale_resume = replace(resume.claimed, bot_generation=OLD_GEN)
     stop = rl.stop(resume.reply, stale_resume, StopFacts(3, span_live=False), now_ns=NOW)
-    assert stop.effects == (FenceApproval("approval-1", "cancelled_by_user"),)
+    assert stop.effects == (
+        rl.StopJobs("reply-1"),
+        FenceApproval("approval-1", "cancelled_by_user"),
+    )
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.ACTIVE
     released = rl.approval_released(replace(stop.reply, state=ReplyState.CANCELLED), stale_resume, now_ns=NOW)
@@ -2246,3 +2267,286 @@ def test_an_unmodeled_event_on_an_ended_reply_changes_nothing() -> None:
     assert transition.outcome is Outcome.DUPLICATE
     assert transition.reply == ended
     assert transition.unmodeled == "test"
+
+
+# --- waits for background work ---------------------------------------------
+
+_KEY = '{"recipient":"agent"}'
+
+
+def _waiting() -> tuple[Reply, Span]:
+    """Return a reply whose turn answered and waits for its background work, with that turn's ended span."""
+    reply, span = _turn()
+    transition = rl.wait(reply, span, _write(reply, ReplyState.WAITING), hold_key=_KEY, now_ns=NOW)
+    assert transition.reply is not None
+    return transition.reply, _span_after(transition, span.span_id)
+
+
+def _wake_request(span_id: str = "span-wake", **changes: object) -> ClaimRequest:
+    return _request(
+        span_id,
+        delivery_id="job-wake:reply-1:1",
+        sources=ResponseSources(pending_event_ids=("job-wake:reply-1:1",), logical_source_event_ids=("$source",)),
+        wake_reply_id="reply-1",
+        **changes,
+    )
+
+
+def test_wait_answers_the_turn_and_keeps_the_reply_open() -> None:
+    """A span that leaves work outstanding ends with its answer, settles its sources, and keeps its Stop button."""
+    reply, span = _turn()
+    reply = replace(reply, stop_button_event_id="$button")
+    transition = rl.wait(reply, span, _write(reply, ReplyState.WAITING, "answer"), hold_key=_KEY, now_ns=NOW)
+    assert transition.outcome is Outcome.APPLIED
+    waiting = transition.reply
+    assert waiting is not None
+    assert waiting.state is ReplyState.WAITING
+    assert waiting.hold_key == _KEY
+    assert waiting.current_span_id is None
+    assert waiting.stop_button_event_id == "$button"
+    assert waiting.presentation == waiting.possibly_shown == "answer"
+    assert _span_after(transition, span.span_id).outcome is SpanOutcome.COMPLETED
+    assert transition.effects == (SettleSources(span.span_id),)
+    assert transition.row is not None
+    assert transition.row.stage is WriteStage.EDIT
+
+
+def test_wait_with_an_unapplied_stop_renders_again_cancelled() -> None:
+    """A Stop the span has not observed yet outranks the wait, as it outranks an answer."""
+    reply, span = _turn()
+    reply = replace(reply, stop_receipt_order=3)
+    transition = rl.wait(reply, span, _write(reply, ReplyState.WAITING), hold_key=_KEY, now_ns=NOW)
+    assert transition.outcome is Outcome.RECOMPUTE
+
+
+def test_a_reply_an_approval_holds_never_waits() -> None:
+    """A span that runs for an approval leaves its outstanding work to the next reply instead."""
+    reply, span = _turn()
+    reply = replace(reply, approval_id="approval-1")
+    transition = rl.wait(reply, span, _write(reply, ReplyState.WAITING), hold_key=_KEY, now_ns=NOW)
+    assert transition.unmodeled == "wait_rendered_another_state_or_held"
+
+
+def test_unhold_ends_a_waiting_reply_with_its_answer() -> None:
+    """A waiting reply that loses its work ends completed and owes the write without the waiting note."""
+    reply, span = _waiting()
+    reply = replace(reply, stop_button_event_id="$button")
+    transition = rl.unhold(reply, now_ns=NOW)
+    ended = transition.reply
+    assert ended is not None
+    assert ended.state is ReplyState.COMPLETED
+    assert ended.owed_write == rl.OwedWrite(span.span_id, None)
+    assert ended.stop_button_event_id is None
+    assert ended.redaction_pending == ("$button",)
+    assert transition.effects == ()
+
+
+def test_unhold_of_a_reply_that_stopped_waiting_changes_nothing() -> None:
+    """A release that lost a race with a wake or a Stop leaves the reply to them."""
+    reply, _span = _turn()
+    assert rl.unhold(reply, now_ns=NOW).outcome is Outcome.DUPLICATE
+
+
+def test_wake_claims_a_waiting_reply() -> None:
+    """A wake continues the waiting reply in a span of its own, which keeps the reply's Stop button."""
+    reply, span = _waiting()
+    reply = replace(reply, stop_button_event_id="$button")
+    transition = rl.claim(_wake_request(), _context(reply, span))
+    assert transition.claimed is not None
+    assert transition.claimed.kind is SpanKind.WAKE
+    assert transition.claimed.sources.pending_event_ids == ("job-wake:reply-1:1",)
+    claimed = transition.reply
+    assert claimed is not None
+    assert claimed.state is ReplyState.ACTIVE
+    assert claimed.current_span_id == transition.claimed.span_id
+    assert claimed.stop_button_event_id == "$button"
+
+
+def test_wake_of_a_reply_that_stopped_waiting_runs_nothing() -> None:
+    """A Stop, takeover, or regeneration that ended the wait first leaves the wake nothing to run."""
+    reply, span = _waiting()
+    ended = rl.unhold(reply, now_ns=NOW).reply
+    assert ended is not None
+    transition = rl.claim(_wake_request(), _context(replace(ended, owed_write=None), span))
+    assert transition.outcome is Outcome.DUPLICATE
+    assert rl.claim(_wake_request(), _context(None)).outcome is Outcome.DUPLICATE
+
+
+def test_wake_waits_for_the_wait_row() -> None:
+    """A wake claims only once the reply's earlier writes resolved."""
+    reply, span = _waiting()
+    assert rl.claim(_wake_request(), _context(reply, span, debt=True)).outcome is Outcome.DEFERRED
+
+
+def test_a_wake_cut_short_is_retried_as_a_wake() -> None:
+    """A released or lost wake keeps its source pending; the retry claims another wake, never a replay."""
+    reply, span = _waiting()
+    woken = rl.claim(_wake_request(), _context(reply, span))
+    assert woken.reply is not None
+    assert woken.claimed is not None
+    for outcome in (SpanOutcome.RELEASED, SpanOutcome.LOST):
+        released, wake = _ended(woken.reply, woken.claimed, outcome)
+        retried = rl.claim(_wake_request("span-retry"), _context(released, span, wake))
+        assert retried.claimed is not None
+        assert retried.claimed.kind is SpanKind.WAKE
+
+
+def test_only_its_wake_continues_a_waiting_reply() -> None:
+    """A replayed turn source, or a retry of one, never reopens a reply that already answered it."""
+    reply, span = _waiting()
+    assert rl.claim(_request("span-2"), _context(reply, span)).outcome is Outcome.DUPLICATE
+
+
+def test_a_wake_waits_again() -> None:
+    """A wake with work still outstanding waits again below what it added."""
+    reply, span = _waiting()
+    woken = rl.claim(_wake_request(), _context(reply, span))
+    assert woken.reply is not None
+    assert woken.claimed is not None
+    write = _write(woken.reply, ReplyState.WAITING, "more")
+    transition = rl.wait(woken.reply, woken.claimed, write, hold_key=_KEY, now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.WAITING
+    assert transition.effects == (SettleSources(woken.claimed.span_id),)
+
+
+def test_a_regeneration_of_a_waiting_reply_waits_for_its_stop() -> None:
+    """The regenerator stops a waiting reply first; an edit that reaches it without that Stop regenerates nothing."""
+    reply, span = _waiting()
+    edit = _request("span-edit", delivery_id="$edit", driving_edit_id="$edit")
+    assert rl.claim(edit, _context(reply, span)).outcome is Outcome.DUPLICATE
+
+
+def test_stop_ends_a_waiting_reply_and_cancels_its_work() -> None:
+    """A Stop on a waiting reply cancels it with the note and records that its work must be cancelled."""
+    reply, span = _waiting()
+    transition = rl.stop(reply, span, StopFacts(receipt_order=4, span_live=False), now_ns=NOW)
+    stopped = transition.reply
+    assert stopped is not None
+    assert stopped.state is ReplyState.CANCELLED
+    assert stopped.owed_write == rl.OwedWrite(span.span_id, NoteKind.CANCELLED)
+    assert not stopped.unapplied_stop
+    assert rl.StopJobs(reply.reply_id) in transition.effects
+
+
+def test_every_stop_of_an_unfinished_reply_cancels_its_work() -> None:
+    """A Stop of a running reply also cancels the background work it started; a finished reply's Stop does not."""
+    reply, span = _turn()
+    running = rl.stop(reply, span, StopFacts(receipt_order=4, span_live=True), now_ns=NOW)
+    assert running.effects == (rl.StopJobs(reply.reply_id), CancelSpan(span.span_id, by_stop=True))
+    finished = rl.finish(reply, span, _write(reply, ReplyState.COMPLETED), now_ns=NOW).reply
+    assert finished is not None
+    satisfied = rl.stop(finished, span, StopFacts(receipt_order=5, span_live=False), now_ns=NOW)
+    assert satisfied.effects == ()
+
+
+def test_deleting_the_message_a_waiting_reply_answers_keeps_its_answer() -> None:
+    """Decision 5: the waiting reply ends completed with its answer, and its work is cancelled."""
+    reply, span = _waiting()
+    transition = rl.sources_deleted(reply, span, now_ns=NOW)
+    ended = transition.reply
+    assert ended is not None
+    assert ended.state is ReplyState.COMPLETED
+    assert ended.owed_write == rl.OwedWrite(span.span_id, None)
+    assert ended.redaction_pending == ()
+    assert transition.effects == (SettleSources(span.span_id, answered=False), rl.StopJobs(reply.reply_id))
+
+
+def test_deleting_the_message_during_a_wake_cancels_the_wake() -> None:
+    """A running wake is cancelled, the answer the reply gave stands, and its work is cancelled."""
+    reply, span = _waiting()
+    woken = rl.claim(_wake_request(), _context(reply, span))
+    assert woken.reply is not None
+    assert woken.claimed is not None
+    transition = rl.sources_deleted(woken.reply, woken.claimed, now_ns=NOW)
+    assert transition.reply is not None
+    # What the wake may have shown of its continuation ends with the interrupted note, not as a finished answer.
+    assert transition.reply.state is ReplyState.FAILED
+    assert transition.reply.owed_write == rl.OwedWrite(woken.claimed.span_id, NoteKind.INTERRUPTED)
+    assert _span_after(transition, woken.claimed.span_id).outcome is SpanOutcome.CANCELLED
+    assert transition.effects == (
+        CancelSpan(woken.claimed.span_id),
+        SettleSources(woken.claimed.span_id, answered=False),
+        rl.StopJobs(reply.reply_id),
+    )
+
+
+def test_a_removed_entity_releases_its_waiting_reply() -> None:
+    """A waiting reply of an entity without a bot ends with its answer; its bot writes the end if it comes back."""
+    reply, span = _waiting()
+    transition = rl.removed_entity(reply, span, now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.state is ReplyState.COMPLETED
+    assert transition.reply.owed_write == rl.OwedWrite(span.span_id, None)
+
+
+def test_a_restart_leaves_a_waiting_reply_waiting() -> None:
+    """A waiting reply has no span to lose; the job runtime wakes or releases it after the restart."""
+    reply, span = _waiting()
+    facts = rl.OwnerLostFacts(active_generation="gen-3", sources_pending=False)
+    assert rl.owner_lost(reply, span, facts, now_ns=NOW).outcome is Outcome.DUPLICATE
+
+
+def test_a_waiting_reply_records_its_stop_button() -> None:
+    """A Stop button that lands while the reply waits stays, since a Stop still cancels its work."""
+    reply, _span = _waiting()
+    transition = rl.record_stop_button(reply, event_id="$button", membership_current=True, now_ns=NOW)
+    assert transition.reply is not None
+    assert transition.reply.stop_button_event_id == "$button"
+
+
+def test_a_wake_whose_approval_resume_was_released_is_retried_as_a_wake() -> None:
+    """A restart that released a wake's approval resume leaves its source pending; the retry continues as a wake."""
+    reply, span = _waiting()
+    woken = rl.claim(_wake_request(), _context(reply, span))
+    assert woken.reply is not None
+    assert woken.claimed is not None
+    resume = replace(
+        woken.claimed,
+        span_id="span-resume",
+        kind=SpanKind.APPROVAL_RESUME,
+        approval_id="approval-1",
+        outcome=SpanOutcome.RELEASED,
+    )
+    released = replace(woken.reply, current_span_id=None, last_span_id=resume.span_id)
+    retried = rl.claim(_wake_request("span-retry"), _context(released, span, resume))
+    assert retried.claimed is not None
+    assert retried.claimed.kind is SpanKind.WAKE
+
+
+def test_deleting_a_running_turns_message_cancels_the_work_it_started() -> None:
+    """As a Stop would, a deletion that ends a running reply also cancels its background work."""
+    reply, span = _turn()
+    deleted = rl.sources_deleted(reply, span, now_ns=NOW)
+    assert rl.StopJobs(reply.reply_id) in deleted.effects
+
+
+def test_a_wait_that_gave_no_answer_removes_its_message() -> None:
+    """A reply whose owed end would show only its placeholder ends gone, its message redacted."""
+    reply, _span = _waiting()
+    ended = rl.unhold(replace(reply, event_id="$reply"), now_ns=NOW).reply
+    assert ended is not None
+    assert ended.owed_write is not None
+    vacated = rl.vacated(ended, ended.owed_write, now_ns=NOW).reply
+    assert vacated is not None
+    assert vacated.state is ReplyState.GONE
+    assert vacated.owed_write is None
+    assert "$reply" in vacated.redaction_pending
+    assert rl.vacated(vacated, ended.owed_write, now_ns=NOW).outcome is Outcome.DUPLICATE
+
+
+def test_a_regeneration_starts_without_the_wait_of_the_answer_it_replaces() -> None:
+    """A Stop of the regenerated answer reaches only the work the regeneration starts."""
+    reply, span = _waiting()
+    stopped = rl.stop(reply, span, StopFacts(receipt_order=4, span_live=False), now_ns=NOW).reply
+    assert stopped is not None
+    edit = _request("span-edit", delivery_id="$edit", driving_edit_id="$edit")
+    regenerated = rl.claim(edit, _context(replace(stopped, owed_write=None), span))
+    assert regenerated.reply is not None
+    assert regenerated.reply.hold_key is None
+
+
+def test_a_failed_dispatch_leaves_a_waiting_reply_waiting() -> None:
+    """A dispatch that failed before a wake claimed the reply changed nothing it shows."""
+    reply, _span = _waiting()
+    assert rl.dispatch_failed(reply, None, error_text="boom", now_ns=NOW).outcome is Outcome.DUPLICATE

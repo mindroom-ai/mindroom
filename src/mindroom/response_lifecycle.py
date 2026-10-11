@@ -16,7 +16,9 @@ from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
+from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
+from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -45,7 +47,7 @@ class ResponseLifecycleReservation:
     _lifecycle_key: ResponseLifecycleKey
     _lifecycle_lock: asyncio.Lock
     _queued_signal: _QueuedMessageState
-    _notice: str | None
+    _notice: _TurnNotice | None
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
     _acquire_task: asyncio.Task[None] | None = None
     _release_task: asyncio.Task[None] | None = None
@@ -96,7 +98,7 @@ class ResponseLifecycleReservation:
     def _consume_notice(self) -> None:
         if self._notice is None:
             return
-        self._queued_signal.consume_waiting_human_message(self._notice)
+        self._queued_signal.consume_turn_notice(self._notice)
         self._notice = None
 
     async def _release(self) -> None:
@@ -146,6 +148,7 @@ class _QueuedMessageState:
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
+    turn_signal: QueuedTurnSignal = field(default_factory=QueuedTurnSignal)
 
     def __post_init__(self) -> None:
         self._idle_event.set()
@@ -178,14 +181,23 @@ class _QueuedMessageState:
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
         self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
         self._event.set()
+        self.turn_signal.notify()
         return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
             return
         del self._pending_messages[source_event_id]
+        self.turn_signal.settle()
         if self.pending_human_messages == 0:
             self._event.clear()
+
+    def consume_turn_notice(self, notice: _TurnNotice) -> None:
+        """The turn that queued this notice started or gave up, so it no longer waits for the running reply."""
+        if notice.human:
+            self.consume_waiting_human_message(notice.source_event_id)
+        else:
+            self.turn_signal.settle()
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -201,6 +213,15 @@ class _QueuedMessageState:
 
     def is_set(self) -> bool:
         return self._event.is_set()
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnNotice:
+    """What one turn queued behind the running reply signalled, settled once when it starts or gives up."""
+
+    source_event_id: str
+    # A human message also stays a queued notice for the running reply's model; other turns only release its waits.
+    human: bool
 
 
 @dataclass(slots=True)
@@ -411,30 +432,32 @@ class ResponseLifecycleCoordinator:
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
-    ) -> str | None:
+    ) -> _TurnNotice | None:
         existing_turn = queued_signal.begin_response_turn()
-        if not signal_queued_message:
-            return None
         if not (existing_turn or lifecycle_lock.locked()):
             return None
-        if not self._should_signal_queued_message(response_envelope):
+        if response_envelope.origin.intent is TurnIntent.JOB_WAKE:
+            # The running reply takes over the work this wake would continue, so the wake must not end its waits.
             return None
-        if not queued_signal.add_waiting_human_message(
-            response_envelope.source_event_id,
-            text=message_text_for_judgment(response_envelope),
-        ):
-            return None
-        return response_envelope.source_event_id
+        source_event_id = response_envelope.source_event_id
+        if signal_queued_message and self._should_signal_queued_message(response_envelope):
+            # An ingress reservation may already hold this source's notice for the running reply.
+            queued_signal.add_waiting_human_message(source_event_id, text=message_text_for_judgment(response_envelope))
+            return _TurnNotice(source_event_id, human=True)
+        # Any queued turn ends the running reply's waits inside its model run, so the reply finishes and its message
+        # holds the outstanding work while this turn runs.
+        queued_signal.turn_signal.notify()
+        return _TurnNotice(source_event_id, human=False)
 
     def _consume_queued_human_notice(
         self,
         *,
-        notice: str | None,
+        notice: _TurnNotice | None,
         queued_signal: _QueuedMessageState,
     ) -> None:
         if notice is None:
             return
-        queued_signal.consume_waiting_human_message(notice)
+        queued_signal.consume_turn_notice(notice)
 
     def _start_response_turn(
         self,
@@ -443,7 +466,7 @@ class ResponseLifecycleCoordinator:
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
         reservation: ResponseLifecycleReservation | None,
-    ) -> tuple[asyncio.Lock, _QueuedMessageState, str | None]:
+    ) -> tuple[asyncio.Lock, _QueuedMessageState, _TurnNotice | None]:
         if reservation is not None:
             return reservation.consume(self, target), reservation._queued_signal, None
         lifecycle_lock = self._response_lifecycle_lock(target)
@@ -470,7 +493,7 @@ class ResponseLifecycleCoordinator:
         self,
         *,
         reservation: ResponseLifecycleReservation | None,
-        notice: str | None,
+        notice: _TurnNotice | None,
         queued_signal: _QueuedMessageState,
     ) -> None:
         if reservation is not None:
@@ -492,7 +515,7 @@ class ResponseLifecycleCoordinator:
         self,
         *,
         reservation: ResponseLifecycleReservation | None,
-        notice: str | None,
+        notice: _TurnNotice | None,
         queued_signal: _QueuedMessageState,
     ) -> None:
         if reservation is not None:
@@ -538,8 +561,13 @@ class ResponseLifecycleCoordinator:
                     notice=notice,
                     queued_signal=queued_signal,
                 )
+                # Consumed once: a started turn no longer waits for the reply it queued behind.
+                notice = None
                 queued_signal.mid_turn_gate = mid_turn_gate
-                with queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context:
+                with (
+                    queued_turn_signal_context(queued_signal.turn_signal),
+                    queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context,
+                ):
                     try:
                         return await locked_operation(target)
                     finally:

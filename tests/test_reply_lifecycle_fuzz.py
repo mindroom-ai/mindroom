@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 import pytest
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
+from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
 from mindroom import reply_lifecycle as rl
 from mindroom.reply_lifecycle import (
@@ -34,6 +34,7 @@ from mindroom.reply_lifecycle import (
     SpanKind,
     SpanOutcome,
     StopFacts,
+    StopJobs,
     TerminalWrite,
     WriteFacts,
     WriteStage,
@@ -110,6 +111,11 @@ class _Model:
     left: bool = False
     # What each write of a reply, by sequence, may show: one that ends the reply, work in progress, or refused.
     writes: dict[tuple[str, int], str] = field(default_factory=dict)
+    # The background work of the reply's key: none, outstanding, or ready for a wake to retrieve.
+    work: str = "none"
+    # Replies whose background work a Stop cancelled, until the job runtime applies it.
+    job_stops: set[str] = field(default_factory=set)
+    wakes: int = 0
 
 
 class ReplyLifecycleMachine(RuleBasedStateMachine):
@@ -231,6 +237,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self.model.cancel_requested.add(span_id)
             case FenceApproval(approval_id=approval_id, disposition=disposition):
                 self._fence(approval_id, disposition)
+            case StopJobs(reply_id=reply_id):
+                self.model.job_stops.add(reply_id)
             case _:
                 msg = f"unmodelled effect {effect!r}"
                 raise AssertionError(msg)
@@ -250,9 +258,15 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         edit: str | None = None,
         approval: _Continuation | None = None,
         replay_of: Span | None = None,
+        wake: str | None = None,
     ) -> rl.Transition:
         reply = self.model.reply
-        if approval is not None:
+        if wake is not None:
+            delivery_id, sources = (
+                wake,
+                ResponseSources(pending_event_ids=(wake,), logical_source_event_ids=("$source",)),
+            )
+        elif approval is not None:
             paused = self.model.spans[approval.paused_span_id]
             delivery_id, sources = paused.delivery_id, paused.sources
         elif edit is not None:
@@ -281,6 +295,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             empty_presentation="empty",
             driving_edit_id=edit,
             approval_id=None if approval is None else approval.approval_id,
+            wake_reply_id=None if wake is None or reply is None else reply.reply_id,
         )
         context = ClaimContext(
             reply=reply,
@@ -347,6 +362,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if "$source" in self.model.deleted:
             # The source gate finds the message deleted, and the reply ends as a deletion ends it.
             self._apply(rl.sources_deleted(self.model.reply, last, now_ns=self._now()))  # type: ignore[arg-type]
+        elif last.delivery_id.startswith("job-wake-"):
+            # The journal retries the wake's own source, a wake's or its approval's resume.
+            self._claim_wake(last.delivery_id)
         elif last.delivery_id.startswith("$edit-"):
             # The pending source is an edit, a regeneration's or its approved resume's: the regenerator replays it
             # with the edit it selected.
@@ -372,7 +390,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             # The regenerator leaves a reply the user deleted as it is.
             return
         live = self._live()
-        if live is not None or reply.approval_id is not None:
+        if live is not None or reply.approval_id is not None or reply.state is ReplyState.WAITING:
             # As a Stop reaction would; the regeneration's claim waits for the stopped span to end.
             self.stop()
             stopped = self.model.reply
@@ -1131,6 +1149,159 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         self.model.deleted.clear()
         self.model.turn_answered = False
         self.model.answered.clear()
+        self.model.wakes = 0
+        self.model.work = "none"
+        # The store forgets the Stops of the replies it forgets.
+        self.model.job_stops.clear()
+
+    # --- background work ----------------------------------------------------
+
+    @precondition(lambda self: self._live() is not None and self.model.work == "none")
+    @rule()
+    def start_job(self) -> None:
+        """The running span starts background work it does not wait for."""
+        self.model.work = "outstanding"
+
+    @precondition(lambda self: self.model.work == "outstanding")
+    @rule()
+    def job_finishes(self) -> None:
+        """Background work finishes; its outcome is ready to retrieve."""
+        self.model.work = "ready"
+
+    @precondition(lambda self: self._live() is not None and self.model.work != "ready")
+    @rule()
+    def wait(self) -> None:
+        """The span reaches its boundary with work outstanding and nothing ready: the reply waits for it."""
+        span = self._live()
+        reply = self.model.reply
+        assert span is not None
+        assert reply is not None
+        # The span started the work, or an earlier one did.
+        self.model.work = "outstanding"
+        if reply.state is ReplyState.PAUSED or reply.approval_id is not None or self._runs_for(span) is not None:
+            # A span an approval holds never waits; it finishes, and the key's next reply takes the work.
+            self.finish()
+            return
+        if reply.unapplied_stop:
+            # The gateway renders the Stop's end instead.
+            self._span_exit(
+                span,
+                rl.stopped(reply, span, self._terminal_write(ReplyState.CANCELLED), now_ns=self._now()),
+            )
+            return
+        shown_by_create = reply.event_id is None and not any(
+            row.intent.stage is WriteStage.INITIAL for row in self.model.rows
+        )
+        if shown_by_create:
+            # The wait is the reply's first visible message, so its create shows it, as a pause's does.
+            self._apply(
+                rl.enqueue_initial(
+                    reply,
+                    span,
+                    shown="waiting",
+                    placeholder_only=False,
+                    prepared_revision=reply.revision,
+                    now_ns=self._now(),
+                ),
+            )
+            reply = self.model.reply
+            assert reply is not None
+        write = TerminalWrite(shown="waiting", prepared_revision=reply.revision, state=ReplyState.WAITING)
+        transition = rl.wait(reply, span, write, hold_key="key", shown_by_create=shown_by_create, now_ns=self._now())
+        self._span_exit(span, transition)
+
+    def _wake_pending(self) -> str | None:
+        """Return the wake source the journal still has to run, if any."""
+        for span_id in (f"job-wake-{index}" for index in range(1, self.model.wakes + 1)):
+            if span_id not in self.model.settled:
+                return span_id
+        return None
+
+    @precondition(
+        lambda self: (
+            self._bot()
+            and self.model.reply is not None
+            and self.model.reply.state is ReplyState.WAITING
+            and self.model.work == "ready"
+            and self._wake_pending() is None
+        ),
+    )
+    @rule()
+    def admit_wake(self) -> None:
+        """The job runtime admits a wake for a waiting reply whose work is ready."""
+        self.model.wakes += 1
+
+    @precondition(
+        lambda self: (
+            self._bot()
+            and self.model.reply is not None
+            and self.model.reply.state is ReplyState.WAITING
+            and self._wake_pending() is None
+        ),
+    )
+    @rule()
+    def work_wakes_the_reply(self) -> None:
+        """The common path: Matrix takes the wait, the work finishes, a wake is admitted, and the journal runs it."""
+        while self.model.rows:
+            self._acknowledge_row()
+        self.model.work = "ready"
+        self.admit_wake()
+        self.run_wake()
+
+    @precondition(lambda self: self._bot() and self._wake_pending() is not None)
+    @rule()
+    def run_wake(self) -> None:
+        """The journal runs a pending wake source."""
+        wake = self._wake_pending()
+        assert wake is not None
+        self._claim_wake(wake)
+
+    def _claim_wake(self, wake: str) -> None:
+        reply = self.model.reply
+        if reply is None or "$source" in self.model.deleted:
+            # The reply is gone, or the wake's turn was deleted: the wake settles without a turn.
+            self.model.settled.add(wake)
+            return
+        if reply.current_span_id is not None:
+            # A span runs under the conversation lock; the wake waits for it.
+            return
+        transition = self._claim(wake=wake)
+        if transition.outcome is Outcome.DUPLICATE:
+            self.model.settled.add(wake)
+        elif transition.claimed is not None:
+            # The wake retrieves what is ready; a retry rereads what it retrieved.
+            self.model.work = "none"
+
+    @precondition(
+        lambda self: (
+            self._bot()
+            and self.model.reply is not None
+            and self.model.reply.state is ReplyState.WAITING
+            and self._wake_pending() is None
+        ),
+    )
+    @rule(taken_over=st.booleans())
+    def end_wait(self, taken_over: bool) -> None:
+        """A newer reply on the key takes the work over, or the job runtime finds none left: the wait ends."""
+        if not taken_over and self.model.work != "none":
+            return
+        reply = self.model.reply
+        assert reply is not None
+        self._apply(rl.unhold(reply, now_ns=self._now()))
+        self.model.work = "none"
+
+    @precondition(lambda self: self.model.work != "none")
+    @rule()
+    def newer_reply_retrieves_the_work(self) -> None:
+        """A newer reply of the key retrieves or takes the work, or the work is cancelled or revoked."""
+        self.model.work = "none"
+
+    @precondition(lambda self: bool(self.model.job_stops))
+    @rule()
+    def apply_job_stops(self) -> None:
+        """The job runtime cancels the work the Stops named, then forgets them."""
+        self.model.job_stops.clear()
+        self.model.work = "none"
 
     # --- invariants ---------------------------------------------------------
 
@@ -1215,6 +1386,30 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert len(holders) <= 1, holders
 
     @invariant()
+    def a_waiting_reply_answered_and_runs_nothing(self) -> None:
+        """A waiting reply answered its turn, runs no span, no approval holds it, and it names its work."""
+        reply = self.model.reply
+        if reply is None or reply.state is not ReplyState.WAITING:
+            return
+        last = self._last()
+        assert last is not None
+        assert reply.current_span_id is None, reply
+        assert reply.approval_id is None, reply
+        assert reply.hold_key is not None, reply
+        assert last.outcome is SpanOutcome.COMPLETED, last
+        assert self._is_settled(last.span_id), last
+
+    @invariant()
+    def a_stop_button_belongs_to_a_running_reply(self) -> None:
+        """I8: a reply keeps its Stop button only while active, waiting, or waiting in place for an approval."""
+        reply = self.model.reply
+        if reply is None or reply.stop_button_event_id is None:
+            return
+        assert reply.state in {ReplyState.ACTIVE, ReplyState.WAITING} or (
+            reply.state is ReplyState.PAUSED and reply.current_span_id is not None
+        ), reply
+
+    @invariant()
     def a_paused_reply_is_held(self) -> None:
         """A paused reply waits on the approval that holds it."""
         reply = self.model.reply
@@ -1230,6 +1425,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 break
         assert not self.model.continuations, self.model.continuations
         assert not self.model.deferred, self.model.deferred
+        assert not self.model.job_stops, self.model.job_stops
         reply = self.model.reply
         if reply is not None and self.model.removed:
             # No bot remains for a removed entity: its reply ended, and no source waits on it. What it still owes
@@ -1250,6 +1446,10 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
     def _drain_step(self) -> bool:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Move one owner forward; return whether anything was left to move."""
         model = self.model
+        if model.job_stops:
+            # The job runtime applies them whether or not the entity still has a bot.
+            self.apply_job_stops()
+            return True
         if model.removed:
             if model.continuations:
                 self.discard_unavailable_approvals()
@@ -1304,6 +1504,18 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if model.deferred:
             self._retry_deferred()
             return True
+        if (wake := self._wake_pending()) is not None and reply.current_span_id is None:
+            self._claim_wake(wake)
+            return True
+        if reply.state is ReplyState.WAITING:
+            # The work finishes and wakes the reply, or none is left and the wait ends.
+            if model.work == "outstanding":
+                self.job_finishes()
+            elif model.work == "ready":
+                self.admit_wake()
+            else:
+                self.end_wait(taken_over=False)
+            return True
         if not reply.terminal:
             current = self._current()
             if current is not None:
@@ -1323,6 +1535,18 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self._settle(span.span_id)
                 return True
         return False
+
+
+class WaitingReplyMachine(ReplyLifecycleMachine):
+    """Start every run from a reply whose turn answered and waits for the background work it left outstanding."""
+
+    @initialize(acknowledged=st.booleans())
+    def answer_and_wait(self, acknowledged: bool) -> None:
+        """A turn answers, starts work it does not wait for, and waits for it; Matrix may have taken the wait."""
+        self.start_turn()
+        self.wait()
+        while acknowledged and self.model.rows:
+            self._acknowledge_row()
 
 
 def test_a_refused_answer_after_an_approved_regeneration_ends_with_the_delivery_failed_note() -> None:
@@ -1354,3 +1578,15 @@ def test_reply_lifecycle_invariants() -> None:
         suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
     )
     ReplyLifecycleMachine.TestCase().runTest()
+
+
+@pytest.mark.timeout(300)
+def test_waiting_reply_invariants() -> None:
+    """Random interleavings from a waiting reply never break the lifecycle invariants, and every run drains."""
+    WaitingReplyMachine.TestCase.settings = settings(
+        max_examples=300,
+        stateful_step_count=30,
+        deadline=None,
+        suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
+    )
+    WaitingReplyMachine.TestCase().runTest()

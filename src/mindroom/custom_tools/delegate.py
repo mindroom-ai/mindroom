@@ -26,6 +26,8 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.minimal_mode_preflight import minimal_subagent_candidates
+from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
@@ -144,9 +146,23 @@ class DelegateTools(Toolkit):
             else describe_agent(target_name, self._config)
             for target_name in self._delegate_to
         ]
-        return self._config.render_prompt(
+        instructions = self._config.render_prompt(
             "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
+        )
+        if self._background_jobs_available():
+            instructions += "\n" + self._config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS")
+        return instructions
+
+    def _background_jobs_available(self) -> bool:
+        # A nested subagent's calls run inline inside its parent's job, so only a top-level caller can wait on one.
+        return (
+            self._delegation_depth == 0
+            and background_tool_jobs_enabled(self._config, self._runtime_paths)
+            and not toolkit_is_background_excluded("delegate", self._config, self._runtime_paths)
+            and self._execution_identity is not None
+            and self._execution_identity.channel == "matrix"
+            and get_background_runtime(self._runtime_paths) is not None
         )
 
     def _build_run_subagent_description(self) -> str:
@@ -164,6 +180,14 @@ class DelegateTools(Toolkit):
             if self._minimal_targets
             else ""
         )
+        background = self._background_jobs_available()
+        background_guidance = (
+            "Managed Matrix calls accept wait_timeout: null waits, zero returns a Job ID immediately, "
+            "and a positive number bounds the wait while work continues. "
+            "A newer message you answer releases the wait while the child keeps working. "
+            if background
+            else ""
+        )
         return (
             "Run one allowed configured agent as a fresh subagent and wait for its result.\n"
             f"Allowed subagents for this caller: {available_targets}.\n"
@@ -171,10 +195,11 @@ class DelegateTools(Toolkit):
             "the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\n"
             "Selecting your own name starts a fresh copy of yourself, if listed. "
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
+            f"{background_guidance}"
             "Set model to a configured model name to override the child's model for this session. "
             f"Available models: {', '.join(sorted(self._config.models))}. "
             "Omit model or pass null to use the child's normal thread, room, or configured model. "
-            "The caller waits; this does not create a Matrix thread. "
+            f"{'This' if background else 'The caller waits; this'} does not create a Matrix thread. "
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
             "follow-ups keep the child's model and mode.\n"
             f"{minimal_guidance}"

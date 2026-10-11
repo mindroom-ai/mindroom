@@ -16,6 +16,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -207,16 +208,20 @@ async def test_native_shell_calls_in_one_batch_run_at_the_same_time(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
 async def test_approval_gated_tools_stay_native_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+    *,
+    jobs: bool,
 ) -> None:
-    """A tool that may need approval keeps its native confirmation and is not offered to the CLI."""
+    """A tool that may need approval keeps its native confirmation, or asks as its job, and is not offered to the CLI."""
     runtime = _helper_runtime(tmp_path, running_api)
     runtime.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="add", action="require_approval")],
     )
+    runtime.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=jobs)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     provider.steps = [[("run_shell_command", {"args": "mindroom-agent tools list"})], "done"]
@@ -229,12 +234,15 @@ async def test_approval_gated_tools_stay_native_only(
     assert '"function":"add"' not in listing, listing
 
 
-def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path) -> None:
-    """An approved command resumes later without this response's CLI, so none is offered."""
+@pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
+def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path, *, jobs: bool) -> None:
+    """An approved command resumes later, or runs in its job after the reply ended, without this response's CLI."""
     runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
     runtime.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
     )
+    # With shell managed, its gated command asks for approval as its job.
+    runtime.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=jobs, exclude_toolkits=[])
     set_api_server_address("127.0.0.1", 8765)
     try:
         agent = agents.create_agent(
@@ -251,6 +259,33 @@ def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path) -> None:
     try:
         assert not isinstance(agent, CliShellAgent)
         assert STANDARD_CLI_NOTE not in agent.instructions
+    finally:
+        close_agent_runtime_state_dbs(agent)
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["excluded-shell", "managed-shell"])
+def test_a_shell_that_runs_as_a_background_job_gets_no_cli(tmp_path: Path, *, managed: bool) -> None:
+    """A shell command that can outlive its reply cannot use that reply's CLI, which ends with it."""
+    runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
+    runtime.config.background_tool_jobs = BackgroundToolJobsConfig(
+        enabled=True,
+        exclude_toolkits=[] if managed else ["shell"],
+    )
+    set_api_server_address("127.0.0.1", 8765)
+    try:
+        agent = agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            build_execution_identity_from_runtime_context(runtime),
+            agent_cli_in_shell=True,
+            supports_native_tool_approval=True,
+        )
+    finally:
+        clear_api_server_address()
+
+    try:
+        assert isinstance(agent, CliShellAgent) is not managed
     finally:
         close_agent_runtime_state_dbs(agent)
 

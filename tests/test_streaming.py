@@ -1074,6 +1074,7 @@ async def _run_resumed_stream(
     response_stream: AsyncIterator[object],
     *,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
+    resumed: UnfinishedStreamedReply = _STOPPED_REPLY,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -1084,7 +1085,7 @@ async def _run_resumed_stream(
         streaming_cls=streaming_cls,
         existing_event_id="$reply",
         adopt_existing_placeholder=True,
-        resumed=_STOPPED_REPLY,
+        resumed=resumed,
     )
 
 

@@ -13,6 +13,7 @@ from mindroom.mcp.config import resolved_mcp_tool_prefix
 from mindroom.mcp.errors import MCPToolUnavailableError
 from mindroom.mcp.function_surface import local_mcp_function_name_collisions
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
     from agno.tools.function import ToolResult
@@ -136,16 +137,13 @@ class MindRoomMCPToolkit(Toolkit):
         return self.server_config is not None and self.server_config.auth is not None
 
     def _filtered_catalog_tools(self, catalog: MCPServerCatalog) -> list[MCPDiscoveredTool]:
-        filtered: list[MCPDiscoveredTool] = []
-        include_tools = set(self.include_tools or [])
-        exclude_tools = set(self.exclude_tools or [])
-        for tool in catalog.tools:
-            if exclude_tools and tool.remote_name in exclude_tools:
-                continue
-            if include_tools and tool.remote_name not in include_tools:
-                continue
-            filtered.append(tool)
-        return filtered
+        include_tools = set(self.include_tools) if self.include_tools else None
+        exclude_tools = set(self.exclude_tools) if self.exclude_tools else None
+        return [
+            tool
+            for tool in catalog.tools
+            if tool_name_allowed(tool.remote_name, include=include_tools, exclude=exclude_tools)
+        ]
 
     def _filtered_tools(self) -> list[MCPDiscoveredTool]:
         if self.catalog is None:

@@ -44,6 +44,7 @@ AGENT_PLACEHOLDER = PROGRESS_PLACEHOLDER
 TEAM_PLACEHOLDER = TEAM_PROGRESS_PLACEHOLDER
 _DELIVERY_FAILED_NOTE = "Response delivery failed. Please retry."
 _APPROVAL_START_FAILED_NOTE = "Tool approval could not be started. Please try again."
+_JOB_WAIT_NOTE = "⏳ Waiting for background work…"
 
 
 def format_error_note(error: object) -> str:
@@ -57,7 +58,11 @@ _FIXED_NOTE_TEXTS = {
     NoteKind.INTERRUPTED: INTERRUPTED_RESPONSE_NOTE,
     NoteKind.DELIVERY_FAILED: _DELIVERY_FAILED_NOTE,
     NoteKind.APPROVAL_FAILED: _APPROVAL_START_FAILED_NOTE,
+    NoteKind.JOB_WAIT: _JOB_WAIT_NOTE,
 }
+
+# Notes that say what a reply waits for; what it showed before stays its work, so a restart drops them.
+_WAIT_NOTES = frozenset({NoteKind.APPROVAL_WAIT, NoteKind.JOB_WAIT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +187,7 @@ def _shown_work(possibly_shown: Presentation) -> Segment | None:
     """
     body, trace = _combined(possibly_shown.segments, possibly_shown.placeholder)
     note = possibly_shown.trailing_note
-    if note is not None and note.note is not NoteKind.APPROVAL_WAIT:
+    if note is not None and note.note not in _WAIT_NOTES:
         body = f"{body}\n\n{note.text}" if body else note.text
     body = body.rstrip()
     text = clean_partial_reply_text("" if body == possibly_shown.placeholder else body)

@@ -31,6 +31,8 @@ from mindroom.reply_presentation import (
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
+from mindroom.tool_jobs.disabled import ParkedWork
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_store import TurnStore
@@ -389,6 +391,27 @@ async def test_a_hold_whose_approval_is_gone_does_not_keep_its_conversation_wait
                 runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id),
                 timeout=5,
             )
+        assert not runner.is_held_for_approval(target)
+
+
+async def test_an_approval_parked_while_jobs_are_off_does_not_keep_its_conversation_waiting(tmp_path: Path) -> None:
+    """A parked approval can neither resume nor expire until background jobs are on again, so it holds nothing."""
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        await _respond(bot)
+        [continuation] = await bot.journal_principal().pending_approvals()
+        target = _target()
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        assert runner.is_held_for_approval(target)
+        instance = pin_background_tool_jobs(bot.config, bot.runtime_paths)
+        instance.parked = ParkedWork(approvals={continuation.approval_id})
+        try:
+            with patch("mindroom.response_runner._APPROVAL_HOLD_RECHECK_SECONDS", 0.01):
+                await asyncio.wait_for(
+                    runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id),
+                    timeout=5,
+                )
+        finally:
+            release_background_tool_jobs(bot.runtime_paths, instance)
         assert not runner.is_held_for_approval(target)
 
 

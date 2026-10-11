@@ -745,6 +745,7 @@ async def _run_authorized_call_agent(
             active_model_name=active_model_name,
             transient_enrichment_items=transient_enrichment_items,
             system_enrichment_items=voice_enrichment_items,
+            inline_tools=True,
         )
         run_metadata: dict[str, Any] = {}
 

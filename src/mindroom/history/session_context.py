@@ -20,6 +20,7 @@ from mindroom.constants import prompt_roles_for_history_storage, resolve_session
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.team_scope import ad_hoc_team_scope_id
+from mindroom.tool_jobs.resources import defer_execution_cleanup
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -135,7 +136,7 @@ def _open_scope_storage(
     try:
         yield storage
     finally:
-        storage.close()
+        close_execution_storage(storage)
 
 
 def _build_scope_session_context(
@@ -331,6 +332,16 @@ def create_scope_session_storage(
     )
 
 
+def close_execution_storage(storage: BaseDb) -> None:
+    """Close a concrete DB handle after accepted tool users have settled."""
+
+    async def close() -> None:
+        storage.close()
+
+    if not defer_execution_cleanup(close, resource=storage):
+        storage.close()
+
+
 def _close_unique_state_dbs(*storages: BaseDb | None) -> None:
     """Close each distinct state DB handle at most once."""
     seen: set[int] = set()
@@ -341,7 +352,7 @@ def _close_unique_state_dbs(*storages: BaseDb | None) -> None:
         if storage_id in seen:
             continue
         seen.add(storage_id)
-        storage.close()
+        close_execution_storage(storage)
 
 
 def close_agent_runtime_state_dbs(

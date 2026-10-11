@@ -52,6 +52,7 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
 from mindroom.synthetic_model import SyntheticModel
+from mindroom.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1429,6 +1430,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
         "no final answer",
         "no skill_manage",
         "skill_manage needs approval",
+        "skill_manage asks as its job",
         "compressed tool results",
         "conversation too long to fork",
         "no capture",
@@ -1446,6 +1448,9 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
     elif reason == "skill_manage needs approval":
         (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
         tool.requires_confirmation = True
+    elif reason == "skill_manage asks as its job":
+        (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
+        tool.approval_type = JOB_APPROVAL_TYPE
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
     capture = SkillReviewCapture()
     compression = _ShortenToolResults() if reason == "compressed tool results" else None

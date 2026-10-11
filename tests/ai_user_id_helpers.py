@@ -569,6 +569,8 @@ def _build_response_runner(
                 complete_turn=AsyncMock(),
                 hold_conversation=lambda _continuation: None,
                 approval_ended=lambda _ended: None,
+                settle_debt=lambda _reply_id: None,
+                jobs_stopped=lambda: None,
             ),
         ),
     )

@@ -66,6 +66,8 @@ class EventKind(StrEnum):
     RTC = "rtc"
     REDACTION = "redaction"
     OPAQUE_HISTORY = "opaque_history"
+    # A runtime source, not a Matrix event: a waiting reply's background work is ready, or none is left.
+    JOB_WAKE = "job_wake"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a

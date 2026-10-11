@@ -21,11 +21,13 @@ from mindroom.reply_lifecycle import (
     Reply,
     SettleSources,
     Span,
+    StopJobs,
     Transition,
 )
 
-from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
+from . import approval_continuations, journal, outbox, reply_messages, reply_spans, tool_jobs, turn_records
 from .membership_state import claim_membership_epoch
+from .models import EventKind
 from .projection import is_tombstoned
 
 logger = get_logger(__name__)
@@ -65,8 +67,20 @@ class ApprovalEnded:
     reply_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReplyDebtDue:
+    """After commit: another reply's transition ended this reply, which owes Matrix the write that shows it."""
+
+    reply_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class JobsStopped:
+    """After commit: a Stop recorded background work to cancel, which the job runtime can apply at once."""
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted | ReplyDebtDue | JobsStopped
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -115,8 +129,8 @@ def apply(transaction: Transaction, principal_id: str, transition: Transition) -
             reply_id=None if transition.reply is None else transition.reply.reply_id,
             reason=transition.unmodeled,
         )
+    post_commit = list(_take_over(transaction, principal_id, transition))
     reply_messages.persist(transaction, principal_id, transition)
-    post_commit: list[PostCommitEffect] = []
     for effect in transition.effects:
         _run(transaction, principal_id, transition, effect, post_commit)
     if transition.reply is not None:
@@ -124,6 +138,25 @@ def apply(transaction: Transaction, principal_id: str, transition: Transition) -
         if held != transition.reply.approval_id:
             transition = replace(transition, reply=replace(transition.reply, approval_id=held))
     return AppliedTransition(transition=transition, post_commit=tuple(post_commit))
+
+
+def _take_over(transaction: Transaction, principal_id: str, transition: Transition) -> tuple[PostCommitEffect, ...]:
+    """End the reply that waits for the same work as one that starts waiting now, before the newer one is saved.
+
+    At most one reply waits for a key's work, so the newer reply takes it over and the older one keeps its answer.
+    """
+    reply = transition.reply
+    if not transition.applied or reply is None or reply.state is not rl.ReplyState.WAITING or reply.hold_key is None:
+        return ()
+    waiting = reply_messages.waiting_on(transaction, principal_id, reply.hold_key)
+    if waiting is None or waiting == reply.reply_id:
+        return ()
+    older = reply_messages.lock(transaction, principal_id, waiting)
+    assert older is not None, "the reply waiting on a key exists"
+    taken = apply(transaction, principal_id, rl.unhold(older, now_ns=reply.updated_at_ns))
+    if not taken.transition.applied:
+        return taken.post_commit
+    return (*taken.post_commit, ReplyDebtDue(waiting))
 
 
 def _run(
@@ -160,9 +193,49 @@ def _run(
             post_commit.append(WakeApproval(approval_id))
         case CancelSpan():
             post_commit.append(effect)
+        case StopJobs():
+            reply = transition.reply
+            assert reply is not None, "a Stop of background work belongs to a reply's transition"
+            if _record_job_stop(transaction, principal_id, reply):
+                post_commit.append(JobsStopped())
         case _:
             msg = f"Reply effect {effect!r} has no transactional owner yet"
             raise NotImplementedError(msg)
+
+
+def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) -> bool:
+    """Record which background work a Stop cancels, as the reply is now, so a later regeneration cannot change it.
+
+    Nothing is recorded while no background job exists: a stopped reply starts none afterwards, and a call whose job
+    was being admitted when the Stop committed finds its span refusing tool starts and stops that job itself.
+    """
+    if not tool_jobs.any_saved(transaction):
+        return False
+    sources = tuple(
+        dict.fromkeys(
+            source
+            for span in reply_spans.for_reply(transaction, principal_id, reply.reply_id)
+            for source in span.sources.pending_event_ids
+        ),
+    )
+    # A wake is not a message: work a newer message started stays that message's even when a wake came after it.
+    messages = (journal.load(transaction, principal_id, source) for source in sources)
+    orders = [event.receipt_order for event in messages if event is not None and event.kind is not EventKind.JOB_WAKE]
+    reply_messages.record_job_stop(
+        transaction,
+        reply_messages.JobStop(
+            principal_id=principal_id,
+            stop_id=f"{reply.reply_id}:{reply.revision}",
+            entity_name=reply.entity_name,
+            room_id=reply.room_id,
+            sources=sources,
+            hold_key=reply.hold_key,
+            cutoff_receipt_order=max(orders, default=None),
+            stop_receipt_order=reply.stop_receipt_order or 0,
+        ),
+        now_ns=reply.updated_at_ns,
+    )
+    return True
 
 
 def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None = None) -> bool:
@@ -339,8 +412,9 @@ def claim(
 ) -> AppliedTransition:
     """Find the reply a span continues and claim it, in one transaction.
 
-    The reply is the one a selection's acknowledgement span belongs to, else
-    the one bound to ``existing_event_id``, else the one owning the sources.
+    The reply is the waiting reply a wake names, else the one a selection's
+    acknowledgement span belongs to, else the one bound to
+    ``existing_event_id``, else the one owning the sources.
     """
     interactive = (
         None
@@ -348,6 +422,14 @@ def claim(
         else reply_spans.load(transaction, principal_id, request.interactive_span_id)
     )
     reply: Reply | None = None
+    if request.wake_reply_id is not None:
+        # A wake continues only the reply it names; one retention forgot leaves it nothing to run.
+        reply = reply_messages.lock(transaction, principal_id, request.wake_reply_id)
+        return apply(
+            transaction,
+            principal_id,
+            rl.claim(request, _claim_context(transaction, principal_id, request, reply)),
+        )
     if interactive is not None:
         reply = reply_messages.lock(transaction, principal_id, interactive.reply_id)
     if reply is None and existing_event_id is not None:
@@ -363,8 +445,23 @@ def claim(
     if reply is not None and reply.state is rl.ReplyState.GONE and request.driving_edit_id is None:
         # A removed reply is never continued; the turn answers again in a new one.
         reply = None
-    active_generation = reply_messages.active_generation(transaction, principal_id) or request.bot_generation
-    context = rl.ClaimContext(
+    context = replace(_claim_context(transaction, principal_id, request, reply), interactive_span=interactive)
+    if reply is None or request.driving_edit_id is not None:
+        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
+        admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
+        if admitted is not None:
+            request = replace(request, membership_epoch=admitted[1])
+    return apply(transaction, principal_id, rl.claim(request, context))
+
+
+def _claim_context(
+    transaction: Transaction,
+    principal_id: str,
+    request: rl.ClaimRequest,
+    reply: Reply | None,
+) -> rl.ClaimContext:
+    """Read what a claim of ``reply`` decides on, inside its transaction."""
+    return rl.ClaimContext(
         reply=reply,
         last_span=None if reply is None else reply_spans.load(transaction, principal_id, reply.last_span_id),
         current_span=(
@@ -372,16 +469,10 @@ def claim(
             if reply is None or reply.current_span_id is None
             else reply_spans.load(transaction, principal_id, reply.current_span_id)
         ),
-        interactive_span=interactive,
+        interactive_span=None,
         durable_write_debt=reply is not None and has_unresolved_rows(transaction, principal_id, reply.reply_id),
-        active_generation=active_generation,
+        active_generation=reply_messages.active_generation(transaction, principal_id) or request.bot_generation,
     )
-    if reply is None or request.driving_edit_id is not None:
-        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
-        admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
-        if admitted is not None:
-            request = replace(request, membership_epoch=admitted[1])
-    return apply(transaction, principal_id, rl.claim(request, context))
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +595,22 @@ def drop_replays(
         if applied.transition.applied:
             ended.append(reply_id)
     return tuple(ended)
+
+
+def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, now_ns: int) -> None:
+    """End the room's replies as its membership ends, without touching Matrix.
+
+    Running replies end gone with their spans released, their background work is cancelled, and what finished
+    replies still owed the room is dropped. The departing bot cancels the span tasks it runs after this commits, and
+    the job runtime applies the cancellation on its next pass.
+    """
+    for reply in reply_messages.departing(transaction, principal_id, room_id):
+        current = (
+            None
+            if reply.current_span_id is None
+            else reply_spans.load(transaction, principal_id, reply.current_span_id)
+        )
+        apply(transaction, principal_id, rl.departed(reply, current, now_ns=now_ns))
 
 
 def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
@@ -769,6 +876,16 @@ class ReplyStore:
 
         return await self._backend.write(start)
 
+    async def admits_tool_start(self, *, span_id: str) -> bool:
+        """Return whether a span may still start a tool, as recording a start checks."""
+
+        def admits(transaction: Transaction) -> bool:
+            span = reply_spans.load(transaction, self._principal_id, span_id)
+            reply = None if span is None else reply_messages.load(transaction, self._principal_id, span.reply_id)
+            return span is not None and reply is not None and rl.admits_tool_start(reply, span)
+
+        return await self._backend.read(admits)
+
     async def record_tool_call(self, *, span_id: str, call_id: str, entry_json: str, now_ns: int) -> None:
         """Record what a started tool call returned, replacing its start."""
         await self._backend.write(
@@ -983,6 +1100,12 @@ class ReplyStore:
         """Return replies owing a redaction or a note not yet enqueued."""
         return await self._backend.read(
             lambda transaction: reply_messages.with_pending_work(transaction, self._principal_id),
+        )
+
+    async def forget_job_stop(self, stop_id: str) -> None:
+        """Delete a job Stop once a job runtime applied it."""
+        await self._backend.write(
+            lambda transaction: reply_messages.forget_job_stop(transaction, self._principal_id, stop_id),
         )
 
     async def has_unresolved_rows(self, reply_id: str) -> bool:

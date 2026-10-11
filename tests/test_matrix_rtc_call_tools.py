@@ -1121,6 +1121,8 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert turn.entity_label == AGENT
     assert turn.requester_id == REQUESTER
     assert turn.session_id == "!room:example.org:call:one"
+    # No reply owns a call's outcomes afterwards, so its tool calls finish inside the turn.
+    assert turn.inline_tools
     assert turn.active_model_name == "call_fast"
     assert contexts[0].active_model_name == "call_fast"
     assert turn.system_enrichment_items[0].text == "Speak briefly."

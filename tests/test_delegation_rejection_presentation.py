@@ -22,9 +22,8 @@ from mindroom.delegation.state import DelegationState
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
