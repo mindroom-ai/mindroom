@@ -3510,7 +3510,11 @@ class ResponseRunner:
         runtime = get_background_runtime(self.deps.runtime_paths)
         jobs = () if runtime is None else follow_up_jobs(await ended_jobs(runtime, request.follow_up_key))
         if not jobs:
-            return None
+            # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
+            follow_up_id = request.response_envelope.source_event_id
+            reply = await self.deps.replies.store.replies.for_sources((follow_up_id,))
+            if reply is None or reply.terminal:
+                return None
         # The turn's start note lists the jobs, as every turn's does.
         prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
         return replace(request, prompt=prompt, response_envelope=replace(request.response_envelope, body=prompt))

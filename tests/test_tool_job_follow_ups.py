@@ -9,9 +9,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from mindroom import reply_lifecycle as rl
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt, TurnSinks, run_blocking_response_turn
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
@@ -23,7 +26,7 @@ from mindroom.tool_jobs.follow_ups import (
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import install_generate_response_mock, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _envelope, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter
 from tests.test_response_turn import _continuation as _turn_continuation
@@ -95,7 +98,7 @@ def _admitting_bot() -> MagicMock:
 
 
 async def test_jobs_ending_together_share_one_follow_up(tmp_path: Path) -> None:
-    """Two jobs that ended in one conversation make one follow-up, and a later pass admits that same one."""
+    """Two jobs that ended in one conversation make one follow-up."""
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
@@ -103,11 +106,7 @@ async def test_jobs_ending_together_share_one_follow_up(tmp_path: Path) -> None:
         await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
         await _ended(runtime, "job_b", BackgroundOutcome("failed", "b"))
         await coordinator._admit_follow_ups(runtime)
-        await coordinator._admit_follow_ups(runtime)
-        assert bot.admit_job_follow_up.await_count == 2
-        first, second = (call.args for call in bot.admit_job_follow_up.await_args_list)
-        assert first == second
-        key, follow_up_id, streak = first
+        key, follow_up_id, streak = bot.admit_job_follow_up.await_args.args
         assert key == _key(job_owner())
         jobs = [job for job in runtime.retained_jobs() if job.job_id in {"job_a", "job_b"}]
         assert follow_up_id == follow_up_event_id(key, jobs)
@@ -226,6 +225,43 @@ async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp
         await runtime.shutdown()
 
 
+async def test_a_capped_job_does_not_hold_back_a_later_one(tmp_path: Path) -> None:
+    """A job past the follow-up limit waits for a human message; a job a human message started is still followed up."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    assert coordinator._journal is not None
+    principal = coordinator._journal.principal("@mindroom_parent:test")
+    bot.journal_principal = MagicMock(return_value=principal)
+    key = _key(job_owner())
+    try:
+        last = follow_up_event(key, "job-follow-up:last", sender_id="@mindroom_parent:test", now_ms=1, streak=20)
+        await principal.admit(last)
+        await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last.event_id)
+        await _ended(runtime, "fresh", BackgroundOutcome("completed", "b"), source_event_id="$human")
+        await coordinator._admit_follow_ups(runtime)
+        bot.admit_job_follow_up.assert_awaited_once()
+        _key_arg, follow_up_id, streak = bot.admit_job_follow_up.await_args.args
+        fresh = [job for job in runtime.retained_jobs() if job.job_id == "fresh"]
+        assert (follow_up_id, streak) == (follow_up_event_id(key, fresh), 1)
+    finally:
+        await runtime.shutdown()
+
+
+async def test_an_admitted_follow_up_is_not_admitted_again(tmp_path: Path) -> None:
+    """Later passes over the same ended jobs leave the journal alone."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    try:
+        await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
+        await coordinator._admit_follow_ups(runtime)
+        await coordinator._admit_follow_ups(runtime)
+        bot.admit_job_follow_up.assert_awaited_once()
+    finally:
+        await runtime.shutdown()
+
+
 def _runner_key(bot: AgentBot) -> ConversationKey:
     return ConversationKey(
         recipient=bot.agent_name,
@@ -271,10 +307,13 @@ async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: 
     runtime = await _runner_runtime(bot, tmp_path)
     try:
         await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
-        event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
-        runner.generate_response = AsyncMock(return_value=None)
-        await runner._run_job_follow_up(event)
-        request = runner.generate_response.await_args.args[0]
+        await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        request = runner._job_follow_up_request(
+            key,
+            "job-follow-up:1",
+            claimed=asyncio.Event(),
+            handoff=asyncio.Event(),
+        )
         assert request.existing_event_id is None
         assert request.sources.pending_event_ids == ("job-follow-up:1",)
         prepared = await runner._follow_up_under_lock(request)
@@ -297,14 +336,62 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
     try:
         await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=owner)
         event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
-        runner.generate_response = AsyncMock(return_value=None)
-        await runner._run_job_follow_up(event)
-        request = runner.generate_response.await_args.args[0]
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", collected.claim)
+        request = runner._job_follow_up_request(
+            key,
+            "job-follow-up:1",
+            claimed=asyncio.Event(),
+            handoff=asyncio.Event(),
+        )
         assert await runner._follow_up_under_lock(request) is None
         # Nothing claimed a reply for it, so its source settles.
+        install_generate_response_mock(bot, AsyncMock(return_value=None))
+        await runner._run_job_follow_up(event)
         assert not await bot.journal_principal().is_pending("job-follow-up:1")
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path) -> None:
+    """A follow-up whose reply a restart cut short runs again, though that reply already collected its jobs."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    owner = _runner_owner(key)
+    runtime = await _runner_runtime(bot, tmp_path)
+    principal = bot.journal_principal()
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=owner)
+        await _follow_up(principal, key, "job-follow-up:1")
+        await principal.replies.write_generation("gen-1")
+        claimed = (
+            await principal.replies.claim(
+                rl.ClaimRequest(
+                    span_id="span-1",
+                    delivery_id="job-follow-up:1",
+                    sources=ResponseSources(("job-follow-up:1",), ("job-follow-up:1",)),
+                    bot_generation="gen-1",
+                    now_ns=10,
+                    new_reply_id="reply-1",
+                    entity_name=key.recipient,
+                    room_id=key.room_id,
+                    thread_id=key.thread_id,
+                    membership_epoch=0,
+                    empty_presentation=encode_presentation(Presentation()),
+                ),
+            )
+        ).transition
+        assert claimed.reply is not None
+        collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
+        await runtime.acknowledge_wait("work", collected.claim)
+        request = runner._job_follow_up_request(
+            key,
+            "job-follow-up:1",
+            claimed=asyncio.Event(),
+            handoff=asyncio.Event(),
+        )
+        assert await runner._follow_up_under_lock(request) is not None
     finally:
         await runtime.shutdown()
 
@@ -322,10 +409,14 @@ async def test_an_interrupted_job_gets_a_follow_up_saying_it_may_have_partly_run
             BackgroundOutcome("interrupted", "Restart interrupted the job."),
             owner=_runner_owner(key),
         )
-        event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
-        runner.generate_response = AsyncMock(return_value=None)
-        await runner._run_job_follow_up(event)
-        prepared = await runner._follow_up_under_lock(runner.generate_response.await_args.args[0])
+        await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        request = runner._job_follow_up_request(
+            key,
+            "job-follow-up:1",
+            claimed=asyncio.Event(),
+            handoff=asyncio.Event(),
+        )
+        prepared = await runner._follow_up_under_lock(request)
         # The follow-up's start note says the interrupted job may have partly run.
         assert prepared is not None
     finally:

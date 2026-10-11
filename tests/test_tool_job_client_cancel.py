@@ -230,6 +230,20 @@ async def test_jobs_command_lists_this_conversations_jobs(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_jobs_command_outside_a_thread_lists_the_whole_rooms_jobs(tmp_path: Path) -> None:
+    """In a room that answers in threads, `!jobs` sent at the top level lists every job of the room."""
+    runtime = await _command_runtime(tmp_path)
+    try:
+        await _start(runtime, "in_a_thread", thread="$thread")
+        await _start(runtime, "in_another", thread="$other")
+        reply = await _command(tmp_path, "!jobs", thread=None)
+        assert "`in_a_thread`" in reply
+        assert "`in_another`" in reply
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_cancel_job_command_cancels_one_job_and_replies(tmp_path: Path) -> None:
     """`!cancel_job <id>` stops that job and says so."""
     runtime = await _command_runtime(tmp_path)

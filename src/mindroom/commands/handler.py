@@ -522,7 +522,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             )
 
     elif command.type in {CommandType.JOBS, CommandType.CANCEL_JOB}:
-        response_text = await _background_jobs_command(context, room, command, requester_user_id, effective_thread_id)
+        # A command sent outside any thread speaks for the whole room, though its reply opens a thread.
+        thread_id = context.stable_target.source_thread_id
+        response_text = await _background_jobs_command(context, room, command, requester_user_id, thread_id)
 
     elif command.type == CommandType.EDIT_SCHEDULE:
         task_id = command.args["task_id"]

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 
 if TYPE_CHECKING:
@@ -17,8 +18,6 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 logger = get_logger(__name__)
-
-_BACKGROUND_JOBS_STATE_TYPE = "io.mindroom.background_jobs"
 
 
 class _PublishingBot(Protocol):
@@ -75,12 +74,13 @@ class JobStatePublisher:
             if self._published.get((agent, room_id)) == content:
                 continue
             bot = bots(agent)
-            if bot is None or bot.client is None:
+            # A room the bot left can no longer show its jobs, and refuses its writes.
+            if bot is None or bot.client is None or room_id not in bot.client.rooms:
                 continue
             try:
                 response = await bot.client.room_put_state(
                     room_id=room_id,
-                    event_type=_BACKGROUND_JOBS_STATE_TYPE,
+                    event_type=BACKGROUND_JOBS_EVENT_TYPE,
                     content=content,
                     state_key=bot.matrix_id.full_id,
                 )
@@ -88,6 +88,10 @@ class JobStatePublisher:
                 logger.warning("Publishing background jobs state failed; retrying", room_id=room_id, exc_info=True)
                 continue
             if isinstance(response, nio.RoomPutStateResponse):
+                self._published[(agent, room_id)] = content
+            elif isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN":
+                # The room does not let the bot write this state; retrying the same content cannot help.
+                logger.warning("Background jobs state is forbidden in this room", room_id=room_id)
                 self._published[(agent, room_id)] = content
             else:
                 logger.warning("Background jobs state was refused; retrying", room_id=room_id, response=str(response))

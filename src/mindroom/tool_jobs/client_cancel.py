@@ -21,7 +21,7 @@ BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 
 @dataclass(frozen=True)
 class JobCancelRequest:
-    """One job to cancel, or every job of the thread the request was sent in."""
+    """One job to cancel, or every job of the thread the request was sent in, or of the room outside any thread."""
 
     job_id: str | None
     cancel_all: bool
@@ -72,7 +72,7 @@ async def _cancel_jobs(
     """Cancel the agent's live jobs a request names in a room, and return them."""
     live = _live_jobs(runtime, agent_name=agent_name, room_id=room_id)
     if request.cancel_all:
-        targets = [job for job in live if job.owner.resolved_thread_id == request.thread_id]
+        targets = [job for job in live if request.thread_id in {None, job.owner.resolved_thread_id}]
     else:
         targets = [job for job in live if job.job_id == request.job_id]
     for job in targets:
@@ -102,14 +102,14 @@ async def cancel_room_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id:
 
 
 def conversation_jobs(runtime: ToolJobRuntime, *, room_id: str, thread_id: str | None) -> list[BackgroundJob]:
-    """Return the live jobs of every entity in one conversation, oldest first."""
+    """Return the live jobs of every entity in one thread, or in the whole room for ``None``, oldest first."""
     return sorted(
         (
             job
             for job in runtime.retained_jobs()
             if job.status not in TERMINAL_STATUSES
             and job.owner.room_id == room_id
-            and job.owner.resolved_thread_id == thread_id
+            and thread_id in {None, job.owner.resolved_thread_id}
         ),
         key=lambda job: (job.created_at, job.job_id),
     )

@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.identity import MatrixID
-from mindroom.tool_jobs.publication import _BACKGROUND_JOBS_STATE_TYPE, JobStatePublisher, _jobs_state_content
+from mindroom.tool_jobs.publication import JobStatePublisher, _jobs_state_content
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
 from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime, wait_for_status
 
@@ -34,6 +35,7 @@ def _job(job_id: str, *, agent: str = "agent_a", room: str = "!room:test", statu
 def _bot(agent: str) -> MagicMock:
     bot = MagicMock()
     bot.matrix_id = MatrixID.parse(f"@mindroom_{agent}:test")
+    bot.client.rooms = {"!room:test": MagicMock()}
     bot.client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse(event_id="$state", room_id="!room:test"),
     )
@@ -68,7 +70,7 @@ async def test_each_agent_publishes_its_own_state_in_each_room() -> None:
         bot.client.room_put_state.assert_awaited_once()
         call = bot.client.room_put_state.await_args.kwargs
         assert call["room_id"] == "!room:test"
-        assert call["event_type"] == _BACKGROUND_JOBS_STATE_TYPE
+        assert call["event_type"] == BACKGROUND_JOBS_EVENT_TYPE
         assert call["state_key"] == f"@mindroom_{agent}:test"
 
 
@@ -123,3 +125,26 @@ async def test_recovered_interrupted_jobs_leave_the_published_state(tmp_path: Pa
         assert call["content"] == {"jobs": []}
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_room_the_bot_left_gets_no_write() -> None:
+    """The bot writes no state into a room it is no longer in."""
+    bots = _bots("agent_a")
+    bots["agent_a"].client.rooms = {}
+    await JobStatePublisher().publish(bots.get, [_job("job_1")])
+    bots["agent_a"].client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_forbidden_write_is_not_retried_until_the_jobs_change() -> None:
+    """A room where the bot may not write the state is left alone until its jobs change."""
+    bots = _bots("agent_a")
+    put = bots["agent_a"].client.room_put_state
+    put.return_value = nio.RoomPutStateError("forbidden", status_code="M_FORBIDDEN")
+    publisher = JobStatePublisher()
+    await publisher.publish(bots.get, [_job("job_1")])
+    await publisher.publish(bots.get, [_job("job_1")])
+    assert put.await_count == 1
+    await publisher.publish(bots.get, [_job("job_1"), _job("job_2")])
+    assert put.await_count == 2

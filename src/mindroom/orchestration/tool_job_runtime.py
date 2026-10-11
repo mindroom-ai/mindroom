@@ -112,6 +112,8 @@ class ToolJobRuntimeCoordinator:
     _initialized: bool = field(default=False, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
     _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
+    # Follow-ups this process admitted, which later passes over the same ended jobs leave alone.
+    _admitted_follow_ups: set[str] = field(default_factory=set, init=False)
 
     async def initialize(self) -> None:
         """Pin execution mode, then build the job runtime when the instance runs jobs, before dispatch can start."""
@@ -357,14 +359,21 @@ class ToolJobRuntimeCoordinator:
             if not jobs or bot is None:
                 continue
             principal = bot.journal_principal()
-            streaks = [
-                follow_up_streak(await principal.load_event(job.source_event_id))
+            streaks = {
+                job.job_id: 0
+                if job.source_event_id is None
+                else follow_up_streak(await principal.load_event(job.source_event_id))
                 for job in jobs
-                if job.source_event_id is not None
-            ]
-            streak = 1 + max(streaks, default=0)
-            if streak <= FOLLOW_UP_LIMIT:
-                await bot.admit_job_follow_up(key, follow_up_event_id(key, jobs), streak)
+            }
+            # A job a chain at the limit started waits for a human message; it holds back no other job.
+            reported = [job for job in jobs if streaks[job.job_id] < FOLLOW_UP_LIMIT]
+            if not reported:
+                continue
+            follow_up_id = follow_up_event_id(key, reported)
+            if follow_up_id in self._admitted_follow_ups:
+                continue
+            await bot.admit_job_follow_up(key, follow_up_id, 1 + max(streaks[job.job_id] for job in reported))
+            self._admitted_follow_ups.add(follow_up_id)
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""
