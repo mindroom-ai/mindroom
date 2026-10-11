@@ -198,7 +198,7 @@ def test_budget_limit_uses_the_users_cap_then_the_default() -> None:
 
 
 def test_monitor_loads_caps_stored_by_an_earlier_run(tmp_path: Path) -> None:
-    BudgetCaps.load(budget_caps_path(_paths(tmp_path))).set(ALICE, 100, updated_by="test", now=OCTOBER)
+    BudgetCaps(budget_caps_path(_paths(tmp_path))).set(ALICE, 100, updated_by="test", now=OCTOBER)
 
     monitor, _current = _monitor(tmp_path, _config())
 

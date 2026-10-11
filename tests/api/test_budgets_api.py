@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 _HEADERS = {"Authorization": "Bearer test-budget-key"}
 _NOW = datetime(2026, 10, 11, 12, tzinfo=UTC)
+ALICE = "@alice:example.org"
+ALICE_BRIDGE = "@telegram-alice:example.org"
 
 
 def _client(temp_config_file: Path, tmp_path: Path) -> TestClient:
@@ -58,7 +60,7 @@ def _budgeted_config() -> Config:
 def test_budget_status_lists_settings_and_users_with_caps(temp_config_file: Path, tmp_path: Path) -> None:
     client = _client(temp_config_file, tmp_path)
     monitor = _bind_monitor(client, _budgeted_config())
-    monitor.caps.set("@alice:example.org", 100, updated_by="budget-service", now=_NOW)
+    monitor.caps.set(ALICE, 100, updated_by="budget-service", now=_NOW)
 
     try:
         response = client.get("/api/budgets", headers=_HEADERS)
@@ -74,7 +76,7 @@ def test_budget_status_lists_settings_and_users_with_caps(temp_config_file: Path
     assert payload["generated_at"] is None
     assert payload["users"] == [
         {
-            "user_id": "@alice:example.org",
+            "user_id": ALICE,
             "spend_usd": 0.0,
             "limit_usd": 100.0,
             "over_budget": False,
@@ -112,10 +114,6 @@ def test_budget_status_requires_dashboard_authentication(temp_config_file: Path,
 
     assert client.get("/api/budgets").status_code == 401
     assert client.get("/api/budgets", headers={"Authorization": "Bearer wrong"}).status_code == 401
-
-
-ALICE = "@alice:example.org"
-ALICE_BRIDGE = "@telegram-alice:example.org"
 
 
 @pytest.fixture

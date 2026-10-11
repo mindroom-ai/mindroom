@@ -173,7 +173,7 @@ class BudgetMonitor:
 
     def __post_init__(self) -> None:
         """Load the per-user caps a previous run stored."""
-        self.caps = BudgetCaps.load(budget_caps_path(self.runtime_paths))
+        self.caps = BudgetCaps(budget_caps_path(self.runtime_paths))
 
     def sync(self) -> None:
         """Start the refresh loop once and rescan for the active config."""

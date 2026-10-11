@@ -34,43 +34,43 @@ def test_caps_live_under_the_storage_root(tmp_path: Path) -> None:
 
 
 def test_missing_file_is_an_empty_store(tmp_path: Path) -> None:
-    assert BudgetCaps.load(_path(tmp_path)).entries() == {}
+    assert BudgetCaps(_path(tmp_path)).entries() == {}
 
 
 def test_set_persists_and_reloads(tmp_path: Path) -> None:
-    caps = BudgetCaps.load(_path(tmp_path))
+    caps = BudgetCaps(_path(tmp_path))
 
     cap = caps.set(ALICE, 100, updated_by="budget-service", now=NOW)
 
     assert cap == UserCap(limit_usd=100.0, updated_at=NOW, updated_by="budget-service")
     assert caps.get(ALICE) == cap
-    assert BudgetCaps.load(_path(tmp_path)).get(ALICE) == cap
+    assert BudgetCaps(_path(tmp_path)).get(ALICE) == cap
 
 
 def test_set_replaces_an_existing_cap(tmp_path: Path) -> None:
-    caps = BudgetCaps.load(_path(tmp_path))
+    caps = BudgetCaps(_path(tmp_path))
     caps.set(ALICE, 100, updated_by="budget-service", now=NOW)
 
     caps.set(ALICE, 50, updated_by="@admin:example.test", now=NOW)
 
-    assert BudgetCaps.load(_path(tmp_path)).entries() == {
+    assert BudgetCaps(_path(tmp_path)).entries() == {
         ALICE: UserCap(limit_usd=50.0, updated_at=NOW, updated_by="@admin:example.test"),
     }
 
 
 def test_delete_removes_a_cap_and_is_idempotent(tmp_path: Path) -> None:
-    caps = BudgetCaps.load(_path(tmp_path))
+    caps = BudgetCaps(_path(tmp_path))
     caps.set(ALICE, 100, updated_by="budget-service", now=NOW)
 
     caps.delete(ALICE)
     caps.delete(ALICE)
 
     assert caps.get(ALICE) is None
-    assert BudgetCaps.load(_path(tmp_path)).entries() == {}
+    assert BudgetCaps(_path(tmp_path)).entries() == {}
 
 
 def test_concurrent_sets_for_different_users_all_persist(tmp_path: Path) -> None:
-    caps = BudgetCaps.load(_path(tmp_path))
+    caps = BudgetCaps(_path(tmp_path))
     user_ids = [f"@user{index}:example.test" for index in range(20)]
     start = threading.Barrier(len(user_ids))
 
@@ -85,7 +85,7 @@ def test_concurrent_sets_for_different_users_all_persist(tmp_path: Path) -> None
         thread.join()
 
     assert set(caps.entries()) == set(user_ids)
-    assert set(BudgetCaps.load(_path(tmp_path)).entries()) == set(user_ids)
+    assert set(BudgetCaps(_path(tmp_path)).entries()) == set(user_ids)
 
 
 def test_invalid_file_raises_with_its_path(tmp_path: Path) -> None:
@@ -94,4 +94,4 @@ def test_invalid_file_raises_with_its_path(tmp_path: Path) -> None:
     path.write_text("{not json", encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"user_caps\.json"):
-        BudgetCaps.load(path)
+        BudgetCaps(path)

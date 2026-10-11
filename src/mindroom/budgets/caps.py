@@ -44,22 +44,19 @@ class BudgetCaps:
     """Caps by canonical Matrix user ID, read lock-free and written atomically to one JSON file."""
 
     path: Path
-    _entries: Mapping[str, UserCap] = field(default_factory=lambda: MappingProxyType({}), init=False)
+    _entries: Mapping[str, UserCap] = field(init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
-    @classmethod
-    def load(cls, path: Path) -> BudgetCaps:
-        """Load the caps at ``path``; a missing file holds no caps."""
-        caps = cls(path)
-        if not path.exists():
-            return caps
-        try:
-            users = _CapsFile.model_validate_json(path.read_bytes()).users
-        except ValidationError as exc:
-            msg = f"Invalid budget caps file {path}: {exc}"
-            raise ValueError(msg) from exc
-        caps._entries = MappingProxyType(users)
-        return caps
+    def __post_init__(self) -> None:
+        """Load the caps stored at ``path``; a missing file holds no caps."""
+        users: dict[str, UserCap] = {}
+        if self.path.exists():
+            try:
+                users = _CapsFile.model_validate_json(self.path.read_bytes()).users
+            except ValidationError as exc:
+                msg = f"Invalid budget caps file {self.path}: {exc}"
+                raise ValueError(msg) from exc
+        self._entries = MappingProxyType(users)
 
     def get(self, user_id: str) -> UserCap | None:
         """Return the cap stored for exactly this user ID."""
