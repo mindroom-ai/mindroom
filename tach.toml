@@ -7969,16 +7969,6 @@ path = "mindroom.routing_judgment"
 depends_on = ["mindroom.agent_descriptions", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
 visibility = ["mindroom.routing"]
 
-# The bundled research_check plugin is loaded from its directory by the plugin loader, never imported.
-[[modules]]
-path = "mindroom.research_check.hooks"
-depends_on = ["mindroom.agents", "mindroom.attachments", "mindroom.config.judgment", "mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.redaction", "mindroom.tool_system.events"]
-visibility = []
-
-[[interfaces]]
-from = ["mindroom.research_check.hooks"]
-expose = ["check_research"]
-
 [[modules]]
 path = "mindroom.tools.moviepy_video_tools"
 depends_on = [
