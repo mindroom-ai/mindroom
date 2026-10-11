@@ -174,6 +174,8 @@ class _Policy:
     limit: int
     model: Model
     replay_model: NativeCompactionModel | None
+    # Set while the provider compacts natively; the hook then only falls back to text when a request cannot fit.
+    native_route: str | None
 
 
 async def _prepare_request(
@@ -191,6 +193,13 @@ async def _prepare_request(
     layout = _layout(messages, run_response)
     if not layout.folded:
         return
+    if policy.native_route is not None and policy.replay_model is not None:
+        # The provider's own compaction could not keep this request within the window.
+        logger.warning(
+            "Native compaction left the request over its limit; compacting as text",
+            run_id=run_response.run_id,
+        )
+        policy.replay_model.configure_native_compaction(threshold=None)
     session = _scoped_session(binding, run_response)
     try:
         if session is None:
@@ -310,10 +319,15 @@ def _policy(binding: _MidTurnCompaction) -> _Policy | None:
         return None
     model = cast("Model", binding.target.model)
     replay_model = model if isinstance(model, NativeCompactionModel) else None
-    if replay_model is not None and replay_model.native_compaction is not None:
-        return None
+    native = replay_model.native_compaction if replay_model is not None else None
     limit = context_budget_after_reserve(plan.replay_window_tokens, plan.reserve_tokens)
-    return _Policy(inputs=inputs, limit=limit, model=model, replay_model=replay_model)
+    return _Policy(
+        inputs=inputs,
+        limit=limit,
+        model=model,
+        replay_model=replay_model,
+        native_route=native.route if native is not None else None,
+    )
 
 
 def _require_fit(
@@ -340,7 +354,17 @@ def _request_tokens(
     tools: list[dict[str, Any]] | None,
     loaded_ids: frozenset[str],
 ) -> int:
-    """Size the next request from the latest response this loop received, else by estimate."""
+    """Size the next request from the latest response this loop received, else by estimate.
+
+    A native response that created a checkpoint is billed for the transcript it replaced, so native routes always
+    estimate their projected request.
+    """
+    if policy.native_route is not None:
+        return estimate_request_messages_tokens(
+            messages,
+            replay_model=policy.replay_model,
+            native_route=policy.native_route,
+        ) + _tool_tokens(tools)
     anchor = next(
         (
             index

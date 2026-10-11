@@ -19,7 +19,7 @@ from agno.session.summary import SessionSummary
 from agno.utils.models.claude import format_messages
 
 from mindroom.agents import create_agent
-from mindroom.claude_prompt_cache import _count_cache_markers, prepare_claude_request_kwargs
+from mindroom.claude_prompt_cache import _count_cache_markers, _prepare_claude_request_kwargs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -96,7 +96,7 @@ async def _agent_request(
     assert isinstance(model, Claude)
     request = model._prepare_request_kwargs(system_text, messages=run_messages.messages)
     request["messages"] = chat_messages
-    return system_text, prepare_claude_request_kwargs(model, request)
+    return system_text, _prepare_claude_request_kwargs(model, request)
 
 
 @pytest.mark.asyncio
@@ -187,12 +187,12 @@ def test_system_boundary_preserves_custom_blocks_and_cache_budget(
     }
     original = deepcopy(request)
 
-    prepared = prepare_claude_request_kwargs(model, request)
+    prepared = _prepare_claude_request_kwargs(model, request)
 
     assert request == original
     assert prepared["system"][-1] == custom_block
     assert _count_cache_markers(prepared) <= 4
-    assert prepare_claude_request_kwargs(model, prepared) == prepared
+    assert _prepare_claude_request_kwargs(model, prepared) == prepared
     if cache_enabled:
         assert len(prepared["system"]) == 3
         assert prepared["system"][0] == {

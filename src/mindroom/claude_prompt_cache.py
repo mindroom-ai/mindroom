@@ -587,7 +587,7 @@ class _PromptCacheMessagesProxy:
         self._offload_stream_setup = offload_stream_setup
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
-        return prepare_claude_request_kwargs(self._model, request_kwargs)
+        return _prepare_claude_request_kwargs(self._model, request_kwargs)
 
     def create(self, **request_kwargs: object) -> object:
         return self._messages_namespace.create(**self._prepared(request_kwargs))
@@ -617,7 +617,7 @@ def _request_kwargs_without_provider_execution(request_kwargs: dict[str, Any]) -
     return prepared
 
 
-def prepare_claude_request_kwargs(
+def _prepare_claude_request_kwargs(
     model: AnthropicClaude,
     request_kwargs: dict[str, Any],
 ) -> dict[str, Any]:

@@ -64,32 +64,39 @@ def estimate_prompt_visible_history_tokens(
         scope=scope,
         history_settings=history_settings,
     )
+    tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
+    # A checkpoint covers the summary message before it, which native projection drops.
+    return tokens if has_checkpoint else summary_tokens + tokens
+
+
+def _route_tokens(
+    messages: list[Message],
+    *,
+    replay_model: NativeCompactionModel | None,
+    native_route: str | None,
+) -> tuple[int, bool]:
+    """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
     checkpoint_tokens = 0
     if native_route is not None:
-        projected = native_replay_messages(history_messages, native_route)
-        history_messages = []
+        projected = native_replay_messages(messages, native_route)
+        messages = []
         for message in projected:
             if items := checkpoint_items(message, native_route):
                 checkpoint_tokens += checkpoint_estimated_tokens(items)
             else:
-                history_messages.append(message)
-    if checkpoint_tokens:
-        # The checkpoint covers the summary message before it, which native projection drops.
-        summary_tokens = 0
-    return (
-        summary_tokens
-        + checkpoint_tokens
-        + _estimate_messages_tokens(history_messages, replay_model=replay_model, native_route=native_route)
-    )
+                messages.append(message)
+    tokens = _estimate_messages_tokens(messages, replay_model=replay_model, native_route=native_route)
+    return checkpoint_tokens + tokens, checkpoint_tokens > 0
 
 
 def estimate_request_messages_tokens(
     messages: Sequence[Message],
     *,
     replay_model: NativeCompactionModel | None,
+    native_route: str | None = None,
 ) -> int:
     """Estimate one provider request's messages the way replay planning estimates history."""
-    return _estimate_messages_tokens(list(messages), replay_model=replay_model, native_route=None)
+    return _route_tokens(list(messages), replay_model=replay_model, native_route=native_route)[0]
 
 
 def _estimate_messages_tokens(

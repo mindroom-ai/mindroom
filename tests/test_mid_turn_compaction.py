@@ -34,6 +34,7 @@ from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, inst
 from mindroom.history.replay import compaction_summary_message, is_compaction_summary
 from mindroom.history.storage import read_scope_state, set_force_compaction_state
 from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
+from mindroom.native_compaction import NativeCompactionModel
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.usage_storage import project_usage
 from tests.conftest import FakeModel, seed_session
@@ -876,3 +877,46 @@ def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
     assert messages[0].content == "Be precise.\n\nCurrent date: Monday"
     assert [is_compaction_summary(message) for message in messages] == [False, True, False]
     assert messages[2] is prompt
+
+
+class _NativeToolLoopModel(NativeCompactionModel, _ToolLoopModel):
+    """A tool-loop model on a native compaction route whose provider never compacts."""
+
+    def native_compaction_supported(self) -> bool:
+        return True
+
+    def native_compaction_endpoint(self) -> str:
+        return "test-endpoint"
+
+
+@pytest.mark.asyncio
+async def test_native_request_under_the_limit_never_text_compacts(
+    tmp_path: Path,
+    summary_calls: _SummaryCalls,
+) -> None:
+    config, paths = _config(tmp_path, context_window=1_000_000)
+    model = _NativeToolLoopModel(tool_rounds=4, usage=lambda number: MessageMetrics(input_tokens=999_900 * number))
+    model.configure_native_compaction(threshold=500_000)
+
+    await _run(_agent(model, config, paths), "Do the task")
+
+    assert summary_calls.inputs == []
+    assert model.native_compaction is not None
+
+
+@pytest.mark.asyncio
+async def test_oversized_native_request_turns_native_off_and_compacts_as_text(
+    tmp_path: Path,
+    summary_calls: _SummaryCalls,
+) -> None:
+    config, paths = _config(tmp_path)
+    model = _NativeToolLoopModel(tool_rounds=5)
+    model.configure_native_compaction(threshold=2000)
+
+    await _run(_agent(model, config, paths), "Do the task")
+
+    assert summary_calls.inputs
+    assert model.native_compaction is None
+    compacted = _first_compacted(model)
+    assert compacted.contents[-1] == "Do the task"
+    assert "tool" not in compacted.roles

@@ -20,8 +20,8 @@ from agno.tools.function import ToolResult
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.vertex_request_helpers import vertex_request_body
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -178,15 +178,8 @@ def test_stored_responses_thread_replays_to_claude_with_results_first(tmp_path: 
     assert [message.role for message in messages[:6]] == ["user", "assistant", "tool", "user", "tool", "assistant"]
 
 
-def test_vertex_claude_request_payload_puts_tool_results_first() -> None:
-    """Vertex shares the Claude request preparation, including its token-count payload."""
-    model = MindroomVertexAIClaude(id="claude-opus-5-5", project_id="demo-project", region="us-central1")
-
-    payload = model._request_input_kwargs(
-        _stored_responses_thread(),
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
+def test_vertex_claude_request_payload_puts_tool_results_first(tmp_path: Path) -> None:
+    """Vertex shares the Claude request preparation."""
+    payload = vertex_request_body(tmp_path, _stored_responses_thread(), model_id="claude-opus-5-5")
 
     _assert_every_tool_use_answered_first(payload)
