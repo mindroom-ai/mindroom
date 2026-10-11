@@ -17,6 +17,7 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent
 
 from mindroom.browser import playwright_mcp_session
 from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 
 @pytest.fixture
@@ -311,7 +312,8 @@ setInterval(()=>{},1000);
             command=node,
             args=[str(script), str(pidfile), str(detached).lower(), operation, str(birth_delay_ms)],
         ),
-        call_timeout_seconds=0.3,
+        # Only the timeout cases may expire the call; elsewhere a slow server must still receive it.
+        call_timeout_seconds=0.3 if operation in {"timeout", "startup"} else SETTLE_TIMEOUT_SECONDS,
     )
     call: asyncio.Task[CallToolResult] | None = None
     pid: int | None = None
@@ -327,27 +329,27 @@ setInterval(()=>{},1000);
                 await asyncio.sleep(0.01)
         pid = int(pidfile.read_text())
         call = asyncio.create_task(session.call_tool("crash" if operation == "crash" else "stuck", {}))
-        if operation in {"timeout", "cancel", "crash"}:
-            async with asyncio.timeout(2):
+        if operation in {"cancel", "crash"}:
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 while not pidfile.with_suffix(".pid.called").exists():  # noqa: ASYNC110 - real tool dispatch
                     await asyncio.sleep(0.01)
         if operation == "cancel":
             call.cancel()
         elif operation == "close":
-            await asyncio.wait_for(session.close(), 6)
+            await asyncio.wait_for(session.close(), SETTLE_TIMEOUT_SECONDS)
         expected_error = (
             TimeoutError
             if operation in {"timeout", "startup"}
             else (asyncio.CancelledError, ExceptionGroup, RuntimeError)
         )
         with pytest.raises(expected_error):
-            await asyncio.wait_for(call, 6)
-        await asyncio.wait_for(session.close(), 6)
+            await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(session.close(), SETTLE_TIMEOUT_SECONDS)
         stat = Path(f"/proc/{pid}/stat")
         assert not stat.exists() or stat.read_text().split()[2] == "Z"
     finally:
         try:
-            await asyncio.wait_for(session.close(), 6)
+            await asyncio.wait_for(session.close(), SETTLE_TIMEOUT_SECONDS)
         finally:
             if call is not None:
                 call.cancel()
