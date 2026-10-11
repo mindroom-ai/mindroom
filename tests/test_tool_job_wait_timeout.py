@@ -106,8 +106,9 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
     controls = JobTools(paths, build_execution_identity_from_runtime_context(context)).get_async_functions()["job"]
     controls.process_entrypoint()
     try:
-        with tool_runtime_context(context):
-            formatted = (backup if fallback else model)._format_tools([function, controls])
+        async with execution_resources():
+            with tool_runtime_context(context):
+                formatted = (backup if fallback else model)._format_tools([function, controls])
         schema = formatted[0]["function"]["parameters"]
         assert schema["properties"]["wait_timeout"]["anyOf"] == [{"type": "number", "minimum": 0}, {"type": "null"}]
         assert "wait_timeout" not in schema["required"]

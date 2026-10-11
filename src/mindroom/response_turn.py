@@ -316,6 +316,8 @@ class ResponseTurnContext:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
     background_tool_jobs: bool = False
+    # Set for a voice call's turn: no reply owns its calls' outcomes afterwards, so they finish inside it.
+    inline_tools: bool = False
     tool_job_agent_names: tuple[str, ...] | None = None
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the

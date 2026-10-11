@@ -1627,7 +1627,10 @@ async def ai_response(  # noqa: C901, PLR0915
         Agent response string
 
     """
-    ctx = replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths))
+    ctx = replace(
+        ctx,
+        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
+    )
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.agent_mode == "minimal":
@@ -2173,7 +2176,10 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
-    ctx = replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths))
+    ctx = replace(
+        ctx,
+        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
+    )
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _require_turn_session_id(ctx)

@@ -282,7 +282,7 @@ When work is still running, the reply finishes its answer and its message waits 
 When the work finishes, the same message continues below its answer: the agent retrieves the results with the native result-retrieval tool and answers with them.
 When a newer reply of the agent, with the same participants, ends with that work still running, it takes the work over, and the older message drops its waiting notice.
 A reply that resumes an approved tool does not wait; a waiting message of the agent, or its next reply, takes the work it leaves.
-Tool calls made through `mindroom-agent` inside a shell command never become jobs, and a [minimal-mode](https://docs.mindroom.chat/tools/agent-cli/) reply leaves earlier background results to the agent's next standard reply.
+Tool calls made through `mindroom-agent` inside a shell command or during a voice call never become jobs, and a [minimal-mode](https://docs.mindroom.chat/tools/agent-cli/) reply leaves earlier background results to the agent's next standard reply.
 A message continues with ready results at most 20 times; the requester's next answered message then takes the remaining work.
 A result that finishes while the reply is still streaming is picked up when the reply's current step ends; it does not start a competing response.
 No job completion starts a new reply by itself.

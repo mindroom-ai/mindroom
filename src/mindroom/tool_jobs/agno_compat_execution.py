@@ -16,6 +16,7 @@ from mindroom.tool_jobs.agno_execution import (
     wait_mode,
     wrap_tool_execution,
 )
+from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -69,7 +70,12 @@ def _wrap_tool_schemas(
 ) -> Callable[..., list[dict[str, Any]]]:
     def format_tools(tools: list[Function | dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         context = get_tool_runtime_context()
-        if context is None or get_background_runtime(context.runtime_paths) is None:
+        # Only a turn whose calls can become jobs offers their waiting budget.
+        if (
+            context is None
+            or get_background_runtime(context.runtime_paths) is None
+            or current_execution_resources() is None
+        ):
             return original(tools)
         projected: list[Function | dict[str, Any]] = []
         for tool in tools or []:
