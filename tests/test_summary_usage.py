@@ -15,6 +15,7 @@ from agno.models.response import ModelResponse
 from sqlalchemy import create_engine, event
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.history.compaction import (
     SummaryModel,
     _generate_compaction_summary_with_retry,
@@ -23,8 +24,12 @@ from mindroom.history.compaction import (
 from mindroom.history.storage import record_summary_usage
 from mindroom.history.summary_call import _CompactionSummaryTimeoutError, generate_compaction_summary
 from mindroom.history.types import HistoryScopeState
-from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import build_tool_execution_identity, tool_execution_identity
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    detached_requester_context,
+    tool_runtime_context,
+)
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
@@ -191,18 +196,15 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
             ),
         ],
     )
-    identity = build_tool_execution_identity(
-        channel="openai_compat",
-        agent_name="test_agent",
-        runtime_paths=paths,
+    authority = DetachedRequesterContext(
         requester_id="@api:localhost",
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session",
+        config=config,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: config,
     )
     try:
-        with tool_execution_identity(identity):
+        with detached_requester_context(authority):
             assert (
                 await compact_scope_history(
                     storage=storage,
