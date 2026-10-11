@@ -90,6 +90,8 @@ def _spawn_reader() -> subprocess.Popen[bytes]:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         env=_child_environment(),
+        # An idle warm child must not receive the terminal's Ctrl+C; the parent owns its lifetime.
+        start_new_session=True,
     )
 
 

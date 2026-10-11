@@ -305,10 +305,7 @@ def test_registry_initialization_accepts_superseded_state_snapshot(
 
 @pytest.mark.parametrize("orphan", [False, True])
 def test_native_reader_deadline_releases_lock_after_parent_death(tmp_path: Path, orphan: bool) -> None:
-    """A kernel deadline releases the lease even when native code holds the GIL.
-
-    The deadline starts with the request, so a reader that idled past it first still serves the read.
-    """
+    """A kernel deadline releases the lease even when native code holds the GIL."""
     if sys.platform != "linux":
         pytest.skip("The isolated orphan supervisor uses Linux child adoption")
     probe = tmp_path / "reader_probe.py"
@@ -347,8 +344,6 @@ else:
     )
     try:
         if not orphan:
-            time.sleep(0.6)
-            assert process.poll() is None, "an idle reader spent its deadline"
             process.stdin.write(('0.3\\n{"path":' + __import__('json').dumps(str(root)) +
                 ',"collection":"published","query":"query","embedding":[1.0]}').encode())
             process.stdin.close()

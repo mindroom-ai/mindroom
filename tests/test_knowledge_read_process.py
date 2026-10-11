@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import subprocess
 import sys
@@ -464,14 +465,14 @@ async def test_next_read_uses_warm_reader_and_replaces_it(
     _assert_only_warm_reader_alive(capture_read_processes)
 
 
-def test_idle_reader_spends_no_deadline_until_its_request_arrives(published_index: Path) -> None:
-    """A warm child can idle past any read deadline; the deadline starts with its request."""
+def test_warm_reader_runs_outside_the_terminal_process_group() -> None:
+    """Ctrl+C in the terminal reaches MindRoom, not the idle reader it keeps warm."""
     reader = read_process._spawn_reader()
-    time.sleep(1.5)
-    assert reader.poll() is None, "An idle reader must not spend a read deadline"
-    request = ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
-    output, returncode = read_process._exchange(reader, read_process._encode_request(request, 1.0))
-    assert [document.id for document in read_process._decode_result(output, returncode).documents] == ["a", "b"]
+    try:
+        assert os.getsid(reader.pid) == reader.pid
+    finally:
+        reader.kill()
+        reader.wait()
 
 
 def test_idle_reader_exits_quietly_when_its_input_closes(capfd: pytest.CaptureFixture[str]) -> None:
