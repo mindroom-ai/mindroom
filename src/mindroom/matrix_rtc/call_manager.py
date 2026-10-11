@@ -126,7 +126,8 @@ def _default_live_bridge_factory(local_identity: str, e2ee_enabled: bool) -> Liv
 _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
 _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
-_RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
+# A caller is waiting in the call, so retries never pause longer than a few seconds.
+_RECONCILE_RETRY_DELAYS_S = (1.0, 5.0)
 # A voice session that stays up this long proves the call works, so its failure retries from the first delay.
 _STABLE_CALL_SESSION_MS = 60_000
 _RECONCILE_MIN_INTERVAL_S = 1.0

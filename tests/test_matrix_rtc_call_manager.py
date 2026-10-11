@@ -4405,7 +4405,7 @@ async def test_repeated_session_failures_back_off_and_notify_once_per_call(tmp_p
     for _ in range(5):
         await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
 
-    assert delays == [1.0, 5.0, 30.0, 60.0, 60.0]
+    assert delays == [1.0, 5.0, 5.0, 5.0, 5.0]
     assert client.room_send.await_count == 1
 
     client.room_get_state.return_value = _state_response()
@@ -4464,7 +4464,7 @@ async def test_slow_teardown_does_not_count_as_a_stable_session(tmp_path: Path) 
     for _ in range(3):
         await _fail_active_session(manager, bridge, "Voice call error: connection failed.")
 
-    assert delays == [1.0, 5.0, 30.0]
+    assert delays == [1.0, 5.0, 5.0]
     await manager.shutdown()
 
 
