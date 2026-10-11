@@ -748,6 +748,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.timing",
     "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.resources",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
@@ -880,6 +881,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_call_budget",
     "mindroom.tool_jobs.agno_compat_execution",
+    "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.settings",
@@ -3032,6 +3034,7 @@ depends_on = [
     "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
+    "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
@@ -7658,6 +7661,7 @@ visibility = [
     "mindroom.tool_call_budget",
     "mindroom.skill_learning.capture",
     "mindroom.skill_learning.reviewer",
+    "mindroom.tool_jobs.notices",
 ]
 
 [[interfaces]]
@@ -8015,6 +8019,7 @@ visibility = [
 path = "mindroom.tool_jobs.execution_scope"
 depends_on = [
     "mindroom.tool_jobs.consumption",
+    "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.resources",
     "mindroom.tool_system.context_bound_streams",
 ]
@@ -8271,6 +8276,21 @@ depends_on = [
 visibility = ["mindroom.orchestration.tool_job_runtime"]
 
 [[modules]]
+path = "mindroom.tool_jobs.notices"
+depends_on = [
+    "mindroom.agno_compat_model_hooks",
+    "mindroom.hooks.types",
+    "mindroom.tool_jobs.completion",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = [
+    "mindroom.agents",
+    "mindroom.ai",
+    "mindroom.teams",
+    "mindroom.tool_jobs.execution_scope",
+]
+
+[[modules]]
 path = "mindroom.delegation.job_approvals"
 depends_on = [
     "mindroom.approval.response",
@@ -8313,6 +8333,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.response_turn",
     "mindroom.teams",
+    "mindroom.tool_jobs.notices",
 ]
 
 [[modules]]

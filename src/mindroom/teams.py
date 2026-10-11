@@ -135,6 +135,7 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import join_approval_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -2989,6 +2990,13 @@ async def prepare_materialized_team_execution(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
+    ctx = replace(
+        ctx,
+        transient_enrichment_items=await append_turn_start_job_note(
+            ctx.transient_enrichment_items,
+            ctx.tool_job_agent_names or (),
+        ),
+    )
     if ctx.system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
         _append_additional_context(team, rendered_system_context)

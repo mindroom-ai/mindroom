@@ -11,6 +11,7 @@ __all__ = [
     "AVATAR_ROOM_STYLE",
     "AVATAR_ROOM_SYSTEM_PROMPT",
     "AVATAR_TEAM_SYSTEM_PROMPT",
+    "BACKGROUND_JOBS_ENDED_NOTICE",
     "CODEX_DEFAULT_INSTRUCTIONS",
     "COMPACTION_SUMMARY_PROMPT",
     "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
@@ -224,6 +225,12 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
     "message arrived and states: (1) what you completed, (2) what remains unfinished, and (3) the "
     "next step. You cannot see the newer message's contents yet. If work remains, state that you "
     "intend to resume it on the next turn, subject to the newer message's instructions."
+)
+BACKGROUND_JOBS_ENDED_NOTICE = (
+    "[RUNTIME NOTICE, NOT A USER MESSAGE] The background jobs listed above have ended. "
+    'Acknowledge them by calling job(action="collect") once, which returns their results; do this even for jobs '
+    "whose output you do not need. Cancelled jobs need no acknowledgement. A team member collects the jobs it started. "
+    "Then continue your current task."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model or provider adapter could not accept some inline attachments for this request. "

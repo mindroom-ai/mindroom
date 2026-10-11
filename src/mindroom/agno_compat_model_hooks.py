@@ -124,7 +124,8 @@ def _with_tool_checkpoint(
 # and stop-after policy.
 # Coverage: tests/test_mid_turn.py exercises streaming, resumed batches, terminal tools,
 # and checkpoint cancellation; tests/test_queued_message_notify.py and
-# tests/test_approval_queued_notice.py cover queued notices and approval resumes.
+# tests/test_approval_queued_notice.py cover queued notices and approval resumes;
+# tests/test_tool_job_notices.py covers background job notices on tool results.
 def install_tool_result_callback(
     model: Model,
     *,

@@ -119,6 +119,7 @@ from mindroom.skill_learning.capture import observe_final_request
 from mindroom.streaming import StreamingPresentation
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.completion import delegated_child_context
+from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -1402,7 +1403,7 @@ async def _prepare_agent_run_context(
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
     prepared_run = await _prepare_agent_and_prompt(
-        ctx,
+        replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items)),
         prompt=prompt,
         runtime_paths=runtime_paths,
         config=config,

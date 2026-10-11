@@ -62,6 +62,7 @@ from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.agno_execution import approval_can_run_as_job
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
+from mindroom.tool_jobs.notices import install_job_notice_hook
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
@@ -1935,6 +1936,7 @@ def _install_background_jobs(
     if background_tool_jobs_enabled(config, runtime_paths):
         bind_actor_authority(agent, authority_snapshot(config, agent_name))
         install_tool_job_execution(model, agent.fallback_config, depth=depth)
+        install_job_notice_hook(model, agent_name=agent_name)
 
 
 @timed("system_prompt_assembly.agent_create")

@@ -107,6 +107,33 @@ async def conversation_work(
     )
 
 
+def current_conversation(agent_names: Sequence[str] | None = None) -> tuple[ToolJobRuntime, ConversationKey] | None:
+    """Return the runtime and key of the reply running now, whose participants are its agent and ``agent_names``.
+
+    A job's own run and a delegated child's reply have no message of their own, so they have no conversation here.
+    """
+    context = get_tool_runtime_context()
+    if context is None or job_owns_execution() or _DELEGATED_CHILD.get():
+        return None
+    runtime = get_background_runtime(context.runtime_paths)
+    if runtime is None:
+        return None
+    return runtime, ConversationKey(
+        recipient=context.recipient,
+        room_id=context.room_id,
+        thread_id=context.resolved_thread_id,
+        requester_id=context.requester_id,
+        silent=context.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
+        participants=tuple(sorted({context.agent_name, *(agent_names or ())})),
+    )
+
+
+async def ended_jobs(runtime: ToolJobRuntime, key: ConversationKey) -> tuple[BackgroundJob, ...]:
+    """Return the ended, readable, unacknowledged jobs of ``key``, oldest first."""
+    work = await conversation_work(runtime, key)
+    return tuple(sorted(work.ready, key=lambda job: (job.created_at, job.job_id)))
+
+
 def _retrieval_calls(jobs: Sequence[BackgroundJob]) -> str:
     calls = []
     for job in jobs:
@@ -143,20 +170,9 @@ async def join_conversation_jobs(
     A reply that cannot retrieve results as an exact call of its own takes none: a minimal reply, whose CLI saves no
     such call, and a voice turn, whose call session owns no conversation's results.
     """
-    context = get_tool_runtime_context()
-    if context is None or job_owns_execution() or _DELEGATED_CHILD.get() or not can_retrieve:
+    if not can_retrieve or (current := current_conversation(agent_names)) is None:
         return _JobJoin()
-    runtime = get_background_runtime(context.runtime_paths)
-    if runtime is None:
-        return _JobJoin()
-    key = ConversationKey(
-        recipient=context.recipient,
-        room_id=context.room_id,
-        thread_id=context.resolved_thread_id,
-        requester_id=context.requester_id,
-        silent=context.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
-        participants=tuple(sorted({context.agent_name, *(agent_names or ())})),
-    )
+    runtime, key = current
     work = await conversation_work(runtime, key, attempted=attempted)
     ready = bool(work.ready) and joins < _JOB_JOIN_LIMIT
     # At the join limit the message stops holding, and the next reply in the conversation takes the work; a silent

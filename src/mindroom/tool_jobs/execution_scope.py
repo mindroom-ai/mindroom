@@ -10,6 +10,7 @@ from typing import cast
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.tool_jobs.consumption import ConsumptionOwner, consumption_context, finalize_consumption
+from mindroom.tool_jobs.notices import JobNotices, job_notice_context
 from mindroom.tool_jobs.resources import ExecutionResources, bind_execution_resources, execution_resources
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 
@@ -19,7 +20,7 @@ def owned_tool_execution[FunctionT: Callable[..., object]](
     *,
     enabled: Callable[..., bool] = lambda *_args, **_kwargs: True,
 ) -> FunctionT:
-    """Own resources and durable result claims for a coroutine or async stream."""
+    """Own resources, durable result claims, and job notices for a coroutine or async stream."""
     if inspect.isasyncgenfunction(function):
 
         @wraps(function)
@@ -28,10 +29,15 @@ def owned_tool_execution[FunctionT: Callable[..., object]](
                 return cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
             resources = ExecutionResources()
             consumption = ConsumptionOwner()
+            notices = JobNotices()
 
             @contextmanager
             def bind() -> Iterator[None]:
-                with bind_execution_resources(resources), consumption_context(consumption):
+                with (
+                    bind_execution_resources(resources),
+                    consumption_context(consumption),
+                    job_notice_context(notices),
+                ):
                     yield
 
             async def stream() -> AsyncIterator[object]:
@@ -56,7 +62,7 @@ def owned_tool_execution[FunctionT: Callable[..., object]](
             return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
         # Consumption finalizes, even for a cancelled parent, before response resources are released.
         async with execution_resources():
-            with consumption_context(ConsumptionOwner()):
+            with consumption_context(ConsumptionOwner()), job_notice_context(JobNotices()):
                 try:
                     return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
                 finally:
