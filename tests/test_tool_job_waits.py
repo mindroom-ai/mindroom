@@ -197,6 +197,8 @@ async def test_the_job_runtime_wakes_a_reply_once_its_work_is_ready(tmp_path: Pa
         woken, wake_id = bot.admit_job_wake.await_args.args
         assert woken.reply_id == reply.reply_id
         assert wake_id == wake_event_id(reply, (job,))
+        # A later wait of the reply has its own wakes, so an outcome left unretrieved can wake it again.
+        assert wake_event_id(replace(reply, revision=reply.revision + 1), (job,)) != wake_id
 
         # The wake retrieves the outcome, so no work is left for the reply.
         retrieved = await runtime.wait("work", owner=owner, depth=0, timeout=0)

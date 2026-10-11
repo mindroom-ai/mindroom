@@ -32,13 +32,13 @@ WAKE_RETRY_PROMPT = (
 def wake_event_id(reply: Reply, ready: Sequence[BackgroundJob]) -> str:
     """Name the wake for one set of ready outcomes, or the one that ends this wait of the reply, as no work is left.
 
-    Admitting the same wake again changes nothing, outcomes that become ready later name a new one, and each wait,
-    told apart by the reply's revision, has its own release.
+    Admitting the same wake again changes nothing, and outcomes that become ready later name a new one; each wait,
+    told apart by the reply's revision, has its own wakes, so an outcome a wake left unretrieved can wake a later one.
     """
     if not ready:
         return f"job-wake:{reply.reply_id}:{_RELEASE}:{reply.revision}"
     digest = hashlib.sha256(",".join(sorted(job.job_id for job in ready)).encode()).hexdigest()[:16]
-    return f"job-wake:{reply.reply_id}:{digest}"
+    return f"job-wake:{reply.reply_id}:{digest}:{reply.revision}"
 
 
 def ends_wait(wake_id: str) -> bool:
