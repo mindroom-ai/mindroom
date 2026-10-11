@@ -147,6 +147,7 @@ from mindroom.turn_store import TurnStore
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
+from mindroom.workers import runtime as workers_runtime_module
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -2981,6 +2982,14 @@ def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
     monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)
+
+
+@pytest.fixture(autouse=True)
+def _reopen_primary_worker_manager() -> Generator[None, None, None]:
+    """Reopen the process-wide primary worker manager after a test runs a real shutdown."""
+    yield
+    if not workers_runtime_module._PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 @pytest.fixture(autouse=True)
