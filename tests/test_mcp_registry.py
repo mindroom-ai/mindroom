@@ -57,7 +57,6 @@ def _restore_tool_registry() -> Iterator[None]:
     TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
-    bind_mcp_server_manager(None)
     sync_mcp_tool_registry(None)
     yield
     _MCP_TOOL_NAMES.clear()
@@ -65,7 +64,6 @@ def _restore_tool_registry() -> Iterator[None]:
     TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
-    bind_mcp_server_manager(None)
     sync_mcp_tool_registry(None)
 
 

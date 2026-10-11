@@ -126,6 +126,7 @@ from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers.media_fallback import reset_model_media_capability_cache
@@ -2974,6 +2975,12 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a router registered as the scheduled-task runner owner from leaking into later tests."""
     monkeypatch.setattr(scheduling_module, "_runner_owner", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
+    monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)
 
 
 @pytest.fixture(autouse=True)
