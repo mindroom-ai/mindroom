@@ -61,14 +61,15 @@ class _ChildRunObservation:
 _CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
 
 
-def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, str], ...]:
-    """Return the exact active native ancestry for a retained leaf execution owner."""
+def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, str, _DelegationGrant], ...]:
+    """Return the exact active native ancestry for a retained leaf execution owner, with each edge's grant."""
     observation = _CHILD_RUN.get()
     if observation is None or child_execution_identity(observation.child) != owner:
         return ()
     edges = []
     while observation is not None:
-        edges.append((observation.child.caller_agent_name, observation.child.child_agent_name))
+        child = observation.child
+        edges.append((child.caller_agent_name, child.child_agent_name, delegation_grant(child)))
         observation = observation.parent
     return tuple(reversed(edges))
 
@@ -279,7 +280,8 @@ def delegation_grant(child: DelegationChild) -> _DelegationGrant:
     return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
 
 
-def _caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: _DelegationGrant) -> bool:
+def caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: _DelegationGrant) -> bool:
+    """Return whether the caller's current config still grants this child, by delegation or its workflow tool."""
     caller = config.agents.get(caller_name)
     if caller is None:
         return False
@@ -373,7 +375,7 @@ def authorize_delegation(  # noqa: PLR0911
         return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-    caller_allows_target = _caller_grants_child(caller_name, agent_name, active_config, grant)
+    caller_allows_target = caller_grants_child(caller_name, agent_name, active_config, grant)
     # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
     # the caller already serves, possibly only through a team's access, keeps that access.
     if not caller_allows_target or (

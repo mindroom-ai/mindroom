@@ -13,7 +13,7 @@ from uuid import uuid4
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
-from mindroom.delegation.lifecycle import active_delegation_edges
+from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
@@ -240,14 +240,13 @@ class ToolJobRuntimeCoordinator:
         recipient = owner.transport_agent_name or root
         valid_transport = _transport_allows_actor(config, recipient, root)
         # Delegated children and their callers need their own grants; the root actor may hold its team's.
-        callers = ({owner.agent_name, *(caller for caller, _ in edges)} - {root}) | _accessed_entities(
+        callers = ({owner.agent_name, *(caller for caller, _, _ in edges)} - {root}) | _accessed_entities(
             config,
             recipient,
             root,
         )
-        allowed_edges = all(
-            caller in config.agents and child in config.agents[caller].delegate_to for caller, child in edges
-        )
+        # A workflow participant is granted by its caller's workflow tool, any other child by its delegate list.
+        allowed_edges = all(caller_grants_child(caller, child, config, grant) for caller, child, grant in edges)
         # Accepted work keeps executing while membership resolves; only a proven denial stops it, as revocation does.
         if (
             not valid_transport

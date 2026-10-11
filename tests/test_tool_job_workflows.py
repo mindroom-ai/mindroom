@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,9 +15,12 @@ from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agents import build_agent_toolkit
 from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.hooks import HookRegistry
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import (
     authority_snapshot,
@@ -32,7 +36,13 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call
 from tests.test_dynamic_workflows import _make_context, _workflow_spec
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    assembled_function,
+    tool_job_journal,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -257,3 +267,71 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     finally:
         release.set()
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant is granted by its caller's workflow tool, not by a delegate list, which stays empty here."""
+    context = _make_context(tmp_path)
+    context.config.background_tool_jobs.enabled = True
+    context.config.agents["general"].tools = [
+        ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
+        ToolConfigEntry(name="calculator"),
+    ]
+    assert context.config.agents["general"].delegate_to == []
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=context.runtime_paths,
+        config_provider=lambda: context.config,
+        bot_provider=lambda _name: None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, context.runtime_paths.storage_root),
+    )
+    child_model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("add", "a", a=1, b=2)]),
+            ModelResponse(content="workflow done"),
+        ],
+    )
+    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: child_model)
+    outer = DelegationModel(id="test")
+    install_tool_job_execution(outer)
+    entry = context.config.agents["general"].tools[0]
+    assert isinstance(entry, ToolConfigEntry)
+    toolkit = build_agent_toolkit(
+        "dynamic_workflow",
+        agent_name="general",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        tool_config_overrides=context.config.resolve_entity("general").authored_tool_configs[0].tool_config_overrides,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+        session_id=context.session_id,
+    )
+    assert isinstance(toolkit, DynamicWorkflowTools)
+    bind_toolkit_authority(toolkit, authored_name="dynamic_workflow")
+    function = toolkit.get_async_functions()["run_workflow"]
+    function._agent = bind_actor_authority(
+        Agent(id="general", telemetry=False),
+        authority_snapshot(context.config, "general"),
+    )
+    function._run_context = RunContext(run_id="root", session_id=context.session_id, session_state={})
+    spec = _workflow_spec(
+        participants=[{"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["calculator"]}],
+        permissions={"models": ["claude-sonnet-5"], "tools": ["calculator"]},
+    )
+    try:
+        await coordinator.sync()
+        async with execution_resources():
+            with tool_runtime_context(context):
+                assert json.loads(toolkit.create_workflow(spec))["status"] == "ok"
+                arguments = {"workflow_id": "competitor-research-report", "input": {"topic": "test"}}
+                await outer.arun_function_call(FunctionCall(function=function, call_id="outer", arguments=arguments))
+        outputs = [message.content for message in child_model.seen_messages if message.role == "tool"]
+        assert [json.loads(output)["result"] for output in outputs] == [3]
+    finally:
+        await coordinator.stop()
