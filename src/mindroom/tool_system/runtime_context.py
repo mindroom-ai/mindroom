@@ -132,6 +132,8 @@ class ToolRuntimeContext:
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[Function], bool] | None = None
+    # Tools of the authored subagent running this turn; copies it authors stay within them.
+    persona_tools: tuple[str, ...] | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     config_provider: Callable[[], Config] | None = None

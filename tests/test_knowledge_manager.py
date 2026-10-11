@@ -89,6 +89,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.logging_config import subprocess_logging_env
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -6153,6 +6154,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
     assert captured_env["TMPDIR"] == tempfile.gettempdir()
+    assert captured_env.items() >= subprocess_logging_env().items()
     assert captured_env["PATH"] == str((launcher_bin, runtime_bin)[explicit_runtime_path])
     assert captured_stdin is not None
     captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))

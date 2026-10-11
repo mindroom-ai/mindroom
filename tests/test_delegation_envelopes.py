@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agno.agent import Agent
@@ -40,11 +40,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class _InstructionRecordingModel(DelegationModel):
-    """Keep every child system prompt, including its first resumed model request."""
+    """Keep every child system prompt and offered function names, including its first resumed model request."""
 
     system_prompts: list[str] = field(default_factory=list)
+    offered: list[list[str]] = field(default_factory=list)
 
     async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        tools = cast("list[dict[str, Any]]", kwargs.get("tools") or [])
+        self.offered.append(sorted(str(tool.get("function", tool).get("name")) for tool in tools))
         if not self.responses:
             msg = "Child provider unavailable."
             raise RuntimeError(msg)
