@@ -1,0 +1,118 @@
+/* Brand palette from the logo: navy frame, teal faces, gold core. */
+:root {
+  --mr-navy: #143e69;
+  --mr-teal: #22b2c4;
+  --mr-teal-light: #a6f5ef;
+}
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #0b6f86;
+  --md-primary-fg-color--light: #2f97ad;
+  --md-primary-fg-color--dark: #08566a;
+  --md-accent-fg-color: #0a8aa3;
+  --md-accent-fg-color--transparent: #0a8aa31a;
+  --md-typeset-a-color: #0b6f86;
+  --mr-heading-gradient: linear-gradient(120deg, var(--mr-navy) 10%, #0b6f86 90%);
+  --mr-card-border: #0b6f8626;
+  --mr-glow: #ffd25e55;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #4cc9d6;
+  --md-primary-fg-color--light: #7fe3ea;
+  --md-primary-fg-color--dark: #22b2c4;
+  --md-accent-fg-color: #7fe3ea;
+  --md-accent-fg-color--transparent: #7fe3ea1a;
+  --md-typeset-a-color: #5fd3de;
+  --mr-heading-gradient: linear-gradient(120deg, #ffffff 15%, var(--mr-teal-light) 55%, var(--mr-teal) 95%);
+  --mr-card-border: #4cc9d626;
+  --mr-glow: #ffd25e33;
+}
+
+/* Hero on the home page. */
+.mr-hero {
+  position: relative;
+  padding: 1.5rem 0 1rem;
+  overflow-x: clip;
+  text-align: center;
+}
+
+.mr-hero::before {
+  position: absolute;
+  top: -1rem;
+  left: 50%;
+  z-index: -1;
+  width: min(22rem, 100%);
+  height: 14rem;
+  background: radial-gradient(closest-side, var(--mr-glow), transparent);
+  transform: translateX(-50%);
+  content: "";
+}
+
+.mr-hero img {
+  filter: drop-shadow(0 0.6rem 1.4rem #081a2e40);
+}
+
+.md-typeset .mr-hero h1 {
+  margin: 0.8rem 0 0.4rem;
+  font-size: 2.8em;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  background: var(--mr-heading-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.md-typeset .mr-hero .mr-tagline {
+  margin: 0 auto 0.6rem;
+  font-size: 1.35em;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .mr-hero .mr-lede {
+  max-width: 40rem;
+  margin: 0 auto 1.4rem;
+  color: var(--md-default-fg-color--light);
+}
+
+.md-typeset .mr-hero .md-button {
+  margin: 0.25rem 0.2rem;
+}
+
+.md-typeset .mr-video {
+  max-width: 52rem;
+  margin: 1.5rem auto 2rem;
+}
+
+.md-typeset .mr-video video {
+  display: block;
+  border: 1px solid var(--mr-card-border);
+  border-radius: 0.8rem;
+  box-shadow: 0 0.8rem 2rem #081a2e33;
+}
+
+/* Cards: a quiet brand-tinted border that lights up on hover. */
+.md-typeset .grid.cards > ul > li {
+  border-color: var(--mr-card-border);
+  transition: border-color 150ms, box-shadow 150ms, transform 150ms;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-primary-fg-color);
+  box-shadow: 0 0.4rem 1.2rem #081a2e1f;
+  transform: translateY(-1px);
+}
+
+.md-typeset .grid.cards .lg {
+  width: 1.6em;
+  height: 1.6em;
+  color: var(--md-primary-fg-color);
+}
+
+/* The reasons to choose MindRoom are long, so they get two columns. */
+.md-typeset .mr-why.grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+}
