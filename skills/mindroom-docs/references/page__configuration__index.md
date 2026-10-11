@@ -55,6 +55,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `teams` | Multi-agent collaboration | [Teams](https://docs.mindroom.chat/configuration/teams/) |
 | `router` | Message routing | [Router](https://docs.mindroom.chat/configuration/router/) |
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](https://docs.mindroom.chat/configuration/agents/#defaults) |
+| `agent_repositories` | GitHub organization and prefix for agent-owned repositories | [`agent_repository`](https://docs.mindroom.chat/tools/execution-and-coding/#agent_repository) |
 | `memory` | Memory backends and embedder | [Memory](https://docs.mindroom.chat/memory/) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](https://docs.mindroom.chat/mcp/) |
