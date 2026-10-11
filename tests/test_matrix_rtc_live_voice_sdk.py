@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import json
-import wave
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
@@ -23,7 +21,6 @@ from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions, LiveVoiceUsag
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from livekit.agents import Agent, AgentSession
     from livekit.agents.llm import InputTranscriptionCompleted
@@ -483,22 +480,17 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
 
 
 @pytest.mark.asyncio
-async def test_live_sdk_reports_call_telemetry_and_captures_provider_audio(
-    provider: _ProviderHTTP,
-    tmp_path: Path,
-) -> None:
-    """Real provider events drive delegation timing, cadence summaries, and opt-in provider capture."""
+async def test_live_sdk_times_delegation_stages_through_the_provider_ack(provider: _ProviderHTTP) -> None:
+    """Real SDK client and server events carry one delegation from creation to its commentary acknowledgement."""
     options = LiveVoiceAgentOptions(
         get_instructions=AsyncMock(return_value="Delegate requests."),
         model="gpt-live-1",
         api_key="test-api-key",
         voice="marin",
         respond=AsyncMock(return_value=CallAgentResponse("Done.")),
-        audio_capture_dir=tmp_path,
     )
     bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
     bridge._room = SimpleNamespace(disconnect=AsyncMock())
-    delta = base64.b64encode(bytes(4800)).decode()
     ack = "session.commentary.appended"
     acked = asyncio.Event()
     with capture_logs() as logs:
@@ -506,40 +498,23 @@ async def test_live_sdk_reports_call_telemetry_and_captures_provider_audio(
             await bridge.start_agent(options)
             await provider.socket.next_event("session.start")
             provider.socket.feed(
-                {"type": "session.input_transcript.delta", "delta": "Check status.", "start_ms": 0, "end_ms": 100},
-            )
-            provider.socket.feed(
                 {"type": "session.delegation.created", "delegation": {"id": "first", "target": "client"}},
             )
             append = await provider.socket.next_event("session.commentary.append")
             session = cast("Agent", bridge._live_agent).duplex_session
-            # Registered after MindRoom's listener, so telemetry has seen the acknowledgement first.
+            # Registered after MindRoom's listener, so the acknowledgement has been handled first.
             session.on("openai_server_event_received", lambda event: acked.set() if event["type"] == ack else None)
-            for _ in range(3):
-                provider.socket.feed({"type": "session.output_audio.delta", "delta": delta})
             provider.socket.feed({"type": ack, "client_event_id": append["event_id"]})
             await asyncio.wait_for(acked.wait(), timeout=2)
         finally:
             await asyncio.wait_for(bridge.aclose(), timeout=3)
 
     stages = [entry for entry in logs if entry["event"] == "call_delegation_stage"]
-    assert [entry["stage"] for entry in stages] == [
-        "created",
-        "enqueued",
-        "lock_acquired",
-        "response_done",
-        "commentary_appended",
-        "commentary_acked",
+    assert [(entry["delegation_id"], entry["stage"]) for entry in stages] == [
+        ("first", "created"),
+        ("first", "enqueued"),
+        ("first", "lock_acquired"),
+        ("first", "response_done"),
+        ("first", "commentary_appended"),
+        ("first", "commentary_acked"),
     ]
-    assert {entry["delegation_id"] for entry in stages} == {"first"}
-    assert stages[-1]["correlation"] == "client_event_id"
-    [burst] = [entry for entry in logs if entry["event"] == "call_output_audio_burst"]
-    assert (burst["audio_ms"], burst["delta_count"], burst["final"]) == (300.0, 3, True)
-    [cadence] = [entry for entry in logs if entry["event"] == "call_input_transcript_cadence"]
-    assert cadence["count"] == 1
-    [started] = [entry for entry in logs if entry["event"] == "call_audio_capture_started"]
-    capture_dir = tmp_path / started["path"].rsplit("/", 1)[-1]
-    with wave.open(str(capture_dir / "provider_out.wav"), "rb") as wav:
-        assert wav.readframes(wav.getnframes()) == bytes(4800) * 3
-    assert len((capture_dir / "provider_out.jsonl").read_text(encoding="utf-8").splitlines()) == 3
-    assert any(entry["event"] == "call_audio_capture_published_unavailable" for entry in logs)

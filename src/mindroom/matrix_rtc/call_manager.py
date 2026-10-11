@@ -37,7 +37,6 @@ from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.room_membership import cached_joined_member_ids
-from mindroom.matrix_rtc.call_audio_capture import call_audio_capture_dir
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
     CALL_BRIEF_TOKEN_BUDGET,
@@ -1517,7 +1516,6 @@ class CallManager:
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,
                 on_session_error=on_session_error,
-                audio_capture_dir=call_audio_capture_dir(self._runtime_paths),
             )
         if backend.stt is None or backend.tts is None or tooling.responder is None:
             msg = "Cascaded call agent was not fully materialized"

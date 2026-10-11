@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.timing import elapsed_ms_between, nearest_rank_percentile
+from mindroom.timing import elapsed_ms_between
 
 if TYPE_CHECKING:
     from types import FrameType
@@ -145,7 +145,6 @@ class EventLoopStallDetector:
         repeat_log_interval_seconds: float = _REPEAT_LOG_INTERVAL_SECONDS,
         poll_interval_seconds: float | None = None,
         stack_threshold_seconds: float | None = _DEFAULT_EVENT_LOOP_STALL_STACK_SECONDS,
-        stack_cooldown_seconds: float = _STALL_STACK_COOLDOWN_SECONDS,
     ) -> None:
         """Configure thresholds; ``start()`` arms the heartbeat and thread."""
         if not math.isfinite(heartbeat_interval_seconds) or heartbeat_interval_seconds <= 0:
@@ -155,7 +154,6 @@ class EventLoopStallDetector:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.repeat_log_interval_seconds = repeat_log_interval_seconds
         self.stack_threshold_seconds = stack_threshold_seconds
-        self.stack_cooldown_seconds = stack_cooldown_seconds
         default_poll_interval_seconds = max(min(1.0, threshold_seconds / 2), 0.01)
         if stack_threshold_seconds is not None:
             # Poll several times per short stall so its stack is sampled while the loop is blocked.
@@ -323,9 +321,9 @@ class EventLoopStallDetector:
         logger.info(
             "event_loop_scheduler_lag_summary",
             sample_count=len(milliseconds),
-            p50_ms=nearest_rank_percentile(milliseconds, 50),
-            p95_ms=nearest_rank_percentile(milliseconds, 95),
-            p99_ms=nearest_rank_percentile(milliseconds, 99),
+            p50_ms=_nearest_rank_percentile(milliseconds, 50),
+            p95_ms=_nearest_rank_percentile(milliseconds, 95),
+            p99_ms=_nearest_rank_percentile(milliseconds, 99),
             max_ms=milliseconds[-1],
             gc_collections_total=[generation["collections"] for generation in gc.get_stats()],
             # Wall-clock boundaries aid correlation; elapsed lag uses the monotonic clock.
@@ -453,7 +451,7 @@ class EventLoopStallDetector:
             self._suppressed_short_stall_stacks += 1
             self._short_stall = _ShortStall(beat=last_beat, diagnostics=None)
             return
-        self._next_short_stall_stack = now + self.stack_cooldown_seconds
+        self._next_short_stall_stack = now + _STALL_STACK_COOLDOWN_SECONDS
         current_process_cpu = time.process_time()
         diagnostics: dict[str, object] = {
             "stack_lag_ms": elapsed_ms_between(0.0, lag_seconds),
@@ -481,6 +479,11 @@ class EventLoopStallDetector:
                 self._note_stall_ended(last_beat)
             if now - last_beat > self.threshold_seconds:
                 self._note_stalled(now, heartbeat)
+
+
+def _nearest_rank_percentile(samples: list[float], percentile: int) -> float:
+    """Return one nearest-rank percentile from sorted non-empty samples."""
+    return samples[math.ceil(len(samples) * percentile / 100) - 1]
 
 
 def start_event_loop_stall_detector(runtime_paths: RuntimePaths) -> EventLoopStallDetector | None:

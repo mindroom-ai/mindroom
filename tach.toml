@@ -4070,7 +4070,6 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix_rtc.call_audio_capture",
     "mindroom.matrix_rtc.call_origin",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
@@ -4133,19 +4132,7 @@ path = "mindroom.matrix_rtc.live_voice_agent"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.logging_config",
-    "mindroom.matrix_rtc.call_audio_capture",
-    "mindroom.matrix_rtc.call_telemetry",
     "mindroom.matrix_rtc.voice_agent",
-]
-
-[[modules]]
-path = "mindroom.matrix_rtc.call_audio_capture"
-depends_on = ["mindroom.logging_config"]
-
-[[modules]]
-path = "mindroom.matrix_rtc.call_telemetry"
-depends_on = [
-    "mindroom.logging_config",
     "mindroom.timing",
 ]
 

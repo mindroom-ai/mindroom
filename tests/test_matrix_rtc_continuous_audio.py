@@ -52,7 +52,6 @@ async def start_audio(
     *,
     live: bool = True,
     stream_factory: Callable[..., object] | None = None,
-    on_input_frame: Callable[[rtc.AudioFrame, bool], None] | None = None,
 ) -> tuple[_AuthorizedParticipantAudioInput, MagicMock]:
     """Exercise session input wiring with the real RTC mixer and no network."""
     room = MagicMock()
@@ -90,7 +89,6 @@ async def start_audio(
         options,
         rtc_module=rtc_module,
         room_io_module=room_io,
-        on_input_frame=on_input_frame,
     )
     return session.input.audio, room
 
@@ -163,29 +161,6 @@ async def test_live_input_resumes_real_frames_after_late_microphone_and_stream_g
         await audio.aclose()
     assert microphone.closed
     assert microphone.pending_reads == 0
-
-
-@pytest.mark.asyncio
-async def test_live_input_reports_each_returned_frame_and_whether_it_was_zero_filled() -> None:
-    """The capture tap sees exactly the frames handed to the session, flagged by origin."""
-    observed: list[tuple[bytes, bool]] = []
-    audio, room = await start_audio(
-        on_input_frame=lambda item, zero_filled: observed.append((item.data.tobytes(), zero_filled)),
-    )
-    microphone = Microphone()
-    try:
-        returned = [(await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes()]
-        subscribe(room, "alice", microphone)
-        await asyncio.wait_for(microphone.reading.wait(), timeout=1)
-        microphone.frames.put_nowait(frame(5))
-        async with asyncio.timeout(2):
-            while frame(5).data.tobytes() not in returned:
-                returned.append((await anext(audio)).data.tobytes())
-    finally:
-        await audio.aclose()
-
-    assert [pcm for pcm, _ in observed] == returned
-    assert [zero_filled for _, zero_filled in observed] == [pcm == bytes(2400) for pcm in returned]
 
 
 @pytest.mark.asyncio
