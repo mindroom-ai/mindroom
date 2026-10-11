@@ -15,8 +15,8 @@ Matrix sync callback
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
-       -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
-       -> coalescing.py                                          (ordinary text dispatches immediately; adaptive text and media debounce)
+       -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
+       -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
             -> response_turn.py                                  (shared blocking/streaming turn drivers)
@@ -33,7 +33,7 @@ Matrix sync callback
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
-| `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
+| `config/bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
 | `cli/config_bundle.py` | Bundle install, change-classification, and runtime-confirmed apply/rollback command adapters, plus initialize-only runtime bootstrap |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
@@ -44,9 +44,9 @@ Matrix sync callback
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
-| `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
-| `coalescing.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
-| `coalescing_batch.py` | Coalesced dispatch batch construction |
+| `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
+| `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
+| `coalescing/batch.py` | Coalesced dispatch batch construction |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
@@ -56,8 +56,8 @@ Matrix sync callback
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
 | `mid_turn_judgment.py` | Bind the active request and agent settings to the shared LLM, TypeSafe, or OpenAI Decisions judgment backend |
 | `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
-| `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
-| `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
+| `providers/tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
+| `providers/groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
@@ -91,11 +91,11 @@ Matrix sync callback
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through |
 | `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools) |
-| `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
-| `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
-| `approval_tools.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
-| `approval_response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
-| `approval_manager.py` | Matrix-backed tool approval runtime state |
+| `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
+| `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
+| `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
+| `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
+| `approval/manager.py` | Matrix-backed tool approval runtime state |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
 | `oauth/credential_lifecycle.py` | Single transaction owner for scoped OAuth load, refresh, callback publication, invalidation, and reset state |
 | `oauth/credential_store.py` | Per-scope SQLite OAuth credential storage, revisions, and reset receipts |
@@ -103,7 +103,7 @@ Matrix sync callback
 | `oauth/reset_execution.py` | MCP retirement and durable reset execution |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
-| `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
+| `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
@@ -111,19 +111,19 @@ Matrix sync callback
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
-| `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
-| `cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
+| `agent_cli/minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
+| `agent_cli/cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
 | `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
-| `minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
+| `agent_cli/minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
-| `cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
-| `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
+| `agent_cli/cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
+| `agent_cli/cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
-| `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
+| `knowledge/file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
@@ -137,22 +137,22 @@ Matrix sync callback
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
-| `scheduling.py` | Cron and natural-language task scheduling |
-| `scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
-| `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
-| `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
+| `scheduling/tasks.py` | Cron and natural-language task scheduling |
+| `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
+| `scheduling/executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
+| `scheduling/scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
 | `tools/` | 100+ tool integrations |
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
-| `model_loading.py` | Model instantiation and provider-specific loader selection |
+| `providers/model_loading.py` | Model instantiation and provider-specific loader selection |
 | `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
 | `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
 | `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
-| `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
-| `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
+| `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
+| `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/monitor.py` | Background spend refresh and the per-reply decision to use the fallback model |
@@ -176,7 +176,7 @@ Matrix sync callback
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool subset, `subagents/<name>.md` workspace profiles, and the caller tool-subset check |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
-| `credentials.py` | Unified credential management (CredentialsManager) |
+| `credentials/manager.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
@@ -204,12 +204,12 @@ Matrix sync callback
 | `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
 | `commands/config_commands.py` | Chat-based config commands (`!config`) |
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
-| `voice_handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup |
+| `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
-| `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
-| `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
-| `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
+| `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
+| `shell/execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
+| `shell/supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
@@ -285,14 +285,14 @@ Matrix sync callback
 | `cli/debug_report.py` | `mindroom debug-report` command: bug report parsing, config-only storage location, and JSON output |
 | `cli/doctor.py` | Doctor command implementation |
 | `cli/local_stack.py` | Local stack setup command |
-| `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
+| `credentials/sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
 | `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded router relays, tag copy, and the moved notice in the source thread |
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
-| `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
+| `voice/visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 
 ## Persistent State

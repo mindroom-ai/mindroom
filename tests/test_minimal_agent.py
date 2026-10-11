@@ -22,6 +22,7 @@ from mindroom import agents, ai
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import response_cli_lifetime
+from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
@@ -37,7 +38,6 @@ from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_lo
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.hooks import EnrichmentItem
 from mindroom.memory.functions import MemoryPromptParts
-from mindroom.minimal_agent import MinimalAgent
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context

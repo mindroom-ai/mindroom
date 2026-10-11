@@ -35,11 +35,12 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
-from mindroom.approval_manager import (
+from mindroom.approval.manager import (
     _ApprovalStartupSweep,
     get_approval_store,
     initialize_approval_store,
 )
+from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
@@ -52,7 +53,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.heap_probe import start_heap_type_probe
 from mindroom.hooks import (
@@ -94,7 +95,6 @@ from mindroom.runtime_state import (
     set_runtime_ready,
 )
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
-from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.bot_helpers import (
@@ -3186,7 +3186,7 @@ class TestMultiAgentOrchestrator:
             _ApprovalStartupSweep(discarded=1, failed=0),
         ]
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
             _mock_approval_recovery(orchestrator, side_effect=sweeps) as recover_approval_cards_on_startup,
         ):
             orchestrator._approval_recovery.reset_startup_cleanup_gate()
@@ -3224,8 +3224,8 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION", 3),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION", 3),
             _mock_approval_recovery(
                 orchestrator,
                 return_value=_ApprovalStartupSweep(discarded=0, failed=1),
@@ -3297,7 +3297,7 @@ class TestMultiAgentOrchestrator:
             return _ApprovalStartupSweep(discarded=0, failed=1)
 
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
             _mock_approval_recovery(orchestrator, side_effect=_never_finishes) as recover_approval_cards_on_startup,
         ):
             recovery.reset_startup_cleanup_gate()
@@ -3367,7 +3367,7 @@ class TestMultiAgentOrchestrator:
             return _ApprovalStartupSweep(discarded=0, failed=1)
 
         with (
-            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            patch("mindroom.approval.recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
             _mock_approval_recovery(orchestrator, side_effect=_sweep),
         ):
             recovery.reset_startup_cleanup_gate()

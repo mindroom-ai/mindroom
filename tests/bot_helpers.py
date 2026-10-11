@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from agno.knowledge.document import Document
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.coalescing import ReadyPendingEvent
+    from mindroom.coalescing.gate import ReadyPendingEvent
     from mindroom.config.knowledge import KnowledgeBaseConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.inbound_turn_normalizer import DispatchPayload

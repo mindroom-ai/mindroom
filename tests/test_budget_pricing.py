@@ -12,8 +12,8 @@ from mindroom.budgets.pricing import PricedModel, _PriceTable, cost_usd, price_t
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.model_loading import get_model_instance
-from mindroom.usage_stats import TokenTotals
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.usage.stats import TokenTotals
 
 if TYPE_CHECKING:
     from pathlib import Path

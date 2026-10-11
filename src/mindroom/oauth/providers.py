@@ -22,7 +22,8 @@ from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
 from httpx import HTTPError, HTTPStatusError, ReadError, ReadTimeout, RemoteProtocolError
 
-from mindroom.credential_policy import (
+from mindroom.credentials.manager import get_runtime_credentials_manager, validate_service_name
+from mindroom.credentials.policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
@@ -30,7 +31,6 @@ from mindroom.credential_policy import (
     is_oauth_client_config_service,
     is_oauth_token_service,
 )
-from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
 from mindroom.logging_config import get_logger
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 

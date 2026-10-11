@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from mindroom.history_run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:

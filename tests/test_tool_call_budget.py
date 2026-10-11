@@ -16,7 +16,7 @@ from agno.run.team import TeamRunOutput
 from agno.team import Team
 from structlog.testing import capture_logs
 
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.tool_call_budget import install_model_call_cap
 
 if TYPE_CHECKING:

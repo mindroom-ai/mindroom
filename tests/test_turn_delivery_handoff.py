@@ -34,11 +34,11 @@ from mindroom.event_journal import (
     EventJournalStore,
     EventKind,
 )
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
-from mindroom.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
 from mindroom.turn_record import canonicalize_turn_record

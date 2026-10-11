@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from mindroom.scheduling import ScheduledWorkflow
+    from mindroom.scheduling.tasks import ScheduledWorkflow
 
 
 class _MessageTargetMetadata(TypedDict):

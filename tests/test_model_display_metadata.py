@@ -9,8 +9,8 @@ from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.model_loading import get_model_instance
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.synthetic_model import SyntheticModel
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:

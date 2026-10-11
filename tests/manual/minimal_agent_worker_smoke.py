@@ -39,7 +39,7 @@ from mindroom.commands import mode_commands
 from mindroom.config.agent import AgentConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import setup_logging
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import apply_exact_approval_decisions

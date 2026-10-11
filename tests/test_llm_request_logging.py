@@ -12,7 +12,6 @@ from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
 
-from mindroom.claude_prompt_cache import install_claude_deferred_tool_search
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import (
@@ -24,7 +23,8 @@ from mindroom.llm_request_logging import (
     record_llm_request_tools,
     stream_with_llm_request_log_context,
 )
-from mindroom.openai_tool_search import request_params_with_deferred_tool_search
+from mindroom.providers.claude_prompt_cache import install_claude_deferred_tool_search
+from mindroom.providers.openai_tool_search import request_params_with_deferred_tool_search
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

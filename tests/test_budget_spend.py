@@ -20,8 +20,8 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.model_loading import get_model_instance
-from mindroom.usage_stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -116,7 +116,7 @@ def _wire(
     rows: dict[UsageStorageSource, tuple[UsageRunNode, ...]],
 ) -> list[float | None]:
     seen_since: list[float | None] = []
-    monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: tuple(rows))
+    monkeypatch.setattr("mindroom.usage.stats.discover_admin_usage_sources", lambda **_: tuple(rows))
 
     def iter_rows(
         source: UsageStorageSource,
@@ -135,7 +135,7 @@ def _wire(
             runs=rows[source],
         )
 
-    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
+    monkeypatch.setattr("mindroom.usage.stats.iter_usage_storage_rows", iter_rows)
     return seen_since
 
 

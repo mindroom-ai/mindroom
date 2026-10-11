@@ -23,8 +23,9 @@ from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 
 from mindroom.agent_storage import create_session_storage
-from mindroom.approval_receipt import install_approval_receipt_hooks
-from mindroom.approval_tools import (
+from mindroom.approval.receipt import install_approval_receipt_hooks
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.approval.tool_owners import (
     approval_denial_context,
     approved_executions_context,
     required_approval_tool_names,
@@ -63,7 +64,6 @@ from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,

@@ -10,12 +10,13 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError
 
-from mindroom import embedder_health, embedding_errors
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.embedder_health import (
+from mindroom.embeddings import embedder_health
+from mindroom.embeddings import errors as embedding_errors
+from mindroom.embeddings.embedder_health import (
     capture_embedder_health_recorder,
     check_embedder_health,
     embedder_in_use,
@@ -23,11 +24,11 @@ from mindroom.embedder_health import (
     handle_embedder_config_reload,
     probe_embedder,
 )
-from mindroom.embedding_errors import (
+from mindroom.embeddings.errors import (
     describe_embedder_error,
     is_embedder_auth_failure_detail,
 )
-from mindroom.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -245,7 +246,7 @@ def test_per_agent_file_semantic_override_uses_embedder() -> None:
 def test_probe_returns_none_on_non_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A successful embedding round-trip reports healthy."""
     monkeypatch.setattr(
-        "mindroom.embedding_factory.create_configured_embedder",
+        "mindroom.embeddings.factory.create_configured_embedder",
         lambda *_args: _HealthyEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
@@ -254,7 +255,7 @@ def test_probe_returns_none_on_non_empty_vector(tmp_path: Path, monkeypatch: pyt
 def test_probe_reports_auth_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A 401 during the probe surfaces the canonical auth detail."""
     monkeypatch.setattr(
-        "mindroom.embedding_factory.create_configured_embedder",
+        "mindroom.embeddings.factory.create_configured_embedder",
         lambda *_args: _AuthFailingEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == EMBEDDER_AUTH_FAILED_DETAIL
@@ -263,7 +264,7 @@ def test_probe_reports_auth_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty vector is a failure, never a silent success."""
     monkeypatch.setattr(
-        "mindroom.embedding_factory.create_configured_embedder",
+        "mindroom.embeddings.factory.create_configured_embedder",
         lambda *_args: _EmptyVectorEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == "embedder returned an empty vector"
@@ -278,7 +279,7 @@ def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.
     )
     embedder = MindRoomOpenAIEmbedder(id="text-embedding-3-small", api_key="sk-x", openai_client=client)
     monkeypatch.setattr(
-        "mindroom.embedding_factory.create_configured_embedder",
+        "mindroom.embeddings.factory.create_configured_embedder",
         lambda *_args: embedder,
     )
 

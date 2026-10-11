@@ -13,7 +13,6 @@ from mindroom.automations.registry import iter_module_automations
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
-from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.registry_state import (
     capture_tool_registry_snapshot,
@@ -26,6 +25,7 @@ from mindroom.tool_system.registry_state import (
     synchronize_plugin_tools,
 )
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.tool_schema_cache import clear_tool_schema_cache
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

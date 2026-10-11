@@ -8,7 +8,7 @@ import pytest
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from mindroom.config_reload import ConfigReloadStatus
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 
 if TYPE_CHECKING:

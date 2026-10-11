@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES
-from mindroom.shell_execution import (
+from mindroom.shell.execution import (
     MAX_BACKGROUNDED,
     ProcessRecord,
     discard_background_record,
@@ -25,7 +25,7 @@ from mindroom.shell_execution import (
     run_command,
     signal_record,
 )
-from mindroom.shell_output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping

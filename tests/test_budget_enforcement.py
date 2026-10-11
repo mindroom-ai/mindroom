@@ -30,7 +30,7 @@ from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.teams import TeamMode, TeamTurnModelSelection
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -107,7 +107,7 @@ async def test_completed_response_asks_budgets_to_count_the_new_spend(tmp_path: 
     model = SyntheticModel(id="synthetic", min_response_chars=10, max_response_chars=10, chars_per_second=0)
 
     with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
         patch_response_runner_module(typing_indicator=_noop_typing, should_use_streaming=AsyncMock(return_value=False)),
     ):
         await coordinator.generate_response(_plain_request(_target()))

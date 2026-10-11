@@ -18,6 +18,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import reply_lifecycle as rl
+from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
@@ -25,9 +26,9 @@ from mindroom.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
-from mindroom.approval_execution import AgentApprovalExecution
-from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
-from mindroom.approval_response import (
+from mindroom.approval.execution import AgentApprovalExecution
+from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
+from mindroom.approval.response import (
     ApprovalResponseCoordinator,
     continuation_target,
     identify_approval_tools,
@@ -37,7 +38,6 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.budgets.monitor import budget_model
-from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -133,7 +133,7 @@ from mindroom.runtime_shutdown import (
     ResponseShutdownTimeoutError,
     RuntimeShutdownIntent,
 )
-from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
+from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,

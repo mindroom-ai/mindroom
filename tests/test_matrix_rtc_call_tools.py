@@ -19,8 +19,6 @@ from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
-from mindroom.bedrock_claude import MindRoomBedrockClaude
-from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.budgets import BudgetsConfig
@@ -43,6 +41,8 @@ from mindroom.matrix_rtc.call_tools import (
     matrix_message_available_during_call,
 )
 from mindroom.memory import MemoryPromptParts
+from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
+from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
@@ -346,7 +346,7 @@ async def test_call_agent_cache_refreshes_session_client_before_reused_turn(
         return client
 
     vars(model)["_get_client_params"] = dict
-    monkeypatch.setattr("mindroom.bedrock_claude.AsyncAnthropicBedrockMantle", _build_client)
+    monkeypatch.setattr("mindroom.providers.bedrock_claude.AsyncAnthropicBedrockMantle", _build_client)
     agent = MagicMock(model=model)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))

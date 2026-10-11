@@ -10,13 +10,15 @@ from agno.metrics import MessageMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 
-from mindroom import helper_usage, model_loading, routing, scheduling, thread_summary, topic_generator
+from mindroom import helper_usage, routing, thread_summary, topic_generator
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.providers import model_loading
+from mindroom.scheduling import tasks as scheduling
+from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 

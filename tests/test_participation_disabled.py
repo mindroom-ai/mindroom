@@ -17,7 +17,7 @@ from openai import AsyncOpenAI
 
 from mindroom import agno_compat_session_persistence as persistence
 from mindroom.agent_storage import get_agent_session
-from mindroom.openai_models import MindRoomOpenAIChat
+from mindroom.providers.openai_models import MindRoomOpenAIChat
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import ResponseAction

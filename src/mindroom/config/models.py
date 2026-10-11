@@ -19,8 +19,8 @@ from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
 )
-from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import validate_service_name
+from mindroom.credentials.manager import validate_service_name
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001

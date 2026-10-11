@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.model_loading import canonical_provider, get_model_instance
 from mindroom.model_usage import provider_reports_cache_tokens_outside_input
+from mindroom.providers.model_loading import canonical_provider, get_model_instance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelPricing
     from mindroom.constants import RuntimePaths
-    from mindroom.usage_stats import TokenTotals
+    from mindroom.usage.stats import TokenTotals
 
 logger = get_logger(__name__)
 

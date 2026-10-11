@@ -30,7 +30,7 @@ from mindroom.agents import create_agent
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     CredentialsManager,
     get_runtime_credentials_manager,
 )
@@ -4763,7 +4763,7 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
     bind_mcp_server_manager(manager)
     try:
         model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
             agent = create_agent(
                 "code",
                 config,
@@ -5220,7 +5220,7 @@ async def test_dynamic_load_rejects_scoped_oauth_mcp_function_collision(
     bind_mcp_server_manager(manager)
     try:
         model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
             agent = create_agent(
                 "code",
                 config,
@@ -5285,7 +5285,7 @@ async def test_oauth_mcp_catalog_projection_hides_session_loaded_function_collis
     bind_mcp_server_manager(manager)
     try:
         with patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             side_effect=lambda *_args, **_kwargs: OpenAIChat(id="gpt-4o-mini", api_key="sk-test"),
         ):
             initial_agent = create_agent(
@@ -5485,7 +5485,7 @@ async def test_dynamic_load_rejects_failed_deferred_non_oauth_mcp_server_before_
         assert get_loaded_tools_for_session(agent_name="code", config=config, session_id=session_id) == []
 
         model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
             agent = create_agent(
                 "code",
                 config,
@@ -5549,7 +5549,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
     bind_mcp_server_manager(manager)
     try:
         model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
             agent = create_agent(
                 "code",
                 config,

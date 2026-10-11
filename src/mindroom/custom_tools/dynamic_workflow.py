@@ -12,9 +12,10 @@ import nio
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.budgets.monitor import budget_model
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store,
@@ -48,7 +49,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from mindroom.api.credentials_oauth_policy import OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS
-from mindroom.credential_policy import filter_oauth_credential_fields, looks_like_oauth_credentials
+from mindroom.credentials.policy import filter_oauth_credential_fields, looks_like_oauth_credentials
 
 
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:

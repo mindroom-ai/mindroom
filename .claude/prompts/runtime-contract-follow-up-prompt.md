@@ -68,7 +68,7 @@ Scope for this PR:
   - `src/mindroom/matrix/users.py`
   - `src/mindroom/matrix/mentions.py`
   - `src/mindroom/avatar_generation.py`
-  - `src/mindroom/voice_handler.py`
+  - `src/mindroom/voice/handler.py`
   - `src/mindroom/thread_utils.py`
   - any directly related config helpers
 

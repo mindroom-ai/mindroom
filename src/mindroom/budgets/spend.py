@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 from mindroom.budgets.pricing import PricedModel, cost_usd
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

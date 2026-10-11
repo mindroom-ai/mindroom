@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.agent_cli.minimal_mode_preflight import minimal_mode_problems, render_minimal_mode_problems
 from mindroom.agent_modes import clear_agent_mode, resolve_agent_mode, set_agent_mode
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.message_target import MessageTarget
-from mindroom.minimal_mode_preflight import minimal_mode_problems, render_minimal_mode_problems
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 

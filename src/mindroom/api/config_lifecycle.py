@@ -31,7 +31,7 @@ from mindroom.config.yaml_includes import (
     partial_source_uses_includes,
     source_files_fingerprint,
 )
-from mindroom.event_journal_open import pending_event_journal_restart
+from mindroom.event_journal.opening import pending_event_journal_restart
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
     from mindroom.budgets.monitor import BudgetMonitor
-    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher

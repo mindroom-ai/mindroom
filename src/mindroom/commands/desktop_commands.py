@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.credentials import (
     delete_desktop_credentials,
