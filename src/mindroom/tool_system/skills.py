@@ -158,9 +158,11 @@ class _MindroomSkills(Skills):
     # AGNO_COMPAT: Skills always describes all three skill functions.
     # Reason: Agno 3.0.9 Skills.get_system_prompt_snippet names get_skill_instructions, get_skill_reference, and
     #   get_skill_script even when an approval rule hides one, so the model is told to call a function it lacks.
+    #   MindRoom's own SKILLS_TOOL_USAGE_PROMPT lists all three too, and this note corrects both.
     # Upstream issue: Tracking gap; no issue for rendering skill guidance from the offered functions has been identified.
     # Upstream PR: None identified.
-    # Remove when: Skills renders its prompt guidance from the skill functions the agent is actually offered.
+    # Remove when: Skills renders its prompt guidance from the skill functions the agent is actually offered, and
+    #   SKILLS_TOOL_USAGE_PROMPT then names only the offered functions or the note moves beside it.
     # Coverage: tests/test_dynamic_workflow_subagents.py::test_participant_reads_only_the_skills_it_names.
     def get_system_prompt_snippet(self) -> str:
         """Return Agno's skills prompt, naming any skill function an approval rule hides."""

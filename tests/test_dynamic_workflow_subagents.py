@@ -589,8 +589,13 @@ async def test_participant_reads_only_the_skills_it_names(
 
 @pytest.mark.asyncio
 async def test_participant_without_skills_reads_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A participant that names no skills is offered no skill functions, even when its caller has skills."""
-    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    """A participant that names no skills is offered no skill functions, even when every skill function is approved."""
+    rules = {
+        "get_skill_instructions": "auto_approve",
+        "get_skill_reference": "auto_approve",
+        "get_skill_script": "auto_approve",
+    }
+    workflow = _Workflow(tmp_path, monkeypatch, _config(rules=rules))
     _write_skill(workflow, "research")
 
     run = await workflow.run(_spec([{"id": "critic", "system_prompt": "Critic.", "tools": []}]))

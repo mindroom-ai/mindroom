@@ -335,7 +335,7 @@ def validate_persona_tools(
     if entry is not None:
         # A cap entry the caller has since lost is no longer theirs to offer.
         yours = (
-            [entry for entry in cap if entry.partition(".")[0] in available_toolkits]
+            [kept for kept in cap if kept.partition(".")[0] in available_toolkits]
             if cap is not None
             else sorted(set(available_toolkits))
         )
