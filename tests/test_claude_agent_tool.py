@@ -103,7 +103,7 @@ def _claude_response(
     )
 
 
-def _claude_result(output_tokens: int) -> ResultMessage:
+def _claude_result(output_tokens: int, *, input_tokens: int = 0, cache_reads: int = 0) -> ResultMessage:
     """Return a turn's result, whose usage covers its main conversation and whose model usage is a running total."""
     return ResultMessage(
         subtype="success",
@@ -113,7 +113,7 @@ def _claude_result(output_tokens: int) -> ResultMessage:
         num_turns=1,
         session_id="claude-session-123",
         total_cost_usd=0.02,
-        usage={"output_tokens": output_tokens},
+        usage={"input_tokens": input_tokens, "output_tokens": output_tokens, "cache_read_input_tokens": cache_reads},
         model_usage={
             "claude-sonnet-5-5": {
                 "inputTokens": 99999,
@@ -1165,6 +1165,7 @@ async def _send_metered_turns(
     requesters: list[str],
     *,
     api_requests: bool = False,
+    model: str | None = None,
 ) -> tuple[list[str], list[tuple[str | None, str, int, int, int, int]]]:
     """Send one prompt per requester on one session; return the replies and each requester's usage by model."""
     config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
@@ -1177,7 +1178,7 @@ async def _send_metered_turns(
         runtime_paths=paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
-    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model=model)
     replies: list[str] = []
     try:
         for requester in requesters:
@@ -1287,6 +1288,40 @@ async def test_claude_turn_that_switches_models_counts_each_model(
         ("@user:localhost", "claude-opus-5-5", 1000, 0, 4000, 0),
         ("@user:localhost", "claude-sonnet-5-5", 300, 150, 0, 0),
     ]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_counts_responses_that_sent_no_message(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty response that Claude Code retries sends no message, but the turn's result still counts it."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turn = [
+        _claude_response("claude-sonnet-5-5", "msg-1", 1000, cache_reads=4000),
+        _claude_result(200, input_tokens=1600, cache_reads=9000),
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [turn])
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"])
+
+    assert rows == [("@user:localhost", "claude-sonnet-5-5", 1600, 200, 9000, 0)]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_without_messages_counts_toward_the_session_model(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn whose responses all sent no message is counted under the model the session was started with."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_claude_result(4, input_tokens=6000, cache_reads=18000)]])
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"], model="claude-sonnet-5-5")
+
+    assert rows == [("@user:localhost", "claude-sonnet-5-5", 6000, 4, 18000, 0)]
 
 
 @pytest.mark.asyncio

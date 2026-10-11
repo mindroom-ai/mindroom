@@ -307,16 +307,19 @@ async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
         logger.warning("Claude session cleanup failed", error=str(error))
 
 
-async def _record_turn_usage(turn: _ClaudeTurn) -> None:
+async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> None:
     """Count one Claude Code turn's main-conversation usage toward the conversation and requester that ran it.
 
-    Each response reports its input and cache usage when it starts, while output is reported only for the whole
-    turn on its result, so output goes to the model that finished the turn. The result's model usage is a running
-    total that also restores earlier spend when a session resumes, so it is not used.
+    The result's usage covers the turn's main conversation, including responses that sent no message, such as an
+    empty reply Claude Code retried. Each message-bearing response reports its own input and cache usage when it
+    starts, which splits the turn by model; the rest of the turn, and its output, which only the result reports,
+    go to the model that finished it. The result's model usage is a running total that also restores earlier spend
+    when a session resumes, so it is not used.
     """
     owner = get_helper_usage_owner()
     responses = list(turn.responses.values())
-    if owner is None or not responses:
+    finishing_model = responses[-1].model if responses else session_model
+    if owner is None or finishing_model is None:
         return
     models: dict[str, ModelMetrics] = {}
     for response in responses:
@@ -326,7 +329,19 @@ async def _record_turn_usage(turn: _ClaudeTurn) -> None:
         model.cache_read_tokens += usage.get("cache_read_input_tokens") or 0
         model.cache_write_tokens += usage.get("cache_creation_input_tokens") or 0
     result_usage = (turn.result.usage if turn.result is not None else None) or {}
-    models[responses[-1].model].output_tokens = result_usage.get("output_tokens") or 0
+    # A crashed turn's result can report zeroes, so the result only ever adds to what its messages reported.
+    unseen_input = (result_usage.get("input_tokens") or 0) - sum(model.input_tokens for model in models.values())
+    unseen_cache_reads = (result_usage.get("cache_read_input_tokens") or 0) - sum(
+        model.cache_read_tokens for model in models.values()
+    )
+    unseen_cache_writes = (result_usage.get("cache_creation_input_tokens") or 0) - sum(
+        model.cache_write_tokens for model in models.values()
+    )
+    finishing = models.setdefault(finishing_model, ModelMetrics(id=finishing_model, provider="Anthropic"))
+    finishing.input_tokens += max(unseen_input, 0)
+    finishing.cache_read_tokens += max(unseen_cache_reads, 0)
+    finishing.cache_write_tokens += max(unseen_cache_writes, 0)
+    finishing.output_tokens = result_usage.get("output_tokens") or 0
     metrics = RunMetrics(details={"model": list(models.values())})
     for model in models.values():
         model.total_tokens = model.input_tokens + model.output_tokens
@@ -661,7 +676,7 @@ class ClaudeAgentTools(Toolkit):
             return session_error
 
         try:
-            await _record_turn_usage(turn)
+            await _record_turn_usage(turn, resolved_model)
         except Exception as error:
             # Claude has already done the work, so a usage write failure must not hide its reply.
             logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
