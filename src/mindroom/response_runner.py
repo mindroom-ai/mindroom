@@ -156,9 +156,9 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_jobs.completion import ConversationKey, ended_jobs
+from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
 from mindroom.tool_jobs.disabled import approval_is_parked
-from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key, follow_up_prompt
+from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import (
@@ -646,8 +646,6 @@ class ResponseRequest:
     interactive_span_id: str | None = None
     # Set for a follow-up: the conversation whose ended background jobs it reports in a new reply.
     follow_up_key: ConversationKey | None = None
-    # The jobs a follow-up's prompt already asks the model to collect; its turn does not mention them again.
-    asked_job_ids: tuple[str, ...] = ()
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -3504,13 +3502,12 @@ class ResponseRunner:
 
     async def _run_job_follow_up(self, event: JournalEvent) -> None:
         """Run the turn a follow-up asks for, then settle a follow-up no reply took."""
-        key = follow_up_key(event)
+        key = follow_up_key(event, self.deps.agent_name)
         claimed = asyncio.Event()
         handoff = asyncio.Event()
         if key is not None:
             await self._generate_job_follow_up(
                 self._job_follow_up_request(key, event.event_id, claimed=claimed, handoff=handoff),
-                key,
             )
         if claimed.is_set() or handoff.is_set():
             # The follow-up's reply settles its source, or keeps it pending for its retry.
@@ -3524,13 +3521,9 @@ class ResponseRunner:
         jobs = () if runtime is None else follow_up_jobs(await ended_jobs(runtime, request.follow_up_key))
         if not jobs:
             return None
-        prompt = follow_up_prompt(jobs, self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT"))
-        return replace(
-            request,
-            prompt=prompt,
-            response_envelope=replace(request.response_envelope, body=prompt),
-            asked_job_ids=tuple(job.job_id for job in jobs),
-        )
+        # The turn's start note lists the jobs, as every turn's does.
+        prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
+        return replace(request, prompt=prompt, response_envelope=replace(request.response_envelope, body=prompt))
 
     def _job_follow_up_request(
         self,
@@ -3557,23 +3550,21 @@ class ResponseRunner:
             source_handoff=handoff,
         )
 
-    async def _generate_job_follow_up(self, request: ResponseRequest, key: ConversationKey) -> None:
-        """Answer as this agent, or as the team whose members started the work."""
+    async def _generate_job_follow_up(self, request: ResponseRequest) -> None:
+        """Answer as this agent, or as this team, which owns the jobs its members started."""
         config = self.deps.runtime.config
         team = config.teams.get(self.deps.agent_name)
-        if team is None and key.participants == (self.deps.agent_name,):
+        if team is None:
             await self.generate_response(request)
             return
-        # An ad hoc team has no configured roster; the participants the key names are its members.
-        member_names, team_mode = (team.agents, team.mode) if team is not None else (key.participants, "coordinate")
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        if any(name not in registry.current_ids for name in member_names):
+        if any(name not in registry.current_ids for name in team.agents):
             # A member left the configuration, so no team answers; a later reply's note reports the jobs.
             return
         await self.generate_team_response_helper(
             request,
-            team_agents=[registry.current_ids[name] for name in member_names],
-            team_mode=team_mode,
+            team_agents=[registry.current_ids[name] for name in team.agents],
+            team_mode=team.mode,
         )
 
     def wake_cli_approval_sources(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
@@ -3940,7 +3931,6 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
             redacted_history_events=partial(self.deps.redacted_history_events, runtime.resolved_target),
-            asked_job_ids=request.asked_job_ids,
         )
 
     async def _request_remains_authorized(
@@ -4748,7 +4738,6 @@ class ResponseRunner:
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
         team_turn_ctx = ResponseTurnContext(
-            asked_job_ids=request.asked_job_ids,
             entity_label=self.deps.agent_name,
             session_id=session_id,
             run_id=response_run_id,

@@ -570,7 +570,7 @@ async def test_result_expiry_deletes_only_old_consumed_jobs_with_finished_source
 
 @pytest.mark.asyncio
 async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_path: Path) -> None:
-    """The held lookup finds exactly one conversation's unconsumed jobs in admission order, and forgets expired ones."""
+    """The ended-jobs lookup finds exactly one conversation's unconsumed jobs in order, and forgets expired ones."""
     owner = job_owner()
     jobs = {
         "a": (owner, "$turn"),
@@ -585,8 +585,14 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
         return BackgroundOutcome("completed", "saved")
 
     async def lookups(runtime: ToolJobRuntime) -> list[str]:
-        held = await runtime.held_jobs(**source, requester_id="@alice:test")
-        return [job.job_id for job, _readable in held]
+        ended = await runtime.ended_jobs(
+            recipient=source["transport_agent_name"],
+            room_id=source["room_id"],
+            thread_id=source["thread_id"],
+            requester_id="@alice:test",
+            silent=False,
+        )
+        return [job.job_id for job in ended]
 
     runtime = await tool_job_runtime(tmp_path)
     try:

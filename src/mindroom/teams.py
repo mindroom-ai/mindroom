@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
-from mindroom.agents import create_agent, enable_all_history_replay
+from mindroom.agents import create_agent, enable_all_history_replay, team_job_controls
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
     accumulate_model_request_metrics,
@@ -133,7 +133,7 @@ from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.notices import append_turn_start_job_note
+from mindroom.tool_jobs.notices import append_turn_start_job_note, install_job_notice_hook
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -154,6 +154,7 @@ if TYPE_CHECKING:
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
     from agno.run.requirement import RunRequirement
+    from agno.tools import Toolkit
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
@@ -2324,11 +2325,17 @@ def _create_team_instance(
         agent.add_session_summary_to_context = False
 
     install_message_builder_patch()
+    job_controls: Toolkit | None = None
     if background_tool_jobs_enabled(config, runtime_paths):
         install_tool_job_execution(model)
+        if execution_identity is not None:
+            # The team owns the jobs its members start for it: its leader hears when they end and collects them.
+            install_job_notice_hook(model, entity_name=execution_identity.recipient)
+            job_controls = team_job_controls(config, runtime_paths, execution_identity)
     team_members: list[Agent | Team] = [*agents]
     team = Team(
         members=team_members,
+        tools=None if job_controls is None else [job_controls],
         id=team_id,
         name=team_display_name,
         model=model,
@@ -2882,11 +2889,7 @@ async def prepare_materialized_team_execution(
     """Prepare one materialized team for execution."""
     ctx = replace(
         ctx,
-        transient_enrichment_items=await append_turn_start_job_note(
-            ctx.transient_enrichment_items,
-            ctx.tool_job_agent_names or (),
-            ctx.asked_job_ids,
-        ),
+        transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
     )
     if ctx.system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
@@ -3034,7 +3037,6 @@ async def team_response(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_name,
-        tool_job_agent_names=tuple(requested_agent_names),
         background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
@@ -3508,7 +3510,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_label,
-        tool_job_agent_names=tuple(requested_agent_names),
         background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,

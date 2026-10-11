@@ -230,13 +230,13 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
 BACKGROUND_JOBS_ENDED_NOTICE = (
     "[RUNTIME NOTICE, NOT A USER MESSAGE] The background jobs listed above have ended. "
     'Acknowledge them by calling job(action="collect") once, which returns their results; do this even for jobs '
-    "whose output you do not need. Cancelled jobs need no acknowledgement. A team member collects the jobs it started. "
+    "whose output you do not need. Cancelled jobs need no acknowledgement. "
     "Then continue your current task."
 )
 BACKGROUND_JOBS_FOLLOW_UP_PROMPT = (
-    "[RUNTIME UPDATE, NOT A USER MESSAGE] The background jobs listed above, which you started earlier in this "
-    'conversation, have ended. Call job(action="collect") once to read their results, then tell the user what '
-    "happened, as a reply to the request that started them."
+    "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs you started earlier in this conversation have ended; this "
+    'turn\'s background jobs context lists them. Call job(action="collect") once to read their results, then tell the '
+    "user what happened, as a reply to the request that started them."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model or provider adapter could not accept some inline attachments for this request. "

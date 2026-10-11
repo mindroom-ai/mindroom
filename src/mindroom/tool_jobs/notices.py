@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
 from mindroom.hooks.types import EnrichmentItem
-from mindroom.tool_jobs.completion import current_conversation, ended_jobs
+from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
 
     from agno.models.base import Model
     from agno.models.message import Message
@@ -47,18 +47,13 @@ def job_notice_context(notices: JobNotices) -> Iterator[None]:
         _NOTICES.reset(token)
 
 
-def job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
+def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
     """List each ended job on its own line, followed by what to do about them."""
     lines = []
     for job in jobs:
-        member = (
-            f" by member {job.owner.agent_name}"
-            if job.owner.transport_agent_name not in {None, job.owner.agent_name}
-            else ""
-        )
         # A restart stopped an interrupted job at an unknown point, and it is never run again on its own.
         partly = "; it may have partly run" if job.status == "interrupted" else ""
-        lines.append(f"`{job.job_id}` ({job.tool_name}) {job.status}{member}{partly}")
+        lines.append(f"`{job.job_id}` ({job.tool_name}) {job.status}{partly}")
     return "\n".join([*lines, notice])
 
 
@@ -72,9 +67,9 @@ async def _acknowledge_cancellations(runtime: ToolJobRuntime, jobs: Sequence[Bac
             await runtime.acknowledge_wait(job.job_id, waited.claim)
 
 
-async def _unnoticed_notice(notices: JobNotices, agent_names: Sequence[str]) -> str | None:
+async def _unnoticed_notice(notices: JobNotices) -> str | None:
     """Describe this reply's ended jobs it was not told about yet, and count them as told."""
-    current = current_conversation(agent_names)
+    current = current_conversation()
     context = get_tool_runtime_context()
     if current is None or context is None:
         return None
@@ -84,46 +79,44 @@ async def _unnoticed_notice(notices: JobNotices, agent_names: Sequence[str]) -> 
         return None
     notices.noticed.update(job.job_id for job in jobs)
     await _acknowledge_cancellations(runtime, jobs)
-    return job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
+    return _job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
 
 
-async def _turn_start_job_note(agent_names: Sequence[str] = (), asked: Collection[str] = ()) -> str | None:
+async def _turn_start_job_note() -> str | None:
     """Describe the conversation's jobs that ended before this reply, cancelled ones included, once per reply.
 
-    Jobs the turn's prompt already ``asked`` about, as a follow-up's does, are left out. Every attempt of the reply
-    asks again and gets the same note, since an attempt's prompt is not saved.
+    Every attempt of the reply asks again and gets the same note, since an attempt's prompt is not saved.
     """
     notices = _NOTICES.get()
     if notices is None:
         return None
     if not notices.started:
         notices.started = True
-        notices.noticed.update(asked)
-        notices.start_note = await _unnoticed_notice(notices, agent_names)
+        notices.start_note = await _unnoticed_notice(notices)
     return notices.start_note
 
 
-async def append_turn_start_job_note(
-    items: Sequence[EnrichmentItem],
-    agent_names: Sequence[str] = (),
-    asked: Collection[str] = (),
-) -> tuple[EnrichmentItem, ...]:
+async def append_turn_start_job_note(items: Sequence[EnrichmentItem]) -> tuple[EnrichmentItem, ...]:
     """Open the reply's prompt with its turn-start job note, when jobs ended before it."""
-    note = await _turn_start_job_note(agent_names, asked)
+    note = await _turn_start_job_note()
     if note is None:
         return tuple(items)
     return (*items, EnrichmentItem(key="background_jobs", text=note, cache_policy="volatile", persist=False))
 
 
-async def _append_job_notice(messages: list[Message], *, agent_name: str) -> None:
-    """Append the notice for jobs that ended during the tool batch to the batch's last result."""
+async def _append_job_notice(messages: list[Message], *, entity_name: str) -> None:
+    """Append the notice for jobs that ended during the tool batch to the batch's last result.
+
+    Only the answering entity hears it: an agent, or a team's leader, never the member a team delegated to.
+    """
     notices = _NOTICES.get()
-    if notices is None:
+    context = get_tool_runtime_context()
+    if notices is None or context is None or context.recipient != entity_name:
         return
     result = next((message for message in reversed(messages) if message.role == "tool"), None)
     if result is None or not isinstance(result.content, str | None):
         return
-    text = await _unnoticed_notice(notices, (agent_name,))
+    text = await _unnoticed_notice(notices)
     if text is None:
         return
     result.content = f"{result.content}\n\n{text}" if result.content else text
@@ -131,11 +124,11 @@ async def _append_job_notice(messages: list[Message], *, agent_name: str) -> Non
         result.compressed_content = f"{result.compressed_content}\n\n{text}"
 
 
-def install_job_notice_hook(model: Model, *, agent_name: str) -> None:
-    """Tell the model after each tool batch about the agent's jobs that ended since it last heard."""
+def install_job_notice_hook(model: Model, *, entity_name: str) -> None:
+    """Tell the model of the agent or team ``entity_name``, after each tool batch, about jobs that ended meanwhile."""
 
     async def after_tools(messages: list[Message], _result: ModelResponse) -> None:
-        await _append_job_notice(messages, agent_name=agent_name)
+        await _append_job_notice(messages, entity_name=entity_name)
 
     async def no_entry_notice(_messages: list[Message]) -> None:
         return None

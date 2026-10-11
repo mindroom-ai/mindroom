@@ -13,7 +13,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_turn import CompletedAttempt, TurnSinks, run_blocking_response_turn
-from mindroom.tool_jobs.completion import ConversationKey
+from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     FOLLOW_UP_LIMIT,
     follow_up_envelope,
@@ -59,7 +59,6 @@ def _key(owner: ToolExecutionIdentity) -> ConversationKey:
         thread_id=owner.resolved_thread_id,
         requester_id=owner.requester_id,
         silent=False,
-        participants=(owner.agent_name,),
     )
 
 
@@ -234,7 +233,6 @@ def _runner_key(bot: AgentBot) -> ConversationKey:
         thread_id="$thread",
         requester_id="@user:localhost",
         silent=False,
-        participants=(bot.agent_name,),
     )
 
 
@@ -281,10 +279,10 @@ async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: 
         assert request.sources.pending_event_ids == ("job-follow-up:1",)
         prepared = await runner._follow_up_under_lock(request)
         assert prepared is not None
-        assert "`work` (tool_work) completed" in prepared.prompt
+        # The turn's start note lists the jobs; its prompt asks for one collect.
+        assert prepared.prompt == bot.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
         assert 'job(action="collect")' in prepared.prompt
         assert prepared.response_envelope.body == prepared.prompt
-        assert prepared.asked_job_ids == ("work",)
     finally:
         await runtime.shutdown()
 
@@ -312,7 +310,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
 
 
 async def test_an_interrupted_job_gets_a_follow_up_saying_it_may_have_partly_run(tmp_path: Path) -> None:
-    """A job a restart interrupted is followed up as interrupted, warning that it may have partly run."""
+    """A job a restart interrupted gets a follow-up like a finished one."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
@@ -328,9 +326,8 @@ async def test_an_interrupted_job_gets_a_follow_up_saying_it_may_have_partly_run
         runner.generate_response = AsyncMock(return_value=None)
         await runner._run_job_follow_up(event)
         prepared = await runner._follow_up_under_lock(runner.generate_response.await_args.args[0])
+        # The follow-up's start note says the interrupted job may have partly run.
         assert prepared is not None
-        assert "`work` (tool_work) interrupted" in prepared.prompt
-        assert "partly run" in prepared.prompt
     finally:
         await runtime.shutdown()
 
@@ -341,7 +338,7 @@ async def test_only_a_human_message_releases_a_running_wait(turn: str) -> None:
     coordinator = ResponseLifecycleCoordinator()
     queued = _QueuedMessageState()
     queued.begin_response_turn()
-    key = ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False, participants=())
+    key = ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False)
     envelope = (
         follow_up_envelope(key, follow_up_id="job-follow-up:1", sender_id="@mindroom_general:localhost", prompt="")
         if turn == "follow_up"
@@ -425,9 +422,3 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
         bot.admit_job_follow_up.assert_awaited_once()
     finally:
         await runtime.shutdown()
-
-
-async def test_a_key_round_trips_through_its_recorded_json() -> None:
-    """A follow-up's recorded key restores the conversation it was admitted for."""
-    key = _key(job_owner())
-    assert ConversationKey.decode(key.encode()) == key

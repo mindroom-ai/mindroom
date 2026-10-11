@@ -11,13 +11,15 @@ from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.team import Team
 
+from mindroom.agents import team_job_controls
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
-from mindroom.tool_jobs.completion import current_conversation, ended_jobs
+from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
@@ -39,6 +41,7 @@ from tests.tool_job_helpers import (
     start_job,
     team_coordinator,
     tool_job_runtime,
+    wait_for_status,
 )
 
 if TYPE_CHECKING:
@@ -115,7 +118,10 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
                 waited = await coordinator.runtime.wait(jobs[0].job_id, owner=member_owner, depth=0)
                 assert waited.job.status == "completed", waited.job.result
                 assert json.loads(waited.job.result)["result"] == 5
-                assert await coordinator.runtime.list_jobs(owner=owner, depth=0) == []
+                # The entity that answers, the configured team or the ad hoc team's account, owns its member's job.
+                answering = replace(owner, agent_name=owner.recipient)
+                listed = await coordinator.runtime.list_jobs(owner=answering, depth=0)
+                assert [job.job_id for job in listed] == [jobs[0].job_id]
                 if configured:
                     config.teams["team"].access = ResponderAccessConfig(current_room_members=False)
                 else:
@@ -126,8 +132,8 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
 
 
 @pytest.mark.asyncio
-async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_path: Path) -> None:
-    """An ordinary later turn of the lead is not told of a member's job, which only a team reply can collect."""
+async def test_the_entity_that_answers_owns_its_members_jobs(tmp_path: Path) -> None:
+    """The entity whose account answers sees and collects a member's job; the member sees only its own."""
     config = managed_team_config(tmp_path)
     paths = team_coordinator(tmp_path, config).runtime_paths
     owner = replace(completed_delegation_job().owner, agent_name="worker", transport_agent_name="lead")
@@ -148,12 +154,13 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_p
         waited = await runtime.wait("member", owner=owner, depth=0)
         await runtime.release_wait("member", waited.claim)
         with tool_runtime_context(context):
-            agent_turn = current_conversation()
-            team_turn = current_conversation(("lead", "worker"))
-        assert agent_turn is not None
-        assert team_turn is not None
-        assert await ended_jobs(*agent_turn) == ()
-        assert [job.job_id for job in await ended_jobs(*team_turn)] == ["member"]
+            current = current_conversation()
+        assert current is not None
+        assert [job.job_id for job in await ended_jobs(*current)] == ["member"]
+        answering = replace(owner, agent_name="lead")
+        assert [job.job_id for job in await runtime.list_jobs(owner=answering, depth=0)] == ["member"]
+        other_member = replace(owner, agent_name="other")
+        assert await runtime.list_jobs(owner=other_member, depth=0) == []
         assert pending_outcome(runtime, "member") is not None
     finally:
         await runtime.shutdown()
@@ -278,3 +285,35 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
                 assert await coordinator.runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Path) -> None:
+    """The team's own job tool collects a member's ended job, as the team's reply that answers for it."""
+    config = managed_team_config(tmp_path)
+    paths = team_coordinator(tmp_path, config).runtime_paths
+    member = replace(completed_delegation_job().owner, agent_name="lead", transport_agent_name="team")
+    team = replace(member, agent_name="team")
+    runtime = await tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=team),
+        agent_name="team",
+        transport_agent_name="team",
+    )
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "Member result")
+
+    try:
+        await start_job(runtime, "member", tool_name="report", depth=0, adapter={}, owner=member, operation=operation)
+        await wait_for_status(runtime, "member", "completed")
+        controls = team_job_controls(config, paths, team)
+        assert isinstance(controls, JobTools)
+        with tool_runtime_context(context):
+            collected = str(await controls.job("collect"))
+        assert "`member` (report) completed" in collected
+        assert "Member result" in collected
+    finally:
+        await runtime.shutdown()

@@ -115,7 +115,6 @@ from mindroom.response_turn import (
 )
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
-from mindroom.tool_jobs.completion import delegated_child_context
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -1323,14 +1322,11 @@ async def _prepare_agent_run_context(
     """Prepare one agent response lifecycle through metadata assembly."""
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
+    if delegation_depth == 0 and ctx.agent_mode != "minimal":
+        # Only a top-level standard reply can collect jobs, so only it hears which ended.
+        ctx = replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items))
     prepared_run = await _prepare_agent_and_prompt(
-        replace(
-            ctx,
-            transient_enrichment_items=await append_turn_start_job_note(
-                ctx.transient_enrichment_items,
-                asked=ctx.asked_job_ids,
-            ),
-        ),
+        ctx,
         prompt=prompt,
         runtime_paths=runtime_paths,
         config=config,
@@ -1452,7 +1448,7 @@ async def run_delegated_child_response(
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
     )
     # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
-    with tool_runtime_context(child_context), delegated_child_context():
+    with tool_runtime_context(child_context):
         return await run_with_tool_execution_identity(
             identity,
             operation=lambda: ai_response(

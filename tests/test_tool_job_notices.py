@@ -18,11 +18,11 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.notices import (
     JobNotices,
+    _job_notice_text,
     _turn_start_job_note,
     append_turn_start_job_note,
     install_job_notice_hook,
     job_notice_context,
-    job_notice_text,
 )
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -95,7 +95,7 @@ async def _run(conversation: _Conversation, responses: list[ModelResponse], *, n
     """Run the leader for one reply whose tools can end jobs, with or without the reply's notice context."""
     model = DelegationModel(id="test", responses=responses)
     install_tool_job_execution(model)
-    install_job_notice_hook(model, agent_name="leader")
+    install_job_notice_hook(model, entity_name="leader")
 
     async def end_jobs(job_ids: list[str]) -> str:
         """End background jobs."""
@@ -156,7 +156,7 @@ async def test_the_notice_names_each_job_and_how_it_ended(tmp_path: Path) -> Non
         await conversation.start("job_a")
         await conversation.end("job_a")
         job = await lookup(conversation.runtime, "job_a", owner=conversation.owner, depth=0)
-        assert job_notice_text([job], "Collect.") == "`job_a` (tool_job_a) completed\nCollect."
+        assert _job_notice_text([job], "Collect.") == "`job_a` (tool_job_a) completed\nCollect."
     finally:
         await conversation.runtime.shutdown()
 
@@ -202,14 +202,28 @@ async def test_a_turn_starts_with_a_note_for_jobs_that_ended_before_it(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_a_follow_ups_note_leaves_out_what_its_prompt_asks_about(tmp_path: Path) -> None:
-    """A follow-up's prompt already lists its jobs, so its turn opens with no note repeating them."""
+async def test_an_interrupted_job_is_noted_as_one_that_may_have_partly_run(tmp_path: Path) -> None:
+    """A job a restart interrupted is reported like a finished one, warning that it may have partly run."""
     conversation = await _conversation(tmp_path)
+
+    async def interrupted() -> BackgroundOutcome:
+        return BackgroundOutcome("interrupted", "Restart interrupted the job.")
+
     try:
-        await conversation.start("finished")
-        await conversation.end("finished")
+        await start_job(
+            conversation.runtime,
+            "work",
+            tool_name="tool_work",
+            depth=0,
+            adapter={},
+            owner=conversation.owner,
+            operation=interrupted,
+        )
+        await wait_for_status(conversation.runtime, "work", "interrupted")
         with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
-            assert await _turn_start_job_note(asked=("finished",)) is None
+            note = await _turn_start_job_note()
+        assert note is not None
+        assert "`work` (tool_work) interrupted; it may have partly run" in note
     finally:
         await conversation.runtime.shutdown()
 

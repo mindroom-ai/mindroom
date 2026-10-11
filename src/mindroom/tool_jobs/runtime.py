@@ -335,14 +335,24 @@ class ToolJobRuntime:
         job = self._entries.pop(job_id).job
         self._by_conversation.remove(_conversation_key(job.owner), job_id)
 
-    def _visible(self, entry: _Entry, owner: ToolExecutionIdentity, depth: int) -> bool:
-        """Whether a caller's conversation, requester, and depth own a job it may still access."""
-        job = entry.job
-        return (
-            bool(owner.session_id)
-            and (job.owner, job.depth) == (self._canonical_owner(owner), depth)
-            and self._authorize(job)
+    def _owns(self, job: BackgroundJob, owner: ToolExecutionIdentity, depth: int) -> bool:
+        """Whether a caller owns a job: it made the call, or it is the agent or team that answers in its conversation.
+
+        A team owns the jobs its members start for its replies, so the team that answers collects their outcomes.
+        """
+        caller = self._canonical_owner(owner)
+        if not owner.session_id or job.depth != depth:
+            return False
+        answers = (
+            caller.agent_name == caller.recipient
+            and _conversation_key(job.owner) == _conversation_key(caller)
+            and job.owner.session_id == caller.session_id
         )
+        return job.owner == caller or answers
+
+    def _visible(self, entry: _Entry, owner: ToolExecutionIdentity, depth: int) -> bool:
+        """Whether a caller owns a job it may still access."""
+        return self._owns(entry.job, owner, depth) and self._authorize(entry.job)
 
     def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
@@ -360,12 +370,7 @@ class ToolJobRuntime:
         """
         self._ensure_open()
         entry = self._entries.get(job_id)
-        if (
-            entry is None
-            or not owner.session_id
-            or (entry.job.owner, entry.job.depth) != (self._canonical_owner(owner), depth)
-            or self._denied(entry.job)
-        ):
+        if entry is None or not self._owns(entry.job, owner, depth) or self._denied(entry.job):
             raise JobAccessError(_UNAVAILABLE)
         return entry, self._authorize(entry.job)
 
@@ -785,31 +790,34 @@ class ToolJobRuntime:
             outcome = stopped
         return outcome if outcome is not None and outcome.status in TERMINAL_STATUSES else default
 
-    async def held_jobs(
+    async def ended_jobs(
         self,
         *,
-        transport_agent_name: str,
+        recipient: str,
         room_id: str,
         thread_id: str | None,
         requester_id: str,
-        source_kind: str | None = None,
-    ) -> list[tuple[BackgroundJob, bool]]:
-        """Unacknowledged work of one requester and conversation, each job with whether its outcome is readable now.
+        silent: bool,
+    ) -> tuple[BackgroundJob, ...]:
+        """Return one conversation's ended top-level jobs that nobody acknowledged or reads now, oldest first.
 
-        A job stays listed while a waiter claims it or while its access is only unresolved, such as while room
-        membership resolves; neither is readable then. Consumption or a proven denial ends the listing.
+        A job stays out while a waiter claims it, while its requester's access is unresolved or gone, and once its
+        outcome was acknowledged; a silent schedule's jobs and visible ones are listed apart.
         """
-        silent = source_kind == SILENT_SCHEDULE_SOURCE_KIND
         async with self._lock:
             if self._closed:
-                return []
-            return [
-                (await self._snapshot(entry), entry.claim is None and self._authorize(entry.job))
-                for entry in self._by_conversation.get((transport_agent_name, room_id, thread_id, requester_id))
-                if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent
+                return ()
+            ended = [
+                await self._snapshot(entry)
+                for entry in self._by_conversation.get((recipient, room_id, thread_id, requester_id))
+                if entry.job.status in TERMINAL_STATUSES
+                and entry.job.depth == 0
                 and not entry.job.consumed
-                and not self._denied(entry.job)
+                and entry.claim is None
+                and (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent
+                and self._authorize(entry.job)
             ]
+        return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
 
     async def expire_consumed(
         self,

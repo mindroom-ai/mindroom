@@ -1699,26 +1699,23 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
-    controls = JobTools.build(
+    controls = _job_controls(
         tools,
+        config,
         runtime_paths,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
+        supports_native_tool_approval=supports_native_tool_approval,
+        tool_hook_bridge=tool_hook_bridge,
         output_file_policy=_agent_tool_output_file_policy(
             agent_runtime,
             runtime_paths,
             config.defaults.tool_output_auto_save_threshold_bytes,
         ),
     )
-    controls = apply_tool_approval_capability(
-        controls,
-        config,
-        supports_native_tool_approval=supports_native_tool_approval,
-        registered_tool_name="job",
-    )
     if controls is not None:
-        tools.append(prepend_tool_hook_bridge(controls, tool_hook_bridge))
+        tools.append(controls)
     hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
@@ -1923,6 +1920,62 @@ def _build_agent_instructions(
     return instructions
 
 
+def _job_controls(
+    tools: Sequence[Toolkit],
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    owner: ToolExecutionIdentity | None,
+    *,
+    depth: int,
+    enabled: bool,
+    supports_native_tool_approval: bool,
+    tool_hook_bridge: Callable[..., Any] | None,
+    output_file_policy: ToolOutputFilePolicy | None = None,
+) -> Toolkit | None:
+    """Build the reserved job toolkit through its caller's approval policy and tool hooks."""
+    controls = JobTools.build(
+        list(tools),
+        runtime_paths,
+        owner,
+        depth=depth,
+        enabled=enabled,
+        output_file_policy=output_file_policy,
+    )
+    controls = apply_tool_approval_capability(
+        controls,
+        config,
+        supports_native_tool_approval=supports_native_tool_approval,
+        registered_tool_name="job",
+    )
+    return None if controls is None else prepend_tool_hook_bridge(controls, tool_hook_bridge)
+
+
+def team_job_controls(
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    owner: ToolExecutionIdentity,
+) -> Toolkit | None:
+    """Build a team leader's job toolkit: the team owns, and collects, the jobs its members start for it."""
+    bridge = _build_agent_tool_hook_bridge(
+        hook_registry=None,
+        plugins=_load_agent_plugins(config, runtime_paths),
+        agent_name=owner.recipient,
+        dispatch_context=ToolDispatchContext(execution_identity=owner),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    return _job_controls(
+        (),
+        config,
+        runtime_paths,
+        owner,
+        depth=0,
+        enabled=background_tool_jobs_enabled(config, runtime_paths),
+        supports_native_tool_approval=True,
+        tool_hook_bridge=bridge,
+    )
+
+
 def _install_background_jobs(
     agent: Agent,
     agent_name: str,
@@ -1936,7 +1989,9 @@ def _install_background_jobs(
     if background_tool_jobs_enabled(config, runtime_paths):
         bind_actor_authority(agent, authority_snapshot(config, agent_name))
         install_tool_job_execution(model, agent.fallback_config, depth=depth)
-        install_job_notice_hook(model, agent_name=agent_name)
+        if depth == 0:
+            # A delegated child cannot collect jobs; its caller hears when they end.
+            install_job_notice_hook(model, entity_name=agent_name)
 
 
 @timed("system_prompt_assembly.agent_create")
@@ -2315,4 +2370,5 @@ __all__ = [
     "get_agent_toolkit_names",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
+    "team_job_controls",
 ]

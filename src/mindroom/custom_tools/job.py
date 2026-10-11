@@ -11,7 +11,8 @@ from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, format_job_handle, get_background_runtime, job_summary
+from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
+from mindroom.tool_jobs.runtime import JobAccessError, format_job_handle, get_background_runtime, job_summary
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -57,10 +58,13 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any
     """Return every ended, unacknowledged job of this caller with its result, acknowledging each once this call saves."""
     sections: list[str] = []
     collected: list[ToolResult] = []
-    for job in await runtime.list_jobs(owner=owner, depth=0, limit=100):
-        if job.status not in TERMINAL_STATUSES or job.consumed:
+    current = current_conversation()
+    for job in () if current is None else await ended_jobs(*current):
+        try:
+            waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
+        except JobAccessError:
+            # A team member collects only its own jobs; the team collects them all.
             continue
-        waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
         if waited.claim is None:
             # Another caller is reading this outcome now.
             continue

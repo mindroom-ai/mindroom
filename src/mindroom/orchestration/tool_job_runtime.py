@@ -20,7 +20,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
-from mindroom.tool_jobs.completion import ConversationKey, ended_jobs
+from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
 from mindroom.tool_jobs.disabled import index_parked_work
 from mindroom.tool_jobs.follow_ups import FOLLOW_UP_LIMIT, follow_up_event_id, follow_up_jobs, follow_up_streak
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
@@ -66,34 +66,27 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
 
 
 def _follow_up_keys(jobs: Iterable[BackgroundJob]) -> list[ConversationKey]:
-    """Return each conversation whose ended jobs may need a follow-up: one per entity, room, thread, and requester.
+    """Return each conversation with ended top-level jobs that may need a follow-up, by its answering entity.
 
     A silent schedule's work waits for its next silent run, which opens with the note instead.
     """
-    participants: dict[tuple[str, str, str | None, str], set[str]] = {}
-    for job in jobs:
-        owner = job.owner
-        if (
-            job.status not in TERMINAL_STATUSES
-            or job.consumed
-            or owner.room_id is None
-            or owner.requester_id is None
-            or job.source_kind == SILENT_SCHEDULE_SOURCE_KIND
-        ):
-            continue
-        conversation = (owner.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id)
-        participants.setdefault(conversation, set()).add(owner.agent_name)
-    return [
+    keys = {
         ConversationKey(
-            recipient=recipient,
-            room_id=room_id,
-            thread_id=thread_id,
-            requester_id=requester_id,
+            recipient=job.owner.recipient,
+            room_id=job.owner.room_id,
+            thread_id=job.owner.resolved_thread_id,
+            requester_id=job.owner.requester_id,
             silent=False,
-            participants=tuple(sorted(agents)),
         )
-        for (recipient, room_id, thread_id, requester_id), agents in participants.items()
-    ]
+        for job in jobs
+        if job.status in TERMINAL_STATUSES
+        and job.depth == 0
+        and not job.consumed
+        and job.owner.room_id is not None
+        and job.owner.requester_id is not None
+        and job.source_kind != SILENT_SCHEDULE_SOURCE_KIND
+    }
+    return sorted(keys, key=lambda key: (key.recipient, key.room_id, key.thread_id or "", key.requester_id))
 
 
 def _accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:

@@ -188,7 +188,7 @@ if TYPE_CHECKING:
     from mindroom.reply_lifecycle import Reply
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
-    from mindroom.tool_jobs.completion import ConversationKey
+    from mindroom.tool_jobs.conversation import ConversationKey
 
 
 class _ProcessShutdownMatrixClient(Protocol):

@@ -315,9 +315,6 @@ class ResponseTurnContext:
     background_tool_jobs: bool = False
     # Set for a voice call's turn: no reply owns its calls' outcomes afterwards, so they finish inside it.
     inline_tools: bool = False
-    # The jobs a follow-up's prompt already asks the model to collect; its turn-start note leaves them out.
-    asked_job_ids: tuple[str, ...] = ()
-    tool_job_agent_names: tuple[str, ...] | None = None
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.

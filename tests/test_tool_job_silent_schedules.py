@@ -26,7 +26,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import current_conversation, ended_jobs
+from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
@@ -297,14 +297,14 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
         assert owner.room_id is not None
         assert owner.requester_id is not None
         conversation = {
-            "transport_agent_name": owner.recipient,
+            "recipient": owner.recipient,
             "room_id": owner.room_id,
             "thread_id": owner.resolved_thread_id,
             "requester_id": owner.requester_id,
         }
-        quiet = await runtime.held_jobs(**conversation, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
-        assert [job.job_id for job, _readable in quiet] == [job_id]
-        assert await runtime.held_jobs(**conversation) == []
+        quiet = await runtime.ended_jobs(**conversation, silent=True)
+        assert [job.job_id for job in quiet] == [job_id]
+        assert await runtime.ended_jobs(**conversation, silent=False) == ()
     finally:
         release.set()
         await runtime.shutdown()

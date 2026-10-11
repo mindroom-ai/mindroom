@@ -9,8 +9,7 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks.context import MessageEnvelope
 from mindroom.message_target import MessageTarget
-from mindroom.tool_jobs.completion import ConversationKey
-from mindroom.tool_jobs.notices import job_notice_text
+from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 if TYPE_CHECKING:
@@ -29,7 +28,8 @@ def _digest(text: str) -> str:
 
 def follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> str:
     """Name the follow-up for one set of ended jobs, so admitting it again changes nothing."""
-    return f"job-follow-up:{_digest(key.encode())}:{_digest(','.join(sorted(job.job_id for job in jobs)))}"
+    conversation = "\n".join((key.recipient, key.room_id, key.thread_id or "", key.requester_id))
+    return f"job-follow-up:{_digest(conversation)}:{_digest(','.join(sorted(job.job_id for job in jobs)))}"
 
 
 def follow_up_event(
@@ -49,14 +49,22 @@ def follow_up_event(
         event_class=EventClass.ACTIONABLE,
         sender=sender_id,
         origin_server_ts=now_ms,
-        source={"key": key.encode(), "streak": streak},
+        source={"requester_id": key.requester_id, "streak": streak},
     )
 
 
-def follow_up_key(event: JournalEvent) -> ConversationKey | None:
-    """Return the conversation a follow-up answers in."""
-    key = event.source.get("key")
-    return ConversationKey.decode(key) if isinstance(key, str) else None
+def follow_up_key(event: JournalEvent, recipient: str) -> ConversationKey | None:
+    """Return the conversation a follow-up admitted for ``recipient`` answers in."""
+    requester_id = event.source.get("requester_id")
+    if not isinstance(requester_id, str):
+        return None
+    return ConversationKey(
+        recipient=recipient,
+        room_id=event.room_id,
+        thread_id=event.thread_id,
+        requester_id=requester_id,
+        silent=False,
+    )
 
 
 def follow_up_streak(event: JournalEvent | None) -> int:
@@ -94,8 +102,3 @@ def follow_up_envelope(key: ConversationKey, *, follow_up_id: str, sender_id: st
 def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     """Return the ended jobs a follow-up reports: every one but a cancellation, which needs no message of its own."""
     return tuple(job for job in jobs if job.status != "cancelled")
-
-
-def follow_up_prompt(jobs: Sequence[BackgroundJob], instruction: str) -> str:
-    """Ask the follow-up turn to collect the jobs that ended and tell the user."""
-    return job_notice_text(jobs, instruction)
