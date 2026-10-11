@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from mindroom.claude_wire_blocks import (
@@ -20,8 +19,6 @@ if TYPE_CHECKING:
     from anthropic.types.beta import BetaMessage
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
-# Usage from message_start of the Claude stream this task is reading, until it reports its final usage.
-_STREAM_START_USAGE: ContextVar[MessageMetrics | None] = ContextVar("claude_stream_start_usage", default=None)
 
 # AGNO_COMPAT: Claude requests include unsupported sampling controls.
 # Reason: Agno 3.0.9 moves sampling controls into extra_body even for current
@@ -54,18 +51,23 @@ _STREAM_START_USAGE: ContextVar[MessageMetrics | None] = ContextVar("claude_stre
 # Remove when: The pinned Agno release keeps message_start usage for a stream that ends before
 # message_stop, while counting completed streams once.
 # Coverage: tests/test_claude_stream_usage.py::test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start;
+# tests/test_claude_stream_usage.py::test_hard_stopped_claude_reply_keeps_the_usage_reported_at_stream_start;
+# tests/test_claude_stream_usage.py::test_claude_reply_closed_from_another_task_keeps_its_start_usage;
 # tests/test_claude_stream_usage.py::test_completed_claude_stream_counts_its_usage_once.
-def take_unfinished_stream_usage() -> MessageMetrics | None:
-    """Return and forget the start usage of a Claude stream this task read that never reported final usage."""
-    start = _STREAM_START_USAGE.get()
-    _STREAM_START_USAGE.set(None)
-    return start
 
 
 class ClaudeProviderSDKCompat:
     """Sanitize Agno-built requests, preserve terminal metadata, and keep stream start usage for settlement."""
 
     id: str
+    # Usage from message_start of the stream this model is reading, until it reports its final usage.
+    # A model streams one request at a time, and settlement of an interrupted request may run in another task.
+    _stream_start_usage: MessageMetrics | None = None
+
+    def take_unfinished_stream_usage(self) -> MessageMetrics | None:
+        """Return and forget the start usage of a stream that never reported its final usage."""
+        start, self._stream_start_usage = self._stream_start_usage, None
+        return start
 
     def get_request_params(
         self,
@@ -116,9 +118,9 @@ class ClaudeProviderSDKCompat:
         )
         if isinstance(response, (RawMessageStartEvent, BetaRawMessageStartEvent)):
             # Keep it aside: settlement adds it only if the stream ends before its final usage.
-            _STREAM_START_USAGE.set(self._get_metrics(response.message.usage))  # ty: ignore[unresolved-attribute]
+            self._stream_start_usage = self._get_metrics(response.message.usage)  # ty: ignore[unresolved-attribute]
         elif parsed.response_usage is not None:
-            _STREAM_START_USAGE.set(None)
+            self._stream_start_usage = None
         return parsed
 
 

@@ -7599,7 +7599,6 @@ expose = [
     "BEDROCK_MAX_INLINE_MEDIA_BYTES",
     "ClaudeProviderSDKCompat",
     "MAX_INLINE_MEDIA_BYTES",
-    "take_unfinished_stream_usage",
     "request_kwargs_with_leading_tool_results",
     "request_kwargs_with_replay_safe_tool_search_results",
     "request_kwargs_with_supported_inline_media",

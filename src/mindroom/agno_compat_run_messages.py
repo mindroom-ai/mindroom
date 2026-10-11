@@ -14,7 +14,7 @@ from agno.models.base import MessageData, Model
 from agno.models.response import ModelResponse
 from agno.team import _run as team_run
 
-from mindroom.agno_compat_claude import ClaudeProviderSDKCompat, take_unfinished_stream_usage
+from mindroom.agno_compat_claude import ClaudeProviderSDKCompat
 from mindroom.usage_storage import has_token_usage
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None)
     if received is not None and has_token_usage(received.to_dict()):
         return None
     # Claude reports input and cache usage when the stream starts, and nothing more until it ends.
-    return take_unfinished_stream_usage()
+    return request.model.take_unfinished_stream_usage()
 
 
 def _settle_claude_start_usage(request: _ModelRequest) -> None:

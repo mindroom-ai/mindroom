@@ -192,6 +192,44 @@ async def test_hard_stopped_claude_reply_keeps_the_usage_reported_at_stream_star
 
 
 @pytest.mark.asyncio
+async def test_claude_reply_closed_from_another_task_keeps_its_start_usage(tmp_path: Path) -> None:
+    """The streaming path reads the reply in one task and can close the suspended stream from another."""
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    held = _HeldStream()
+    try:
+        agent = _agent(
+            storage,
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
+            tmp_path / "logs",
+        )
+        async with drain_agent_cancellation(agent, "run") as bind:
+            with bind():
+                events = agent.arun("Check status", run_id="run", session_id="session", stream=True)
+
+            async def read_until_text() -> None:
+                while True:
+                    with bind():
+                        event = await anext(events)
+                    if isinstance(event, RunContentEvent) and event.content:
+                        return
+
+            async with asyncio.timeout(5):
+                await asyncio.create_task(read_until_text())
+                with bind():
+                    await events.aclose()
+        await held.closed.wait()
+
+        assert _session_usage(storage) == {
+            "input_tokens": 1200,
+            "output_tokens": 1,
+            "cache_read_tokens": 48000,
+            "cache_write_tokens": 800,
+        }
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("delta_usage", [_FINAL_USAGE, {"output_tokens": 50}], ids=["cumulative", "output_only"])
 async def test_completed_claude_stream_counts_its_usage_once(tmp_path: Path, delta_usage: dict[str, int]) -> None:
     """Usage known at the start of the stream is not counted again when the final usage arrives."""
