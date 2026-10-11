@@ -458,6 +458,49 @@ async def _rewrite_working_session_for_compaction(
     )
 
 
+async def summarize_runs(
+    *,
+    summary_model: SummaryModel,
+    fallback_summary_model: SummaryModel | None,
+    previous_summary: str | None,
+    runs: Sequence[RunOutput | TeamRunOutput],
+    session_id: str,
+    scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
+    summary_prompt: str,
+    timeout_seconds: float,
+    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None,
+) -> str:
+    """Summarize runs into one cumulative summary without touching the archive."""
+    token_estimator, _estimate_kind = _compaction_sizing(summary_model.model)
+    summary_input, included_runs = await asyncio.to_thread(
+        build_summary_input,
+        previous_summary=previous_summary,
+        compacted_runs=runs,
+        history_settings=history_settings,
+        max_input_tokens=summary_model.input_budget_tokens,
+        token_estimator=token_estimator,
+    )
+    if not included_runs:
+        msg = "No compactable content fit the summary input budget."
+        raise RuntimeError(msg)
+    chunk = await _generate_compaction_summary_with_retry(
+        summary_model=summary_model,
+        previous_summary=previous_summary,
+        compactable_runs=runs,
+        initial_summary_input=summary_input,
+        initial_included_runs=included_runs,
+        session_id=session_id,
+        scope=scope,
+        history_settings=history_settings,
+        summary_prompt=summary_prompt,
+        timeout_seconds=timeout_seconds,
+        fallback_model=fallback_summary_model,
+        on_response=on_response,
+    )
+    return chunk.summary.summary
+
+
 def _compaction_sizing(summary_model: Model) -> tuple[Callable[[str], int], CompactionEstimateKind]:
     """Resolve one estimator together with the kind describing its arithmetic."""
     conservative_fallback = as_anthropic_claude(summary_model) is not None

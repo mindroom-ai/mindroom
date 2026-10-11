@@ -38,8 +38,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class _HistorySummaryBudgetError(RuntimeError):
+class HistorySummaryBudgetError(RuntimeError):
     """The saved summary cannot fit in the current run's history budget."""
+
+    def __init__(self, *, summary_tokens: int, available_tokens: int) -> None:
+        super().__init__(
+            "Saved conversation summary exceeds the available history budget "
+            f"({summary_tokens} estimated tokens; {available_tokens} available). "
+            "Choose a model with a larger context window or reduce the current prompt.",
+        )
 
 
 def estimate_prompt_visible_history_tokens(
@@ -66,6 +73,28 @@ def estimate_prompt_visible_history_tokens(
                 checkpoint_tokens += checkpoint_estimated_tokens(items)
             else:
                 history_messages.append(message)
+    return (
+        summary_tokens
+        + checkpoint_tokens
+        + _estimate_messages_tokens(history_messages, replay_model=replay_model, native_route=native_route)
+    )
+
+
+def estimate_request_messages_tokens(
+    messages: Sequence[Message],
+    *,
+    replay_model: NativeCompactionModel | None,
+) -> int:
+    """Estimate one provider request's messages the way replay planning estimates history."""
+    return _estimate_messages_tokens(list(messages), replay_model=replay_model, native_route=None)
+
+
+def _estimate_messages_tokens(
+    history_messages: list[Message],
+    *,
+    replay_model: NativeCompactionModel | None,
+    native_route: str | None,
+) -> int:
     uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
     estimation_messages = (
         history_messages
@@ -88,7 +117,7 @@ def estimate_prompt_visible_history_tokens(
         else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
     )
     image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
-    return summary_tokens + checkpoint_tokens + max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens
+    return max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens
 
 
 def _without_image_transport(message: Message, *, strip_content_blocks: bool) -> Message:
@@ -117,6 +146,13 @@ def compaction_summary_message(summary: str, *, from_history: bool) -> Message:
         provider_data={_COMPACTION_SUMMARY_MARKER: True},
         from_history=from_history,
     )
+
+
+def compaction_summary_text(message: Message) -> str:
+    """Return the summary a rendered compaction summary message carries."""
+    content = str(message.content)
+    start = content.index("<compacted_history>\n") + len("<compacted_history>\n")
+    return content[start : content.rindex("\n</compacted_history>")]
 
 
 def is_compaction_summary(message: Message) -> bool:
@@ -280,12 +316,7 @@ def plan_replay_that_fits(
     """Return the safest persisted-replay plan that fits the current run budget."""
     summary_tokens = _session_summary_replay_tokens(session)
     if summary_tokens > available_history_budget:
-        msg = (
-            "Saved conversation summary exceeds the available history budget "
-            f"({summary_tokens} estimated tokens; {available_history_budget} available). "
-            "Choose a model with a larger context window or reduce the current prompt."
-        )
-        raise _HistorySummaryBudgetError(msg)
+        raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
     if current_history_tokens <= available_history_budget:
         return configured_replay_plan(
             history_settings=history_settings,

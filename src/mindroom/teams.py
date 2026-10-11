@@ -72,6 +72,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
+from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
 from mindroom.history.native import restore_native_history
 from mindroom.history.prompt_tokens import team_tool_definition_payloads_for_logging
 from mindroom.history.runtime import note_prepared_history_timing
@@ -2294,8 +2295,6 @@ def _create_team_instance(
         model,
         notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
-    # The team budget caps the coordinator's own calls; members carry their own.
-    install_model_call_cap(model, entity_name=configured_team_name or team_display_name)
     team_scope = config.resolve_entity(
         configured_team_name if configured_team_name is not None and configured_team_name in config.teams else None,
     )
@@ -2343,6 +2342,16 @@ def _create_team_instance(
     )
     if history_settings.policy.mode == "all":
         enable_all_history_replay(team)
+    install_mid_turn_compaction(
+        team,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=configured_team_name if configured_team_name in config.teams else None,
+        model_name=model_name,
+    )
+    # The team budget caps the coordinator's own calls; members carry their own. Installed after mid-turn
+    # compaction so a refused request never spends a summary call.
+    install_model_call_cap(model, entity_name=configured_team_name or team_display_name)
     return team
 
 

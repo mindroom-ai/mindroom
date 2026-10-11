@@ -25,6 +25,7 @@ from mindroom.history import agno_compat_message_builder
 from mindroom.history.replay import (
     compaction_summary_message,
     estimate_prompt_visible_history_tokens,
+    estimate_request_messages_tokens,
     is_compaction_summary,
     plan_replay_that_fits,
 )
@@ -334,3 +335,16 @@ def test_resuming_a_pre_release_pause_keeps_its_single_summary(kind: str) -> Non
 
     assert _summaries(run_messages.messages) == []
     assert run_messages.messages[0].content == _LEGACY_SYSTEM_PROMPT
+
+
+def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() -> None:
+    session = _session("agent", None)
+    scope = HistoryScope(kind="agent", scope_id="helper")
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    messages = [message for run in session.runs or [] for message in run.messages or []]
+
+    assert estimate_request_messages_tokens(messages, replay_model=None) == estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=settings,
+    )

@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# Run metadata key holding the projected usage of requests mid-turn compaction folded out of the run's messages.
+COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
+
 type IndependentUsageKind = Literal[
     "compaction_summary",
     "memory_auto_flush",
@@ -103,13 +106,19 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
         # An invalid details sentinel lets the reporter retain totals while reporting missing attribution.
         selected["details"] = _project_model_details(details)
     result["metrics"] = selected
-    requests = _project_requests(run.get("messages"))
+    requests = project_requests(run.get("messages"))
+    carried = (
+        cast("dict[str, object]", metadata).get(COMPACTED_REQUESTS_METADATA_KEY) if isinstance(metadata, dict) else None
+    )
+    if isinstance(carried, list) and carried:
+        # Mid-turn compaction folded these earlier requests out of the run's messages.
+        requests = [*(item for item in carried if isinstance(item, dict)), *(requests or [])]
     if requests is not None:
         result["requests"] = requests
     return result
 
 
-def _project_requests(messages: object) -> list[dict[str, object]] | None:
+def project_requests(messages: object) -> list[dict[str, object]] | None:
     """Project current assistant counters, timestamps and recorded model attribution."""
     if not isinstance(messages, list):
         return None

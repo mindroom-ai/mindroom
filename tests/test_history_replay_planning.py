@@ -22,7 +22,7 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.replay import (
-    _HistorySummaryBudgetError,
+    HistorySummaryBudgetError,
     apply_replay_plan,
     estimate_prompt_visible_history_tokens,
     plan_replay_that_fits,
@@ -1510,7 +1510,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
         ),
-        pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"),
+        pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
         await prepare_history_for_run_for_test(
             agent=agent,
@@ -1544,7 +1544,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
     size = estimate_prompt_visible_history_tokens(session=session, scope=scope, history_settings=settings)
 
-    with pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"):
+    with pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"):
         plan_replay_that_fits(
             session=session,
             scope=scope,

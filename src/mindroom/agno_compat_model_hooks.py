@@ -7,7 +7,7 @@ them to the Agno methods that currently expose the required lifecycle stages.
 from __future__ import annotations
 
 from contextlib import aclosing, contextmanager
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Iterator
@@ -23,6 +23,10 @@ type _AsyncInvoke = Callable[..., Coroutine[object, object, ModelResponse]]
 type _AsyncStream = Callable[..., AsyncIterator[ModelResponse]]
 type _SyncStream = Callable[..., Iterator[ModelResponse]]
 type _RetryPredicate = Callable[[ModelProviderError], bool]
+type _RequestPreparation = Callable[
+    [list[Message], list[dict[str, Any]] | None, RunOutput | TeamRunOutput | None],
+    Awaitable[None],
+]
 
 
 class _MessageProjection(Protocol):
@@ -313,6 +317,57 @@ def install_response_request_gate(
 
     model_dict["aresponse"] = response
     model_dict["aresponse_stream"] = response_stream
+    model_dict["_aprocess_model_response"] = process_model_response
+    model_dict["aprocess_response_stream"] = process_response_stream
+
+
+# AGNO_COMPAT: Response loops lack an awaitable pre-request hook with mutable messages.
+# Reason: Mid-turn compaction must inspect and rewrite the loop's own message list, with the formatted tools and
+# the run, after Agno appends each tool batch and before the next provider request. Agno's CompressionManager runs
+# at that point but only compresses tool results, is enabled only by compress_tool_results, and never sees the run.
+# Upstream issue: Tracking gap; no issue identified for a caller-owned hook consulted before each model request.
+# Upstream PR: None identified.
+# Remove when: Agno awaits a public callback before every provider request of its async streaming and
+# non-streaming loops, passing the mutable message list, the formatted tools, and the run; the owner's compaction
+# policy remains MindRoom's.
+# Coverage: tests/test_agno_compat_model_hooks.py.
+def install_request_preparation(model: Model, *, marker: str, prepare: _RequestPreparation) -> None:
+    """Await ``prepare`` before every provider request of this model's async response loops.
+
+    ``prepare`` receives the loop's own message list, which Agno sends and keeps appending to, so it may rewrite
+    the list in place. A tool-call cap installed later wraps this hook, so a refused request is never prepared.
+    """
+    model_dict = vars(model)
+    if model_dict.get(marker) is True:
+        return
+    model_dict[marker] = True
+    original_process = cast("Callable[..., Awaitable[None]]", model._aprocess_model_response)
+    original_process_stream = cast("Callable[..., AsyncGenerator[ModelResponse]]", model.aprocess_response_stream)
+
+    async def process_model_response(
+        *args: object,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        run_response: RunOutput | TeamRunOutput | None = None,
+        **kwargs: object,
+    ) -> None:
+        await prepare(messages, tools, run_response)
+        await original_process(*args, messages=messages, tools=tools, run_response=run_response, **kwargs)
+
+    async def process_response_stream(
+        *args: object,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        run_response: RunOutput | TeamRunOutput | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse]:
+        await prepare(messages, tools, run_response)
+        async with aclosing(
+            original_process_stream(*args, messages=messages, tools=tools, run_response=run_response, **kwargs),
+        ) as stream:
+            async for delta in stream:
+                yield delta
+
     model_dict["_aprocess_model_response"] = process_model_response
     model_dict["aprocess_response_stream"] = process_response_stream
 
