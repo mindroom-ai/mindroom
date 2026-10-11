@@ -12,6 +12,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agno_compat_cli_checkpoint import cli_dispatch_active
 from mindroom.logging_config import get_logger
 from mindroom.tool_approval import JOB_APPROVAL_TYPE
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -48,11 +49,18 @@ def standard_cli_eligible(
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None,
 ) -> bool:
-    """Return whether this standard agent's shell can reach MindRoom's CLI routes in a Matrix conversation."""
+    """Return whether this standard agent's shell can reach MindRoom's CLI routes in a Matrix conversation.
+
+    A shell that runs as a background job can outlive its reply, whose CLI ends with it, so it gets none.
+    """
     return (
         execution_identity is not None
         and execution_identity.channel == "matrix"
         and not minimal_shell_problems(config, runtime_paths, agent_name)
+        and not (
+            background_tool_jobs_enabled(config, runtime_paths)
+            and not toolkit_is_background_excluded("shell", config, runtime_paths)
+        )
     )
 
 
@@ -61,14 +69,12 @@ def wrap_native_shell_window(tools: Sequence[Toolkit]) -> bool:
     wrapped = False
     for toolkit in tools:
         function = toolkit.get_async_functions().get("run_shell_command")
-        # An approved command resumes in a later run, or runs in its job after the reply ended, without this
-        # response's CLI, like a minimal subagent's.
+        # An approved command resumes in a later run without this response's CLI, like a minimal subagent's.
         if (
             function is None
             or function.owning_toolkit != "shell"
             or function.entrypoint is None
             or function.requires_confirmation
-            or function.approval_type == JOB_APPROVAL_TYPE
         ):
             continue
         original = function.entrypoint
