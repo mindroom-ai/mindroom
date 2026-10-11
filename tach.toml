@@ -1537,6 +1537,11 @@ depends_on = []
 visibility = ["mindroom.api.main"]
 
 [[modules]]
+path = "mindroom.api.validation_errors"
+depends_on = []
+visibility = ["mindroom.api.main", "mindroom.api.sandbox_runner_app"]
+
+[[modules]]
 path = "mindroom.api.frontend"
 depends_on = [
     "mindroom.api.auth",
@@ -1772,6 +1777,7 @@ depends_on = [
     "mindroom.api.budgets",
     "mindroom.api.usage",
     "mindroom.api.usage_export",
+    "mindroom.api.validation_errors",
     "mindroom.api.workers",
     "mindroom.constants",
     "mindroom.credentials.sync",
@@ -1967,6 +1973,7 @@ depends_on = [
     "mindroom.worker_computer.runtime",
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_runner_scripts",
+    "mindroom.api.validation_errors",
 ]
 
 [[modules]]
